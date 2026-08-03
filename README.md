@@ -94,3 +94,7 @@ cargo test
 
 Covers terrain generation invariants, the coast, mesh chunking, the camera
 maths and the menu state transitions.
+
+## Licence
+
+GPL-3.0 — see [LICENSE](LICENSE).
