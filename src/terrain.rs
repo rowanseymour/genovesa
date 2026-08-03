@@ -115,6 +115,18 @@ const SNOW_LINE: f32 = 112.0;
 /// that open water reads as open water rather than as one endless shelf.
 const DEEP_FRACTION: f32 = 0.18;
 
+/// Depth the middle of the sea is guaranteed to reach, in metres — the mirror
+/// of [`LOWLAND_FLOOR`], on the other side of the waterline. A minority of
+/// seeds run flat just *below* where the sea lands in the field, and the deep
+/// anchor cannot save them: it pins one point far down while the whole middle
+/// of the distribution sits centimetres under the surface, so the map comes
+/// out one endless bright shelf speckled with sand, with the falloff's rim
+/// embossed round the edge of it. Set well past the last of the shallow-water
+/// colours, not merely at their edge — a median pinned exactly on the colour
+/// threshold leaves half the sea painted as shallows — so the middle of the
+/// sea always reads as open water.
+const SHALLOWS_FLOOR: f32 = 6.5;
+
 /// Height the middle of the land is guaranteed to reach, in metres. A minority
 /// of seeds put nearly all their land within a metre or two of sea level — the
 /// field happens to run flat just above where the sea lands in it — and the
@@ -959,9 +971,26 @@ impl TerrainGenerator {
         // land usually does reach the falloff: at 0.55 the field put barely a
         // lobe on a 768 m island's outline, and every small map read as the
         // same rounded square.
-        let bend = drift * FEATURE_SCALE * 0.7;
+        // The bend's amplitude shrinks on maps the landmass field cannot
+        // break up — the same regime the land share tapers in, measured the
+        // same way. The warp's dominant component is over a kilometre long,
+        // and on a map that small a displacement of full amplitude is not a
+        // lobe on the ring, it is a translation of the whole ring, off the
+        // edge of the map — and the coast on that side ends up drawn by the
+        // rim in a straight line along the frame. On larger maps the same
+        // displacement is a lobe, and is most of what un-squircles them, so
+        // it fades back in as soon as the map can afford it.
+        let cycles = self.half_extent * 2.0 / CONTINENT_SCALE;
+        let room = smoothstep(1.1, 1.55, cycles);
+        let bend = drift * FEATURE_SCALE * 0.7 * (0.25 + 0.75 * room);
         let reach = 1.0 + 0.7 * self.continent.fbm(n.x * 0.85 - 12.4, n.y * 0.85 + 9.8, 2);
-        let shaped = self.squircle(wx + bend.x, wz + bend.y, 2.2) / reach.clamp(0.72, 1.35);
+        // The clamp is asymmetric: the radius may pull well in, carving deep
+        // bays out of the ring, but only push a little out — pushed further,
+        // the ramp ends up at the rim and the rim ends up drawing the coast.
+        // Like the bend, the outward allowance closes almost entirely on the
+        // one-blob maps.
+        let shaped =
+            self.squircle(wx + bend.x, wz + bend.y, 2.2) / reach.clamp(0.72, 1.0 + 0.15 * room);
 
         // Spread over a wide ramp and pushed down gently. A short, hard falloff
         // drops the ground into the sea too fast, and the slope rule then paints
@@ -973,13 +1002,20 @@ impl TerrainGenerator {
         let edge = smoothstep(0.72, 1.12, shaped);
 
         // The rim, in unwarped coordinates and narrower still, so that whatever
-        // the warp does the very edge of the map is open sea.
+        // the warp does the very edge of the map is open sea. Not wider: the
+        // cells it pushes down land in the quantiles every fit below the
+        // waterline reads, and widening it once flattened the whole interior
+        // sea into a shelf.
         let rim = smoothstep(0.94, 1.0, self.squircle(wx, wz, 4.0));
 
-        (
-            (1.0 - edge) * (1.0 - rim),
-            edge * 0.7 * (1.0 - rim) + rim * 1.4,
-        )
+        // The damp is squared because it is the only part of the falloff
+        // that scales with the field it is fighting: the push is a fixed
+        // number of raw units, and a seed whose field runs high towards an
+        // edge simply out-shouts it, keeping land deep into the ramp. Since
+        // sea level is refitted per seed, land killed in the ramp reappears
+        // in the interior rather than vanishing.
+        let damp = (1.0 - edge) * (1.0 - rim);
+        (damp * damp, edge * 0.7 * (1.0 - rim) + rim * 1.4)
     }
 
     /// Distance from the middle of the map, as a fraction of its half extent,
@@ -1397,8 +1433,15 @@ impl TerrainGenerator {
 struct Calibration {
     /// Raw value that sea level sits at.
     sea_level: f32,
-    /// Metres per raw unit below it.
-    depth_gain: f32,
+    /// Raw distance below sea level that the sea's median sits at — where the
+    /// two depth slopes meet. The mirror of `knee`.
+    sea_knee: f32,
+    /// Metres of depth the sea knee maps to.
+    sea_knee_depth: f32,
+    /// Metres per raw unit above the sea knee, and below it. Equal on any
+    /// seed the floor leaves alone, like the land slopes.
+    depth_shallow: f32,
+    depth_deep: f32,
     /// Raw distance above sea level that the land's median sits at — where the
     /// two land slopes meet.
     knee: f32,
@@ -1449,10 +1492,30 @@ impl Calibration {
                 (natural, slope, slope)
             };
 
+        // The same again below the waterline: the sea's median, and where
+        // the straight slope through the deep anchor would put it. Only a
+        // median that comes out shallower than the floor bends the line.
         let deep = sea_level - quantile(DEEP_FRACTION);
+        let depth_gain = MAX_DEPTH / deep.max(1e-4);
+        let sea_knee = sea_level - quantile((1.0 - land) * 0.5);
+        let natural_depth = depth_gain * sea_knee;
+        let (sea_knee_depth, depth_shallow, depth_deep) =
+            if natural_depth < SHALLOWS_FLOOR && sea_knee > 1e-4 && deep - sea_knee > 1e-4 {
+                (
+                    SHALLOWS_FLOOR,
+                    SHALLOWS_FLOOR / sea_knee,
+                    (MAX_DEPTH - SHALLOWS_FLOOR) / (deep - sea_knee),
+                )
+            } else {
+                (natural_depth, depth_gain, depth_gain)
+            };
+
         Self {
             sea_level,
-            depth_gain: MAX_DEPTH / deep.max(1e-4),
+            sea_knee,
+            sea_knee_depth,
+            depth_shallow,
+            depth_deep,
             knee,
             knee_height,
             slope_low,
@@ -1463,7 +1526,12 @@ impl Calibration {
     fn metres(&self, raw: f32) -> f32 {
         let t = raw - self.sea_level;
         if t <= 0.0 {
-            (t * self.depth_gain).max(-MAX_DEPTH)
+            let depth = if -t <= self.sea_knee {
+                -t * self.depth_shallow
+            } else {
+                self.sea_knee_depth + (-t - self.sea_knee) * self.depth_deep
+            };
+            (-depth).max(-MAX_DEPTH)
         } else if t <= self.knee {
             t * self.slope_low
         } else {
