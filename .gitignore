@@ -1,0 +1,11 @@
+# Build artifacts
+/target
+
+# Screenshots written by KASSITER_SCREENSHOT
+/screenshots
+
+# Plan dumps written by plan_view / plan_grid when KASSITER_DUMP is unset
+/*.ppm
+
+# macOS
+.DS_Store

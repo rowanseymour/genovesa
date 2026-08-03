@@ -1,0 +1,19 @@
+[package]
+name = "kassiter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.19"
+
+[features]
+# Much faster incremental builds while iterating: `cargo run --features dev`
+dev = ["bevy/dynamic_linking"]
+
+# Optimise dependencies even in debug builds, otherwise terrain generation and
+# rendering crawl.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
