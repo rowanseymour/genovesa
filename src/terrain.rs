@@ -62,6 +62,27 @@ pub const CHUNK_TILES: u32 = 128;
 /// fits per seed.
 const LAND_FRACTION: f32 = 0.34;
 
+/// The land share on maps too small for the landmass field to break up. Their
+/// land arrives as a single blob — the field barely completes a cycle across
+/// the map — and a lone blob holding a third of a square has the same radius
+/// as the falloff ring, so it presses into the frame and comes out
+/// squircle-shaped however the noise wanders. Shrinking the target is what
+/// buys the blob enough clearance for the noise to draw its outline. Larger
+/// maps split their land into several lobes with sea between, so each lobe
+/// clears the ring on its own and the full share is safe.
+const LAND_FRACTION_SMALL: f32 = 0.28;
+
+/// The land share for a given map size, continuous in the size so nothing
+/// jumps as a size control sweeps through it. Measured in how many times the
+/// landmass field repeats across the map, since that is what decides whether
+/// the land is one blob or several lobes: up to about one repeat it is one
+/// blob and gets [`LAND_FRACTION_SMALL`], by one and a half it is lobed
+/// enough to carry the full [`LAND_FRACTION`].
+fn land_fraction(size: u32) -> f32 {
+    let cycles = size as f32 / CONTINENT_SCALE;
+    LAND_FRACTION_SMALL + (LAND_FRACTION - LAND_FRACTION_SMALL) * smoothstep(1.2, 1.5, cycles)
+}
+
 /// Share of that land standing high enough to count as mountain.
 const MOUNTAIN_FRACTION: f32 = 0.11;
 
@@ -500,6 +521,8 @@ pub struct TerrainGenerator {
     range_ceiling: GridField,
     calibration: Calibration,
     coast: CoastDistance,
+    /// This map's land share — [`land_fraction`] of its size.
+    land: f32,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
     coast_scale: f32,
@@ -552,13 +575,14 @@ impl TerrainGenerator {
             calibration: Calibration::default(),
             coast: CoastDistance::default(),
             coast_scale: 1.0,
+            land: land_fraction(config.size),
             half_extent: config.half_extent(),
         };
 
         let samples = generator.fit_ranges(config.size);
         generator.fit_range_height(&samples);
         let (raw, side, origin) = generator.sample_raw(config.size);
-        generator.calibration = Calibration::fit(&mut raw.clone());
+        generator.calibration = Calibration::fit(&mut raw.clone(), generator.land);
         generator.coast = CoastDistance::from_raw(&raw, side, origin, &generator.calibration);
         generator.fit_coast_scale(&raw, side, origin);
         generator
@@ -625,7 +649,7 @@ impl TerrainGenerator {
         }
         field.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a noise field"));
 
-        let footprint = RANGE_FOOTPRINT * LAND_FRACTION;
+        let footprint = RANGE_FOOTPRINT * self.land;
         self.range_floor = field[((field.len() - 1) as f32 * (1.0 - footprint)) as usize];
         self.range_span = (field[field.len() - 1] - self.range_floor).max(1e-3);
 
@@ -678,7 +702,7 @@ impl TerrainGenerator {
         let peak_at = |gain: f32| {
             let mut raw: Vec<f32> = samples.iter().map(|s| s.raw(gain)).collect();
             // Sorts in place, so the last entry is the summit afterwards.
-            let calibration = Calibration::fit(&mut raw);
+            let calibration = Calibration::fit(&mut raw, self.land);
             calibration.metres(raw[raw.len() - 1])
         };
 
@@ -1389,17 +1413,17 @@ struct Calibration {
 impl Calibration {
     /// Fits to a grid of raw samples covering the whole map. `raw` is sorted in
     /// place — it is the caller's scratch, not a field of anything.
-    fn fit(raw: &mut [f32]) -> Self {
+    fn fit(raw: &mut [f32], land: f32) -> Self {
         raw.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a height field"));
         let quantile = |q: f32| raw[((raw.len() - 1) as f32 * q) as usize];
 
-        let sea_level = quantile(1.0 - LAND_FRACTION);
+        let sea_level = quantile(1.0 - land);
 
         // One point fixes the line: the height mountains start at, placed so
         // that exactly the intended share of land is above it. Everything else
         // — how low the lowlands are, how high the peaks reach — follows from
         // the field's own shape, which is the point.
-        let mountain = quantile(1.0 - LAND_FRACTION * MOUNTAIN_FRACTION) - sea_level;
+        let mountain = quantile(1.0 - land * MOUNTAIN_FRACTION) - sea_level;
         let slope = if mountain > 1e-4 {
             MOUNTAIN_HEIGHT / mountain
         } else {
@@ -1412,7 +1436,7 @@ impl Calibration {
         // median that lands under the floor bends the line; the knee fields are
         // still filled in on the straight seeds, with both slopes equal, so
         // `metres` never has to ask which kind of seed this is.
-        let knee = quantile(1.0 - LAND_FRACTION * 0.5) - sea_level;
+        let knee = quantile(1.0 - land * 0.5) - sea_level;
         let natural = slope * knee;
         let (knee_height, slope_low, slope_high) =
             if natural < LOWLAND_FLOOR && knee > 1e-4 && mountain - knee > 1e-4 {
@@ -2403,8 +2427,10 @@ mod tests {
 
     #[test]
     fn distance_to_water_is_zero_at_sea_and_grows_inland() {
+        // At the default size — a small map's land share is deliberately
+        // shrunk, and with it how far inland anywhere can be.
         let config = MapConfig {
-            size: 512,
+            size: 1024,
             seed: 42,
         };
         let gen = TerrainGenerator::new(&config);
@@ -2415,9 +2441,9 @@ mod tests {
         assert_eq!(gen.coast.metres(0.0, half), 0.0);
 
         let mut deepest_inland = 0.0f32;
-        for iz in (0..512).step_by(8) {
+        for iz in (0..1024).step_by(8) {
             let wz = iz as f32 - half;
-            for ix in (0..512).step_by(8) {
+            for ix in (0..1024).step_by(8) {
                 let wx = ix as f32 - half;
                 deepest_inland = deepest_inland.max(gen.coast.metres(wx, wz));
 
