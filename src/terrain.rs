@@ -590,25 +590,6 @@ impl MapConfig {
         };
         Some(UVec2::new(axis(w)?, axis(d)?))
     }
-
-    /// Overrides from `KASSITER_SIZE` / `KASSITER_SEED`, for trying out maps
-    /// without going through the menu.
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-        if let Some(chunks) = std::env::var("KASSITER_SIZE")
-            .ok()
-            .and_then(|v| Self::parse_size(&v))
-        {
-            config.chunks = chunks;
-        }
-        if let Some(seed) = std::env::var("KASSITER_SEED")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
-            config.seed = seed;
-        }
-        config
-    }
 }
 
 pub struct TerrainPlugin;
@@ -2285,9 +2266,7 @@ fn spawn_world(
         Transform::from_xyz(0.0, 0.08, 0.0),
     ));
 
-    // Sun. The cascade config is tuned for the shallow, wide view a camera
-    // pitched down at a fixed angle has — the default bounds are far too tight
-    // for it.
+    // Sun.
     commands.spawn((
         Name::new("Sun"),
         DespawnOnExit(AppState::InWorld),
@@ -2304,9 +2283,14 @@ fn spawn_world(
             shadow_normal_bias: 2.2,
             ..default()
         },
+        // Cascades are fitted to the camera's own frustum, so the far end of the
+        // shadowed region travels with the camera. It has to sit past everything
+        // the camera can see, or that end lands on ground that is in shot and
+        // whole hillsides gain and lose their shadows as the view moves. Out at
+        // the haze it can't be seen doing it.
         CascadeShadowConfigBuilder {
             first_cascade_far_bound: 60.0,
-            maximum_distance: 280.0,
+            maximum_distance: crate::HAZE_END,
             ..default()
         }
         .build(),

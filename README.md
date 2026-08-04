@@ -100,16 +100,24 @@ tools/readme-collage.sh 7
 
 ## Development helpers
 
-Environment variables for the app, all optional:
+The app takes options too — `--state` to open on a given screen, `--size` and
+`--seed` to set the map up, and `--focus`, `--zoom` and `--yaw` to say where
+the camera starts. Run `cargo run -- --help` for the details.
 
-| Variable | Effect |
-| --- | --- |
-| `KASSITER_STATE` | `newmap` or `inworld` — start on that screen |
-| `KASSITER_SIZE` | Initial map size in metres — `1024` or `1536x1024` — rounded to whole 128 m chunks |
-| `KASSITER_SEED` | Initial map seed |
-| `KASSITER_ZOOM` | Initial camera distance in metres |
-| `KASSITER_FOCUS` | `x,z` in metres from the map centre — start the camera there |
-| `KASSITER_SCREENSHOT` | Render ~270 frames, save a PNG to this path, exit |
+`--shot` writes a PNG of the view instead of waiting to be looked at. It can be
+given as many times as you like: the view options are read left to right, so
+each shot is the view as the options before it have left it.
+
+```bash
+cargo run -- --seed 7 --focus 98,-317 --yaw 45 \
+  --zoom 120 --shot near.png \
+  --zoom 340 --shot far.png \
+  --yaw 225 --shot behind.png
+```
+
+That is one process and one generated map, so the pictures are all of the same
+world and worth comparing against each other. Shots are rendered off screen —
+no window opens, and the run quits when the last one is written.
 
 Three `#[ignore]`-d tests measure rather than draw, run like:
 
