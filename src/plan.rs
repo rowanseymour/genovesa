@@ -93,13 +93,13 @@ pub fn render_at_scale(config: &MapConfig, metres_per_pixel: f32) -> Image {
     render(config, (extent.x as u32).max(1), (extent.y as u32).max(1))
 }
 
-/// `count` seeds for batch `batch`, spread by the same splitmix the noise
-/// uses on its own, so that consecutive batches are as unrelated as
-/// consecutive seeds are.
-pub fn batch_seeds(batch: u32, count: u32) -> Vec<u32> {
+/// The `count` seeds a layout of many maps draws, spread from one seed by the
+/// same splitmix the noise uses on its own — so that neighbouring seeds give
+/// sets as unrelated as the maps within a set are.
+pub fn seed_set(from: u32, count: u32) -> Vec<u32> {
     (0..count as u64)
         .map(|i| {
-            let mut s = (batch as u64 * count as u64 + i + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut s = (from as u64 * count as u64 + i + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             s ^= s >> 31;
             (s >> 32) as u32 % 1_000_000
         })
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn a_grid_holds_nine_maps_and_their_rules() {
         let chunks = UVec2::new(3, 2);
-        let seeds = batch_seeds(1, 9);
+        let seeds = seed_set(1, 9);
         let grid = grid(chunks, &seeds, GRID_METRES_PER_PIXEL);
 
         let cell = (chunks * CHUNK_TILES).as_vec2() / GRID_METRES_PER_PIXEL;
@@ -282,12 +282,16 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_is_nine_unrelated_seeds() {
-        let seeds = batch_seeds(1, 9);
+    fn a_set_is_nine_unrelated_seeds() {
+        let seeds = seed_set(1, 9);
         let mut sorted = seeds.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), seeds.len(), "a batch repeats a seed");
-        assert_ne!(seeds, batch_seeds(2, 9), "two batches drew the same seeds");
+        assert_eq!(sorted.len(), seeds.len(), "a set repeats a seed");
+        assert_ne!(
+            seeds,
+            seed_set(2, 9),
+            "neighbouring seeds drew the same set"
+        );
     }
 }

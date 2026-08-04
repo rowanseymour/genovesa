@@ -8,8 +8,12 @@
 //! ```sh
 //! cargo run --release --bin mapgen -- grid
 //! cargo run --release --bin mapgen -- map --size 1536x1024 --seed 99
-//! cargo run --release --bin mapgen -- collage --out docs/maps.png
+//! cargo run --release --bin mapgen -- collage --out collage.png
 //! ```
+//!
+//! The collage that ships in the README is not written by hand from here:
+//! `tools/readme-collage.sh` runs this binary and quantises the result on the
+//! way to `docs/maps.png`.
 
 use std::process::ExitCode;
 
@@ -18,7 +22,17 @@ use bevy::math::UVec2;
 use kassiter::plan;
 use kassiter::terrain::{MapConfig, CHUNK_TILES};
 
-const USAGE: &str = "\
+/// The seed the grid and collage spread their set from when none is given.
+/// The collage in the README is this one, so leaving it alone redraws the
+/// picture that is already there.
+const DEFAULT_SET_SEED: u32 = 1;
+
+/// Built rather than written out so the two seed defaults it quotes are read
+/// from the constants themselves and cannot drift.
+fn usage() -> String {
+    let map_seed = MapConfig::default().seed;
+    format!(
+        "\
 Renders Kassiter maps in plan, as PNG.
 
 Usage: mapgen <command> [options]
@@ -32,12 +46,15 @@ Commands:
 Options:
   --size <W|WxD>   map size in metres, rounded to whole 128 m chunks
                    (map: the map's size; grid: render only this shape)
-  --seed <n>       seed to draw (map only)
-  --batch <n>      which set of seeds the grid and collage draw [default: 1]
+  --seed <n>       the seed to draw [default: {map_seed}]; for grid and
+                   collage, which draw many maps, the seed the set of them is
+                   spread from [default: {DEFAULT_SET_SEED}]
   --scale <m>      metres of ground per pixel (map, grid)
   --out <path>     where to write; grids get one file per shape, each
                    suffixed with its size unless --size named just one
-";
+"
+    )
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -53,8 +70,8 @@ fn main() -> ExitCode {
 struct Args {
     command: String,
     size: Option<UVec2>,
+    /// One map's seed, or the seed a whole set is spread from.
     seed: Option<u32>,
-    batch: u32,
     scale: Option<f32>,
     out: Option<String>,
 }
@@ -65,25 +82,24 @@ fn run() -> Result<(), String> {
         "map" => map(&args),
         "grid" => grid(&args),
         "collage" => collage(&args),
-        other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
+        other => Err(format!("unknown command `{other}`\n\n{}", usage())),
     }
 }
 
 fn parse(argv: Vec<String>) -> Result<Args, String> {
     if argv.iter().any(|a| a == "-h" || a == "--help") {
-        print!("{USAGE}");
+        print!("{}", usage());
         std::process::exit(0);
     }
     let command = argv
         .first()
-        .ok_or_else(|| format!("no command given\n\n{USAGE}"))?
+        .ok_or_else(|| format!("no command given\n\n{}", usage()))?
         .clone();
 
     let mut parsed = Args {
         command,
         size: None,
         seed: None,
-        batch: 1,
         scale: None,
         out: None,
     };
@@ -108,11 +124,6 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
                         .map_err(|_| format!("`{value}` is not a seed"))?,
                 )
             }
-            "--batch" => {
-                parsed.batch = value
-                    .parse()
-                    .map_err(|_| format!("`{value}` is not a batch"))?
-            }
             "--scale" => {
                 let scale: f32 = value
                     .parse()
@@ -123,7 +134,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
                 parsed.scale = Some(scale);
             }
             "--out" => parsed.out = Some(value.clone()),
-            other => return Err(format!("unknown option `{other}`\n\n{USAGE}")),
+            other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
         }
     }
     Ok(parsed)
@@ -166,14 +177,12 @@ fn map(args: &Args) -> Result<(), String> {
 /// Nine seeds per shape — every shape in [`plan::GRID_SHAPES`], unless one was
 /// asked for by name.
 fn grid(args: &Args) -> Result<(), String> {
-    let seeds = plan::batch_seeds(args.batch, 9);
+    let base = args.seed.unwrap_or(DEFAULT_SET_SEED);
+    let seeds = plan::seed_set(base, 9);
     let scale = args.scale.unwrap_or(plan::GRID_METRES_PER_PIXEL);
     let path = args.out.clone().unwrap_or_else(|| "grid.png".into());
 
-    println!(
-        "batch {}, reading left to right, top to bottom:",
-        args.batch
-    );
+    println!("seed {base}, reading left to right, top to bottom:");
     for row in seeds.chunks(3) {
         println!("  {row:?}");
     }
@@ -207,13 +216,14 @@ fn grid(args: &Args) -> Result<(), String> {
 
 /// The README collage.
 fn collage(args: &Args) -> Result<(), String> {
-    let seeds = plan::batch_seeds(args.batch, plan::COLLAGE_SEEDS);
+    let base = args.seed.unwrap_or(DEFAULT_SET_SEED);
+    let seeds = plan::seed_set(base, plan::COLLAGE_SEEDS);
     let image = plan::collage(&seeds);
     let path = args.out.clone().unwrap_or_else(|| "collage.png".into());
     write(
         &image,
         &path,
-        format_args!("collage of {} maps, batch {}", seeds.len(), args.batch),
+        format_args!("collage of {} maps from seed {base}", seeds.len()),
     )
 }
 

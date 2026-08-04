@@ -74,19 +74,18 @@ cargo run --release --bin mapgen -- grid
 | `map` | one map on its own, for looking hard at a single seed |
 | `collage` | the image at the top of this page |
 
-Options: `--size` (metres, `1024` or `1536x1024`), `--seed`, `--batch` to pick
-which set of seeds the grid and collage draw, `--scale` in metres per pixel,
-and `--out`. Run `mapgen --help` for the details.
+Options: `--size` (metres, `1024` or `1536x1024`), `--seed`, `--scale` in
+metres per pixel, and `--out`. For `grid` and `collage`, which draw many maps
+at once, `--seed` is the seed the whole set is spread from. Run
+`mapgen --help` for the details.
 
-To refresh the collage at the top of this page, quantising on the way — the
-flat palette goes down to 256 colours losslessly to the eye and about a third
-of the size, which is worth doing to a file that ships in the README:
+The collage at the top of this page is redrawn by
+[`tools/readme-collage.sh`](tools/readme-collage.sh), which runs `mapgen` and
+quantises the result through ffmpeg. It takes the seed, so trying a few and
+keeping the one you like is just running it again:
 
 ```bash
-cargo run --release --bin mapgen -- collage --out collage.png
-ffmpeg -y -i collage.png -filter_complex \
-  "[0:v]palettegen=max_colors=256:stats_mode=full[p];[0:v][p]paletteuse=dither=floyd_steinberg" \
-  docs/maps.png
+tools/readme-collage.sh 7
 ```
 
 ## Development helpers
