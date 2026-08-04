@@ -270,11 +270,16 @@ const LOWLAND_FLOOR: f32 = 10.0;
 /// stretched copy of the same one.
 ///
 /// This is the dial worth turning. It fixes [`PEAK_GRADE`], and with it how
-/// tall a given map's mountains come out: a kilometre-square map's interior
-/// gets about a hundred and fifty metres from the sea, so at this reach its
-/// summits land around eighty or ninety metres rather than the full height,
-/// and only maps of a kilometre and a half or more still reach the snow.
-/// Shortening it gives every size taller mountains and steeper country.
+/// tall a given map's mountains come out. A kilometre-square map's interior
+/// stands ninety to a hundred and fifty metres from the open sea, depending on
+/// the seed, so at this reach its summits come out between about fifty-five
+/// and ninety metres rather than the full height — a little under seventy on
+/// average. Snow is rarer still: the tallest ground on any seed measured was
+/// 88 m at a kilometre, 108 m at a kilometre and a half and 113 m at two, so
+/// nothing but the largest maps crosses [`SNOW_LINE`] outright and what snow
+/// appears below that is [`SNOW_WANDER`] carrying the line down to meet a
+/// summit. Shortening this gives every size taller mountains and steeper
+/// country.
 ///
 /// It is also a frankly generous number. A summit at [`HEIGHT_SCALE`] this far
 /// from the sea is a climb of about thirty degrees held for the whole way,
@@ -688,17 +693,18 @@ pub struct TerrainGenerator {
     range_ceiling: GridField,
     calibration: Calibration,
     coast: CoastDistance,
-    /// The waterline the mountains are held back from. Empty until a first
-    /// pass has found a coastline, which leaves [`TerrainGenerator::inland`]
-    /// reading 1 everywhere — see the two rounds in [`TerrainGenerator::new`].
+    /// The waterline the mountains are held back from. Empty until the fit in
+    /// [`TerrainGenerator::new`] has found a coastline to measure; nothing
+    /// asks for a height before then, and an empty field reads infinity
+    /// everywhere in any case, which is the ceiling declining to bind rather
+    /// than binding on a measurement it has not made.
     ///
-    /// Deliberately *not* [`TerrainGenerator::coast`], even though the two
-    /// measure nearly the same thing. The coast field is remeasured once the
-    /// ranges have moved, because the shaping has to meet the waterline the
-    /// map actually ends up with; this one has to stay exactly as it was when
-    /// [`TerrainGenerator::fit_range_height`] read it, or the summits are
-    /// fitted against one field and drawn against another and land wherever
-    /// the difference leaves them.
+    /// Deliberately *not* [`TerrainGenerator::coast`], even though the two are
+    /// measured from the same grid a moment apart. They differ in what counts
+    /// as water: this one is flooded in from the frame, so the lagoons and
+    /// sounds that fill the interior of these maps count as ground rather than
+    /// as a coast a range has to climb from. See
+    /// [`CoastDistance::from_open_sea`].
     inland: CoastDistance,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
@@ -739,13 +745,20 @@ const CEILING_KNEE: f32 = 6.0;
 /// worn-down headland looks like.
 fn under_ceiling(h: f32, ceiling: f32) -> f32 {
     // Nothing to do below the waterline — the ceiling is about how high land
-    // may stand, and depth is the calibration's business. And with no field
-    // measured yet the ceiling is infinite, which is the first round of
-    // [`TerrainGenerator::new`] asking to be left alone.
+    // may stand, and depth is the calibration's business.
+    //
+    // The second half of that is belt and braces rather than arithmetic. An
+    // infinite ceiling already falls out of the formula as `h` untouched, and
+    // it should not arise anyway: [`TerrainGenerator::inland`] only reads
+    // infinite before it has a field to measure, and by the time anything asks
+    // for a height it has one. What the check is really for is the not-a-
+    // number a distance field with no sea in it at all would blur its way to.
     if h <= 0.0 || !ceiling.is_finite() {
         return h;
     }
-    let ratio = h / ceiling.max(1e-3);
+    // No guard on the divisor: the ceiling is [`CLIFF_HEIGHT`] plus a distance
+    // that cannot be negative, so it is never near zero.
+    let ratio = h / ceiling;
     h / (1.0 + ratio.powf(CEILING_KNEE)).powf(1.0 / CEILING_KNEE)
 }
 
@@ -805,25 +818,33 @@ impl TerrainGenerator {
         let tolerance = generator.half_extent * 0.1;
         generator.drift_excess = centre - centre.clamp(-tolerance, tolerance);
 
-        // Fitted twice, because where the mountains go now depends on where
-        // the water is and where the water is depends on the mountains.
+        // One round of fitting, and the ceiling laid over what it produced.
         //
-        // The first round has no coastline yet, so [`TerrainGenerator::inland`]
-        // reads 1 everywhere and it is exactly the generator that came before
-        // this one. Its only job is to say roughly where this seed's sea is.
-        // That answer is then frozen — it is what the ranges are held back
-        // from — and everything is fitted again against it.
+        // It is worth saying why this is not a loop, because it looks like it
+        // ought to be one: the ceiling changes the landform, the landform
+        // decides where the water is, and the water is what the ceiling is
+        // measured from. But nothing inside [`TerrainGenerator::fit`] reads
+        // the ceiling — it is applied in [`TerrainGenerator::landform`],
+        // strictly downstream of everything fitted here, and deliberately so;
+        // see the note in [`TerrainGenerator::fit_range_height`]. So the
+        // coastline this measures is the one the fit produced, and fitting
+        // again against it would return the same numbers to the bit. A second
+        // round was tried and did exactly that, for twice the noise sampling.
         //
-        // Two rounds and not more. Holding the massif back from the shore
-        // moves ground that was well above sea level, and mostly leaves the
-        // ground near the waterline where it was, so the coastline the second
-        // round draws is close to the first's. A third would measure a field
-        // that had barely moved, and would pay a full sampling of the noise
-        // for a change nobody could see.
+        // Nor is there a coastline to converge on even in principle. The
+        // ceiling scales a height rather than subtracting from it, and a
+        // positive height stays positive however hard it binds — so it moves
+        // every contour on the map except the one at zero, which is the only
+        // one any of this is measured from. Whatever it does to the mountains,
+        // the waterline it leaves is the waterline it was handed.
+        //
+        // The order below is load-bearing all the same. `inland` is the one
+        // thing [`TerrainGenerator::ceiling`] reads, and the coast-band fit is
+        // the one step here that asks for a finished height — it walks the
+        // waterline reading [`TerrainGenerator::normal`] — so it has to run
+        // against the ceiling rather than before it exists.
         let raw = generator.fit(config, &targets);
         generator.inland = CoastDistance::from_open_sea(&raw, &generator.calibration);
-
-        let raw = generator.fit(config, &targets);
         generator.fit_coast_scale(&raw);
         generator
     }
@@ -850,23 +871,13 @@ impl TerrainGenerator {
     /// The most height this ground may carry, in metres: [`PEAK_GRADE`] for
     /// every metre it stands back from the sea.
     ///
-    /// [`TerrainGenerator::inland`] decides where a range *wants* to be, which
-    /// is not the same as stopping it standing where it should not. A massif
-    /// the mask made strong can still beat a weaker one with far more room
-    /// behind it — its share of the map is many times the other's, and being
-    /// held back near the water costs it less than being feeble costs the
-    /// other. Then the height fit, which has to put a summit somewhere,
-    /// puts it there. Measured on the finished maps that was the common case
-    /// rather than the rare one: summits standing at one and a half to two
-    /// metres of height per metre of ground back from the sea, against the
-    /// half-metre the rest of this is written around.
+    /// A ceiling point by point, and nothing else — the literal form of the
+    /// thing being claimed. Ground can only climb so fast on the way inland,
+    /// so how far inland it is bounds how high it is. Where there is room this
+    /// never binds and the landscape is whatever the noise made it; on a
+    /// headland it binds hard, and the ground there is low because there is
+    /// nowhere for it to have climbed from.
     ///
-    /// So the grade is also applied as a ceiling, point by point, which is the
-    /// literal form of the thing being claimed — ground can only climb so fast
-    /// on the way inland, so how far inland it is bounds how high it is. Where
-    /// there is room this never binds and the landscape is whatever the noise
-    /// made it; on a headland it binds hard, and the ground there is low
-    /// because there is nowhere for it to have climbed from.
     /// Offset by [`CLIFF_HEIGHT`], because ground at the waterline is not
     /// obliged to be at the waterline: a coast may stand a cliff tall without
     /// having climbed from anywhere, which is exactly what the coastal shaping
@@ -875,6 +886,17 @@ impl TerrainGenerator {
     /// tens of metres of water — and it takes enough off the middle of the
     /// land to undo [`LOWLAND_FLOOR`] and leave the map the drowned sandflat
     /// the calibration went to trouble to rule out.
+    ///
+    /// Biasing the massif *towards* the interior instead was tried first, and
+    /// dropped. A soft preference does not stop anything: a massif the mask
+    /// made strong still beats a weaker one with far more room behind it —
+    /// being held back near the water costs it less than being feeble costs
+    /// the other — and the height fit, which has to put a summit somewhere,
+    /// then puts it exactly where the preference was trying to avoid. Measured
+    /// on the finished maps that was the common case rather than the rare one:
+    /// summits standing at one and a half to two metres of height per metre of
+    /// ground back from the sea, against the half-metre the rest of this is
+    /// written around. A limit does what a preference could not.
     fn ceiling(&self, wx: f32, wz: f32) -> f32 {
         CLIFF_HEIGHT + PEAK_GRADE * self.inland.metres(wx, wz)
     }
@@ -1020,23 +1042,36 @@ impl TerrainGenerator {
         let target = HEIGHT_SCALE * targets.relief;
 
         // Two brackets to start from. The lower is well under anything that
-        // produces mountains and the upper well over it, so the summit height
-        // is bracketed on every seed whatever its massif does.
+        // produces mountains; the upper is a limit as much as a bracket, and
+        // that wants explaining.
         //
-        // The upper end has room to spare on purpose. What a seed needs here
-        // depends on how much of its massif [`TerrainGenerator::inland`] left
-        // it: a seed whose mask already sat well inland is barely touched,
-        // while one whose dome ran out to the coast keeps only its inland
-        // shoulder — a fraction of the field, and squared — and needs several
-        // times the scale to stand a summit on it. A ceiling of 12 was enough
-        // before the ranges were held back from the water and is not now; a
-        // seed that reaches the ceiling silently gets half the mountain it was
-        // fitted for.
-        let (mut lo, mut hi) = (0.05f32, 200.0f32);
-        // Bisection rather than a secant: the curve is monotone but its shape
-        // varies by seed, and a run of halvings costs almost nothing here and
-        // cannot be thrown off by a flat stretch the way a secant can.
-        for _ in 0..24 {
+        // From a kilometre up this is a genuine solve and the answer is small:
+        // under 4 on every seed measured, and under 1 by two kilometres. Below
+        // that the curve stops being one a solve can follow. The calibration
+        // refits the mapping at every trial, so past a point pushing the massif
+        // harder stops raising the summit in metres at all — on one 512-metre
+        // seed the summit read 54.1 m at every scale from 1 to 200 — and far
+        // enough past it the massif swamps the quantiles the mapping is
+        // anchored on and the whole thing breaks upward, the same seed reading
+        // 1285 m at a scale of ten thousand. Others turn over instead, rising
+        // to a maximum part way and falling back. On any of them no scale
+        // reaches the target and the bisection runs to whatever ceiling it was
+        // given, so what that ceiling is chooses the answer outright.
+        //
+        // Which is the case for keeping it low, and it costs nothing to. The
+        // maps either ceiling produces are indistinguishable — the calibration
+        // absorbing the scale is the same thing that made the curve go flat —
+        // so the only difference is the number a degenerate seed comes away
+        // with. At 200 that number lands two orders of magnitude off its
+        // neighbours': one seed solved to 1.9 at 640 m, 200 at 768 m and 1.4 at
+        // a kilometre. Since map size is a dial the player turns, a fitted
+        // number that jumps like that between neighbouring sizes is worth not
+        // having, even where the picture survives it.
+        let (mut lo, mut hi) = (0.05f32, 12.0f32);
+        // Bisection rather than a secant: as above the curve is not reliably
+        // monotone, and a run of halvings costs almost nothing here and cannot
+        // be thrown off by a flat stretch the way a secant can.
+        for _ in 0..18 {
             let mid = 0.5 * (lo + hi);
             if peak_at(mid) < target {
                 lo = mid;
@@ -1965,6 +2000,20 @@ impl CoastDistance {
     /// On a two-kilometre map that was the difference between one range and
     /// several: the interior massifs each had inland water within a hundred
     /// metres and were held down as if they stood on a beach.
+    ///
+    /// Known limitation, and the reason to look here first if map size ever
+    /// misbehaves: whether a body of water reaches the frame is a yes or no,
+    /// so this field steps as the map grows. A lagoon joined to the sea by one
+    /// cell of a strait counts wholly as sea; widen the map a little, the
+    /// strait silts up, and the same lagoon counts wholly as ground — and
+    /// every point behind it gains the whole width of the lagoon in distance
+    /// at once. Measured on one seed over 128-metre steps of size, the largest
+    /// open-sea distance on the map went 101, 131, 288, 320, 340 m: a jump of
+    /// 157 m for one step, which took the ceiling over that region from about
+    /// 85 m to about 175 m and turned a headland into a range. Softening it
+    /// means giving up the binary — weighting each pool by how much sea it
+    /// really connects to, or blending this field with
+    /// [`CoastDistance::from_raw`] — which is a redesign rather than a tweak.
     fn from_open_sea(raw: &GridField, calibration: &Calibration) -> Self {
         let (nx, nz) = raw.dims;
         let mut sea = vec![false; raw.cells.len()];
@@ -2579,12 +2628,13 @@ mod tests {
         // whose land is broad keeps most of the fitted height and one whose
         // land is all coast keeps less.
         //
-        // So the constant across seeds is not the summit any more. It is the
-        // grade: however tall a map's highest ground comes out, it stands back
-        // from the water in proportion. That is the property worth holding,
-        // and it is the one the old fixed-height test cannot express — it
-        // passed happily on a seed with a hundred and twenty metres of rock
-        // fifty metres from the sea.
+        // So there is no constant across seeds any more — not the summit, and
+        // not the grade either, which runs over a fair spread depending on how
+        // close a seed's massif happens to fall to its best ground. What holds
+        // is weaker and worth more: a summit stands within reach of what its
+        // own ground has earned, both ways. That is the property the old
+        // fixed-height test could not express — it passed happily on a seed
+        // with a hundred and twenty metres of rock fifty metres from the sea.
         for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
             let (config, gen) = generator(8, 8, seed);
             let half = config.half_extent();
@@ -2602,14 +2652,29 @@ mod tests {
                 }
             }
 
-            // Never over what that much ground has earned — the ceiling doing
-            // its job. A little slack, because the summit is looked for on a
-            // coarser grid than the distance field is drawn on.
+            // Most of what that ground has earned — the ceiling being what
+            // decides the summit, rather than a bound so far above the
+            // landscape that it never comes into it.
+            //
+            // Only the lower half of that is worth asserting, and it is worth
+            // saying why the other half is missing. `peak <= earned` is not a
+            // property of these maps but arithmetic: `earned` here is the very
+            // ceiling [`under_ceiling`] applied at this point, and a smooth
+            // minimum is strictly under its ceiling for any height above the
+            // waterline. An assertion that cannot fail tests nothing.
+            //
+            // What *can* fail is the summit falling away from its ceiling.
+            // That is the coupling worth holding: [`INLAND_REACH`] fixes
+            // [`PEAK_GRADE`], and if the reach were lengthened much further
+            // than the massif can build against, every map would sit well
+            // below a ceiling that had stopped meaning anything. Measured, the
+            // eight seeds run from 0.57 to 0.96 of their ceiling.
             let earned = CLIFF_HEIGHT + PEAK_GRADE * room;
             assert!(
-                peak <= earned * 1.05,
-                "seed {seed} peaked at {peak:.0} m only {room:.0} m from the sea, \
-                 where the ground has earned {earned:.0} m"
+                peak > earned * 0.4,
+                "seed {seed} peaked at {peak:.0} m with {room:.0} m of ground behind it, \
+                 well under the {earned:.0} m that has earned — is the ceiling still \
+                 what decides a summit?"
             );
             assert!(
                 peak > MOUNTAIN_HEIGHT,
@@ -2671,9 +2736,18 @@ mod tests {
         // nothing any coast does — so what is worth guarding is that several
         // ranges are real mountains, not that they are all nearly as tall as
         // each other.
-        // Over the whole seed list rather than one seed, which is what buys
-        // back the strength given up by reading against the lower line.
-        for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
+        // Counted over the whole seed list and not seed by seed, which is what
+        // buys back the strength given up by reading against the lower line.
+        // A per-seed floor of three has no margin left in it: measured, the
+        // eight seeds get 3, 3, 4, 4, 3, 7, 3, 5 summits, so three of them sit
+        // exactly on such a bar and any tuning that costs one seed one summit
+        // fails the test without the maps having got worse. The total has room
+        // to move — thirty-two against a bar of twenty-four — while still
+        // catching the thing this is really about, which is a big map coming
+        // out as one mountain and a lot of lumps.
+        let seeds = [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337];
+        let mut total = 0;
+        for seed in seeds {
             let config = MapConfig::square(2048, seed);
             let gen = TerrainGenerator::new(&config);
             let half = config.half_extent();
@@ -2703,12 +2777,23 @@ mod tests {
                 }
             }
 
+            // Two is the floor for a map this size on its own: one summit is
+            // the failure this test was written for.
             assert!(
-                peaks.len() >= 3,
-                "seed {seed} got only {} summits clear of {MOUNTAIN_HEIGHT} m",
+                peaks.len() >= 2,
+                "seed {seed} got only {} summit clear of {MOUNTAIN_HEIGHT} m",
                 peaks.len()
             );
+            total += peaks.len();
         }
+
+        assert!(
+            total >= 24,
+            "{} summits clear of {MOUNTAIN_HEIGHT} m over {} seeds — a big map is \
+             supposed to get several each",
+            total,
+            seeds.len()
+        );
     }
 
     #[test]
@@ -3407,6 +3492,28 @@ mod bench {
                  bare-rock share and median slope {rocky:?}  \
                  land the coast reshapes {:.0}%  {rocks} offshore rocks  {examples:?}",
                 reshaped as f32 / land.max(1) as f32 * 100.0,
+            );
+        }
+    }
+
+    /// Cost of fitting a generator, which is the whole of a map's loading time
+    /// before any mesh is built.
+    ///
+    /// Worth watching, and worth its own bench because nothing else here would
+    /// show it: it is one call, it happens once, and it is quietly quadratic in
+    /// map size — it samples the noise over the whole map on a fixed grid. A
+    /// second round of fitting was once added by mistake and doubled this, with
+    /// nothing in the maps or the tests to say so.
+    #[test]
+    #[ignore]
+    fn generator_cost() {
+        for metres in [512u32, 1024, 2048, 4096] {
+            let start = Instant::now();
+            let generator = TerrainGenerator::new(&MapConfig::square(metres, 1));
+            let elapsed = start.elapsed();
+            println!(
+                "{metres:5} m  {elapsed:>8.0?}  range_gain {:.2}",
+                std::hint::black_box(&generator).range_gain
             );
         }
     }
