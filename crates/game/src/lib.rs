@@ -13,6 +13,7 @@ pub mod capture;
 pub mod cli;
 pub mod debug;
 pub mod menu;
+pub mod net;
 pub mod terrain;
 
 use bevy::prelude::*;

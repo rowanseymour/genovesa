@@ -1,0 +1,19 @@
+# The headless side of a shared world. Terrain never crosses the wire — the
+# world crate regenerates it, bit for bit, on every machine — so this stays a
+# thin roster around a seed: who is in the world, and where they are.
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+# Reached only by path, as the world crate is.
+publish = false
+
+[dependencies]
+glam.workspace = true
+# The one thing hosting a world needs the world for: choosing where players
+# enter it. Everything else about the terrain stays on the clients.
+world = { path = "../world" }
+# The words of the session, shared with every client so the two sides of the
+# wire cannot drift.
+protocol = { path = "../protocol" }

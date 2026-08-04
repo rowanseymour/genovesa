@@ -1,8 +1,8 @@
-# A virtual workspace: nothing is built from here, and the two crates sit as
-# equals under crates/ — the game, and the engine-free world it walks around
-# in. A third crate (a server, say) slots in beside them.
+# A virtual workspace: nothing is built from here, and the crates sit as
+# equals under crates/ — the game, the engine-free world it walks around in,
+# the protocol a served session speaks, and the server that hosts one.
 [workspace]
-members = ["crates/game", "crates/world"]
+members = ["crates/game", "crates/protocol", "crates/server", "crates/world"]
 resolver = "2"
 
 # Bevy, the one piece of it the world crate uses directly, and the maths library

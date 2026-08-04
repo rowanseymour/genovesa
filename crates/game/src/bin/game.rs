@@ -18,11 +18,12 @@ use game::capture::CapturePlugin;
 use game::cli::{self, Args};
 use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
+use game::net::{Connection, NetPlugin, Online};
 use game::terrain::TerrainPlugin;
 use game::{SKY, WINDOW};
 
 fn main() -> ExitCode {
-    let args = match cli::parse(std::env::args().skip(1).collect()) {
+    let mut args = match cli::parse(std::env::args().skip(1).collect()) {
         Ok(args) => args,
         Err(message) => {
             eprintln!("game: {message}");
@@ -30,11 +31,28 @@ fn main() -> ExitCode {
         }
     };
 
-    run(args);
+    // Joining happens before the app exists: what the handshake learns — the
+    // seed, and where the world is entered — is what the app is built from.
+    let online = match &args.join {
+        None => None,
+        Some(addr) => match Connection::join(addr) {
+            Ok(connection) => {
+                args.config.seed = connection.seed;
+                args.centre_on(connection.spawn);
+                Some(connection)
+            }
+            Err(message) => {
+                eprintln!("game: {message}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    run(args, online);
     ExitCode::SUCCESS
 }
 
-fn run(args: Args) {
+fn run(args: Args, online: Option<Connection>) {
     let mut app = App::new();
 
     app.add_plugins(DefaultPlugins.set(window_plugin(&args)));
@@ -52,6 +70,10 @@ fn run(args: Args) {
         app.add_plugins(DebugOverlayPlugin);
     }
 
+    if let Some(connection) = online {
+        app.insert_resource(Online::new(connection));
+    }
+
     app.insert_state(args.state)
         .insert_resource(ClearColor(SKY))
         // Sky fill. Deliberately strong relative to the sun — this look wants
@@ -67,6 +89,8 @@ fn run(args: Args) {
             TerrainPlugin,
             MapCameraPlugin,
             MenuPlugin,
+            // Harmless offline: its systems condition on the joined session.
+            NetPlugin,
             CapturePlugin {
                 resolution: args.resolution,
                 shots: args.shots,

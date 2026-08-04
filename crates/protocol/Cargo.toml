@@ -1,0 +1,15 @@
+# The words a server and its clients exchange, and nothing else — shared by
+# both sides so the two ends of the wire cannot drift apart. Engine-free for
+# the same reason the world crate is: the server must build without Bevy.
+[package]
+name = "protocol"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+# Reached only by path, as the world crate is.
+publish = false
+
+[dependencies]
+# For Vec2: positions on the wire are the same type positions are everywhere
+# else in the workspace.
+glam.workspace = true

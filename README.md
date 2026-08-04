@@ -63,6 +63,25 @@ ocean of them;
 [`crates/world/src/noise.rs`](crates/world/src/noise.rs) is a dependency-free
 Perlin implementation, kept in-tree so a seed always produces the same world.
 
+## Playing together
+
+Determinism is what makes the world shareable: since a seed is a whole world
+on every machine, a server never sends terrain — it hands out the seed and
+keeps track of who is in the world and where. Clients generate the same ocean
+for themselves and meet in it.
+
+```bash
+cargo run --bin server -- --seed 7
+```
+
+```bash
+cargo run -- --join localhost
+```
+
+Everyone joins on the same island, and other players appear as coloured
+markers standing on the ground. The wire itself is defined once, in the
+`protocol` crate, and shared by both sides.
+
 ## Looking at maps
 
 Judging the generator means seeing many islands from above, not walking
