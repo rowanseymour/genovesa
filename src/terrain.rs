@@ -153,15 +153,25 @@ const MOOR_HEIGHT: f32 = 37.0;
 /// makes one map feel tame and the next absurd.
 const HEIGHT_SCALE: f32 = 125.0;
 
-/// The tallest peak a map is allowed as a share of its geometric-mean extent,
-/// which caps [`HEIGHT_SCALE`] on small maps. A mountain is mostly climb, and
-/// a map has to have room for the climb: fitted to the full height, a map a
-/// couple of hundred metres across comes out as one grey cone with a beach —
-/// all flank, no country. Held to this pitch, the summit shrinks with the
-/// ground available until, by the smallest maps, there is no mountain at all
-/// and the map is the grassy outcrop it has room to be. At and above the
-/// half-kilometre-odd where the share reaches [`HEIGHT_SCALE`], it does
-/// nothing.
+/// The steepest a map may climb from its waterline to its summit, in metres of
+/// height per metre of ground. Derived rather than tuned: it is exactly the
+/// pitch [`INLAND_REACH`] and [`HEIGHT_SCALE`] already imply between them, so
+/// that the rule saying *where* a mountain may stand and the rule saying *how
+/// high* agree instead of each having its own idea of how steep land gets.
+const PEAK_GRADE: f32 = HEIGHT_SCALE / INLAND_REACH;
+
+/// The tallest peak a map is fitted to as a share of its geometric-mean
+/// extent, which caps [`HEIGHT_SCALE`] on small maps. A mountain is mostly
+/// climb, and a map has to have room for the climb: fitted to the full height,
+/// a map a couple of hundred metres across comes out as one grey cone with a
+/// beach — all flank, no country.
+///
+/// This is what the massif is *aimed* at, not what a map comes out with;
+/// [`TerrainGenerator::ceiling`] has the last word, and on most maps it takes
+/// something off. The two are not doing the same job. This one keeps the range
+/// term a sane share of the field, which has to be settled before there is a
+/// map to measure; the ceiling decides what the ground has earned, which
+/// cannot be known until there is.
 const PEAK_PITCH: f32 = 0.18;
 
 /// What this map's mountains are fitted to, in metres: the [`PEAK_PITCH`]
@@ -176,9 +186,8 @@ fn peak_height(extent: Vec2) -> f32 {
 struct Targets {
     /// Share of the map that is land — [`land_fraction`].
     land: f32,
-    /// Share of the full mountain height the map has room for —
-    /// [`peak_height`] over [`HEIGHT_SCALE`], 1.0 on anything but a small
-    /// map.
+    /// Share of the full mountain height the map is fitted to —
+    /// [`peak_height`] over [`HEIGHT_SCALE`], 1.0 on anything but a small map.
     relief: f32,
     /// How far the sea-depth anchor slides to the shallow side —
     /// [`shoal_shift`], 0 on anything but a small map.
@@ -228,6 +237,52 @@ const SHALLOWS_FLOOR: f32 = 6.5;
 /// difference between a low island and a high one would cost more variety than
 /// the sandflats do.
 const LOWLAND_FLOOR: f32 = 10.0;
+
+// --- How far from the sea a mountain is allowed to be -----------------------
+//
+// Left to the mask field alone, a range sits wherever the noise puts it, and
+// half the time that is on the coast: a wall of rock rising out of the water
+// with no country behind it. Real land does not do that, and the reason is
+// erosion. Ground is only so steep before it comes down, so height has to be
+// *earned* over horizontal distance — which means the high ground is inland,
+// and a coast is the bottom of a slope that started somewhere.
+//
+// So how far a point stands from the open sea sets a ceiling on how high it
+// may be, and [`TerrainGenerator::ceiling`] holds the finished landform under
+// it. Nothing decides where the ranges *go* — that is still the mask field's
+// business, and the noise's. What changes is that a range which happens to
+// land on a headland no longer gets to be a mountain there, because the ground
+// under it has not climbed from anywhere.
+//
+// Two things this deliberately is not. It is not a term added to the height,
+// which would raise the interior rather than lower the coast, and would drain
+// every inland lagoon on the map. And it is not applied to the massif before
+// the height fit: that fit exists to guarantee a summit, so it simply answers
+// any suppression by winding the range term up until the least coastal cell on
+// the map spikes — which on a ring-shaped island put the full hundred and
+// twenty metres of rock fifty metres from the water, worse than the coastal
+// ranges this set out to remove. The ceiling has to be the last word, applied
+// to metres, after everything else has had its say.
+
+/// How far inland ground has to be, in metres, before it may stand at the full
+/// [`HEIGHT_SCALE`]. Absolute rather than a share of the map, for the same
+/// reason [`FEATURE_SCALE`] is: a bigger map should mean more landscape, not a
+/// stretched copy of the same one.
+///
+/// This is the dial worth turning. It fixes [`PEAK_GRADE`], and with it how
+/// tall a given map's mountains come out: a kilometre-square map's interior
+/// gets about a hundred and fifty metres from the sea, so at this reach its
+/// summits land around eighty or ninety metres rather than the full height,
+/// and only maps of a kilometre and a half or more still reach the snow.
+/// Shortening it gives every size taller mountains and steeper country.
+///
+/// It is also a frankly generous number. A summit at [`HEIGHT_SCALE`] this far
+/// from the sea is a climb of about thirty degrees held for the whole way,
+/// where the steepest real islands manage a seventh of that. That is the price
+/// of a map a kilometre across having mountains on it at all, and the useful
+/// part is not the absolute figure but that height now has to be paid for in
+/// ground.
+const INLAND_REACH: f32 = 220.0;
 
 /// Share of the *land* a mountain massif covers, counting its flanks. Roughly
 /// three times [`MOUNTAIN_FRACTION`], since most of a mountain is the climb
@@ -633,6 +688,18 @@ pub struct TerrainGenerator {
     range_ceiling: GridField,
     calibration: Calibration,
     coast: CoastDistance,
+    /// The waterline the mountains are held back from. Empty until a first
+    /// pass has found a coastline, which leaves [`TerrainGenerator::inland`]
+    /// reading 1 everywhere — see the two rounds in [`TerrainGenerator::new`].
+    ///
+    /// Deliberately *not* [`TerrainGenerator::coast`], even though the two
+    /// measure nearly the same thing. The coast field is remeasured once the
+    /// ranges have moved, because the shaping has to meet the waterline the
+    /// map actually ends up with; this one has to stay exactly as it was when
+    /// [`TerrainGenerator::fit_range_height`] read it, or the summits are
+    /// fitted against one field and drawn against another and land wherever
+    /// the difference leaves them.
+    inland: CoastDistance,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
     coast_scale: f32,
@@ -644,6 +711,42 @@ pub struct TerrainGenerator {
     drift_excess: Vec2,
     bend_gain: f32,
     reach_max: f32,
+}
+
+/// How sharply [`under_ceiling`] turns over as it meets the ceiling. Higher is
+/// closer to a plain `min`: later to bend, and flatter once it has.
+///
+/// Set high enough that ground well under its ceiling is left alone. At 3 the
+/// bend started early — a hillside at two thirds of its ceiling lost a tenth
+/// of its height — and since most of any map here is low country a short way
+/// from water, that came off the middle of the land everywhere and undid
+/// [`LOWLAND_FLOOR`]. The ceiling is meant to be a limit, not a tax.
+const CEILING_KNEE: f32 = 6.0;
+
+/// `h` brought under `ceiling`, leaving the ground still rising.
+///
+/// A plain `min` is what this must not be. Clipped flat, every headland with a
+/// strong massif on it becomes a mesa — and a mesa has no summit, so its
+/// highest ground is barely above its own shoulders and there is nothing for a
+/// peak to be made of. It would also print the shape of the distance field on
+/// the ground wherever it bound, creases and all, which is the one thing every
+/// other reader of that field takes trouble to avoid.
+///
+/// A smooth minimum instead: all but exactly `h` while `h` is well under the
+/// ceiling, bending over as it approaches, and closing on the ceiling from
+/// below without ever sitting on it. Ground under a binding ceiling still
+/// climbs, just far more slowly than the noise wanted it to — which is what a
+/// worn-down headland looks like.
+fn under_ceiling(h: f32, ceiling: f32) -> f32 {
+    // Nothing to do below the waterline — the ceiling is about how high land
+    // may stand, and depth is the calibration's business. And with no field
+    // measured yet the ceiling is infinite, which is the first round of
+    // [`TerrainGenerator::new`] asking to be left alone.
+    if h <= 0.0 || !ceiling.is_finite() {
+        return h;
+    }
+    let ratio = h / ceiling.max(1e-3);
+    h / (1.0 + ratio.powf(CEILING_KNEE)).powf(1.0 / CEILING_KNEE)
 }
 
 /// One grid point's landform, split at the one term the fit is free to scale.
@@ -684,17 +787,14 @@ impl TerrainGenerator {
             shore: Noise::new(seed.wrapping_add(0x2545_F491)),
             skerry: Noise::new(seed.wrapping_add(0xC2B2_AE35)),
             // All three are fitted below, by looking at the map this seed
-            // actually produced. Each pass depends on the one before it, so
-            // they cannot be folded together: the ranges have to be scaled
-            // before the height field means anything, the height field has to
-            // exist before its distribution can be read, and the coast cannot
-            // be measured until the calibration has said where the water is.
+            // actually produced. See [`TerrainGenerator::fit`].
             range_floor: 0.0,
             range_span: 1.0,
             range_gain: 1.0,
             range_ceiling: GridField::default(),
             calibration: Calibration::default(),
             coast: CoastDistance::default(),
+            inland: CoastDistance::default(),
             coast_scale: 1.0,
             half_extent: config.half_extent(),
             drift_excess: Vec2::ZERO,
@@ -705,13 +805,78 @@ impl TerrainGenerator {
         let tolerance = generator.half_extent * 0.1;
         generator.drift_excess = centre - centre.clamp(-tolerance, tolerance);
 
-        let samples = generator.fit_ranges(config.tiles(), &targets);
-        generator.fit_range_height(&samples, &targets);
-        let raw = generator.sample_raw(config.tiles());
-        generator.calibration = Calibration::fit(&mut raw.cells.clone(), &targets);
-        generator.coast = CoastDistance::from_raw(&raw, &generator.calibration);
+        // Fitted twice, because where the mountains go now depends on where
+        // the water is and where the water is depends on the mountains.
+        //
+        // The first round has no coastline yet, so [`TerrainGenerator::inland`]
+        // reads 1 everywhere and it is exactly the generator that came before
+        // this one. Its only job is to say roughly where this seed's sea is.
+        // That answer is then frozen — it is what the ranges are held back
+        // from — and everything is fitted again against it.
+        //
+        // Two rounds and not more. Holding the massif back from the shore
+        // moves ground that was well above sea level, and mostly leaves the
+        // ground near the waterline where it was, so the coastline the second
+        // round draws is close to the first's. A third would measure a field
+        // that had barely moved, and would pay a full sampling of the noise
+        // for a change nobody could see.
+        let raw = generator.fit(config, &targets);
+        generator.inland = CoastDistance::from_open_sea(&raw, &generator.calibration);
+
+        let raw = generator.fit(config, &targets);
         generator.fit_coast_scale(&raw);
         generator
+    }
+
+    /// One round of fitting: where the ranges sit, how tall they stand, what
+    /// the raw field's spread means in metres, and where that puts the water.
+    ///
+    /// Each step depends on the one before it, so they cannot be folded
+    /// together: the ranges have to be scaled before the height field means
+    /// anything, the height field has to exist before its distribution can be
+    /// read, and the coast cannot be measured until the calibration has said
+    /// where the water is.
+    ///
+    /// Returns the raw grid, which the coast-band fit still wants afterwards.
+    fn fit(&mut self, config: &MapConfig, targets: &Targets) -> GridField {
+        let samples = self.fit_ranges(config.tiles(), targets);
+        self.fit_range_height(&samples, targets);
+        let raw = self.sample_raw(config.tiles());
+        self.calibration = Calibration::fit(&mut raw.cells.clone(), targets);
+        self.coast = CoastDistance::from_raw(&raw, &self.calibration);
+        raw
+    }
+
+    /// The most height this ground may carry, in metres: [`PEAK_GRADE`] for
+    /// every metre it stands back from the sea.
+    ///
+    /// [`TerrainGenerator::inland`] decides where a range *wants* to be, which
+    /// is not the same as stopping it standing where it should not. A massif
+    /// the mask made strong can still beat a weaker one with far more room
+    /// behind it — its share of the map is many times the other's, and being
+    /// held back near the water costs it less than being feeble costs the
+    /// other. Then the height fit, which has to put a summit somewhere,
+    /// puts it there. Measured on the finished maps that was the common case
+    /// rather than the rare one: summits standing at one and a half to two
+    /// metres of height per metre of ground back from the sea, against the
+    /// half-metre the rest of this is written around.
+    ///
+    /// So the grade is also applied as a ceiling, point by point, which is the
+    /// literal form of the thing being claimed — ground can only climb so fast
+    /// on the way inland, so how far inland it is bounds how high it is. Where
+    /// there is room this never binds and the landscape is whatever the noise
+    /// made it; on a headland it binds hard, and the ground there is low
+    /// because there is nowhere for it to have climbed from.
+    /// Offset by [`CLIFF_HEIGHT`], because ground at the waterline is not
+    /// obliged to be at the waterline: a coast may stand a cliff tall without
+    /// having climbed from anywhere, which is exactly what the coastal shaping
+    /// spends its time building. Without the offset the ceiling bears down on
+    /// the ordinary low country too — most of any map here is within a few
+    /// tens of metres of water — and it takes enough off the middle of the
+    /// land to undo [`LOWLAND_FLOOR`] and leave the map the drowned sandflat
+    /// the calibration went to trouble to rule out.
+    fn ceiling(&self, wx: f32, wz: f32) -> f32 {
+        CLIFF_HEIGHT + PEAK_GRADE * self.inland.metres(wx, wz)
     }
 
     /// Fits where this seed's mountains sit and how much of the map they cover,
@@ -833,6 +998,18 @@ impl TerrainGenerator {
     fn fit_range_height(&mut self, samples: &[Sample], targets: &Targets) {
         // What the map's highest ground comes out at, in metres, for a given
         // scale on the massif.
+        //
+        // Fitted against the field *before* [`TerrainGenerator::ceiling`] gets
+        // to it, and deliberately so. The ceiling is what decides how tall a
+        // map's mountains actually come out, and it does that from geometry —
+        // so the fit has no business chasing it. Made to chase it, the fit
+        // pushes the range term as far as it takes to get a summit up to a
+        // target the ceiling will not allow, which is a long way: the massif
+        // ends up many times the share of the field it should be, and since
+        // the room a map has depends on the map, the same seed came out a
+        // different landscape at two sizes. Left aiming at a fixed height, the
+        // range term keeps the size-independent value it always had, and the
+        // ceiling clips whatever stands taller than its ground has earned.
         let peak_at = |gain: f32| {
             let mut raw: Vec<f32> = samples.iter().map(|s| s.raw(gain)).collect();
             // Sorts in place, so the last entry is the summit afterwards.
@@ -840,18 +1017,26 @@ impl TerrainGenerator {
             calibration.metres(raw[raw.len() - 1])
         };
 
-        // What this map's summit is fitted to — the full height, less
-        // whatever [`peak_height`] took off for the map being small.
         let target = HEIGHT_SCALE * targets.relief;
 
-        // Two brackets to start from, a decade apart. The lower is well under
-        // anything that produces mountains and the upper well over it, so the
-        // summit height is bracketed on every seed whatever its massif does.
-        let (mut lo, mut hi) = (0.05f32, 12.0f32);
+        // Two brackets to start from. The lower is well under anything that
+        // produces mountains and the upper well over it, so the summit height
+        // is bracketed on every seed whatever its massif does.
+        //
+        // The upper end has room to spare on purpose. What a seed needs here
+        // depends on how much of its massif [`TerrainGenerator::inland`] left
+        // it: a seed whose mask already sat well inland is barely touched,
+        // while one whose dome ran out to the coast keeps only its inland
+        // shoulder — a fraction of the field, and squared — and needs several
+        // times the scale to stand a summit on it. A ceiling of 12 was enough
+        // before the ranges were held back from the water and is not now; a
+        // seed that reaches the ceiling silently gets half the mountain it was
+        // fitted for.
+        let (mut lo, mut hi) = (0.05f32, 200.0f32);
         // Bisection rather than a secant: the curve is monotone but its shape
         // varies by seed, and a run of halvings costs almost nothing here and
         // cannot be thrown off by a flat stretch the way a secant can.
-        for _ in 0..18 {
+        for _ in 0..24 {
             let mid = 0.5 * (lo + hi);
             if peak_at(mid) < target {
                 lo = mid;
@@ -1208,7 +1393,10 @@ impl TerrainGenerator {
 
     /// Terrain height in metres before the coast reshapes it. Sea level is 0.
     fn landform(&self, wx: f32, wz: f32) -> f32 {
-        self.calibration.metres(self.landform_raw(wx, wz))
+        under_ceiling(
+            self.calibration.metres(self.landform_raw(wx, wz)),
+            self.ceiling(wx, wz),
+        )
     }
 
     /// Terrain height in metres at a world-space `(x, z)`. Sea level is 0.
@@ -1755,17 +1943,66 @@ impl CoastDistance {
     /// Measures out from wherever the calibration put the waterline in an
     /// already-sampled grid of raw landform values.
     fn from_raw(raw: &GridField, calibration: &Calibration) -> Self {
-        let dims = raw.dims;
-        let mut cells: Vec<f32> = raw
+        let sea: Vec<bool> = raw
             .cells
             .iter()
-            .map(|v| {
-                if *v <= calibration.sea_level {
-                    0.0
-                } else {
-                    f32::INFINITY
+            .map(|v| *v <= calibration.sea_level)
+            .collect();
+        Self::measure(&sea, raw.dims, raw.origin)
+    }
+
+    /// The same, but measured only from water that reaches the edge of the
+    /// map — the sea proper. Every enclosed pool counts as ground, so distance
+    /// keeps climbing straight across it.
+    ///
+    /// Which is what the mountains have to be held back from, and the sea
+    /// alone. These maps are riddled with inland water: a third of the map is
+    /// land, sea level is fitted high enough that hollows flood, and the
+    /// result is sounds and lagoons all over the interior. Measured from all
+    /// of it, a range is forbidden its height for having a pond beside it,
+    /// which is neither what erosion says nor anything a landscape does — the
+    /// pond is a feature *of* the upland, not a coast it has to climb from.
+    /// On a two-kilometre map that was the difference between one range and
+    /// several: the interior massifs each had inland water within a hundred
+    /// metres and were held down as if they stood on a beach.
+    fn from_open_sea(raw: &GridField, calibration: &Calibration) -> Self {
+        let (nx, nz) = raw.dims;
+        let mut sea = vec![false; raw.cells.len()];
+        let wet = |i: usize| raw.cells[i] <= calibration.sea_level;
+
+        // Flood in from the frame, which is open water on every map — the
+        // falloff's rim guarantees it.
+        let mut stack: Vec<usize> = (0..nx)
+            .flat_map(|ix| [ix, (nz - 1) * nx + ix])
+            .chain((0..nz).flat_map(|iz| [iz * nx, iz * nx + nx - 1]))
+            .filter(|i| wet(*i))
+            .collect();
+        for i in &stack {
+            sea[*i] = true;
+        }
+        while let Some(i) = stack.pop() {
+            let (ix, iz) = (i % nx, i / nx);
+            let neighbours = [
+                (ix > 0).then(|| i - 1),
+                (ix + 1 < nx).then(|| i + 1),
+                (iz > 0).then(|| i - nx),
+                (iz + 1 < nz).then(|| i + nx),
+            ];
+            for next in neighbours.into_iter().flatten() {
+                if wet(next) && !sea[next] {
+                    sea[next] = true;
+                    stack.push(next);
                 }
-            })
+            }
+        }
+        Self::measure(&sea, raw.dims, raw.origin)
+    }
+
+    /// Distance out from a mask of what counts as water.
+    fn measure(sea: &[bool], dims: (usize, usize), origin: Vec2) -> Self {
+        let mut cells: Vec<f32> = sea
+            .iter()
+            .map(|wet| if *wet { 0.0 } else { f32::INFINITY })
             .collect();
 
         chamfer(&mut cells, dims);
@@ -1787,7 +2024,7 @@ impl CoastDistance {
             field: GridField {
                 cells,
                 dims,
-                origin: raw.origin,
+                origin,
             },
         }
     }
@@ -2332,30 +2569,51 @@ mod tests {
     }
 
     #[test]
-    fn every_seed_gets_mountains_of_about_the_same_height() {
-        // The whole point of fitting the massif: how tall a seed's mountains
-        // come out is a property of the generator, not of the seed. Left to the
-        // noise this was the widest-spread number on the map — a hundred metres
-        // on one seed and nearly three hundred on the next — which is most of
-        // what made one map feel tame and another absurd.
+    fn every_seed_pays_for_its_summit_in_ground() {
+        // The massif fit still puts every seed's raw summit on the same
+        // number — that is what stopped one map feeling tame and the next
+        // absurd, when the height a seed reached was the widest-spread number
+        // on the map. What has changed is that reaching it is no longer a
+        // seed's to decide: [`TerrainGenerator::ceiling`] holds every point
+        // under what its distance from the open sea has earned, so a seed
+        // whose land is broad keeps most of the fitted height and one whose
+        // land is all coast keeps less.
+        //
+        // So the constant across seeds is not the summit any more. It is the
+        // grade: however tall a map's highest ground comes out, it stands back
+        // from the water in proportion. That is the property worth holding,
+        // and it is the one the old fixed-height test cannot express — it
+        // passed happily on a seed with a hundred and twenty metres of rock
+        // fifty metres from the sea.
         for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
             let (config, gen) = generator(8, 8, seed);
             let half = config.half_extent();
 
             // On the same grid the fit itself used, so this is testing the
             // solve rather than how the summit falls between samples.
-            let mut peak = 0.0f32;
+            let (mut peak, mut room) = (0.0f32, 0.0f32);
             for iz in (0..config.tiles().y).step_by(COAST_GRID as usize) {
                 for ix in (0..config.tiles().x).step_by(COAST_GRID as usize) {
-                    peak = peak.max(gen.landform(ix as f32 - half.x, iz as f32 - half.y));
+                    let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
+                    let h = gen.landform(wx, wz);
+                    if h > peak {
+                        (peak, room) = (h, gen.inland.metres(wx, wz));
+                    }
                 }
             }
 
-            let off = (peak - HEIGHT_SCALE).abs() / HEIGHT_SCALE;
+            // Never over what that much ground has earned — the ceiling doing
+            // its job. A little slack, because the summit is looked for on a
+            // coarser grid than the distance field is drawn on.
+            let earned = CLIFF_HEIGHT + PEAK_GRADE * room;
             assert!(
-                off < 0.1,
-                "seed {seed} peaked at {peak:.0} m, {:.0}% off the {HEIGHT_SCALE} m it is fitted to",
-                off * 100.0
+                peak <= earned * 1.05,
+                "seed {seed} peaked at {peak:.0} m only {room:.0} m from the sea, \
+                 where the ground has earned {earned:.0} m"
+            );
+            assert!(
+                peak > MOUNTAIN_HEIGHT,
+                "seed {seed} peaked at {peak:.0} m, which is not a mountain"
             );
         }
     }
@@ -2400,41 +2658,57 @@ mod tests {
         // pure luck of the mask field, so a large map came out as many grey
         // lumps under one white cap. The local ceiling — [`MASSIF_EQUALITY`] —
         // is what entitles every range to a summit of its own.
-        let config = MapConfig::square(2048, 20_040_112);
-        let gen = TerrainGenerator::new(&config);
-        let half = config.half_extent();
+        //
+        // Read against [`MOUNTAIN_HEIGHT`], the height the palette starts
+        // drawing ground as mountain, and not against a share of
+        // [`HEIGHT_SCALE`]. Parity was the whole story when a massif could
+        // reach full height wherever the mask happened to put it. It is not
+        // now: [`TerrainGenerator::inland`] rations height by how much room a
+        // range has behind it, so the pecking order runs on how far each
+        // massif sits from the sea. That is a difference the map is *meant*
+        // to show — this seed's third range was 101 m of rock standing 81 m
+        // from the water, which is a fifty-degree climb from sea to summit and
+        // nothing any coast does — so what is worth guarding is that several
+        // ranges are real mountains, not that they are all nearly as tall as
+        // each other.
+        // Over the whole seed list rather than one seed, which is what buys
+        // back the strength given up by reading against the lower line.
+        for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
+            let config = MapConfig::square(2048, seed);
+            let gen = TerrainGenerator::new(&config);
+            let half = config.half_extent();
 
-        // Distinct summits: high ground on a coarse grid, greedily clustered
-        // so that one massif counts once. Measured on the landform, so the
-        // detail layers cannot invent one.
-        let mut peaks: Vec<(f32, f32, f32)> = Vec::new();
-        for iz in (0..config.tiles().y as i32).step_by(8) {
-            for ix in (0..config.tiles().x as i32).step_by(8) {
-                let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
-                let h = gen.landform(wx, wz);
-                if h < HEIGHT_SCALE * 0.6 {
-                    continue;
-                }
-                match peaks
-                    .iter_mut()
-                    .find(|(px, pz, _)| Vec2::new(px - wx, pz - wz).length() < 400.0)
-                {
-                    Some(peak) => {
-                        if h > peak.2 {
-                            *peak = (wx, wz, h);
-                        }
+            // Distinct summits: high ground on a coarse grid, greedily
+            // clustered so that one massif counts once. Measured on the
+            // landform, so the detail layers cannot invent one.
+            let mut peaks: Vec<(f32, f32, f32)> = Vec::new();
+            for iz in (0..config.tiles().y as i32).step_by(8) {
+                for ix in (0..config.tiles().x as i32).step_by(8) {
+                    let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
+                    let h = gen.landform(wx, wz);
+                    if h < MOUNTAIN_HEIGHT {
+                        continue;
                     }
-                    None => peaks.push((wx, wz, h)),
+                    match peaks
+                        .iter_mut()
+                        .find(|(px, pz, _)| Vec2::new(px - wx, pz - wz).length() < 400.0)
+                    {
+                        Some(peak) => {
+                            if h > peak.2 {
+                                *peak = (wx, wz, h);
+                            }
+                        }
+                        None => peaks.push((wx, wz, h)),
+                    }
                 }
             }
-        }
 
-        assert!(
-            peaks.len() >= 3,
-            "only {} summits clear {} m",
-            peaks.len(),
-            HEIGHT_SCALE * 0.6
-        );
+            assert!(
+                peaks.len() >= 3,
+                "seed {seed} got only {} summits clear of {MOUNTAIN_HEIGHT} m",
+                peaks.len()
+            );
+        }
     }
 
     #[test]
