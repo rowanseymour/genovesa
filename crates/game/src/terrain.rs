@@ -37,16 +37,53 @@ const SEA_FLOOR_CLEARANCE: f32 = 2.0;
 /// any particular stretch of world.
 const SEA_EXTENT: f32 = 8000.0;
 
-/// How far out from the camera's focus chunks are wanted, in metres. The eye
-/// sits up to its zoom distance back from the focus and the haze swallows
-/// everything [`crate::HAZE_END`] past the eye, so this is that reach plus a
-/// margin — ground past it cannot be seen, whichever way the view is turned.
+/// How far out from the camera's focus chunks are wanted, in metres.
+///
+/// Worth deriving rather than guessing at, since it is the single number that
+/// decides how much ground the machine is asked to hold. At the furthest zoom
+/// the eye sits `MAX_DISTANCE * cos(PITCH)` — about 235 m — back from the
+/// focus horizontally, and `MAX_DISTANCE * sin(PITCH)`, about 298 m, above it.
+/// The haze closes at [`crate::HAZE_END`], 900 m, and that is a distance
+/// through the air rather than across the ground, so the furthest visible
+/// ground is `sqrt(HAZE_END² - 298²) ≈ 849 m` from the eye and therefore up to
+/// about 1084 m from the focus.
+///
+/// That extreme sits directly *behind* the camera, though — the 235 m only
+/// adds to the reach in the direction the eye is offset in, which is the one
+/// direction the view is not looking. Ahead of the camera the visible ground
+/// stops at 849 m less the offset. So 1024 m covers everything in shot with
+/// room over, and what is left of the gap is taken up by chunk granularity:
+/// [`within`] measures to a chunk's nearest corner, so a chunk is streamed
+/// whenever any of its 128 m reaches inside the radius.
 const STREAM_RADIUS: f32 = 1024.0;
 
 /// How far out a chunk has to fall before it is despawned. The gap behind
 /// [`STREAM_RADIUS`] is hysteresis: panning along a line must not shed and
-/// rebuild the same ring of chunks with every step.
+/// rebuild the same ring of chunks with every step. Exactly two chunks' worth
+/// of it, which is several seconds of panning at the default zoom and still
+/// over half a second at the fastest the camera goes — panning speed scales
+/// with the zoom distance, so the hysteresis is thinnest where the view is
+/// widest.
 const DESPAWN_RADIUS: f32 = 1280.0;
+
+/// Chunks turned into meshes in any one frame.
+///
+/// The builds themselves run on the task pool and cost the frame nothing, but
+/// uploading a mesh is main-thread work, and the finishes arrive in clumps
+/// rather than spread out: every chunk of an island blocks on the one shared
+/// lock that generates it, so when that generation lands — tens to
+/// hundreds of milliseconds after the first chunk asked — the island's whole
+/// rectangle of chunks completes within a frame or two of each other. A big
+/// island is several hundred chunks, and meshing them all at once is a visible
+/// hitch exactly when the player has just arrived somewhere worth looking at.
+///
+/// The rest keep their [`ChunkBuild`] and are picked up over the following
+/// frames. No sorting by distance to go with it: the cap alone is what bounds
+/// the spike, and the chunks are all within the streaming radius by
+/// construction — the difference between meshing the near ones first and
+/// taking them in whatever order the query yields is a few frames of a corner
+/// of the view filling in.
+const MESHES_PER_FRAME: usize = 8;
 
 /// How far out generated islands are kept in the archipelago's cache. Past the
 /// chunk radii with a whole big island of slack, so an island is never dropped
@@ -325,13 +362,24 @@ fn stream_in(
 
 /// Puts finished geometry on its entity. Until this runs for a chunk, the
 /// entity is a placeholder with a transform and a ticket.
+///
+/// At most [`MESHES_PER_FRAME`] of them, so that an island completing all at
+/// once cannot stall a frame. A task that has finished but has not been polled
+/// yet still carries its [`ChunkBuild`], so the capture run's "is anything
+/// still streaming?" gate goes on waiting for it — conservative in the right
+/// direction, since what that gate is really asking is whether the ground in
+/// shot has reached the screen, and an unpolled build has not.
 fn receive_chunks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut index: ResMut<ChunkIndex>,
-    mut building: Query<(Entity, &TerrainChunk, &mut ChunkBuild)>,
+    index: Res<ChunkIndex>,
+    mut building: Query<(Entity, &mut ChunkBuild)>,
 ) {
-    for (entity, chunk, mut build) in &mut building {
+    let mut meshed = 0;
+    for (entity, mut build) in &mut building {
+        if meshed >= MESHES_PER_FRAME {
+            break;
+        }
         let Some(geometry) = block_on(future::poll_once(&mut build.0)) else {
             continue;
         };
@@ -342,13 +390,20 @@ fn receive_chunks(
                     Mesh3d(meshes.add(chunk_mesh(geometry))),
                     MeshMaterial3d(index.ground.clone()),
                 ));
+                meshed += 1;
             }
-            // The layout said this chunk was an island's, the world said
-            // otherwise — cannot happen while the two agree, but a mesh of
-            // nothing is not worth keeping either way.
+            // Nothing to draw: every corner of this chunk sits exactly on the
+            // ocean floor, which the backdrop plane already covers. A quarter
+            // to two thirds of an island's chunks come back this way — the
+            // whole skirt, and the corners of most frames.
+            //
+            // The entity stays, and stays in the index, as an acknowledged
+            // empty chunk. Despawning it would only have `stream_in` notice
+            // the gap next frame and ask for the same nothing again, forever.
+            // `stream_out` still sheds it with the rest when the camera leaves
+            // it behind; a meshless entity despawns the same as any other.
             None => {
-                index.chunks.remove(&chunk.coords);
-                commands.entity(entity).despawn();
+                commands.entity(entity).remove::<ChunkBuild>();
             }
         }
     }

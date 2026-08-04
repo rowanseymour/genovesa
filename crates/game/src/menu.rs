@@ -6,7 +6,8 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
-use crate::terrain::WorldConfig;
+use crate::camera::View;
+use crate::terrain::{Archipelago, WorldConfig};
 use crate::AppState;
 
 /// Longest seed the user can type. Keeps it inside a u32.
@@ -249,6 +250,7 @@ fn dialog_actions(
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
     mut settings: ResMut<NewWorldSettings>,
     mut config: ResMut<WorldConfig>,
+    mut view: ResMut<View>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     for (interaction, button) in &buttons {
@@ -262,6 +264,25 @@ fn dialog_actions(
                 *config = WorldConfig {
                     seed: settings.seed_value(),
                 };
+                // Start the match on land. The world is an endless ocean and
+                // the view carries over from wherever it last was — which on a
+                // fresh run is the origin, open water on essentially every
+                // seed, and on a new world chosen from within a match is a
+                // point in a world that no longer exists. Either way the
+                // player would be dropped on a blank blue plane with no way of
+                // knowing which way to sail.
+                //
+                // Measured from the view's *current* focus rather than from
+                // the origin, so that coming back to the dialog and starting
+                // the same seed again lands where the player was rather than
+                // hauling them back across the ocean. Layout only, so it
+                // generates nothing and costs the frame a few hash mixes.
+                let world = Archipelago::new(&config);
+                let here = Vec2::new(view.focus.x, view.focus.z);
+                if let Some(island) = world.nearest_island(here) {
+                    let centre = island.centre();
+                    view.focus = Vec3::new(centre.x, 0.0, centre.y);
+                }
                 next.set(AppState::InWorld);
             }
             _ => {}
@@ -639,6 +660,9 @@ mod tests {
             .insert_state(state)
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<WorldConfig>()
+            // Normally the camera plugin's, but the new-world dialog moves the
+            // focus onto land when a world starts — see `dialog_actions`.
+            .init_resource::<View>()
             .add_message::<AppExit>()
             .add_message::<KeyboardInput>();
         app.update();
@@ -735,6 +759,29 @@ mod tests {
         let config = app.world().resource::<WorldConfig>();
         assert_eq!(config.seed, 77);
         assert_eq!(state(&app), AppState::InWorld);
+    }
+
+    #[test]
+    fn start_puts_the_view_on_land() {
+        // The origin is open ocean on essentially every seed, so entering a
+        // world from the dialog has to move the view onto the nearest island —
+        // otherwise the match opens on a blank blue plane.
+        let mut app = test_app(AppState::NewWorld);
+
+        app.world_mut().resource_mut::<NewWorldSettings>().seed = "77".to_string();
+        click(&mut app, MenuButton::Start);
+
+        let focus = app.world().resource::<View>().focus;
+        let island = Archipelago::new(&WorldConfig { seed: 77 })
+            .nearest_island(Vec2::ZERO)
+            .expect("seed 77 should have an island near the origin");
+
+        assert_ne!(focus, Vec3::ZERO, "the match still starts on water");
+        let out = (Vec2::new(focus.x, focus.z) - island.centre()).abs() - island.extent() * 0.5;
+        assert!(
+            out.max_element() <= 0.0,
+            "{focus:?} is outside the nearest island's frame"
+        );
     }
 
     #[test]

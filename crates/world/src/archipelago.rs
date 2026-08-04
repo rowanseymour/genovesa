@@ -16,6 +16,29 @@
 //! is where, how big — is a few hash mixes and can be asked about any region
 //! for free, while the terrain of an island is only paid for when something
 //! wants its ground.
+//!
+//! # How endless is endless
+//!
+//! World coordinates are `f32` metres, so "endless" has a horizon after all —
+//! not one the layout imposes but one the arithmetic does. Measured against
+//! the two scales that matter, the height field's half-metre steps and the
+//! [`crate::terrain::MESH_STEP`] the ground is drawn at:
+//!
+//! - out to about **1,280 km** neighbouring `f32` coordinates are 0.15 m
+//!   apart, so a half-metre step in the field still resolves and the ground is
+//!   exactly the ground everywhere a player could sail to;
+//! - by about **12,800 km** they are 1.5 m apart, past the half metre, and the
+//!   field has stopped resolving its own smallest steps — coastlines quantise;
+//! - by about **128,000 km** they are 15 m apart, past the mesh step outright,
+//!   and the ground is flat because there is nowhere between the facets left
+//!   to sample.
+//!
+//! A player panning at the camera's own speed reaches the first of those in
+//! something over a year of continuous play, so the practical answer is that
+//! the ocean does not end. The numbers are here so that "infinite-ish" is a
+//! measurement rather than a hope, and so that anything that ever wants to
+//! *place* a world — a saved position, a server's coordinate space — knows
+//! where the arithmetic starts costing it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -24,8 +47,8 @@ use glam::{IVec2, UVec2, Vec2, Vec3};
 
 use crate::noise::smoothstep;
 use crate::terrain::{
-    facet_geometry, ChunkGeometry, MapConfig, TerrainGenerator, CHUNK_TILES, MAX_DEPTH, SEABED,
-    TILE_SIZE,
+    facet_geometry_from_heights, facet_heights, ChunkGeometry, MapConfig, TerrainGenerator,
+    CHUNK_TILES, MAX_DEPTH, SEABED, TILE_SIZE,
 };
 
 /// Metres along the edge of one chunk — the world's unit of streaming, and the
@@ -78,6 +101,14 @@ struct Layer {
     /// Chunks of guaranteed sea between an island's frame and its parcel's
     /// edge. Islands of one layer can therefore never touch, whatever their
     /// parcels decide — twice this, at least, always separates them.
+    ///
+    /// It must also be at least [`SKIRT_CHUNKS`], and that is load-bearing
+    /// rather than incidental: an island's skirt reaches one chunk past its
+    /// frame, and [`Archipelago::island_at_chunk`] finds the island answerable
+    /// for a chunk by looking in that chunk's *own* parcel and nowhere else.
+    /// A margin narrower than the skirt would let a skirt chunk fall in the
+    /// neighbouring parcel, where nothing would ever think to ask for it, and
+    /// the island would stream in with a hole along that edge.
     margin: i32,
 }
 
@@ -107,12 +138,25 @@ const LAYERS: [Layer; 2] = [
 /// coast ever has to know the other exists.
 const CLEARANCE: i32 = 3;
 
-/// The exponent that skews island sizes small. Sizes are drawn as
-/// `min + (max - min) * u^SIZE_BIAS`: at 2.2 the median island sits in the
-/// lower quarter of its layer's range and the top of the range stays a rare
-/// event, which is the right way round — an ocean of middling islands has no
-/// landmarks in it.
-const SIZE_BIAS: f32 = 2.2;
+/// Skews a uniform draw towards zero, so that island sizes come out mostly
+/// small: the median lands in the lower quarter of its layer's range and the
+/// top of the range stays a rare event, which is the right way round — an
+/// ocean of middling islands has no landmarks in it.
+///
+/// This is `0.8u² + 0.2u³`, which stands in for an exponent of about 2.2 to
+/// within a couple of percent across the unit interval. The exponent is what
+/// this was written as first, and `powf` is exactly what it cannot be. The
+/// layout is a *format*: a seed has to lay out the same islands on every
+/// machine there will ever be, and a size in whole chunks is quantised — so a
+/// single-ULP difference in `powf` between two platforms is not a rounding
+/// error in a height, it is one island a chunk wider than another machine's,
+/// standing at a different origin, with a different map inside its frame. Add
+/// and multiply are pinned by IEEE 754; transcendentals are not. See
+/// `a_seed_is_the_same_world_down_to_the_bit`, which exists to forbid exactly
+/// this drifting.
+fn skewed_small(u: f32) -> f32 {
+    u * u * (0.8 + 0.2 * u)
+}
 
 /// How far below 1.0 an island's aspect ratio may fall — the shorter axis is
 /// the longer times a draw from `SQUEEZE..1.0`. Enough to make ovals and
@@ -128,16 +172,30 @@ const SQUEEZE: f32 = 0.55;
 /// sample: a band inside was tried first, and on small islands it guillotined
 /// the shallow banks — their fitted seas run bright and shallow right to the
 /// frame, and any blend short enough to spare the lagoon was a hard line on
-/// the page. Outside the frame the generator's field is still perfectly well
-/// defined — the falloff has silenced the noise and is pushing everything to
-/// the floor — so the skirt merely walks that last stretch down to exactly
-/// [`-OCEAN_DEPTH`] by its outer edge, across ground the island already
-/// guarantees is open sea.
+/// the page.
+///
+/// What the skirt actually finds out there is worth stating plainly, because
+/// it is not what the name suggests. Measured on generated islands, the
+/// generator's own field is *already* exactly `-OCEAN_DEPTH` at the frame and
+/// everywhere past it: [`crate::terrain::MAX_DEPTH`] is the deepest the bed
+/// may go, `DEEP_FRACTION` anchors the deepest sixth or so of every map there,
+/// and the rim — where the falloff has silenced the noise and is pushing
+/// everything down — is the extreme of that distribution. So the blend in
+/// [`Island::height`] blends the floor into the floor, and nothing about the
+/// picture depends on it.
+///
+/// It is kept as the *guarantee* rather than as a mechanism. Nothing in the
+/// generator promises a rim at full depth — it falls out of a calibration that
+/// is free to be re-fitted, and a future one that left the rim a metre shy
+/// would print every island's chunk rectangle onto the open water as a step.
+/// The skirt makes the hand-over true by construction instead of by luck, for
+/// the price of a smoothstep on chunks that are mostly not built at all.
 ///
 /// One chunk, and it cannot be more: layout margins guarantee two chunks of
 /// gap between islands of a layer and [`CLEARANCE`] across layers, and skirts
 /// must never overlap — a chunk of the world belongs to one island or to
-/// nobody.
+/// nobody. It cannot exceed any [`Layer::margin`] either, for the reason given
+/// there.
 const SKIRT_CHUNKS: i32 = 1;
 
 /// The skirt's width in metres — how far past the frame an island's bed takes
@@ -269,10 +327,17 @@ impl Island {
     }
 
     /// Height at a world point, in metres. Inside the frame this is the
-    /// island's map, untouched; across the skirt the map's own sea bed — the
-    /// field is still well defined out there, silenced and sinking under the
-    /// falloff — is let down to exactly [`-OCEAN_DEPTH`] by the skirt's outer
-    /// edge, where the open ocean takes over without a seam.
+    /// island's map, untouched; across the skirt it is that same field walked
+    /// down to exactly [`-OCEAN_DEPTH`] by the skirt's outer edge, where the
+    /// open ocean takes over without a seam.
+    ///
+    /// In practice the walk has nowhere to go. As `SKIRT_CHUNKS` explains,
+    /// the generator's field is already at the floor by the frame, so the
+    /// blend below is `-OCEAN_DEPTH` blended into `-OCEAN_DEPTH` on every
+    /// island measured. It stays because it is what *makes* that true rather
+    /// than merely observing it — the seam this would show is a step of ocean
+    /// bed around every island in the world, and the fix belongs where it
+    /// cannot be forgotten.
     pub fn height(&self, wx: f32, wz: f32) -> f32 {
         let beyond = self.spec.beyond_frame(Vec2::new(wx, wz));
         if beyond >= SKIRT_METRES {
@@ -338,7 +403,7 @@ impl Archipelago {
         // The long axis, skewed small; the short axis, squeezed under it; and
         // a coin for which is which. Rounded to whole chunks at the end, so
         // the distribution is continuous even though the maps are not.
-        let long = l.size.0 + (l.size.1 - l.size.0) * rng.uniform().powf(SIZE_BIAS);
+        let long = l.size.0 + (l.size.1 - l.size.0) * skewed_small(rng.uniform());
         let short = long * (SQUEEZE + (1.0 - SQUEEZE) * rng.uniform());
         let (sx, sz) = if rng.next() & 1 == 0 {
             (long, short)
@@ -349,8 +414,23 @@ impl Archipelago {
         let chunks = IVec2::new(clamp(sx), clamp(sz));
 
         // Where in the parcel it stands: anywhere that keeps the margin.
+        //
+        // The span is what the parcel has left over once the island and both
+        // margins are taken out, and every [`LAYERS`] entry is written so that
+        // it cannot go negative — the largest island a layer draws plus two
+        // margins fits inside its parcel with room to spare. Asserted rather
+        // than clamped because a negative span means the table is wrong, and
+        // the failure is quiet either way: at exactly -1 this divides by zero,
+        // and below that the cast wraps to an enormous modulus and scatters
+        // islands out of their own parcels.
         let jitter = |rng: &mut ParcelRng, island: i32| {
             let span = l.parcel - island - 2 * l.margin;
+            debug_assert!(
+                span >= 0,
+                "layer parcel {} cannot hold a {island}-chunk island with {}-chunk margins",
+                l.parcel,
+                l.margin
+            );
             l.margin + (rng.next() % (span + 1) as u64) as i32
         };
         let offset = IVec2::new(jitter(&mut rng, chunks.x), jitter(&mut rng, chunks.y));
@@ -427,6 +507,47 @@ impl Archipelago {
         found
     }
 
+    /// The island nearest a world point, by the distance between the point and
+    /// the island's centre — layout only, generating nothing.
+    ///
+    /// What "start somewhere" means in an endless ocean. Every entry into the
+    /// world has to choose a point, and the honest default — the origin — is
+    /// open water on essentially every seed, so a game that took it opened on
+    /// a flat blue plane with the nearest land over the horizon.
+    ///
+    /// Searched over windows that double until one holds something, rather
+    /// than over a single wide one: the layout is cheap but not free, and the
+    /// first window nearly always answers, so the common case sweeps a couple
+    /// of parcels instead of a few hundred. Widening past the cap would be
+    /// searching an ocean that, by the occupancy the layers are written to,
+    /// cannot be that empty — so [`None`] here means the layout is broken, not
+    /// that the sea is wide.
+    pub fn nearest_island(&self, near: Vec2) -> Option<IslandSpec> {
+        /// Coarse parcels the search window spans, doubling until it finds
+        /// land. One coarse parcel is five kilometres, and half its parcels
+        /// hold an island.
+        const SPANS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
+
+        let parcel = LAYERS[0].parcel as f32 * CHUNK_METRES;
+        for span in SPANS {
+            let reach = Vec2::splat(span * parcel);
+            // `islands_within` sweeps its parcels in a fixed order and
+            // `min_by` keeps the first of any tie, so the answer is the seed's
+            // and not the machine's.
+            let nearest = self
+                .islands_within(near - reach, near + reach)
+                .into_iter()
+                .min_by(|a, b| {
+                    let d = |s: &IslandSpec| s.centre().distance_squared(near);
+                    d(a).total_cmp(&d(b))
+                });
+            if nearest.is_some() {
+                return nearest;
+            }
+        }
+        None
+    }
+
     /// This island's terrain, generated now if it never has been. Costs tens
     /// to hundreds of milliseconds on a miss — callers that cannot wait ask
     /// [`Archipelago::ready_height`] instead.
@@ -493,18 +614,41 @@ impl Archipelago {
         }
     }
 
-    /// Geometry for one world chunk, or `None` for a chunk of open ocean —
-    /// which has no geometry to build, being exactly the flat floor the
-    /// game's backdrop already draws.
+    /// Geometry for one world chunk, or `None` where there is no geometry
+    /// worth building — because no island is answerable for the chunk, or
+    /// because the island answerable for it has nothing but ocean floor there.
+    ///
+    /// The second case is most of an island's chunks, not a corner case. An
+    /// island is laid out as a rectangle with a skirt, its land is a lobed
+    /// shape inside a fitted sea, and every chunk of the rectangle that misses
+    /// the land entirely — the whole skirt, and the corners of most frames —
+    /// comes out as a flat plane at minus [`OCEAN_DEPTH`]. Meshing those costs 24
+    /// thousand vertices apiece to draw exactly what the game's ocean-floor
+    /// backdrop is already drawing underneath them. Measured over a streaming
+    /// radius on five seeds it ran from a quarter of the chunks to nearly two
+    /// thirds — the share goes with the mix of island sizes nearby, since a
+    /// skirt is a ring of fixed width and a small island is nearly all ring.
+    ///
+    /// The test is on the sampled corners rather than on the layout, which is
+    /// what makes it exact: if every corner of the facet grid is *precisely*
+    /// the floor then every facet built from them is a flat quad at the floor,
+    /// and the backdrop stands in for it perfectly. Ground a centimetre off the
+    /// floor fails the test and gets its mesh.
     ///
     /// Generates the owning island on a miss, so this is where streaming
     /// pays; it is meant to be called from a worker, not a frame.
     pub fn chunk_geometry(&self, chunk: IVec2) -> Option<ChunkGeometry> {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
-        Some(facet_geometry(
+
+        let heights = facet_heights(base, |wx, wz| island.height(wx, wz));
+        if heights.iter().all(|h| *h == -OCEAN_DEPTH) {
+            return None;
+        }
+
+        Some(facet_geometry_from_heights(
             base,
-            |wx, wz| island.height(wx, wz),
+            &heights,
             |wx, wz, height, normal| island.color(wx, wz, height, normal),
             // With no map to span, UVs tile per chunk — still seamless across
             // boundaries, since world coordinates are continuous.
@@ -517,7 +661,21 @@ impl Archipelago {
     /// identical to the bit, if it is ever wanted again.
     pub fn retain_near(&self, focus: Vec2, radius: f32) {
         let mut islands = self.islands.write().expect("no poisoned lock");
-        islands.retain(|spec, _| {
+        islands.retain(|spec, slot| {
+            // An empty slot is an island being generated right now, on some
+            // other thread, by a caller holding its [`OnceLock`]. Evicting it
+            // would not stop that work — it would only hide it, so the next
+            // caller starts a *second* generation of the same island, and the
+            // hundreds of milliseconds already spent are thrown away. The
+            // window is real: streaming asks for an island's chunks and then
+            // pans, and eviction runs every frame in between.
+            //
+            // Keeping it costs at most one island's memory until the next
+            // sweep, by which time the slot is filled and answers the distance
+            // test like any other.
+            if slot.get().is_none() {
+                return true;
+            }
             let half = spec.extent() * 0.5;
             let apart = (spec.centre() - focus).abs() - half;
             apart.max(Vec2::ZERO).length() <= radius
@@ -526,9 +684,13 @@ impl Archipelago {
 
     /// The island whose map covers this world point, if any.
     pub fn island_at(&self, wx: f32, wz: f32) -> Option<IslandSpec> {
-        let chunk = (Vec2::new(wx, wz) / CHUNK_METRES).floor().as_ivec2();
-        self.island_at_chunk(chunk)
+        self.island_at_chunk(chunk_at(Vec2::new(wx, wz)))
     }
+}
+
+/// The world chunk a world point stands in.
+pub fn chunk_at(world: Vec2) -> IVec2 {
+    (world / CHUNK_METRES).floor().as_ivec2()
 }
 
 #[cfg(test)]
@@ -589,10 +751,60 @@ mod tests {
         // Oblongs both ways, so neither axis is favoured.
         assert!(found.iter().any(|s| s.chunks.x > s.chunks.y));
         assert!(found.iter().any(|s| s.chunks.y > s.chunks.x));
-        // And open water: some fine parcels hold nothing, or the ocean is a
-        // lattice of land.
-        let fine = (WINDOW * 2.0 / (LAYERS[1].parcel as f32 * CHUNK_METRES)).powi(2) as usize;
-        assert!(found.len() < fine, "every parcel is full");
+        // And open water: plenty of fine parcels hold nothing, or the ocean is
+        // a lattice of land.
+        //
+        // Counted the way `islands_within` actually sweeps rather than from
+        // the window's nominal width, which is the difference between a guard
+        // and a decoration: the sweep rounds the window out to whole parcels
+        // on both sides, so it visits 17 rows of fine parcels where the
+        // nominal 20480 m over 1280 m says 16. A bound of 289 could not fail
+        // even with occupancy at 1.0 and suppression switched off, since the
+        // big islands alone hold a chunk of that grid empty.
+        let l = &LAYERS[1];
+        let min_chunk = (-WINDOW / CHUNK_METRES).floor() as i32;
+        let max_chunk = (WINDOW / CHUNK_METRES).ceil() as i32;
+        let rows = max_chunk.div_euclid(l.parcel) - min_chunk.div_euclid(l.parcel) + 1;
+        let swept = (rows * rows) as f32;
+        assert!(
+            (found.len() as f32) < 0.9 * swept,
+            "{} islands over {swept} swept fine parcels — the ocean is a lattice",
+            found.len()
+        );
+    }
+
+    #[test]
+    fn there_is_always_land_within_reach() {
+        // What entering the world leans on: wherever a player is put down, the
+        // nearest island can be found without generating anything. The origin
+        // is the case that matters — it is where every default view starts,
+        // and it is open water on essentially every seed.
+        for seed in [1, 7, 99, 777, 20_040_112] {
+            let ocean = world(seed);
+            let near = ocean
+                .nearest_island(Vec2::ZERO)
+                .unwrap_or_else(|| panic!("seed {seed} has no island near the origin"));
+
+            // Nearest means nearest: nothing in a generous window around the
+            // origin stands closer to it.
+            let reach = Vec2::splat(LAYERS[0].parcel as f32 * CHUNK_METRES);
+            let closest = ocean
+                .islands_within(-reach, reach)
+                .into_iter()
+                .map(|s| s.centre().length())
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                near.centre().length() <= closest + 1e-3,
+                "seed {seed} passed over an island {closest} m out for one {} m out",
+                near.centre().length()
+            );
+
+            // And the same question twice is the same answer — the search
+            // widens over windows, and a tie broken by iteration order would
+            // make it the machine's answer rather than the seed's.
+            assert_eq!(ocean.nearest_island(Vec2::ZERO), Some(near));
+            assert_eq!(world(seed).nearest_island(Vec2::ZERO), Some(near));
+        }
     }
 
     #[test]
@@ -620,9 +832,18 @@ mod tests {
 
     #[test]
     fn an_island_is_its_map_and_the_skirt_lets_it_down() {
-        // Inside its frame an island is the lone map of its spec, bit for
-        // bit; across the skirt the bed reaches exactly the ocean floor; and
-        // beyond it the ocean owes the island nothing.
+        // Inside its frame an island is the lone map of its spec, bit for bit;
+        // and everywhere in the skirt band it is flat ocean floor, all the way
+        // round, so the hand-over to the backdrop plane has nothing to show.
+        //
+        // The band assertion is deliberately the flat one rather than a test
+        // of the blend. As [`SKIRT_CHUNKS`] says, the generator already
+        // delivers `-OCEAN_DEPTH` at the frame, so the blend never has any
+        // distance to travel — a test of the blend's own shape would be a test
+        // that a smoothstep interpolates between two equal numbers. What the
+        // game actually leans on is the *result*: every sample out there is
+        // exactly the floor, so island meshes and the backdrop meet at one
+        // level and `chunk_geometry` is entitled to drop the chunk entirely.
         let world = world(1);
         let spec = specs(&world)
             .into_iter()
@@ -634,38 +855,42 @@ mod tests {
         let centre = spec.centre();
         let half = spec.extent() * 0.5;
 
-        // A transect from the centre out through the east frame and skirt.
-        let reach = half.x + 2.0 * SKIRT_METRES;
+        // A transect from the centre out to the east frame: inside it, the
+        // island has to be its own map to the bit.
         for i in 0..=200 {
-            let wx = centre.x + reach * i as f32 / 200.0;
-            let h = island.height(wx, centre.y);
+            let wx = centre.x + half.x * i as f32 / 200.0;
+            assert_eq!(
+                island.height(wx, centre.y),
+                lone.height(wx - centre.x, 0.0),
+                "inside its frame the island is not its own map at {wx}"
+            );
+        }
 
-            let beyond = wx - (centre.x + half.x);
-            if beyond <= 0.0 {
+        // Then the whole skirt band, on a grid a few metres apart — not one
+        // transect, since a hand-over that held on the east side and failed on
+        // the north is exactly the failure worth catching.
+        const SPACING: f32 = 4.0;
+        let outer = half + SKIRT_METRES;
+        let steps = (outer * 2.0 / SPACING).ceil().as_uvec2();
+        let mut samples = 0;
+        for iz in 0..=steps.y {
+            for ix in 0..=steps.x {
+                let p = centre - outer + Vec2::new(ix as f32, iz as f32) * SPACING;
+                // Chebyshev distance past the frame, signed — negative inside
+                // it, and matching `beyond_frame` once it isn't.
+                let beyond = ((p - centre).abs() - half).max_element();
+                if !(0.0..SKIRT_METRES).contains(&beyond) {
+                    continue;
+                }
+                samples += 1;
                 assert_eq!(
-                    h,
-                    lone.height(wx - centre.x, 0.0),
-                    "inside its frame the island is not its own map at {wx}"
-                );
-            } else if beyond >= SKIRT_METRES {
-                assert_eq!(
-                    h, -OCEAN_DEPTH,
-                    "past its skirt the island still holds ground"
+                    island.height(p.x, p.y),
+                    -OCEAN_DEPTH,
+                    "the skirt stands {beyond} m past the frame at {p} and is not ocean floor"
                 );
             }
         }
-
-        // And the two hand-over lines — frame and skirt's edge — are exactly
-        // where a step would appear if the pieces stopped agreeing. Steep
-        // ground is the island's own business; a *jump* over centimetres is
-        // not.
-        for line in [centre.x + half.x, centre.x + half.x + SKIRT_METRES] {
-            let step = island.height(line + 0.01, centre.y) - island.height(line - 0.01, centre.y);
-            assert!(
-                step.abs() < 0.05,
-                "the bed steps {step} m across the hand-over at {line}"
-            );
-        }
+        assert!(samples > 500, "only {samples} samples fell in the skirt");
     }
 
     #[test]
@@ -681,6 +906,51 @@ mod tests {
         let w = chunk.as_vec2() * CHUNK_METRES + CHUNK_METRES * 0.5;
         assert_eq!(world.height(w.x, w.y), -OCEAN_DEPTH);
         assert_eq!(world.ready_height(w.x, w.y), Some(-OCEAN_DEPTH));
+    }
+
+    #[test]
+    fn an_islands_flat_chunks_build_no_geometry_either() {
+        // An island is answerable for its skirt, but a skirt chunk is flat
+        // ocean floor — the backdrop plane's job, not a mesh's. Building them
+        // was most of what streaming spent its time on.
+        let world = world(1);
+        let spec = specs(&world)
+            .into_iter()
+            .max_by_key(|s| s.chunks.x * s.chunks.y)
+            .expect("some island");
+        let (min, max) = spec.covered();
+
+        // Every chunk of the skirt: the ring outside the frame.
+        let mut skirt = 0;
+        for cz in min.y..max.y {
+            for cx in min.x..max.x {
+                let chunk = IVec2::new(cx, cz);
+                if chunk.cmpge(spec.origin).all() && chunk.cmplt(spec.end()).all() {
+                    continue;
+                }
+                skirt += 1;
+                assert!(
+                    world.chunk_geometry(chunk).is_none(),
+                    "skirt chunk {chunk} built a mesh of flat floor"
+                );
+            }
+        }
+        assert!(skirt > 0, "the island has no skirt to check");
+
+        // And the chunk under the highest ground on the island still does
+        // build, or the test above would pass on a world with no meshes at all.
+        let centre = spec.centre();
+        let half = spec.extent() * 0.5;
+        let land = (0..64)
+            .flat_map(|iz| (0..64).map(move |ix| (ix, iz)))
+            .map(|(ix, iz)| centre - half + Vec2::new(ix as f32, iz as f32) * spec.extent() / 63.0)
+            .max_by(|a, b| world.height(a.x, a.y).total_cmp(&world.height(b.x, b.y)))
+            .expect("some ground");
+        assert!(world.height(land.x, land.y) > 0.0, "the island is all sea");
+        assert!(
+            world.chunk_geometry(chunk_at(land)).is_some(),
+            "the chunk holding the island's summit built nothing"
+        );
     }
 
     #[test]
@@ -767,7 +1037,7 @@ mod tests {
         let ground = digest([], heights);
 
         println!("layout digests to {layout:#018X}, ground to {ground:#018X}");
-        assert_eq!(layout, 0xAB99_6D6A_8652_CCA6, "the layout changed");
+        assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0x74A7_742A_2E33_50BC, "the ground changed");
     }
 }

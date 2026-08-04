@@ -1704,6 +1704,33 @@ impl TerrainGenerator {
     }
 }
 
+/// Vertices along one edge of a chunk's facet grid — one more than the quads,
+/// since the corners at both ends are shared.
+pub(crate) const FACET_VERTS: usize = (CHUNK_TILES / MESH_STEP) as usize + 1;
+
+/// The corner heights one chunk's geometry is built from: a
+/// [`FACET_VERTS`]-square grid, row-major, sampled from `base` outwards at
+/// [`MESH_STEP`] spacing.
+///
+/// Split out from [`facet_geometry`] because a caller may want to *look* at
+/// the heights before deciding whether the chunk is worth meshing at all —
+/// the open world skips chunks whose every corner sits on the ocean floor,
+/// since the backdrop plane already draws that. The loop order is the format:
+/// [`facet_geometry`] samples through here, so a chunk built either way comes
+/// out bit for bit the same.
+pub(crate) fn facet_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec<f32> {
+    let verts = FACET_VERTS;
+    let mut heights = vec![0.0f32; verts * verts];
+    for iz in 0..verts {
+        let wz = base.y + (iz as u32 * MESH_STEP) as f32;
+        for ix in 0..verts {
+            let wx = base.x + (ix as u32 * MESH_STEP) as f32;
+            heights[iz * verts + ix] = height(wx, wz);
+        }
+    }
+    heights
+}
+
 /// Builds one chunk's worth of flat-shaded geometry over any height and colour
 /// field: `base` is the world coordinate of the chunk's lower corner, and the
 /// closures are sampled in that same world space. A lone island map and the
@@ -1722,20 +1749,24 @@ pub(crate) fn facet_geometry(
     color: impl Fn(f32, f32, f32, Vec3) -> Vec3,
     uv: impl Fn(f32, f32) -> [f32; 2],
 ) -> ChunkGeometry {
+    facet_geometry_from_heights(base, &facet_heights(base, height), color, uv)
+}
+
+/// The half of [`facet_geometry`] that turns corner heights into triangles,
+/// for callers that have already sampled the grid themselves.
+///
+/// `heights` must be exactly what [`facet_heights`] returns for the same
+/// `base` — a [`FACET_VERTS`]-square grid, row-major.
+pub(crate) fn facet_geometry_from_heights(
+    base: Vec2,
+    heights: &[f32],
+    color: impl Fn(f32, f32, f32, Vec3) -> Vec3,
+    uv: impl Fn(f32, f32) -> [f32; 2],
+) -> ChunkGeometry {
     let step = MESH_STEP as f32;
     let quads = (CHUNK_TILES / MESH_STEP) as usize;
-    let verts = quads + 1;
-
-    // Corner heights, shared between the quads that meet there even though
-    // the vertices themselves won't be.
-    let mut heights = vec![0.0f32; verts * verts];
-    for iz in 0..verts {
-        let wz = base.y + (iz as u32 * MESH_STEP) as f32;
-        for ix in 0..verts {
-            let wx = base.x + (ix as u32 * MESH_STEP) as f32;
-            heights[iz * verts + ix] = height(wx, wz);
-        }
-    }
+    let verts = FACET_VERTS;
+    debug_assert_eq!(heights.len(), verts * verts, "not a chunk's corner grid");
 
     let count = quads * quads * 6;
     let mut positions = Vec::with_capacity(count);

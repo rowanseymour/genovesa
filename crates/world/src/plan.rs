@@ -5,9 +5,11 @@
 //! generator as a whole got better. The `mapgen` binary is the front end to
 //! everything here.
 
+use std::sync::Arc;
+
 use glam::{UVec2, Vec2, Vec3};
 
-use crate::archipelago::Archipelago;
+use crate::archipelago::{chunk_at, Archipelago, Island, IslandSpec};
 use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES, SEABED};
 
 /// An RGB8 image, as wide and tall as it says, ready to write out.
@@ -104,19 +106,40 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
     let step = extent / Vec2::new(width as f32, height as f32);
     let origin = centre - extent * 0.5;
 
+    // The island the last land pixel belonged to, kept for the next one.
+    //
+    // A region render walks the page in scanlines, and an island on the page
+    // is hundreds of pixels across — so consecutive land pixels almost always
+    // belong to the same island. Without this, each of them re-derives the
+    // layout from the seed and then takes the cache's read lock to find a
+    // generator it just finished using, which on a wide render is most of the
+    // time spent on land. `covers_chunk` is the same test `island_at` would
+    // reach, so keeping the hit is exact rather than approximate: the pixel is
+    // this island's, or the slow path runs.
+    let mut held: Option<(IslandSpec, Arc<Island>)> = None;
+
     let mut pixels = Vec::with_capacity((width * height) as usize * 3);
     for iz in 0..height {
         for ix in 0..width {
             let wx = origin.x + ix as f32 * step.x;
             let wz = origin.y + iz as f32 * step.y;
+            let chunk = chunk_at(Vec2::new(wx, wz));
 
             // Most of any region is open ocean, which is flat floor by
             // construction — skipping the sampling there is most of the
             // render's speed.
-            let pixel = match world.island_at(wx, wz) {
-                None => shade(SEABED, -crate::archipelago::OCEAN_DEPTH, Vec3::Y),
-                Some(spec) => {
+            let island = match &held {
+                Some((spec, island)) if spec.covers_chunk(chunk) => Some(island.clone()),
+                _ => world.island_at(wx, wz).map(|spec| {
                     let island = world.island(spec);
+                    held = Some((spec, island.clone()));
+                    island
+                }),
+            };
+
+            let pixel = match island {
+                None => shade(SEABED, -crate::archipelago::OCEAN_DEPTH, Vec3::Y),
+                Some(island) => {
                     let normal = island.normal(wx, wz);
                     let height = island.height(wx, wz);
                     shade(island.color(wx, wz, height, normal), height, normal)
