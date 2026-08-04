@@ -19,6 +19,7 @@
 //! One process, one world, three pictures.
 
 use bevy::math::{UVec2, Vec2, Vec3};
+use protocol::DEFAULT_PORT;
 
 use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
 use crate::terrain::{Archipelago, WorldConfig};
@@ -32,11 +33,18 @@ const DEFAULT_RESOLUTION: UVec2 = UVec2::new(2560, 1440);
 pub struct Args {
     pub state: AppState,
     pub config: WorldConfig,
+    /// Server to join, as `host` or `host:port`. A joined run takes the
+    /// world's seed — and, unless `--focus` says otherwise, where to look —
+    /// from the server's welcome rather than from this command line.
+    pub join: Option<String>,
     /// Overlay frame rate and geometry counts on the window.
     pub debug: bool,
     /// Where the camera starts. With shots to take this is where the last of
     /// them left it, which nobody sees, since capturing quits at the end.
     pub view: View,
+    /// Whether `--focus` was given — what lets [`Args::centre_on`] tell
+    /// "nobody chose" from "somebody chose the origin".
+    focus_given: bool,
     /// Pictures to take, in order. Empty means play the game.
     pub shots: Vec<Shot>,
     /// Size of each captured picture. Ignored when there are no shots — a
@@ -62,6 +70,22 @@ impl Args {
     pub fn starting_view(&self) -> View {
         self.shots.first().map_or(self.view, |shot| shot.view)
     }
+
+    /// Points the whole run — the starting view and every shot — at a ground
+    /// point, unless `--focus` already chose one. Parsing uses it to open on
+    /// the island nearest the origin; a joined run uses it again, from the
+    /// game binary, once the server's welcome has said where its world is
+    /// entered.
+    pub fn centre_on(&mut self, centre: Vec2) {
+        if self.focus_given {
+            return;
+        }
+        let focus = Vec3::new(centre.x, 0.0, centre.y);
+        self.view.focus = focus;
+        for shot in &mut self.shots {
+            shot.view.focus = focus;
+        }
+    }
 }
 
 /// Built rather than written out so the defaults it quotes are read from the
@@ -79,6 +103,9 @@ Options:
   --state <screen>  start on `mainmenu`, `newworld`, `settings` or `inworld`
                     [default: mainmenu, or inworld when shots are asked for]
   --seed <n>        the world to generate [default: {}]
+  --join <host[:port]>  play in a served world instead of a local one; the
+                    server provides the seed and where the world is entered
+                    [port: {DEFAULT_PORT}]
   --debug           overlay frame rate, geometry counts and the current view
                     on the window; ignored when capturing, so shots stay clean
 
@@ -116,13 +143,15 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     let mut args = Args {
         state: AppState::MainMenu,
         config: WorldConfig::default(),
+        join: None,
         debug: false,
         view: View::default(),
+        focus_given: false,
         shots: Vec::new(),
         resolution: DEFAULT_RESOLUTION,
     };
     let mut state_given = false;
-    let mut focus_given = false;
+    let mut seed_given = false;
 
     // `--debug` is the one flag that stands on its own; every other option
     // takes a value, so past it an option in the last position is always a
@@ -145,10 +174,12 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                 args.config.seed = value
                     .parse()
                     .map_err(|_| format!("`{value}` is not a seed"))?;
+                seed_given = true;
             }
+            "--join" => args.join = Some(value.clone()),
             "--focus" => {
                 args.view.focus = focus(value)?;
-                focus_given = true;
+                args.focus_given = true;
             }
             "--zoom" => args.view.distance = zoom(value)?,
             "--yaw" => args.view.yaw = yaw(value)?,
@@ -164,9 +195,21 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         }
     }
 
+    // A joined world is the server's world, whole: a seed given alongside
+    // would either be ignored or generate a different ocean, and both are
+    // worse than saying so.
+    if args.join.is_some() && seed_given {
+        return Err(
+            "`--seed` picks a world to generate, but a joined world is the server's — \
+             its seed arrives with the welcome"
+                .into(),
+        );
+    }
+
     // Pictures of the menu are a fair thing to want, but a shot nearly always
-    // means a shot of the map, so save every caller from saying so.
-    if args.is_capture() && !state_given {
+    // means a shot of the map — and joining a server means playing in its
+    // world — so save every caller from saying so.
+    if (args.is_capture() || args.join.is_some()) && !state_given {
         args.state = AppState::InWorld;
     }
 
@@ -182,16 +225,16 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // an unrelated set of pictures. Answering the layout costs a few hash
     // mixes and generates nothing, so the world built here is thrown away and
     // the match builds its own.
-    if !focus_given {
+    //
+    // A joined run skips this entirely: its world is the server's, so a
+    // focus from a locally laid-out ocean would point at the wrong one. The
+    // game binary calls `centre_on` with the served spawn point instead.
+    if args.join.is_none() {
         let centre = Archipelago::new(&args.config)
             .nearest_island(Vec2::ZERO)
             .map(|spec| spec.centre());
         if let Some(centre) = centre {
-            let focus = Vec3::new(centre.x, 0.0, centre.y);
-            args.view.focus = focus;
-            for shot in &mut args.shots {
-                shot.view.focus = focus;
-            }
+            args.centre_on(centre);
         }
     }
     Ok(args)
@@ -359,6 +402,39 @@ mod tests {
             ok("--state mainmenu --shot a.png").state,
             AppState::MainMenu
         );
+    }
+
+    #[test]
+    fn joining_enters_the_served_world() {
+        let args = ok("--join example.com:4000");
+        assert_eq!(args.join.as_deref(), Some("example.com:4000"));
+        assert_eq!(args.state, AppState::InWorld);
+        // A named screen still wins, as it does over shots.
+        assert_eq!(ok("--state mainmenu --join x").state, AppState::MainMenu);
+    }
+
+    #[test]
+    fn a_joined_run_leaves_the_seed_and_the_view_to_the_server() {
+        assert!(
+            parse_args("--join x --seed 7").is_err(),
+            "a joined world cannot also be a chosen one"
+        );
+
+        // No island snap either: the layout it would come from is the wrong
+        // world's. The binary centres on the served spawn instead, and that
+        // reaches the shots exactly as the snap would have.
+        let mut args = ok("--join x --shot a.png");
+        assert_eq!(args.view.focus, Vec3::ZERO);
+        args.centre_on(Vec2::new(10.0, 20.0));
+        assert_eq!(args.view.focus, Vec3::new(10.0, 0.0, 20.0));
+        assert_eq!(args.shots[0].view.focus, Vec3::new(10.0, 0.0, 20.0));
+    }
+
+    #[test]
+    fn an_explicit_focus_outranks_the_served_spawn() {
+        let mut args = ok("--join x --focus 5,6");
+        args.centre_on(Vec2::new(10.0, 20.0));
+        assert_eq!(args.view.focus, Vec3::new(5.0, 0.0, 6.0));
     }
 
     #[test]
