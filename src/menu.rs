@@ -252,8 +252,7 @@ fn dialog_actions(
             MenuButton::RandomSeed => settings.seed = random_seed().to_string(),
             MenuButton::Back => next.set(AppState::MainMenu),
             MenuButton::Start => {
-                config.chunks = UVec2::splat(settings.size / CHUNK_TILES);
-                config.seed = settings.seed_value();
+                *config = MapConfig::square(settings.size, settings.seed_value());
                 next.set(AppState::InWorld);
             }
             _ => {}
