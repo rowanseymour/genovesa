@@ -16,6 +16,7 @@ use bevy::window::ExitCondition;
 use game::camera::MapCameraPlugin;
 use game::capture::CapturePlugin;
 use game::cli::{self, Args};
+use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
 use game::terrain::TerrainPlugin;
 use game::{SKY, WINDOW};
@@ -43,6 +44,12 @@ fn run(args: Args) {
     // fast as they render, and let the capture quit when it is done.
     if args.is_capture() {
         app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::ZERO));
+    }
+
+    // Not while capturing: the UI renders to the captured image, so the
+    // readout would be baked into every shot.
+    if args.debug && !args.is_capture() {
+        app.add_plugins(DebugOverlayPlugin);
     }
 
     app.insert_state(args.state)

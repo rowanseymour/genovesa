@@ -11,6 +11,7 @@ pub mod bindings;
 pub mod camera;
 pub mod capture;
 pub mod cli;
+pub mod debug;
 pub mod menu;
 pub mod terrain;
 

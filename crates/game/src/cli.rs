@@ -32,6 +32,8 @@ const DEFAULT_RESOLUTION: UVec2 = UVec2::new(2560, 1440);
 pub struct Args {
     pub state: AppState,
     pub config: WorldConfig,
+    /// Overlay frame rate and geometry counts on the window.
+    pub debug: bool,
     /// Where the camera starts. With shots to take this is where the last of
     /// them left it, which nobody sees, since capturing quits at the end.
     pub view: View,
@@ -77,6 +79,8 @@ Options:
   --state <screen>  start on `mainmenu`, `newworld`, `settings` or `inworld`
                     [default: mainmenu, or inworld when shots are asked for]
   --seed <n>        the world to generate [default: {}]
+  --debug           overlay frame rate, geometry counts and the current view
+                    on the window; ignored when capturing, so shots stay clean
 
 View options, applied in the order given:
   --focus <x,z>     world point to look at, in metres
@@ -112,6 +116,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     let mut args = Args {
         state: AppState::MainMenu,
         config: WorldConfig::default(),
+        debug: false,
         view: View::default(),
         shots: Vec::new(),
         resolution: DEFAULT_RESOLUTION,
@@ -119,10 +124,15 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     let mut state_given = false;
     let mut focus_given = false;
 
-    // Every option here takes a value, so an option in the last position is
-    // always a missing value rather than a flag that stands on its own.
+    // `--debug` is the one flag that stands on its own; every other option
+    // takes a value, so past it an option in the last position is always a
+    // missing value.
     let mut rest = argv.iter();
     while let Some(flag) = rest.next() {
+        if flag == "--debug" {
+            args.debug = true;
+            continue;
+        }
         let value = rest
             .next()
             .ok_or_else(|| format!("`{flag}` needs a value"))?;
@@ -349,6 +359,17 @@ mod tests {
             ok("--state mainmenu --shot a.png").state,
             AppState::MainMenu
         );
+    }
+
+    #[test]
+    fn debug_is_off_unless_asked_for_and_takes_no_value() {
+        assert!(!ok("").debug);
+
+        // Standing between two valued options, so a parse that gave it a
+        // value would swallow `--seed`.
+        let args = ok("--zoom 150 --debug --seed 7");
+        assert!(args.debug);
+        assert_eq!(args.config.seed, 7);
     }
 
     #[test]
