@@ -29,7 +29,7 @@ without opening a window — see [Looking at maps](#looking-at-maps).
 | Input | Action |
 | --- | --- |
 | Arrow keys / WASD | Pan the camera |
-| Q / E | Turn the view a quarter turn left / right |
+| Q / E | Turn the view left / right |
 | Mouse wheel / trackpad | Zoom |
 | Escape | Back to the main menu |
 

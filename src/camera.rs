@@ -1,4 +1,4 @@
-//! A camera with fixed pitch and yaw that pans over the map.
+//! A camera with a fixed pitch that pans and turns over the map.
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::pbr::{DistanceFog, FogFalloff};
@@ -13,11 +13,9 @@ const PITCH: f32 = std::f32::consts::FRAC_PI_4 * 1.15;
 /// diagonal.
 const YAW: f32 = std::f32::consts::FRAC_PI_4;
 
-/// How far one press of Q or E turns the view. A quarter turn means all four
-/// rest positions look down a diagonal, so the framing is the same however far
-/// round the view has been turned — and each one presents the map's corners the
-/// same way.
-const ROTATION_STEP: f32 = std::f32::consts::FRAC_PI_2;
+/// How fast Q and E turn the view, in radians per second — a quarter turn a
+/// second, so a full way round takes four seconds.
+const ROTATION_SPEED: f32 = std::f32::consts::FRAC_PI_2;
 
 /// Zoom range, as the camera's distance from its focus point in metres. At the
 /// default the visible ground is roughly 50 m across at the near edge and 100 m
@@ -55,9 +53,10 @@ pub struct MapCamera {
     target_focus: Vec3,
     pub distance: f32,
     target_distance: f32,
-    /// Rotation about the vertical axis, in radians. Left to run unbounded
-    /// rather than wrapped at a full turn, so easing towards `target_yaw` never
-    /// has to reason about which way round the short way is.
+    /// Rotation about the vertical axis, in radians. Free to sit at any angle,
+    /// and left to run unbounded rather than wrapped at a full turn, so easing
+    /// towards `target_yaw` never has to reason about which way round the short
+    /// way is.
     pub yaw: f32,
     target_yaw: f32,
     /// False until the camera has been put down on the ground for this match.
@@ -257,24 +256,24 @@ fn zoom(scroll: Res<AccumulatedMouseScroll>, mut cameras: Query<&mut MapCamera>)
     }
 }
 
-/// Q and E swing the view round in quarter turns. Stepped rather than held so
-/// the view always comes to rest on one of four known orientations.
-fn rotate(keys: Res<ButtonInput<KeyCode>>, mut cameras: Query<&mut MapCamera>) {
-    let mut steps = 0.0;
-    if keys.just_pressed(KeyCode::KeyQ) {
-        steps += 1.0;
+/// Q and E swing the view round for as long as they're held, so it can be left
+/// facing any direction rather than only the four the map was laid out on.
+fn rotate(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut cameras: Query<&mut MapCamera>) {
+    let mut direction = 0.0;
+    if keys.pressed(KeyCode::KeyQ) {
+        direction += 1.0;
     }
-    if keys.just_pressed(KeyCode::KeyE) {
-        steps -= 1.0;
+    if keys.pressed(KeyCode::KeyE) {
+        direction -= 1.0;
     }
-    if steps == 0.0 {
+    if direction == 0.0 {
         return;
     }
 
     for mut camera in &mut cameras {
-        // Off the target rather than the current yaw, so hammering the key
-        // queues turns up instead of the easing swallowing them.
-        camera.target_yaw += steps * ROTATION_STEP;
+        // Drives the target rather than the yaw itself, so the easing in
+        // `apply_transform` still smooths the start and the stop of a turn.
+        camera.target_yaw += direction * ROTATION_SPEED * time.delta_secs();
     }
 }
 
@@ -351,18 +350,6 @@ mod tests {
             .press(key);
     }
 
-    /// A single press and release. Without the release and `clear`, a key stays
-    /// "just pressed" every frame and a stepped input fires over and over.
-    fn tap(app: &mut App, key: KeyCode) {
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(key);
-        app.update();
-        let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-        input.release(key);
-        input.clear();
-    }
-
     /// Reads one field off the single camera.
     fn read<T>(app: &mut App, f: impl Fn(&MapCamera) -> T) -> T {
         f(app
@@ -376,22 +363,48 @@ mod tests {
         read(app, |c| c.target_focus)
     }
 
-    /// Finishes any in-progress turn. The easing is driven by wall-clock time,
-    /// so waiting a fixed number of frames for it to converge isn't reliable.
-    fn settle_rotation(app: &mut App) {
+    /// Puts the view at a given yaw outright. Turning there by holding a key
+    /// would take as long as the wall clock says, which a headless run has no
+    /// patience for.
+    fn turn_to(app: &mut App, yaw: f32) {
         let mut camera = app
             .world_mut()
             .query::<&mut MapCamera>()
             .single_mut(app.world_mut())
             .expect("camera should exist");
-        camera.yaw = camera.target_yaw;
+        camera.yaw = yaw;
+        camera.target_yaw = yaw;
     }
 
-    /// Runs enough frames for the panning to accumulate a measurable distance.
+    /// Runs frames with whatever keys are down. Clears the just-pressed flags
+    /// between them the way the real input plugin does, so a key held here
+    /// reads as held rather than as pressed afresh every frame.
     fn run_frames(app: &mut App, count: usize) {
         for _ in 0..count {
             app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .clear();
         }
+    }
+
+    /// Seconds of clock the app has run for. Frames take however long they take
+    /// in a headless run, so anything driven by `delta_secs` has to be measured
+    /// against the time that actually passed rather than a frame count.
+    fn elapsed(app: &App) -> f32 {
+        app.world().resource::<Time>().elapsed_secs()
+    }
+
+    /// Radians per second the view turns at while `key` is held.
+    fn turn_rate(key: KeyCode) -> f32 {
+        let mut app = test_app();
+        hold(&mut app, key);
+        let start = read(&mut app, |c| c.target_yaw);
+        let before = elapsed(&app);
+        run_frames(&mut app, 20);
+        let seconds = elapsed(&app) - before;
+        assert!(seconds > 0.0, "no time passed while the key was held");
+        (read(&mut app, |c| c.target_yaw) - start) / seconds
     }
 
     #[test]
@@ -491,38 +504,38 @@ mod tests {
     }
 
     #[test]
-    fn q_and_e_turn_the_view_opposite_ways() {
-        let mut app = test_app();
-        tap(&mut app, KeyCode::KeyQ);
-        assert!((read(&mut app, |c| c.target_yaw) - (YAW + ROTATION_STEP)).abs() < 1e-6);
+    fn q_and_e_turn_the_view_opposite_ways_at_the_rotation_speed() {
+        let anticlockwise = turn_rate(KeyCode::KeyQ);
+        let clockwise = turn_rate(KeyCode::KeyE);
 
-        let mut app = test_app();
-        tap(&mut app, KeyCode::KeyE);
-        assert!((read(&mut app, |c| c.target_yaw) - (YAW - ROTATION_STEP)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn four_turns_come_back_to_the_starting_view() {
-        let mut app = test_app();
-        for _ in 0..4 {
-            tap(&mut app, KeyCode::KeyQ);
-        }
-        // Yaw itself keeps counting up rather than wrapping, so it's the
-        // direction the camera ends up facing that has to match.
-        let yaw = read(&mut app, |c| c.target_yaw);
+        // A rate rather than an angle, since it's being proportional to how
+        // long the key was held that makes the turn the same on any machine —
+        // an angle on its own can't tell a held turn from a stepped one.
+        let tolerance = ROTATION_SPEED * 0.01;
         assert!(
-            (forward(yaw) - forward(YAW)).length() < 1e-3,
-            "{yaw} does not face the same way as {YAW}"
+            (anticlockwise - ROTATION_SPEED).abs() < tolerance,
+            "Q turned at {anticlockwise} rad/s, not {ROTATION_SPEED}"
+        );
+        assert!(
+            (clockwise + ROTATION_SPEED).abs() < tolerance,
+            "E turned at {clockwise} rad/s, not -{ROTATION_SPEED}"
         );
     }
 
     #[test]
-    fn presses_during_a_turn_are_not_swallowed() {
+    fn releasing_a_turn_key_stops_the_view() {
         let mut app = test_app();
-        tap(&mut app, KeyCode::KeyQ);
-        // Second press lands while the first turn is still easing.
-        tap(&mut app, KeyCode::KeyQ);
-        assert!((read(&mut app, |c| c.target_yaw) - (YAW + 2.0 * ROTATION_STEP)).abs() < 1e-6);
+        hold(&mut app, KeyCode::KeyQ);
+        run_frames(&mut app, 20);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyQ);
+        app.update();
+        let stopped = read(&mut app, |c| c.target_yaw);
+        run_frames(&mut app, 20);
+
+        assert_eq!(read(&mut app, |c| c.target_yaw), stopped);
     }
 
     #[test]
@@ -532,19 +545,21 @@ mod tests {
         run_frames(&mut app, 20);
         let before = focus(&mut app).normalize();
 
+        // An angle that isn't a multiple of a quarter turn, which the view can
+        // now come to rest at.
+        let turn = 0.7;
         let mut app = test_app();
-        tap(&mut app, KeyCode::KeyQ);
-        settle_rotation(&mut app);
+        turn_to(&mut app, YAW + turn);
         hold(&mut app, KeyCode::ArrowUp);
         let start = focus(&mut app);
         run_frames(&mut app, 20);
         let after = (focus(&mut app) - start).normalize();
 
-        // A quarter turn of the view is a quarter turn of "away from me".
-        let expected = Quat::from_rotation_y(ROTATION_STEP) * before;
+        // Turning the view turns "away from me" with it.
+        let expected = Quat::from_rotation_y(turn) * before;
         assert!(
             (after - expected).length() < 1e-2,
-            "{after:?} is not {before:?} turned a quarter"
+            "{after:?} is not {before:?} turned by {turn} rad"
         );
     }
 
@@ -579,12 +594,14 @@ mod tests {
         // Put the camera down all over the map rather than panning to each
         // spot: panning is wall-clock driven, so a headless run covers almost
         // no ground. The closest zoom is the dangerous one — that's where the
-        // eye sits lowest — and each quarter turn puts it on a different side
+        // eye sits lowest — and a handful of yaws puts it on a different side
         // of whatever it's looking at.
         let mut app = test_app_on_terrain();
         let mut clamped = 0;
 
-        for turn in 0..4 {
+        // Yaws that aren't the four diagonals the map was laid out on, since
+        // the view is free to stop between them now.
+        for turn in 0..5 {
             for iz in 0..16 {
                 for ix in 0..16 {
                     let spot = Vec3::new(ix as f32 * 64.0 - 480.0, 0.0, iz as f32 * 64.0 - 480.0);
@@ -599,7 +616,7 @@ mod tests {
                         camera.target_focus = spot;
                         camera.distance = MIN_DISTANCE;
                         camera.target_distance = MIN_DISTANCE;
-                        camera.yaw = YAW + turn as f32 * ROTATION_STEP;
+                        camera.yaw = YAW + turn as f32 * std::f32::consts::TAU / 5.0;
                         camera.target_yaw = camera.yaw;
                         // Snap onto the ground rather than easing towards it.
                         camera.grounded = false;
