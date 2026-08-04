@@ -1,4 +1,4 @@
-//! Main menu, the map setup dialog and the controls screen.
+//! Main menu, the new-world dialog and the controls screen.
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
@@ -6,14 +6,8 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
-use crate::terrain::MapConfig;
+use crate::terrain::WorldConfig;
 use crate::AppState;
-
-/// Map sizes offered in the setup dialog, in metres per side — each a whole
-/// number of the generator's chunks, which is the unit maps are measured in.
-/// The generator itself takes any X by Z chunks; the dialog offers squares
-/// until it grows a proper size control.
-pub const SIZE_PRESETS: [(&str, u32); 3] = [("Small", 768), ("Medium", 1024), ("Large", 1536)];
 
 /// Longest seed the user can type. Keeps it inside a u32.
 const MAX_SEED_DIGITS: usize = 9;
@@ -31,13 +25,13 @@ pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NewMapSettings>()
+        app.init_resource::<NewWorldSettings>()
             // Shared with the camera, which registers them too — see
             // `MapCameraPlugin`.
             .init_resource::<KeyBindings>()
             .init_resource::<Rebinding>()
             .add_systems(OnEnter(AppState::MainMenu), spawn_main_menu)
-            .add_systems(OnEnter(AppState::NewMap), spawn_new_map_dialog)
+            .add_systems(OnEnter(AppState::NewWorld), spawn_new_world_dialog)
             .add_systems(OnEnter(AppState::Settings), spawn_settings)
             // Leaving the screen mid-capture would otherwise come back to it
             // still waiting for a key.
@@ -47,7 +41,8 @@ impl Plugin for MenuPlugin {
                 (
                     highlight_buttons,
                     main_menu_actions.run_if(in_state(AppState::MainMenu)),
-                    (dialog_actions, type_seed, refresh_dialog).run_if(in_state(AppState::NewMap)),
+                    (dialog_actions, type_seed, refresh_dialog)
+                        .run_if(in_state(AppState::NewWorld)),
                     // Ordered so that arming a row and reading the key meant for
                     // it can't land in the same frame. `settings_keys` carries
                     // no run condition of its own — see its comment.
@@ -63,28 +58,25 @@ impl Plugin for MenuPlugin {
     }
 }
 
-/// What the setup dialog is currently showing. Copied into [`MapConfig`] when
-/// a new map is generated.
+/// What the new-world dialog is currently showing. Copied into
+/// [`WorldConfig`] when a world is entered — the seed is the whole of what a
+/// world is, so it is the whole of the dialog too.
 #[derive(Resource)]
-struct NewMapSettings {
-    size: u32,
+struct NewWorldSettings {
     /// Held as text so the field can be edited a digit at a time, including
     /// being temporarily empty.
     seed: String,
 }
 
-impl Default for NewMapSettings {
+impl Default for NewWorldSettings {
     fn default() -> Self {
-        let defaults = MapConfig::default();
         Self {
-            // The dialog offers square maps, so one axis stands for both.
-            size: defaults.tiles().x,
-            seed: defaults.seed.to_string(),
+            seed: WorldConfig::default().seed.to_string(),
         }
     }
 }
 
-impl NewMapSettings {
+impl NewWorldSettings {
     fn seed_value(&self) -> u32 {
         self.seed.parse().unwrap_or(0)
     }
@@ -97,10 +89,9 @@ struct Rebinding(Option<Action>);
 
 #[derive(Component, Clone, Copy, PartialEq)]
 enum MenuButton {
-    NewMap,
+    NewWorld,
     Settings,
     Exit,
-    ChooseSize(u32),
     RandomSeed,
     Start,
     /// Arms this action's row, so the next key pressed becomes its key.
@@ -143,7 +134,7 @@ fn spawn_main_menu(mut commands: Commands) {
                 },
             ));
             screen.spawn((
-                Text::new("islands in flat colours"),
+                Text::new("an ocean of islands in flat colours"),
                 TextFont {
                     font_size: FontSize::Px(18.0),
                     ..default()
@@ -155,7 +146,7 @@ fn spawn_main_menu(mut commands: Commands) {
                 },
             ));
 
-            spawn_button(screen, MenuButton::NewMap, "New Map", 240.0);
+            spawn_button(screen, MenuButton::NewWorld, "New World", 240.0);
             spawn_button(screen, MenuButton::Settings, "Controls", 240.0);
             spawn_button(screen, MenuButton::Exit, "Exit", 240.0);
         });
@@ -171,7 +162,7 @@ fn main_menu_actions(
             continue;
         }
         match button {
-            MenuButton::NewMap => next.set(AppState::NewMap),
+            MenuButton::NewWorld => next.set(AppState::NewWorld),
             MenuButton::Settings => next.set(AppState::Settings),
             MenuButton::Exit => {
                 exit.write(AppExit::Success);
@@ -182,14 +173,14 @@ fn main_menu_actions(
 }
 
 // ---------------------------------------------------------------------------
-// New map dialog
+// New world dialog
 // ---------------------------------------------------------------------------
 
-fn spawn_new_map_dialog(mut commands: Commands, settings: Res<NewMapSettings>) {
+fn spawn_new_world_dialog(mut commands: Commands, settings: Res<NewWorldSettings>) {
     commands
         .spawn((
-            Name::new("New map dialog"),
-            DespawnOnExit(AppState::NewMap),
+            Name::new("New world dialog"),
+            DespawnOnExit(AppState::NewWorld),
             screen(),
         ))
         .with_children(|screen| {
@@ -208,7 +199,7 @@ fn spawn_new_map_dialog(mut commands: Commands, settings: Res<NewMapSettings>) {
                 ))
                 .with_children(|panel| {
                     panel.spawn((
-                        Text::new("New Map"),
+                        Text::new("New World"),
                         TextFont {
                             font_size: FontSize::Px(34.0),
                             ..default()
@@ -219,24 +210,6 @@ fn spawn_new_map_dialog(mut commands: Commands, settings: Res<NewMapSettings>) {
                             ..default()
                         },
                     ));
-
-                    label(panel, "Map size");
-                    panel
-                        .spawn(Node {
-                            column_gap: Val::Px(8.0),
-                            margin: UiRect::bottom(Val::Px(16.0)),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            for (name, size) in SIZE_PRESETS {
-                                spawn_button(
-                                    row,
-                                    MenuButton::ChooseSize(size),
-                                    &format!("{name}\n{size} m"),
-                                    120.0,
-                                );
-                            }
-                        });
 
                     label(panel, "Seed");
                     panel.spawn((
@@ -274,8 +247,8 @@ fn spawn_new_map_dialog(mut commands: Commands, settings: Res<NewMapSettings>) {
 
 fn dialog_actions(
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
-    mut settings: ResMut<NewMapSettings>,
-    mut config: ResMut<MapConfig>,
+    mut settings: ResMut<NewWorldSettings>,
+    mut config: ResMut<WorldConfig>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     for (interaction, button) in &buttons {
@@ -283,11 +256,12 @@ fn dialog_actions(
             continue;
         }
         match button {
-            MenuButton::ChooseSize(size) => settings.size = *size,
             MenuButton::RandomSeed => settings.seed = random_seed().to_string(),
             MenuButton::Back => next.set(AppState::MainMenu),
             MenuButton::Start => {
-                *config = MapConfig::square(settings.size, settings.seed_value());
+                *config = WorldConfig {
+                    seed: settings.seed_value(),
+                };
                 next.set(AppState::InWorld);
             }
             _ => {}
@@ -296,7 +270,7 @@ fn dialog_actions(
 }
 
 /// Digit-by-digit editing of the seed field.
-fn type_seed(keys: Res<ButtonInput<KeyCode>>, mut settings: ResMut<NewMapSettings>) {
+fn type_seed(keys: Res<ButtonInput<KeyCode>>, mut settings: ResMut<NewWorldSettings>) {
     for key in keys.get_just_pressed() {
         let digit = match key {
             KeyCode::Digit0 | KeyCode::Numpad0 => '0',
@@ -324,9 +298,8 @@ fn type_seed(keys: Res<ButtonInput<KeyCode>>, mut settings: ResMut<NewMapSetting
 
 /// Keeps the dialog's readouts in step with the settings behind them.
 fn refresh_dialog(
-    settings: Res<NewMapSettings>,
+    settings: Res<NewWorldSettings>,
     mut seed_text: Query<&mut Text, With<SeedText>>,
-    mut buttons: Query<(&MenuButton, &mut BackgroundColor, &Interaction)>,
 ) {
     if !settings.is_changed() {
         return;
@@ -340,19 +313,6 @@ fn refresh_dialog(
         } else {
             settings.seed.clone()
         };
-    }
-
-    // The chosen size stays lit so it's clear which preset is active.
-    for (button, mut color, interaction) in &mut buttons {
-        if let MenuButton::ChooseSize(size) = button {
-            if *interaction == Interaction::None {
-                *color = BackgroundColor(if *size == settings.size {
-                    BUTTON_ON
-                } else {
-                    BUTTON
-                });
-            }
-        }
     }
 }
 
@@ -638,13 +598,11 @@ fn spawn_button(parent: &mut ChildSpawnerCommands, action: MenuButton, text: &st
 }
 
 fn highlight_buttons(
-    settings: Res<NewMapSettings>,
     rebinding: Res<Rebinding>,
     mut buttons: Query<(&Interaction, &MenuButton, &mut BackgroundColor), Changed<Interaction>>,
 ) {
     for (interaction, button, mut color) in &mut buttons {
         let idle = match button {
-            MenuButton::ChooseSize(size) if *size == settings.size => BUTTON_ON,
             MenuButton::Rebind(action) if rebinding.0 == Some(*action) => BUTTON_ON,
             _ => BUTTON,
         };
@@ -671,7 +629,6 @@ fn random_seed() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terrain::CHUNK_TILES;
     use bevy::input::keyboard::Key;
     use bevy::state::app::StatesPlugin;
 
@@ -681,7 +638,7 @@ mod tests {
         app.add_plugins((StatesPlugin, MenuPlugin))
             .insert_state(state)
             .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<MapConfig>()
+            .init_resource::<WorldConfig>()
             .add_message::<AppExit>()
             .add_message::<KeyboardInput>();
         app.update();
@@ -746,10 +703,10 @@ mod tests {
     }
 
     #[test]
-    fn new_map_opens_the_setup_dialog() {
+    fn new_world_opens_the_setup_dialog() {
         let mut app = test_app(AppState::MainMenu);
-        click(&mut app, MenuButton::NewMap);
-        assert_eq!(state(&app), AppState::NewMap);
+        click(&mut app, MenuButton::NewWorld);
+        assert_eq!(state(&app), AppState::NewWorld);
     }
 
     #[test]
@@ -763,50 +720,46 @@ mod tests {
 
     #[test]
     fn back_returns_to_the_main_menu() {
-        let mut app = test_app(AppState::NewMap);
+        let mut app = test_app(AppState::NewWorld);
         click(&mut app, MenuButton::Back);
         assert_eq!(state(&app), AppState::MainMenu);
     }
 
     #[test]
-    fn start_applies_the_chosen_size_and_seed() {
-        let mut app = test_app(AppState::NewMap);
+    fn start_applies_the_chosen_seed() {
+        let mut app = test_app(AppState::NewWorld);
 
-        click(&mut app, MenuButton::ChooseSize(256));
-        press_key(&mut app, KeyCode::Digit7);
-        press_key(&mut app, KeyCode::Digit7);
-        app.world_mut().resource_mut::<NewMapSettings>().seed = "77".to_string();
+        app.world_mut().resource_mut::<NewWorldSettings>().seed = "77".to_string();
         click(&mut app, MenuButton::Start);
 
-        let config = app.world().resource::<MapConfig>();
-        assert_eq!(config.chunks, UVec2::splat(2));
+        let config = app.world().resource::<WorldConfig>();
         assert_eq!(config.seed, 77);
         assert_eq!(state(&app), AppState::InWorld);
     }
 
     #[test]
     fn typing_edits_the_seed() {
-        let mut app = test_app(AppState::NewMap);
-        app.world_mut().resource_mut::<NewMapSettings>().seed = String::new();
+        let mut app = test_app(AppState::NewWorld);
+        app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
 
         press_key(&mut app, KeyCode::Digit4);
         press_key(&mut app, KeyCode::Digit2);
-        assert_eq!(app.world().resource::<NewMapSettings>().seed, "42");
+        assert_eq!(app.world().resource::<NewWorldSettings>().seed, "42");
 
         press_key(&mut app, KeyCode::Backspace);
-        assert_eq!(app.world().resource::<NewMapSettings>().seed, "4");
+        assert_eq!(app.world().resource::<NewWorldSettings>().seed, "4");
     }
 
     #[test]
     fn seed_field_is_length_capped() {
-        let mut app = test_app(AppState::NewMap);
-        app.world_mut().resource_mut::<NewMapSettings>().seed = String::new();
+        let mut app = test_app(AppState::NewWorld);
+        app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
 
         for _ in 0..MAX_SEED_DIGITS + 5 {
             press_key(&mut app, KeyCode::Digit9);
         }
 
-        let seed = &app.world().resource::<NewMapSettings>().seed;
+        let seed = &app.world().resource::<NewWorldSettings>().seed;
         assert_eq!(seed.len(), MAX_SEED_DIGITS);
         // Whatever the player types has to survive the trip into a u32.
         assert!(seed.parse::<u32>().is_ok(), "{seed} does not fit a u32");
@@ -977,8 +930,7 @@ mod tests {
 
     #[test]
     fn seed_field_reads_as_zero_when_empty() {
-        let settings = NewMapSettings {
-            size: 96,
+        let settings = NewWorldSettings {
             seed: String::new(),
         };
         assert_eq!(settings.seed_value(), 0);
@@ -986,8 +938,7 @@ mod tests {
 
     #[test]
     fn seed_field_parses_digits() {
-        let settings = NewMapSettings {
-            size: 96,
+        let settings = NewWorldSettings {
             seed: "123456".to_string(),
         };
         assert_eq!(settings.seed_value(), 123_456);
@@ -1000,26 +951,8 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_the_map_config() {
-        let settings = NewMapSettings::default();
-        let config = MapConfig::default();
-        assert_eq!(settings.size, config.tiles().x);
-        assert_eq!(settings.seed_value(), config.seed);
-    }
-
-    #[test]
-    fn size_presets_are_distinct_ordered_whole_chunks() {
-        let sizes: Vec<u32> = SIZE_PRESETS.iter().map(|(_, size)| *size).collect();
-        for size in &sizes {
-            assert_eq!(
-                size % CHUNK_TILES,
-                0,
-                "{size} m is not a whole number of chunks"
-            );
-        }
-        let mut sorted = sizes.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sizes, sorted);
+    fn defaults_match_the_world_config() {
+        let settings = NewWorldSettings::default();
+        assert_eq!(settings.seed_value(), WorldConfig::default().seed);
     }
 }

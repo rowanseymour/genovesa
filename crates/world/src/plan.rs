@@ -7,7 +7,8 @@
 
 use glam::{UVec2, Vec2, Vec3};
 
-use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES};
+use crate::archipelago::Archipelago;
+use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES, SEABED};
 
 /// An RGB8 image, as wide and tall as it says, ready to write out.
 pub struct Image {
@@ -50,6 +51,20 @@ impl Image {
     }
 }
 
+/// One pixel of any plan render: the map's own colour, tinted for the sea
+/// below the waterline, hill-shaded by a sun over the -x/-z corner so relief
+/// reads in plan.
+fn shade(color: Vec3, height: f32, normal: Vec3) -> [u8; 3] {
+    let mut c = color;
+    if height < 0.0 {
+        // Stand in for the translucent sea plane.
+        c = c * 0.45 + Vec3::new(0.10, 0.42, 0.62) * 0.55;
+    }
+    let lit = 0.72 + 0.55 * normal.dot(Vec3::new(-0.5, 0.72, -0.48).normalize());
+    let c = (c * lit).clamp(Vec3::ZERO, Vec3::ONE) * 255.0;
+    [c.x as u8, c.y as u8, c.z as u8]
+}
+
 /// Renders one map in plan, hill-shaded, using the same colour function the
 /// mesh does, into a `width`-by-`height` image.
 ///
@@ -67,17 +82,47 @@ pub fn render(config: &MapConfig, width: u32, height: u32) -> Image {
             let wz = iz as f32 * step.y - half.y;
             let normal = gen.normal(wx, wz);
             let height = gen.height(wx, wz);
+            pixels.extend_from_slice(&shade(gen.color(wx, wz, height, normal), height, normal));
+        }
+    }
+    Image {
+        width,
+        height,
+        pixels,
+    }
+}
 
-            let mut c = gen.color(wx, wz, height, normal);
-            if height < 0.0 {
-                // Stand in for the translucent sea plane.
-                c = c * 0.45 + Vec3::new(0.10, 0.42, 0.62) * 0.55;
-            }
-            // Cheap hillshade from a sun over the -x/-z corner, so relief
-            // reads in plan.
-            let lit = 0.72 + 0.55 * normal.dot(Vec3::new(-0.5, 0.72, -0.48).normalize());
-            let c = (c * lit).clamp(Vec3::ZERO, Vec3::ONE) * 255.0;
-            pixels.extend_from_slice(&[c.x as u8, c.y as u8, c.z as u8]);
+/// Renders a world-space region of an archipelago in plan — the same shading
+/// as [`render`], over a window onto the open world instead of a whole lone
+/// map. `centre` and `extent` are in metres of world space.
+///
+/// The one honest way to judge the layout: any measure of island spacing or
+/// size mix is an average, and averages are exactly how a layout that clumps
+/// or stripes slips through. A few kilometres on the page shows it.
+pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32) -> Image {
+    let height = (width as f32 * extent.y / extent.x).round().max(1.0) as u32;
+    let step = extent / Vec2::new(width as f32, height as f32);
+    let origin = centre - extent * 0.5;
+
+    let mut pixels = Vec::with_capacity((width * height) as usize * 3);
+    for iz in 0..height {
+        for ix in 0..width {
+            let wx = origin.x + ix as f32 * step.x;
+            let wz = origin.y + iz as f32 * step.y;
+
+            // Most of any region is open ocean, which is flat floor by
+            // construction — skipping the sampling there is most of the
+            // render's speed.
+            let pixel = match world.island_at(wx, wz) {
+                None => shade(SEABED, -crate::archipelago::OCEAN_DEPTH, Vec3::Y),
+                Some(spec) => {
+                    let island = world.island(spec);
+                    let normal = island.normal(wx, wz);
+                    let height = island.height(wx, wz);
+                    shade(island.color(wx, wz, height, normal), height, normal)
+                }
+            };
+            pixels.extend_from_slice(&pixel);
         }
     }
     Image {

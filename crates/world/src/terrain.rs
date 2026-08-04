@@ -553,7 +553,7 @@ const SNOW_WANDER: f32 = 26.0;
 /// steps. Saturated well past anything natural, because flat shading has no
 /// texture or gradient to carry the picture; the colour has to do that work on
 /// its own.
-const SEABED: Vec3 = Vec3::new(0.16, 0.34, 0.38);
+pub(crate) const SEABED: Vec3 = Vec3::new(0.16, 0.34, 0.38);
 const SHALLOW: Vec3 = Vec3::new(0.46, 0.68, 0.62);
 const SAND: Vec3 = Vec3::new(0.90, 0.83, 0.58);
 /// Pebble and boulder foreshore. Warmer and lighter than [`ROCK`], so a shingle
@@ -1681,107 +1681,126 @@ impl TerrainGenerator {
     /// tile index into the map, whose full extent in tiles is `map_tiles` —
     /// every chunk is full-sized, since a map is a whole number of chunks.
     ///
-    /// The geometry is flat shaded: every triangle carries its own normal and
-    /// its own single colour, so no vertex is shared between two triangles.
-    /// That costs three vertices per triangle instead of roughly one, and buys
-    /// it back many times over from drawing at [`MESH_STEP`] rather than per
-    /// tile. It also means chunks need no border samples to meet cleanly —
-    /// there are no shared normals to disagree about.
-    ///
     /// Vertex positions are relative to the chunk's own origin, so whatever
     /// places the chunk carries the world offset and the bounding box stays
     /// tight.
     pub fn build_chunk(&self, origin: UVec2, map_tiles: UVec2) -> ChunkGeometry {
         let half = map_tiles.as_vec2() * TILE_SIZE * 0.5;
-        let step = MESH_STEP as f32;
-
-        let quads = (CHUNK_TILES / MESH_STEP) as usize;
-        let verts = quads + 1;
-
-        // Corner heights, shared between the quads that meet there even though
-        // the vertices themselves won't be.
-        let mut heights = vec![0.0f32; verts * verts];
-        for iz in 0..verts {
-            let wz = (origin.y + iz as u32 * MESH_STEP) as f32 - half.y;
-            for ix in 0..verts {
-                let wx = (origin.x + ix as u32 * MESH_STEP) as f32 - half.x;
-                heights[iz * verts + ix] = self.height(wx, wz);
-            }
-        }
-
-        let count = quads * quads * 6;
-        let mut positions = Vec::with_capacity(count);
-        let mut normals = Vec::with_capacity(count);
-        let mut uvs = Vec::with_capacity(count);
-        let mut colors = Vec::with_capacity(count);
-
-        // Where this chunk's local origin sits in the world.
         let base = Vec2::new(origin.x as f32 - half.x, origin.y as f32 - half.y);
 
-        for iz in 0..quads {
-            for ix in 0..quads {
-                let (x0, z0) = (ix as f32 * step, iz as f32 * step);
-                let (x1, z1) = (x0 + step, z0 + step);
-                let h = |cx: usize, cz: usize| heights[cz * verts + cx];
+        facet_geometry(
+            base,
+            |wx, wz| self.height(wx, wz),
+            |wx, wz, height, normal| self.color(wx, wz, height, normal),
+            // UVs span the whole map, so a future overlay lines up across
+            // chunk boundaries.
+            |wx, wz| {
+                [
+                    (wx + half.x) / map_tiles.x as f32,
+                    (wz + half.y) / map_tiles.y as f32,
+                ]
+            },
+        )
+    }
+}
 
-                let tl = Vec3::new(x0, h(ix, iz), z0);
-                let tr = Vec3::new(x1, h(ix + 1, iz), z0);
-                let bl = Vec3::new(x0, h(ix, iz + 1), z1);
-                let br = Vec3::new(x1, h(ix + 1, iz + 1), z1);
+/// Builds one chunk's worth of flat-shaded geometry over any height and colour
+/// field: `base` is the world coordinate of the chunk's lower corner, and the
+/// closures are sampled in that same world space. A lone island map and the
+/// open world build their chunks through here alike, so the two can never
+/// disagree about what a chunk of ground looks like.
+///
+/// The geometry is flat shaded: every triangle carries its own normal and its
+/// own single colour, so no vertex is shared between two triangles. That costs
+/// three vertices per triangle instead of roughly one, and buys it back many
+/// times over from drawing at [`MESH_STEP`] rather than per tile. It also
+/// means chunks need no border samples to meet cleanly — there are no shared
+/// normals to disagree about.
+pub(crate) fn facet_geometry(
+    base: Vec2,
+    height: impl Fn(f32, f32) -> f32,
+    color: impl Fn(f32, f32, f32, Vec3) -> Vec3,
+    uv: impl Fn(f32, f32) -> [f32; 2],
+) -> ChunkGeometry {
+    let step = MESH_STEP as f32;
+    let quads = (CHUNK_TILES / MESH_STEP) as usize;
+    let verts = quads + 1;
 
-                // Which way the quad is split alternates like a checkerboard.
-                // Splitting every quad the same way lines the facets up into an
-                // obvious herringbone across open ground; alternating breaks
-                // that up without costing anything.
-                //
-                // Both windings are counter-clockwise seen from above (+Y),
-                // which is what puts the face normals upwards.
-                let split = if (ix + iz) % 2 == 0 {
-                    [[tl, bl, tr], [tr, bl, br]]
-                } else {
-                    [[tl, bl, br], [tl, br, tr]]
-                };
+    // Corner heights, shared between the quads that meet there even though
+    // the vertices themselves won't be.
+    let mut heights = vec![0.0f32; verts * verts];
+    for iz in 0..verts {
+        let wz = base.y + (iz as u32 * MESH_STEP) as f32;
+        for ix in 0..verts {
+            let wx = base.x + (ix as u32 * MESH_STEP) as f32;
+            heights[iz * verts + ix] = height(wx, wz);
+        }
+    }
 
-                for tri in split {
-                    let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
+    let count = quads * quads * 6;
+    let mut positions = Vec::with_capacity(count);
+    let mut normals = Vec::with_capacity(count);
+    let mut uvs = Vec::with_capacity(count);
+    let mut colors = Vec::with_capacity(count);
 
-                    // One sample at the centre decides the whole facet — the
-                    // point of flat shading is that there is nothing to
-                    // interpolate between its corners.
-                    let mid = (tri[0] + tri[1] + tri[2]) / 3.0;
-                    let (wx, wz) = (base.x + mid.x, base.y + mid.z);
-                    let c = self.color(wx, wz, mid.y, normal);
-                    // Vertex colours are consumed in linear space by the PBR
-                    // shader.
-                    let c = [
-                        srgb_to_linear(c.x),
-                        srgb_to_linear(c.y),
-                        srgb_to_linear(c.z),
-                        1.0,
-                    ];
-                    // UVs span the whole map, so a future overlay lines up
-                    // across chunk boundaries.
-                    let uv = [
-                        (wx + half.x) / map_tiles.x as f32,
-                        (wz + half.y) / map_tiles.y as f32,
-                    ];
+    for iz in 0..quads {
+        for ix in 0..quads {
+            let (x0, z0) = (ix as f32 * step, iz as f32 * step);
+            let (x1, z1) = (x0 + step, z0 + step);
+            let h = |cx: usize, cz: usize| heights[cz * verts + cx];
 
-                    for corner in tri {
-                        positions.push([corner.x, corner.y, corner.z]);
-                        normals.push([normal.x, normal.y, normal.z]);
-                        uvs.push(uv);
-                        colors.push(c);
-                    }
+            let tl = Vec3::new(x0, h(ix, iz), z0);
+            let tr = Vec3::new(x1, h(ix + 1, iz), z0);
+            let bl = Vec3::new(x0, h(ix, iz + 1), z1);
+            let br = Vec3::new(x1, h(ix + 1, iz + 1), z1);
+
+            // Which way the quad is split alternates like a checkerboard.
+            // Splitting every quad the same way lines the facets up into an
+            // obvious herringbone across open ground; alternating breaks
+            // that up without costing anything.
+            //
+            // Both windings are counter-clockwise seen from above (+Y),
+            // which is what puts the face normals upwards.
+            let split = if (ix + iz) % 2 == 0 {
+                [[tl, bl, tr], [tr, bl, br]]
+            } else {
+                [[tl, bl, br], [tl, br, tr]]
+            };
+
+            for tri in split {
+                let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
+
+                // One sample at the centre decides the whole facet — the
+                // point of flat shading is that there is nothing to
+                // interpolate between its corners.
+                let mid = (tri[0] + tri[1] + tri[2]) / 3.0;
+                let (wx, wz) = (base.x + mid.x, base.y + mid.z);
+                let c = color(wx, wz, mid.y, normal);
+                // Vertex colours are consumed in linear space by the PBR
+                // shader.
+                let c = [
+                    srgb_to_linear(c.x),
+                    srgb_to_linear(c.y),
+                    srgb_to_linear(c.z),
+                    1.0,
+                ];
+                let uv = uv(wx, wz);
+
+                for corner in tri {
+                    positions.push([corner.x, corner.y, corner.z]);
+                    normals.push([normal.x, normal.y, normal.z]);
+                    uvs.push(uv);
+                    colors.push(c);
                 }
             }
         }
+    }
 
-        ChunkGeometry {
-            positions,
-            normals,
-            uvs,
-            colors,
-        }
+    ChunkGeometry {
+        positions,
+        normals,
+        uvs,
+        colors,
     }
 }
 
@@ -2503,7 +2522,7 @@ fn beachiness(character: f32) -> f32 {
 }
 
 /// Heightfield normal from the four neighbouring samples, one tile out.
-fn normal_from_neighbours(left: f32, right: f32, down: f32, up: f32) -> Vec3 {
+pub(crate) fn normal_from_neighbours(left: f32, right: f32, down: f32, up: f32) -> Vec3 {
     Vec3::new(left - right, 2.0 * TILE_SIZE, down - up).normalize()
 }
 

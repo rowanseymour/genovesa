@@ -20,9 +20,12 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use crate::camera::{MapCamera, View};
 use crate::cli::Shot;
+use crate::terrain::ChunkBuild;
 
 /// Frames to render before the first shot, so terrain meshes have reached the
-/// GPU and the shadow cascades have settled.
+/// GPU and the shadow cascades have settled. Counted only while no chunk is
+/// still streaming in — the world builds itself in background tasks, so the
+/// clock starts once the ground being photographed has actually arrived.
 const WARMUP_FRAMES: u32 = 120;
 /// Frames between pointing the camera somewhere and capturing it. The camera
 /// snaps rather than eases, so this only has to cover dropping the focus back
@@ -167,9 +170,18 @@ fn capture(
     mut commands: Commands,
     mut capture: ResMut<Capture>,
     mut cameras: Query<&mut MapCamera>,
+    building: Query<(), With<ChunkBuild>>,
     mut view: ResMut<View>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    // Ground still streaming in means the picture is not of the world yet —
+    // hold the phase clock at zero until the last build lands, so the wait
+    // that follows is all settling and none of it generation.
+    if matches!(capture.phase, Phase::WarmUp | Phase::Settling) && !building.is_empty() {
+        capture.waited = 0;
+        return;
+    }
+
     let wait = match capture.phase {
         Phase::WarmUp => WARMUP_FRAMES,
         Phase::Settling => SETTLE_FRAMES,
