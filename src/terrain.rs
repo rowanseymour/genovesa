@@ -271,11 +271,13 @@ const LOWLAND_FLOOR: f32 = 10.0;
 ///
 /// This is the dial worth turning. It fixes [`PEAK_GRADE`], and with it how
 /// tall a given map's mountains come out. A kilometre-square map's interior
-/// stands ninety to a hundred and fifty metres from the open sea, depending on
-/// the seed, so at this reach its summits come out between about fifty-five
-/// and ninety metres rather than the full height — a little under seventy on
-/// average. Snow is rarer still: the tallest ground on any seed measured was
-/// 88 m at a kilometre, 108 m at a kilometre and a half and 113 m at two, so
+/// stands a hundred and fifty to two hundred and forty metres from open water,
+/// depending on the seed, and its summits come out between about fifty-five
+/// and ninety metres rather than the full height — a little over seventy on
+/// average. They fall short of the reach because a summit sits where the mask
+/// put the massif, which is rarely the one most interior point. Snow is rarer
+/// still: the tallest ground on any seed measured was 90 m at a kilometre,
+/// 108 m at a kilometre and a half and 116 m at two, so
 /// nothing but the largest maps crosses [`SNOW_LINE`] outright and what snow
 /// appears below that is [`SNOW_WANDER`] carrying the line down to meet a
 /// summit. Shortening this gives every size taller mountains and steeper
@@ -288,6 +290,25 @@ const LOWLAND_FLOOR: f32 = 10.0;
 /// part is not the absolute figure but that height now has to be paid for in
 /// ground.
 const INLAND_REACH: f32 = 220.0;
+
+/// How far out [`water_fraction`] looks when deciding whether a stretch of
+/// water is sea or a pond, in metres. A little under half [`INLAND_REACH`], so
+/// that the water bodies it counts as sea are the ones big enough to be worth
+/// a range's height.
+const OPEN_RADIUS: f32 = 80.0;
+
+/// Where the share of water around a point cuts into pond and sea.
+///
+/// Well below a half on purpose, and that is the whole trick. Any symmetric
+/// window straddling a shoreline sees about half water, so the open ocean's
+/// own beach reads 0.5 — cut anywhere near there and the coastline itself
+/// stops counting as coast, which is the one thing this field exists to
+/// measure. Cut low instead and the reading separates by *size*: a shore of
+/// open sea holds its half whichever way the window is nudged, while a pond
+/// small enough to sit inside the window can never reach the lower edge at
+/// all, however its middle is sampled.
+const OPEN_POND: f32 = 0.15;
+const OPEN_SEA: f32 = 0.35;
 
 /// Share of the *land* a mountain massif covers, counting its flanks. Roughly
 /// three times [`MOUNTAIN_FRACTION`], since most of a mountain is the climb
@@ -701,10 +722,10 @@ pub struct TerrainGenerator {
     ///
     /// Deliberately *not* [`TerrainGenerator::coast`], even though the two are
     /// measured from the same grid a moment apart. They differ in what counts
-    /// as water: this one is flooded in from the frame, so the lagoons and
-    /// sounds that fill the interior of these maps count as ground rather than
-    /// as a coast a range has to climb from. See
-    /// [`CoastDistance::from_open_sea`].
+    /// as water: this one counts only water broad enough to stand in for the
+    /// sea, so the ponds and narrow sounds that fill the interior of these maps
+    /// are ground rather than a coast a range has to climb from. See
+    /// [`CoastDistance::from_open_water`].
     inland: CoastDistance,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
@@ -844,7 +865,7 @@ impl TerrainGenerator {
         // waterline reading [`TerrainGenerator::normal`] — so it has to run
         // against the ceiling rather than before it exists.
         let raw = generator.fit(config, &targets);
-        generator.inland = CoastDistance::from_open_sea(&raw, &generator.calibration);
+        generator.inland = CoastDistance::from_open_water(&raw, &generator.calibration);
         generator.fit_coast_scale(&raw);
         generator
     }
@@ -1978,81 +1999,94 @@ impl CoastDistance {
     /// Measures out from wherever the calibration put the waterline in an
     /// already-sampled grid of raw landform values.
     fn from_raw(raw: &GridField, calibration: &Calibration) -> Self {
-        let sea: Vec<bool> = raw
+        let seeds = raw
             .cells
             .iter()
-            .map(|v| *v <= calibration.sea_level)
-            .collect();
-        Self::measure(&sea, raw.dims, raw.origin)
-    }
-
-    /// The same, but measured only from water that reaches the edge of the
-    /// map — the sea proper. Every enclosed pool counts as ground, so distance
-    /// keeps climbing straight across it.
-    ///
-    /// Which is what the mountains have to be held back from, and the sea
-    /// alone. These maps are riddled with inland water: a third of the map is
-    /// land, sea level is fitted high enough that hollows flood, and the
-    /// result is sounds and lagoons all over the interior. Measured from all
-    /// of it, a range is forbidden its height for having a pond beside it,
-    /// which is neither what erosion says nor anything a landscape does — the
-    /// pond is a feature *of* the upland, not a coast it has to climb from.
-    /// On a two-kilometre map that was the difference between one range and
-    /// several: the interior massifs each had inland water within a hundred
-    /// metres and were held down as if they stood on a beach.
-    ///
-    /// Known limitation, and the reason to look here first if map size ever
-    /// misbehaves: whether a body of water reaches the frame is a yes or no,
-    /// so this field steps as the map grows. A lagoon joined to the sea by one
-    /// cell of a strait counts wholly as sea; widen the map a little, the
-    /// strait silts up, and the same lagoon counts wholly as ground — and
-    /// every point behind it gains the whole width of the lagoon in distance
-    /// at once. Measured on one seed over 128-metre steps of size, the largest
-    /// open-sea distance on the map went 101, 131, 288, 320, 340 m: a jump of
-    /// 157 m for one step, which took the ceiling over that region from about
-    /// 85 m to about 175 m and turned a headland into a range. Softening it
-    /// means giving up the binary — weighting each pool by how much sea it
-    /// really connects to, or blending this field with
-    /// [`CoastDistance::from_raw`] — which is a redesign rather than a tweak.
-    fn from_open_sea(raw: &GridField, calibration: &Calibration) -> Self {
-        let (nx, nz) = raw.dims;
-        let mut sea = vec![false; raw.cells.len()];
-        let wet = |i: usize| raw.cells[i] <= calibration.sea_level;
-
-        // Flood in from the frame, which is open water on every map — the
-        // falloff's rim guarantees it.
-        let mut stack: Vec<usize> = (0..nx)
-            .flat_map(|ix| [ix, (nz - 1) * nx + ix])
-            .chain((0..nz).flat_map(|iz| [iz * nx, iz * nx + nx - 1]))
-            .filter(|i| wet(*i))
-            .collect();
-        for i in &stack {
-            sea[*i] = true;
-        }
-        while let Some(i) = stack.pop() {
-            let (ix, iz) = (i % nx, i / nx);
-            let neighbours = [
-                (ix > 0).then(|| i - 1),
-                (ix + 1 < nx).then(|| i + 1),
-                (iz > 0).then(|| i - nx),
-                (iz + 1 < nz).then(|| i + nx),
-            ];
-            for next in neighbours.into_iter().flatten() {
-                if wet(next) && !sea[next] {
-                    sea[next] = true;
-                    stack.push(next);
+            .map(|v| {
+                if *v <= calibration.sea_level {
+                    0.0
+                } else {
+                    f32::INFINITY
                 }
-            }
-        }
-        Self::measure(&sea, raw.dims, raw.origin)
+            })
+            .collect();
+        Self::measure(seeds, raw.dims, raw.origin)
     }
 
-    /// Distance out from a mask of what counts as water.
-    fn measure(sea: &[bool], dims: (usize, usize), origin: Vec2) -> Self {
-        let mut cells: Vec<f32> = sea
+    /// The same, but measured from open water only — from the sea, and from
+    /// the inland bodies big enough to stand in for it. A pond counts for
+    /// nothing and distance climbs straight across it.
+    ///
+    /// Which is what the mountains have to be held back from. These maps are
+    /// riddled with inland water: a third of the map is land, sea level is
+    /// fitted high enough that hollows flood, and the result is sounds and
+    /// lagoons all over the interior. Measured from all of it, a range is
+    /// forbidden its height for having a pond beside it, which is neither what
+    /// erosion says nor anything a landscape does — the pond is a feature *of*
+    /// the upland, not a coast it has to climb from. On a two-kilometre map
+    /// that was the difference between one range and several: the interior
+    /// massifs each had inland water within a hundred metres and were held
+    /// down as if they stood on a beach.
+    ///
+    /// What separates the two is **size**, and deliberately not whether the
+    /// water joins the sea. Reaching the frame was the first thing tried and
+    /// it is a property of the map's topology, which is a yes or no — so it
+    /// changed the map in steps. A lagoon joined to the sea by a single cell
+    /// of strait counted wholly as sea; a map grown by one notch silted the
+    /// strait up and the same lagoon counted wholly as ground, handing every
+    /// point behind it the whole width of the lagoon in distance at once.
+    /// Measured over 128-metre steps of size, the largest distance on one seed
+    /// went 101, 131, 288, 320, 340 m — a 157-metre jump for a 128-metre step,
+    /// which took the ceiling over that region from about 85 m to about 175 m
+    /// and turned a headland into a range. Nothing about a strait one cell
+    /// wide should decide how tall a mountain half a kilometre away may be.
+    ///
+    /// Size has no such cliff: a pool grows and shrinks by a cell at a time as
+    /// the map moves under it, so the field moves with it. It is also the
+    /// better rule on its own merits. Every drop of water on these maps sits
+    /// at the one fitted sea level, so a big enclosed lagoon *is* at base
+    /// level whether or not a spit of land closes it off, and ground behind it
+    /// really has only climbed from its shore.
+    ///
+    /// A pool's say is graded rather than granted: full sea seeds the
+    /// transform at zero, a pond seeds it [`INLAND_REACH`] out — far enough
+    /// that the ceiling it implies is above anything the landform reaches, so
+    /// it binds nothing — and the sizes between seed proportionally. The
+    /// chamfer then relaxes each seed against every better one, so a pool a
+    /// short way off a real coast is measured from that coast rather than from
+    /// its own reading.
+    fn from_open_water(raw: &GridField, calibration: &Calibration) -> Self {
+        let wet: Vec<f32> = raw
+            .cells
             .iter()
-            .map(|wet| if *wet { 0.0 } else { f32::INFINITY })
+            .map(|v| {
+                if *v <= calibration.sea_level {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
             .collect();
+        let openness = water_fraction(&wet, raw.dims, (OPEN_RADIUS / COAST_GRID).round() as usize);
+
+        let inert = INLAND_REACH / COAST_GRID;
+        let seeds = wet
+            .iter()
+            .zip(&openness)
+            .map(|(wet, open)| {
+                if *wet < 0.5 {
+                    return f32::INFINITY;
+                }
+                inert * (1.0 - smoothstep(OPEN_POND, OPEN_SEA, *open))
+            })
+            .collect();
+        Self::measure(seeds, raw.dims, raw.origin)
+    }
+
+    /// Distance out from a set of seeds — zero at a cell that counts wholly as
+    /// water, higher at one that counts partly, infinite at ground.
+    fn measure(seeds: Vec<f32>, dims: (usize, usize), origin: Vec2) -> Self {
+        let mut cells = seeds;
 
         chamfer(&mut cells, dims);
         // The transform is exact, and exact is the problem: everywhere two
@@ -2222,6 +2256,61 @@ fn window_max(cells: &mut [f32], dims: (usize, usize), radius: usize) {
 
 /// One pass of 3×3 box blur over a grid, in place. Used to take the creases
 /// off the distance field; run twice it approximates a small tent kernel.
+/// Share of the ground within `radius` cells of each cell that is water, from a
+/// 0-or-1 mask of it — a separable box blur, done with a running sum so the
+/// radius costs nothing.
+///
+/// Everything off the edge of the grid counts as water. The map ends in open
+/// sea on every seed, so a window hanging over the frame really is looking at
+/// sea; and counting it that way is what keeps a coast near the frame reading
+/// the same whatever size map is drawn around it.
+fn water_fraction(wet: &[f32], dims: (usize, usize), radius: usize) -> Vec<f32> {
+    let (nx, nz) = dims;
+    let window = (2 * radius + 1) as f32;
+    let r = radius as isize;
+    let mut line = vec![0.0f32; nx.max(nz)];
+
+    let mut rows = vec![0.0f32; wet.len()];
+    for iz in 0..nz {
+        let row = &wet[iz * nx..iz * nx + nx];
+        let at = |i: isize| {
+            if (0..nx as isize).contains(&i) {
+                row[i as usize]
+            } else {
+                1.0
+            }
+        };
+        let mut sum: f32 = (-r..=r).map(at).sum();
+        line[0] = sum / window;
+        for (ix, value) in line[..nx].iter_mut().enumerate().skip(1) {
+            sum += at(ix as isize + r) - at(ix as isize - r - 1);
+            *value = sum / window;
+        }
+        rows[iz * nx..iz * nx + nx].copy_from_slice(&line[..nx]);
+    }
+
+    let mut out = vec![0.0f32; wet.len()];
+    for ix in 0..nx {
+        let at = |i: isize| {
+            if (0..nz as isize).contains(&i) {
+                rows[i as usize * nx + ix]
+            } else {
+                1.0
+            }
+        };
+        let mut sum: f32 = (-r..=r).map(at).sum();
+        line[0] = sum / window;
+        for (iz, value) in line[..nz].iter_mut().enumerate().skip(1) {
+            sum += at(iz as isize + r) - at(iz as isize - r - 1);
+            *value = sum / window;
+        }
+        for (iz, value) in line[..nz].iter().enumerate() {
+            out[iz * nx + ix] = *value;
+        }
+    }
+    out
+}
+
 fn blur(cells: &mut [f32], dims: (usize, usize)) {
     let (nx, nz) = dims;
     let mut pass = |stride: usize, len: usize, lanes: usize, lane_stride: usize| {
@@ -3085,6 +3174,57 @@ mod tests {
             inland * 6 > land,
             "only {inland} of {land} land samples were beyond the coast's reach"
         );
+    }
+
+    #[test]
+    fn open_water_adds_no_step_of_its_own_as_the_map_grows() {
+        // The map size is a slider, so every field behind it has to move
+        // smoothly as it sweeps. This one decides the ceiling, so a step in it
+        // is a step in how tall a whole region of the map may be.
+        //
+        // Measured against the all-water field rather than against a number of
+        // metres, because some movement is honest: sea level is refitted per
+        // map and the falloff is relative to the frame, so growing a map does
+        // genuinely redraw its coast a little, and both fields inherit that.
+        // What must not happen is this field adding a step the other does not
+        // have — which is what telling sea from pond by whether the water
+        // reaches the frame used to do, that being a fact about the map's
+        // topology and so a yes or no. One cell of strait silting up moved the
+        // deepest point on one seed from 131 m to 288 m across a single
+        // 128-metre notch, against 126 m to 179 m for the all-water field
+        // beside it.
+        for seed in [20_040_112u32, 808] {
+            let (mut open_step, mut all_step) = (0.0f32, 0.0f32);
+            let (mut open_last, mut all_last): (Option<f32>, Option<f32>) = (None, None);
+
+            for chunks in 6..=12u32 {
+                let config = MapConfig {
+                    chunks: UVec2::splat(chunks),
+                    seed,
+                };
+                let gen = TerrainGenerator::new(&config);
+                let deepest = |field: &CoastDistance| {
+                    field.field.cells.iter().copied().fold(0.0f32, f32::max) * COAST_GRID
+                };
+                let (open, all) = (deepest(&gen.inland), deepest(&gen.coast));
+
+                if let (Some(o), Some(a)) = (open_last, all_last) {
+                    open_step = open_step.max((open - o).abs());
+                    all_step = all_step.max((all - a).abs());
+                }
+                (open_last, all_last) = (Some(open), Some(all));
+            }
+
+            // Half as much again, which is slack for the two fields not
+            // tracking each other exactly rather than room for a real step:
+            // measured, this one is the smoother of the two about as often as
+            // not.
+            assert!(
+                open_step <= all_step * 1.5,
+                "seed {seed}'s open-water distance jumped {open_step:.0} m over one size step, \
+                 against {all_step:.0} m for the all-water field it should be as smooth as"
+            );
+        }
     }
 
     #[test]
