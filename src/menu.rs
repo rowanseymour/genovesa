@@ -3,14 +3,13 @@
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::terrain::MapConfig;
+use crate::terrain::{MapConfig, CHUNK_TILES};
 use crate::AppState;
 
-/// Map sizes offered in the setup dialog, in metres per side. Tiles are one
-/// metre, so these are tile counts too.
-///
-/// Shared with `plan_grid` in the terrain tests, so that the sizes a change to
-/// the generator gets judged on are exactly the sizes anyone can pick.
+/// Map sizes offered in the setup dialog, in metres per side — each a whole
+/// number of the generator's chunks, which is the unit maps are measured in.
+/// The generator itself takes any X by Z chunks; the dialog offers squares
+/// until it grows a proper size control.
 pub const SIZE_PRESETS: [(&str, u32); 3] = [("Small", 768), ("Medium", 1024), ("Large", 1536)];
 
 /// Longest seed the user can type. Keeps it inside a u32.
@@ -59,7 +58,8 @@ impl Default for NewMapSettings {
     fn default() -> Self {
         let defaults = MapConfig::default();
         Self {
-            size: defaults.size,
+            // The dialog offers square maps, so one axis stands for both.
+            size: defaults.tiles().x,
             seed: defaults.seed.to_string(),
         }
     }
@@ -252,7 +252,7 @@ fn dialog_actions(
             MenuButton::RandomSeed => settings.seed = random_seed().to_string(),
             MenuButton::Back => next.set(AppState::MainMenu),
             MenuButton::Start => {
-                config.size = settings.size;
+                config.chunks = UVec2::splat(settings.size / CHUNK_TILES);
                 config.seed = settings.seed_value();
                 next.set(AppState::InWorld);
             }
@@ -490,14 +490,14 @@ mod tests {
     fn start_applies_the_chosen_size_and_seed() {
         let mut app = test_app(AppState::NewMap);
 
-        click(&mut app, MenuButton::ChooseSize(240));
+        click(&mut app, MenuButton::ChooseSize(256));
         press_key(&mut app, KeyCode::Digit7);
         press_key(&mut app, KeyCode::Digit7);
         app.world_mut().resource_mut::<NewMapSettings>().seed = "77".to_string();
         click(&mut app, MenuButton::Start);
 
         let config = app.world().resource::<MapConfig>();
-        assert_eq!(config.size, 240);
+        assert_eq!(config.chunks, UVec2::splat(2));
         assert_eq!(config.seed, 77);
         assert_eq!(state(&app), AppState::InWorld);
     }
@@ -566,13 +566,16 @@ mod tests {
     fn defaults_match_the_map_config() {
         let settings = NewMapSettings::default();
         let config = MapConfig::default();
-        assert_eq!(settings.size, config.size);
+        assert_eq!(settings.size, config.tiles().x);
         assert_eq!(settings.seed_value(), config.seed);
     }
 
     #[test]
-    fn size_presets_are_distinct_and_ordered() {
+    fn size_presets_are_distinct_ordered_whole_chunks() {
         let sizes: Vec<u32> = SIZE_PRESETS.iter().map(|(_, size)| *size).collect();
+        for size in &sizes {
+            assert_eq!(size % CHUNK_TILES, 0, "{size} m is not a whole number of chunks");
+        }
         let mut sorted = sizes.clone();
         sorted.sort_unstable();
         sorted.dedup();

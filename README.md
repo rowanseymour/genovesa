@@ -3,10 +3,11 @@
 An experiment in procedural 3D terrain, built with [Bevy](https://bevy.org).
 Where it goes is undecided.
 
-![Fifteen generated islands](docs/maps.png)
+![Sixteen generated islands](docs/maps.png)
 
-*Five seeds at each map size — 768 m, 1024 m and 1536 m per side — rendered in
-plan by the `readme_grid` test.*
+*Sixteen maps of assorted shapes — from single-chunk islets 128 m across to
+1.5 km continents — all drawn to one scale, rendered in plan by the
+`readme_grid` test.*
 
 ## Running
 
@@ -41,12 +42,14 @@ shores and cliffs, with the landform and the colours reading the same field so
 that a beach is always flat and sandy and a cliff steep and grey.
 
 The look is flat-shaded facets in a small fixed palette — no textures and no
-gradients anywhere. The mesh is built in chunks, drawn coarser than the height
-field is sampled, so the facets read as deliberate shapes.
+gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
+height field is sampled, so the facets read as deliberate shapes. A map is any
+number of chunks along each axis — square or not, from a single chunk up.
 
 A bigger map means more landscape, not stretched landscape: wavelengths are
 fixed in metres, so a large map holds more ranges, more coast and more inland
-water rather than larger ones.
+water rather than larger ones. And a small map only holds what fits — by the
+smallest, a low green islet rather than a shrunken alp.
 
 The full story — every constant, and why it is what it is — lives in the
 comments in [`src/terrain.rs`](src/terrain.rs). [`src/noise.rs`](src/noise.rs)
@@ -60,7 +63,7 @@ Environment variables, all optional:
 | Variable | Effect |
 | --- | --- |
 | `KASSITER_STATE` | `newmap` or `inworld` — start on that screen |
-| `KASSITER_SIZE` | Initial map size in metres per side; also narrows `plan_grid` to that one size |
+| `KASSITER_SIZE` | Initial map size in metres — `1024` or `1536x1024` — rounded to whole 128 m chunks; also narrows `plan_grid` to that one shape |
 | `KASSITER_SEED` | Initial map seed |
 | `KASSITER_ZOOM` | Initial camera distance in metres |
 | `KASSITER_FOCUS` | `x,z` in metres from the map centre — start the camera there |
@@ -76,7 +79,7 @@ KASSITER_DUMP=grid.ppm cargo test --release plan_grid -- --ignored --nocapture
 
 | Test | What it shows |
 | --- | --- |
-| `plan_grid` | nine seeds in plan, one grid per preset size at a constant 3 m/px — the tool for judging a generator change |
+| `plan_grid` | nine seeds in plan, one grid per map shape — squares, rectangles and the single-chunk map — at a constant 3 m/px; the tool for judging a generator change |
 | `plan_view` | one map in plan, honouring `KASSITER_SIZE` / `KASSITER_SEED` |
 | `readme_grid` | the image at the top of this page |
 | `island_shape` | per-seed numbers: land and mountain shares, peak height, slopes, coastline |

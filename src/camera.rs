@@ -214,8 +214,8 @@ fn pan(
         // `follow_terrain` owns the height.
         let limit = config.half_extent() * 1.05;
         let mut target = camera.target_focus + delta;
-        target.x = target.x.clamp(-limit, limit);
-        target.z = target.z.clamp(-limit, limit);
+        target.x = target.x.clamp(-limit.x, limit.x);
+        target.z = target.z.clamp(-limit.y, limit.y);
         camera.target_focus = target;
     }
 }
@@ -321,7 +321,10 @@ mod tests {
             .init_state::<AppState>()
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<AccumulatedMouseScroll>()
-            .insert_resource(MapConfig { size: 100, seed: 1 });
+            .insert_resource(MapConfig {
+                chunks: UVec2::splat(1),
+                seed: 1,
+            });
         app.update();
 
         app.world_mut()
@@ -335,10 +338,7 @@ mod tests {
     /// follow and to keep clear of.
     fn test_app_on_terrain() -> App {
         let mut app = test_app();
-        let config = MapConfig {
-            size: 1024,
-            seed: 20_040_112,
-        };
+        let config = MapConfig::square(1024, 20_040_112);
         app.insert_resource(config)
             .insert_resource(TerrainGenerator::new(&config));
         app.update();
@@ -463,10 +463,10 @@ mod tests {
     fn panning_stops_at_the_map_edge() {
         let mut app = test_app();
         hold(&mut app, KeyCode::ArrowUp);
-        // Far more frames than it takes to cross a 100-tile map.
+        // Far more frames than it takes to cross a single-chunk map.
         run_frames(&mut app, 600);
 
-        let limit = 50.0 * 1.05;
+        let limit = 64.0 * 1.05;
         let focus = focus(&mut app);
         assert!(
             focus.x >= -limit - 1e-3 && focus.z >= -limit - 1e-3,
@@ -551,10 +551,7 @@ mod tests {
     #[test]
     fn the_focus_sits_on_the_ground() {
         let mut app = test_app_on_terrain();
-        let terrain = TerrainGenerator::new(&MapConfig {
-            size: 1024,
-            seed: 20_040_112,
-        });
+        let terrain = TerrainGenerator::new(&MapConfig::square(1024, 20_040_112));
 
         // The first frame that can see the terrain puts the camera down on it
         // rather than easing from sea level.
@@ -577,10 +574,7 @@ mod tests {
 
     #[test]
     fn the_eye_never_gets_inside_the_ground() {
-        let terrain = TerrainGenerator::new(&MapConfig {
-            size: 1024,
-            seed: 20_040_112,
-        });
+        let terrain = TerrainGenerator::new(&MapConfig::square(1024, 20_040_112));
 
         // Put the camera down all over the map rather than panning to each
         // spot: panning is wall-clock driven, so a headless run covers almost
