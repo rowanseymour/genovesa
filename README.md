@@ -64,9 +64,11 @@ water rather than larger ones. And a small map only holds what fits — by the
 smallest, a low green islet rather than a shrunken alp.
 
 The full story — every constant, and why it is what it is — lives in the
-comments in [`src/terrain.rs`](src/terrain.rs). [`src/noise.rs`](src/noise.rs)
-is a dependency-free Perlin implementation, kept in-tree so a seed always
-produces the same map.
+comments in [`core/src/terrain.rs`](core/src/terrain.rs), part of the
+`kassiter-core` crate: the terrain without the engine, so the same maps can be
+generated without Bevy along for the ride.
+[`core/src/noise.rs`](core/src/noise.rs) is a dependency-free Perlin
+implementation, kept in-tree so a seed always produces the same map.
 
 ## Looking at maps
 
@@ -119,7 +121,7 @@ That is one process and one generated map, so the pictures are all of the same
 world and worth comparing against each other. Shots are rendered off screen —
 no window opens, and the run quits when the last one is written.
 
-Three `#[ignore]`-d tests measure rather than draw, run like:
+Four `#[ignore]`-d tests measure rather than draw, run like:
 
 ```bash
 cargo test --release island_shape -- --ignored --nocapture
@@ -129,6 +131,7 @@ cargo test --release island_shape -- --ignored --nocapture
 | --- | --- |
 | `island_shape` | per-seed numbers: land and mountain shares, peak height, slopes, coastline |
 | `shore_mix` | how each seed's waterline divides between beach, rocky shore and cliff |
+| `generator_cost` | the one-off cost of fitting a map's generator, before any mesh is built |
 | `mesh_build_cost` | generation cost per map size |
 
 ## Tests
@@ -138,7 +141,16 @@ cargo test
 ```
 
 Covers terrain generation invariants, the coast, mesh chunking, the camera
-maths and the menu state transitions.
+maths and the menu state transitions — both crates, since the workspace runs
+them together.
+
+That run always builds the core crate the way the game asks for it, with Bevy
+on, so the engine-free build it exists for is the one thing it never compiles.
+Check that separately after touching the core crate:
+
+```bash
+cargo check -p kassiter-core --no-default-features
+```
 
 ## Licence
 

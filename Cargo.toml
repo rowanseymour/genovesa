@@ -1,17 +1,35 @@
+[workspace]
+members = ["core"]
+# So a bare `cargo test` or `cargo build` at the root covers the core crate
+# too, rather than only the package this manifest also declares.
+default-members = [".", "core"]
+
+# Bevy, the one piece of it the core crate uses directly, and the maths library
+# the two of them meet on. None of the three can be bumped on its own: bevy_ecs
+# is part of Bevy and glam is what bevy_math wraps, so a version that missed one
+# of them would put two copies of it in the tree and the types the crates hand
+# each other would quietly stop being the same types. Pinned together here so
+# that moving Bevy is one edit rather than three that have to agree.
+[workspace.dependencies]
+bevy = "0.19"
+bevy_ecs = "0.19"
+glam = "0.32"
+
 [package]
 name = "kassiter"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-# Two binaries live here — the game and the map renderer — so a bare
-# `cargo run` has to be told which one it means.
+# The workspace holds a second binary — `mapgen`, over in the core crate — so a
+# bare `cargo run` has to be told which of the two it means.
 default-run = "game"
 
 [dependencies]
-bevy = "0.19"
-# PNG encoding for the `mapgen` binary's plan renders. Bevy already pulls this
-# in, so only the encoder itself is new.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# The world itself — terrain and the plan renderer — engine-free in its own
+# crate; its `bevy` feature is only the derives that let the game hold its types
+# as ECS resources.
+kassiter-core = { path = "core", features = ["bevy"] }
+bevy.workspace = true
 
 [features]
 # Much faster incremental builds while iterating: `cargo run --features dev`

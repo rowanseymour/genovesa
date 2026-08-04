@@ -1,0 +1,25 @@
+# The world without the engine: terrain generation and the plan renderer,
+# with no Bevy dependency — so a headless server, or a wasm build for another
+# renderer, can generate the same maps without dragging a game engine in.
+[package]
+name = "kassiter-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+# Reached only by path, and it names no version of itself that a dependant
+# could ask for, so publishing it would only ever be a mistake.
+publish = false
+
+[dependencies]
+# The same maths types Bevy re-exports, taken directly so this crate and the
+# game agree on them without this crate depending on Bevy. Versioned by the
+# workspace, which is what keeps that agreement true.
+glam.workspace = true
+# PNG encoding for the plan renders.
+image = { version = "0.25", default-features = false, features = ["png"] }
+bevy_ecs = { workspace = true, optional = true }
+
+[features]
+# Lets the game hold MapConfig and TerrainGenerator as ECS resources directly.
+# Off by default so every other consumer gets a Bevy-free build.
+bevy = ["dep:bevy_ecs"]

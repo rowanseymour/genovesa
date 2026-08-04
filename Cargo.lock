@@ -3216,6 +3216,15 @@ name = "kassiter"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "kassiter-core",
+]
+
+[[package]]
+name = "kassiter-core"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "glam",
  "image",
 ]
 

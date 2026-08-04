@@ -5,7 +5,7 @@
 //! generator as a whole got better. The `mapgen` binary is the front end to
 //! everything here.
 
-use bevy::math::{UVec2, Vec2, Vec3};
+use glam::{UVec2, Vec2, Vec3};
 
 use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES};
 

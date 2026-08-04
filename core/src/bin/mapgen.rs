@@ -3,7 +3,8 @@
 //! The generator is the part of the app worth looking at hardest, and looking
 //! at it means seeing many maps from above rather than walking around one. This
 //! binary is that view: no window, no GPU, no app state — just the height field
-//! and the same colour function the mesh uses.
+//! and the same colour function the mesh uses. It ships with the generator
+//! rather than with the game so that none of the engine is even linked in.
 //!
 //! ```sh
 //! cargo run --release --bin mapgen -- grid
@@ -17,10 +18,10 @@
 
 use std::process::ExitCode;
 
-use bevy::math::UVec2;
+use glam::UVec2;
 
-use kassiter::plan;
-use kassiter::terrain::{MapConfig, CHUNK_TILES};
+use kassiter_core::plan;
+use kassiter_core::terrain::{MapConfig, CHUNK_TILES};
 
 /// The seed the grid and collage spread their set from when none is given.
 /// The collage in the README is this one, so leaving it alone redraws the
