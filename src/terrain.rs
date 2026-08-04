@@ -590,25 +590,6 @@ impl MapConfig {
         };
         Some(UVec2::new(axis(w)?, axis(d)?))
     }
-
-    /// Overrides from `KASSITER_SIZE` / `KASSITER_SEED`, for trying out maps
-    /// without going through the menu.
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-        if let Some(chunks) = std::env::var("KASSITER_SIZE")
-            .ok()
-            .and_then(|v| Self::parse_size(&v))
-        {
-            config.chunks = chunks;
-        }
-        if let Some(seed) = std::env::var("KASSITER_SEED")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
-            config.seed = seed;
-        }
-        config
-    }
 }
 
 pub struct TerrainPlugin;

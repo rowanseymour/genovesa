@@ -20,11 +20,11 @@ const ROTATION_SPEED: f32 = std::f32::consts::FRAC_PI_2;
 /// Zoom range, as the camera's distance from its focus point in metres. At the
 /// default the visible ground is roughly 50 m across at the near edge and 100 m
 /// at the far one.
-const MIN_DISTANCE: f32 = 20.0;
+pub const MIN_DISTANCE: f32 = 20.0;
 /// Far enough out to see a whole mountain. The terrain's peaks run to a couple
 /// of hundred metres, and from closer than this the camera sits below the
 /// summit of anything worth looking at.
-const MAX_DISTANCE: f32 = 380.0;
+pub const MAX_DISTANCE: f32 = 380.0;
 const DEFAULT_DISTANCE: f32 = 42.0;
 
 /// How much one notch of scroll changes the distance. Geometric, so a notch
@@ -43,6 +43,30 @@ const MIN_CLEARANCE: f32 = 12.0;
 const PAN_SPEED: f32 = 45.0;
 /// How quickly panning and zooming ease towards their targets.
 const SMOOTHING: f32 = 12.0;
+
+/// Somewhere to point the camera, as a whole. Enough to describe a view
+/// completely, so that one can be asked for on the command line, put back at
+/// the start of a match, or stepped through a list of shots.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    /// Point on the ground the camera is centred on. The height is ignored —
+    /// [`follow_terrain`] puts it down on the ground.
+    pub focus: Vec3,
+    /// How far back the camera sits, in metres.
+    pub distance: f32,
+    /// Bearing to look from, in radians.
+    pub yaw: f32,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            focus: Vec3::ZERO,
+            distance: DEFAULT_DISTANCE,
+            yaw: YAW,
+        }
+    }
+}
 
 /// The camera's ground-level target. The camera itself sits back and above it.
 #[derive(Component)]
@@ -68,53 +92,41 @@ pub struct MapCamera {
 
 impl Default for MapCamera {
     fn default() -> Self {
-        // `KASSITER_ZOOM` sets the starting distance in metres, for checking
-        // how the terrain reads at a given framing without reaching for the
-        // scroll wheel every run.
-        let distance = std::env::var("KASSITER_ZOOM")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(DEFAULT_DISTANCE)
-            .clamp(MIN_DISTANCE, MAX_DISTANCE);
-
-        // `KASSITER_FOCUS=x,z` starts the camera over a given point on the map
-        // in metres from its centre, so a particular stretch of coast can be
-        // looked at — or screenshotted — without panning there by hand.
-        let focus = std::env::var("KASSITER_FOCUS")
-            .ok()
-            .and_then(|v| parse_focus(&v))
-            .unwrap_or(Vec3::ZERO);
-
-        // `KASSITER_YAW` starts the view turned to a given bearing in degrees,
-        // so the same spot can be screenshotted from several sides without
-        // holding Q or E for exactly the right length of time.
-        let yaw = std::env::var("KASSITER_YAW")
-            .ok()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .map(f32::to_radians)
-            .unwrap_or(YAW);
-
-        Self {
-            focus,
-            target_focus: focus,
-            distance,
-            target_distance: distance,
-            yaw,
-            target_yaw: yaw,
-            grounded: false,
-        }
+        Self::looking(View::default())
     }
 }
 
-/// Reads an `x,z` pair of metres. The height is left at zero — `follow_terrain`
-/// puts the camera down on the ground on its first frame.
-fn parse_focus(value: &str) -> Option<Vec3> {
-    let (x, z) = value.split_once(',')?;
-    Some(Vec3::new(
-        x.trim().parse().ok()?,
-        0.0,
-        z.trim().parse().ok()?,
-    ))
+impl MapCamera {
+    /// A camera already at a view, rather than easing towards it.
+    pub fn looking(view: View) -> Self {
+        let mut camera = Self {
+            focus: Vec3::ZERO,
+            target_focus: Vec3::ZERO,
+            distance: 0.0,
+            target_distance: 0.0,
+            yaw: 0.0,
+            target_yaw: 0.0,
+            grounded: false,
+        };
+        camera.snap_to(view);
+        camera
+    }
+
+    /// Puts the camera at a view outright. Both the eased values and the
+    /// targets are set, so nothing slides there over the following frames —
+    /// which is what a screenshot of a named viewpoint needs.
+    pub fn snap_to(&mut self, view: View) {
+        let distance = view.distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
+        self.focus = view.focus;
+        self.target_focus = view.focus;
+        self.distance = distance;
+        self.target_distance = distance;
+        self.yaw = view.yaw;
+        self.target_yaw = view.yaw;
+        // The focus carries no useful height — dropping it back on the ground
+        // is `follow_terrain`'s job, on the next frame.
+        self.grounded = false;
+    }
 }
 
 pub struct MapCameraPlugin;
@@ -123,7 +135,8 @@ impl Plugin for MapCameraPlugin {
     fn build(&self, app: &mut App) {
         // The camera outlives any one match — the UI needs one to render into
         // even while we're sitting on the main menu.
-        app.add_systems(Startup, spawn_camera)
+        app.init_resource::<View>()
+            .add_systems(Startup, spawn_camera)
             .add_systems(OnEnter(AppState::InWorld), recentre)
             .add_systems(
                 Update,
@@ -134,19 +147,19 @@ impl Plugin for MapCameraPlugin {
     }
 }
 
-/// Puts the camera back over the middle of the map at the start of a match.
-fn recentre(mut cameras: Query<&mut MapCamera>) {
+/// Puts the camera back at the starting view at the start of a match.
+fn recentre(view: Res<View>, mut cameras: Query<&mut MapCamera>) {
     for mut camera in &mut cameras {
-        *camera = MapCamera::default();
+        camera.snap_to(*view);
     }
 }
 
-fn spawn_camera(mut commands: Commands) {
-    let camera = MapCamera::default();
+fn spawn_camera(mut commands: Commands, view: Res<View>) {
+    let camera = MapCamera::looking(*view);
     commands.spawn((
         Name::new("Camera"),
         Camera3d::default(),
-        MapCamera::default(),
+        MapCamera::looking(*view),
         Transform::from_translation(eye(&camera)).looking_at(camera.focus, Vec3::Y),
         // Aerial haze, both to stop the far side of the map looking flat and to
         // hide where the sea plane is cut off by the far clip plane. The colour
@@ -710,14 +723,47 @@ mod tests {
     }
 
     #[test]
-    fn a_starting_focus_reads_as_a_pair_of_metres() {
-        assert_eq!(parse_focus("120,-45"), Some(Vec3::new(120.0, 0.0, -45.0)));
-        assert_eq!(parse_focus(" 8.5 , 2 "), Some(Vec3::new(8.5, 0.0, 2.0)));
+    fn a_match_starts_at_the_view_it_was_given() {
+        let view = View {
+            focus: Vec3::new(98.0, 0.0, -317.0),
+            distance: 150.0,
+            yaw: 1.25,
+        };
+        let mut app = test_app();
+        app.insert_resource(view);
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InWorld);
+        app.update();
 
-        // Anything that isn't a pair is ignored rather than guessed at, so a
-        // typo in the variable leaves the camera where it would have been.
-        for bad in ["", "120", "120;45", "a,b", "1,2,3"] {
-            assert_eq!(parse_focus(bad), None, "{bad:?} should not parse");
-        }
+        assert_eq!(focus(&mut app), view.focus);
+        assert_eq!(read(&mut app, |c| c.target_distance), view.distance);
+        assert_eq!(read(&mut app, |c| c.target_yaw), view.yaw);
+    }
+
+    #[test]
+    fn snapping_to_a_view_leaves_nothing_still_easing() {
+        let mut camera = MapCamera::default();
+        camera.snap_to(View {
+            focus: Vec3::new(-40.0, 0.0, 12.0),
+            distance: 200.0,
+            yaw: -0.5,
+        });
+
+        // Eased value and target agree, so the next frame renders the view
+        // asked for rather than one on its way there.
+        assert_eq!(camera.focus, camera.target_focus);
+        assert_eq!(camera.distance, camera.target_distance);
+        assert_eq!(camera.yaw, camera.target_yaw);
+    }
+
+    #[test]
+    fn snapping_holds_the_zoom_within_range() {
+        let mut camera = MapCamera::default();
+        camera.snap_to(View {
+            distance: MAX_DISTANCE * 10.0,
+            ..View::default()
+        });
+        assert_eq!(camera.target_distance, MAX_DISTANCE);
     }
 }

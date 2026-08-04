@@ -4,10 +4,11 @@
 //! is the game, and `mapgen` renders maps in plan without opening a window.
 
 pub mod camera;
+pub mod capture;
+pub mod cli;
 pub mod menu;
 pub mod noise;
 pub mod plan;
-pub mod screenshot;
 pub mod terrain;
 
 use bevy::prelude::*;
@@ -25,6 +26,10 @@ pub const HAZE_START: f32 = 320.0;
 /// shadows included.
 pub const HAZE_END: f32 = 900.0;
 
+/// Size of the window the game is played in, in pixels. Captured shots are
+/// sized by `--resolution` instead, having no window to take it from.
+pub const WINDOW: UVec2 = UVec2::new(1280, 720);
+
 /// Top-level screen the app is on.
 #[derive(States, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum AppState {
@@ -33,16 +38,4 @@ pub enum AppState {
     /// Choosing map size and seed.
     NewMap,
     InWorld,
-}
-
-impl AppState {
-    /// `KASSITER_STATE=newmap|inworld` skips straight to a screen, so that
-    /// working on one doesn't mean clicking through the others every run.
-    pub fn from_env() -> Self {
-        match std::env::var("KASSITER_STATE").as_deref() {
-            Ok("newmap") => Self::NewMap,
-            Ok("inworld") => Self::InWorld,
-            _ => Self::MainMenu,
-        }
-    }
 }
