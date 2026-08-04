@@ -3,6 +3,7 @@
 //! The crate is a library so that more than one binary can share it: `kassiter`
 //! is the game, and `mapgen` renders maps in plan without opening a window.
 
+pub mod bindings;
 pub mod camera;
 pub mod capture;
 pub mod cli;
@@ -37,5 +38,7 @@ pub enum AppState {
     MainMenu,
     /// Choosing map size and seed.
     NewMap,
+    /// Choosing which key does what.
+    Settings,
     InWorld,
 }

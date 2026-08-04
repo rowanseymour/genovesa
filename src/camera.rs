@@ -4,6 +4,7 @@ use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 
+use crate::bindings::{Action, KeyBindings};
 use crate::terrain::{MapConfig, TerrainGenerator};
 use crate::AppState;
 
@@ -135,7 +136,12 @@ impl Plugin for MapCameraPlugin {
     fn build(&self, app: &mut App) {
         // The camera outlives any one match — the UI needs one to render into
         // even while we're sitting on the main menu.
+        //
+        // The bindings are shared with the settings screen, which registers
+        // them too; whichever plugin is built first wins and the other is a
+        // no-op, so either can be used on its own.
         app.init_resource::<View>()
+            .init_resource::<KeyBindings>()
             .add_systems(Startup, spawn_camera)
             .add_systems(OnEnter(AppState::InWorld), recentre)
             .add_systems(
@@ -192,23 +198,37 @@ fn forward(yaw: f32) -> Vec3 {
     -Vec3::new(yaw.sin(), 0.0, yaw.cos())
 }
 
+/// True while an action's own key is down, or the arrow key that permanently
+/// shadows it. The arrows aren't rebindable and aren't listed in the settings
+/// screen: they're the floor under it, so that no set of bindings, however
+/// muddled, can leave the map impossible to move.
+fn held(
+    keys: &ButtonInput<KeyCode>,
+    bindings: &KeyBindings,
+    action: Action,
+    arrow: KeyCode,
+) -> bool {
+    keys.any_pressed([bindings.key(action), arrow])
+}
+
 fn pan(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
     time: Res<Time>,
     config: Res<MapConfig>,
     mut cameras: Query<&mut MapCamera>,
 ) {
     let mut input = Vec2::ZERO;
-    if keys.any_pressed([KeyCode::ArrowUp, KeyCode::KeyW]) {
+    if held(&keys, &bindings, Action::PanForward, KeyCode::ArrowUp) {
         input.y += 1.0;
     }
-    if keys.any_pressed([KeyCode::ArrowDown, KeyCode::KeyS]) {
+    if held(&keys, &bindings, Action::PanBack, KeyCode::ArrowDown) {
         input.y -= 1.0;
     }
-    if keys.any_pressed([KeyCode::ArrowRight, KeyCode::KeyD]) {
+    if held(&keys, &bindings, Action::PanRight, KeyCode::ArrowRight) {
         input.x += 1.0;
     }
-    if keys.any_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]) {
+    if held(&keys, &bindings, Action::PanLeft, KeyCode::ArrowLeft) {
         input.x -= 1.0;
     }
 
@@ -278,14 +298,21 @@ fn zoom(scroll: Res<AccumulatedMouseScroll>, mut cameras: Query<&mut MapCamera>)
     }
 }
 
-/// Q and E swing the view round for as long as they're held, so it can be left
-/// facing any direction rather than only the four the map was laid out on.
-fn rotate(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut cameras: Query<&mut MapCamera>) {
+/// The turn keys swing the view round for as long as they're held, so it can be
+/// left facing any direction rather than only the four the map was laid out on.
+/// Unlike panning these have no arrow-key fallback — a view that can't be turned
+/// is awkward, not stranded.
+fn rotate(
+    keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
+    time: Res<Time>,
+    mut cameras: Query<&mut MapCamera>,
+) {
     let mut direction = 0.0;
-    if keys.pressed(KeyCode::KeyQ) {
+    if keys.pressed(bindings.key(Action::TurnLeft)) {
         direction += 1.0;
     }
-    if keys.pressed(KeyCode::KeyE) {
+    if keys.pressed(bindings.key(Action::TurnRight)) {
         direction -= 1.0;
     }
     if direction == 0.0 {
@@ -439,6 +466,73 @@ mod tests {
             .count();
         assert_eq!(count, 1);
         assert_eq!(focus(&mut app), Vec3::ZERO);
+    }
+
+    /// Puts an action on a key, as the controls screen does.
+    fn rebind(app: &mut App, action: Action, key: KeyCode) {
+        app.world_mut()
+            .resource_mut::<KeyBindings>()
+            .bind(action, key, None);
+    }
+
+    #[test]
+    fn a_rebound_key_pans_and_the_key_it_replaced_stops() {
+        let mut app = test_app();
+        rebind(&mut app, Action::PanForward, KeyCode::KeyJ);
+
+        hold(&mut app, KeyCode::KeyJ);
+        run_frames(&mut app, 20);
+        assert!(
+            focus(&mut app).length() > 0.0,
+            "the newly bound key did not pan"
+        );
+
+        // J was nobody's key, so nothing was traded for it and W is now bound to
+        // nothing at all. Holding it has to leave the camera where it stands.
+        let mut app = test_app();
+        rebind(&mut app, Action::PanForward, KeyCode::KeyJ);
+        hold(&mut app, KeyCode::KeyW);
+        run_frames(&mut app, 20);
+        assert_eq!(
+            focus(&mut app),
+            Vec3::ZERO,
+            "W still pans after being rebound away"
+        );
+    }
+
+    #[test]
+    fn the_arrow_keys_pan_whatever_the_bindings_say() {
+        let mut app = test_app();
+        // Hand every pan action to keys nowhere near the arrows.
+        rebind(&mut app, Action::PanForward, KeyCode::KeyI);
+        rebind(&mut app, Action::PanBack, KeyCode::KeyK);
+        rebind(&mut app, Action::PanLeft, KeyCode::KeyJ);
+        rebind(&mut app, Action::PanRight, KeyCode::KeyL);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 20);
+
+        let focus = focus(&mut app);
+        let forward = forward(read(&mut app, |c| c.yaw));
+        assert!(
+            focus.dot(forward) > 0.0,
+            "the arrow keys stopped panning once the letters moved"
+        );
+    }
+
+    #[test]
+    fn a_rebound_key_turns_the_view() {
+        let mut app = test_app();
+        rebind(&mut app, Action::TurnLeft, KeyCode::KeyN);
+
+        let start = read(&mut app, |c| c.target_yaw);
+        hold(&mut app, KeyCode::KeyN);
+        run_frames(&mut app, 20);
+
+        assert!(
+            read(&mut app, |c| c.target_yaw) > start,
+            "the newly bound key did not turn the view"
+        );
     }
 
     #[test]

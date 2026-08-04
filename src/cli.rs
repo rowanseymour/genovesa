@@ -75,7 +75,7 @@ Kassiter — generates a map and lets you look around it.
 Usage: game [options]
 
 Options:
-  --state <screen>  start on `mainmenu`, `newmap` or `inworld`
+  --state <screen>  start on `mainmenu`, `newmap`, `settings` or `inworld`
                     [default: mainmenu, or inworld when shots are asked for]
   --size <W|WxD>    map size in metres, rounded to whole 128 m chunks
                     [default: {}x{}]
@@ -174,9 +174,10 @@ fn state(value: &str) -> Result<AppState, String> {
     match value {
         "mainmenu" => Ok(AppState::MainMenu),
         "newmap" => Ok(AppState::NewMap),
+        "settings" => Ok(AppState::Settings),
         "inworld" => Ok(AppState::InWorld),
         other => Err(format!(
-            "`{other}` is not a screen — try mainmenu, newmap or inworld"
+            "`{other}` is not a screen — try mainmenu, newmap, settings or inworld"
         )),
     }
 }
@@ -256,6 +257,14 @@ mod tests {
         assert_eq!(args.view.focus, Vec3::new(98.0, 0.0, -317.0));
         assert_eq!(args.view.distance, 150.0);
         assert_eq!(args.view.yaw, std::f32::consts::FRAC_PI_2);
+    }
+
+    #[test]
+    fn opens_on_any_of_the_screens_by_name() {
+        assert_eq!(ok("--state mainmenu").state, AppState::MainMenu);
+        assert_eq!(ok("--state newmap").state, AppState::NewMap);
+        assert_eq!(ok("--state settings").state, AppState::Settings);
+        assert_eq!(ok("--state inworld").state, AppState::InWorld);
     }
 
     #[test]
