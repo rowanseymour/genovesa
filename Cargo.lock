@@ -2617,6 +2617,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "game"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "world",
+]
+
+[[package]]
 name = "gethostname"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3209,23 +3217,6 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "kassiter"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "kassiter-core",
-]
-
-[[package]]
-name = "kassiter-core"
-version = "0.1.0"
-dependencies = [
- "bevy_ecs",
- "glam",
- "image",
 ]
 
 [[package]]
@@ -5859,6 +5850,15 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "world"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "glam",
+ "image",
+]
 
 [[package]]
 name = "writeable"

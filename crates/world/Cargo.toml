@@ -2,7 +2,7 @@
 # with no Bevy dependency — so a headless server, or a wasm build for another
 # renderer, can generate the same maps without dragging a game engine in.
 [package]
-name = "kassiter-core"
+name = "world"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"

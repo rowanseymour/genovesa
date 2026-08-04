@@ -1,0 +1,19 @@
+[package]
+name = "game"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+# The workspace holds a second binary — `mapgen`, over in the world crate — so a
+# bare `cargo run` has to be told which of the two it means.
+default-run = "game"
+
+[dependencies]
+# The world itself — terrain and the plan renderer — engine-free in its own
+# crate; its `bevy` feature is only the derives that let the game hold its types
+# as ECS resources.
+world = { path = "../world", features = ["bevy"] }
+bevy.workspace = true
+
+[features]
+# Much faster incremental builds while iterating: `cargo run --features dev`
+dev = ["bevy/dynamic_linking"]

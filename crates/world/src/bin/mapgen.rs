@@ -20,8 +20,8 @@ use std::process::ExitCode;
 
 use glam::UVec2;
 
-use kassiter_core::plan;
-use kassiter_core::terrain::{MapConfig, CHUNK_TILES};
+use world::plan;
+use world::terrain::{MapConfig, CHUNK_TILES};
 
 /// The seed the grid and collage spread their set from when none is given.
 /// The collage in the README is this one, so leaving it alone redraws the

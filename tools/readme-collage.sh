@@ -49,7 +49,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 # bash 3.2 treats an empty array as unset under `set -u`, hence the guard.
 cargo run --release --quiet --manifest-path "$root/Cargo.toml" \
-    -p kassiter-core --bin mapgen -- \
+    -p world --bin mapgen -- \
     collage ${seed[@]+"${seed[@]}"} --out "$raw" >/dev/null
 
 ffmpeg -y -loglevel error -i "$raw" -filter_complex \

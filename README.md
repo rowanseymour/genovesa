@@ -64,11 +64,11 @@ water rather than larger ones. And a small map only holds what fits — by the
 smallest, a low green islet rather than a shrunken alp.
 
 The full story — every constant, and why it is what it is — lives in the
-comments in [`core/src/terrain.rs`](core/src/terrain.rs), part of the
-`kassiter-core` crate: the terrain without the engine, so the same maps can be
-generated without Bevy along for the ride.
-[`core/src/noise.rs`](core/src/noise.rs) is a dependency-free Perlin
-implementation, kept in-tree so a seed always produces the same map.
+comments in [`crates/world/src/terrain.rs`](crates/world/src/terrain.rs), part of
+the `world` crate: the terrain without the engine, so the same maps can
+be generated without Bevy along for the ride.
+[`crates/world/src/noise.rs`](crates/world/src/noise.rs) is a dependency-free
+Perlin implementation, kept in-tree so a seed always produces the same map.
 
 ## Looking at maps
 
@@ -144,12 +144,12 @@ Covers terrain generation invariants, the coast, mesh chunking, the camera
 maths and the menu state transitions — both crates, since the workspace runs
 them together.
 
-That run always builds the core crate the way the game asks for it, with Bevy
+That run always builds the world crate the way the game asks for it, with Bevy
 on, so the engine-free build it exists for is the one thing it never compiles.
-Check that separately after touching the core crate:
+Check that separately after touching the world crate:
 
 ```bash
-cargo check -p kassiter-core --no-default-features
+cargo check -p world --no-default-features
 ```
 
 ## Licence

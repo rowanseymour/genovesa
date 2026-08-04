@@ -1,7 +1,7 @@
 //! Putting the terrain on screen: meshes, materials, the sea and the sun.
 //!
 //! The terrain itself — the height field, its colours and the chunk geometry —
-//! lives in `kassiter-core`, re-exported here wholesale so the rest of the app
+//! lives in the `world` crate, re-exported here wholesale so the rest of the app
 //! has one place to import terrain things from. This module is the part Bevy
 //! sees: it wraps each chunk's geometry into a `Mesh` and spawns the world.
 
@@ -11,7 +11,7 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 use bevy::tasks::ComputeTaskPool;
 
-pub use kassiter_core::terrain::*;
+pub use world::terrain::*;
 
 use crate::AppState;
 
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn the_colour_conversion_matches_the_renderers() {
         // The geometry's vertex colours are converted to linear space by the
-        // core crate, which cannot ask Bevy how — so hold its conversion equal
+        // world crate, which cannot ask Bevy how — so hold its conversion equal
         // to the one the renderer's own colour types would have done.
         for step in 0..=100 {
             let c = step as f32 / 100.0;

@@ -13,12 +13,12 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use bevy::window::ExitCondition;
 
-use kassiter::camera::MapCameraPlugin;
-use kassiter::capture::CapturePlugin;
-use kassiter::cli::{self, Args};
-use kassiter::menu::MenuPlugin;
-use kassiter::terrain::TerrainPlugin;
-use kassiter::{SKY, WINDOW};
+use game::camera::MapCameraPlugin;
+use game::capture::CapturePlugin;
+use game::cli::{self, Args};
+use game::menu::MenuPlugin;
+use game::terrain::TerrainPlugin;
+use game::{SKY, WINDOW};
 
 fn main() -> ExitCode {
     let args = match cli::parse(std::env::args().skip(1).collect()) {
