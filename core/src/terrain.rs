@@ -2808,6 +2808,80 @@ mod tests {
         assert_ne!(a.height(3.0, -7.0), c.height(3.0, -7.0));
     }
 
+    /// FNV-1a folded over the bit patterns of a stream of floats.
+    /// Dependency-free like the noise, and for the same reason: the digest has
+    /// to mean the same thing in every build there will ever be.
+    fn digest(values: impl IntoIterator<Item = f32>) -> u64 {
+        let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
+        for value in values {
+            for byte in value.to_bits().to_le_bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x100_0000_01B3);
+            }
+        }
+        hash
+    }
+
+    #[test]
+    fn a_seed_is_the_same_map_down_to_the_bit() {
+        // `same_seed_gives_same_map` says two generators in one process agree.
+        // This pins the map itself: golden digests of the height field, the
+        // colours and a chunk's geometry, recorded once and held to ever
+        // after. It is what makes "a seed is a map" a tested property rather
+        // than a habit — anything that regenerates a map elsewhere instead of
+        // shipping it, a server sending nothing but the seed or a wasm build
+        // generating in the browser, is betting that every machine, target
+        // and compiler agrees on every bit.
+        //
+        // When this fails because the generator was *meant* to change,
+        // re-record the digests (run with `--nocapture` and they are printed)
+        // — whether the change was good is mapgen's question, not this
+        // test's. When it fails anywhere else — a new platform, a toolchain
+        // upgrade, a different target — that is the bet being lost, and the
+        // first place to look is the transcendental calls (`powf`), the only
+        // maths here the hardware does not pin down.
+        let cases = [
+            (20_040_112u32, UVec2::new(4, 4), 0x3031_FE9A_B432_AEC6u64),
+            (99, UVec2::new(3, 2), 0xA998_F6F6_BA63_6BE8u64),
+        ];
+
+        for (seed, chunks, expected) in cases {
+            let config = MapConfig { chunks, seed };
+            let gen = TerrainGenerator::new(&config);
+            let half = config.half_extent();
+
+            // Every reader of the map, over the whole of it: the height field
+            // and the palette on a 4 m grid, then one chunk's finished
+            // geometry — which folds in the mesh layout and the sRGB
+            // decoding on top of the fields themselves.
+            let mut values = Vec::new();
+            for iz in (0..=config.tiles().y).step_by(4) {
+                for ix in (0..=config.tiles().x).step_by(4) {
+                    let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
+                    let height = gen.height(wx, wz);
+                    let normal = gen.normal(wx, wz);
+                    let color = gen.color(wx, wz, height, normal);
+                    values.extend([height, normal.x, normal.y, normal.z]);
+                    values.extend([color.x, color.y, color.z]);
+                }
+            }
+
+            let geometry = gen.build_chunk(UVec2::ZERO, config.tiles());
+            values.extend(geometry.positions.iter().flatten());
+            values.extend(geometry.normals.iter().flatten());
+            values.extend(geometry.uvs.iter().flatten());
+            values.extend(geometry.colors.iter().flatten());
+
+            let got = digest(values);
+            println!("seed {seed} digests to {got:#018X}");
+            assert_eq!(
+                got, expected,
+                "seed {seed} no longer digests to its recorded value — see \
+                 this test's comment for what that means"
+            );
+        }
+    }
+
     #[test]
     fn map_size_changes_extent_not_feature_size() {
         // Every wavelength is fixed in metres, so the same world coordinate
