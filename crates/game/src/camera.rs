@@ -5,7 +5,7 @@ use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
-use crate::terrain::{MapConfig, TerrainGenerator};
+use crate::terrain::WorldTerrain;
 use crate::AppState;
 
 /// Downward tilt of the camera, from horizontal.
@@ -215,7 +215,6 @@ fn pan(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     time: Res<Time>,
-    config: Res<MapConfig>,
     mut cameras: Query<&mut MapCamera>,
 ) {
     let mut input = Vec2::ZERO;
@@ -250,27 +249,33 @@ fn pan(
         let speed = PAN_SPEED * (camera.distance / DEFAULT_DISTANCE);
         let delta = (forward * input.y + right * input.x) * speed * time.delta_secs();
 
-        // Let the camera drift a little past the coastline, but not so far that
-        // the map disappears off screen. Only the ground plane is clamped —
+        // Nothing clamps the ground plane: the world is an endless ocean, and
+        // sailing over open water towards the next island is the point.
         // `follow_terrain` owns the height.
-        let limit = config.half_extent() * 1.05;
-        let mut target = camera.target_focus + delta;
-        target.x = target.x.clamp(-limit.x, limit.x);
-        target.z = target.z.clamp(-limit.y, limit.y);
-        camera.target_focus = target;
+        camera.target_focus += delta;
     }
 }
 
 /// Keeps the focus point on the ground, so panning onto a hill raises the whole
 /// camera with it instead of burying it.
-fn follow_terrain(terrain: Option<Res<TerrainGenerator>>, mut cameras: Query<&mut MapCamera>) {
+fn follow_terrain(terrain: Option<Res<WorldTerrain>>, mut cameras: Query<&mut MapCamera>) {
     // Absent in the menu, and in tests that only care about panning maths.
     let Some(terrain) = terrain else {
         return;
     };
 
     for mut camera in &mut cameras {
-        let ground = terrain.height(camera.target_focus.x, camera.target_focus.z);
+        // Only ground that can be answered without generating anything — a
+        // frame is not the place to pay for an island. Until the island under
+        // the focus has streamed in, the camera keeps its last height; the
+        // ground arrives within a few frames of the mesh the player is
+        // waiting on anyway.
+        let Some(ground) = terrain
+            .0
+            .ready_height(camera.target_focus.x, camera.target_focus.z)
+        else {
+            continue;
+        };
         camera.target_focus.y = ground;
 
         if !camera.grounded {
@@ -328,7 +333,7 @@ fn rotate(
 
 fn apply_transform(
     time: Res<Time>,
-    terrain: Option<Res<TerrainGenerator>>,
+    terrain: Option<Res<WorldTerrain>>,
     mut cameras: Query<(&mut MapCamera, &mut Transform)>,
 ) {
     // Frame-rate independent exponential easing.
@@ -345,9 +350,13 @@ fn apply_transform(
         // slope, the eye sits well downhill of what it's looking at and can end
         // up inside the hillside behind it. Lifting it straight up steepens the
         // angle a little, which is a far better failure than being underground.
-        if let Some(terrain) = &terrain {
-            let floor = terrain.height(eye.x, eye.z) + MIN_CLEARANCE;
-            eye.y = eye.y.max(floor);
+        // Ground still generating reads as absent, like the focus's own — see
+        // `follow_terrain`.
+        if let Some(floor) = terrain
+            .as_ref()
+            .and_then(|t| t.0.ready_height(eye.x, eye.z))
+        {
+            eye.y = eye.y.max(floor + MIN_CLEARANCE);
         }
 
         transform.translation = eye;
@@ -368,11 +377,7 @@ mod tests {
         app.add_plugins((TimePlugin, StatesPlugin, MapCameraPlugin))
             .init_state::<AppState>()
             .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<AccumulatedMouseScroll>()
-            .insert_resource(MapConfig {
-                chunks: UVec2::splat(1),
-                seed: 1,
-            });
+            .init_resource::<AccumulatedMouseScroll>();
         app.update();
 
         app.world_mut()
@@ -382,15 +387,44 @@ mod tests {
         app
     }
 
-    /// The same app with real terrain under it, so the camera has ground to
-    /// follow and to keep clear of.
-    fn test_app_on_terrain() -> App {
+    /// The same app with real ground under it — a world with one island
+    /// already generated, so the camera's ready-height queries have something
+    /// to answer with — plus that island, to point the camera at.
+    fn test_app_on_terrain() -> (App, std::sync::Arc<world::archipelago::Archipelago>, Vec3) {
+        use world::archipelago::{Archipelago, WorldConfig};
+
         let mut app = test_app();
-        let config = MapConfig::square(1024, 20_040_112);
-        app.insert_resource(config)
-            .insert_resource(TerrainGenerator::new(&config));
+        let world = std::sync::Arc::new(Archipelago::new(&WorldConfig { seed: 1 }));
+        let spec = world
+            .islands_within(Vec2::splat(-6_000.0), Vec2::splat(6_000.0))
+            .into_iter()
+            .max_by_key(|s| s.chunks.x * s.chunks.y)
+            .expect("a world should have an island within a few kilometres");
+        world.island(spec);
+
+        let centre = spec.centre();
+        app.insert_resource(WorldTerrain(world.clone()));
         app.update();
-        app
+        (app, world, Vec3::new(centre.x, 0.0, centre.y))
+    }
+
+    /// Puts the camera down at a spot outright, mid-match, and lets one frame
+    /// run so the terrain systems ground it.
+    fn place_camera(app: &mut App, spot: Vec3, distance: f32, yaw: f32) {
+        let mut camera = app
+            .world_mut()
+            .query::<&mut MapCamera>()
+            .single_mut(app.world_mut())
+            .expect("camera should exist");
+        camera.focus = spot;
+        camera.target_focus = spot;
+        camera.distance = distance;
+        camera.target_distance = distance;
+        camera.yaw = yaw;
+        camera.target_yaw = yaw;
+        // Snap onto the ground rather than easing towards it.
+        camera.grounded = false;
+        app.update();
     }
 
     fn hold(app: &mut App, key: KeyCode) {
@@ -589,21 +623,6 @@ mod tests {
     }
 
     #[test]
-    fn panning_stops_at_the_map_edge() {
-        let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowUp);
-        // Far more frames than it takes to cross a single-chunk map.
-        run_frames(&mut app, 600);
-
-        let limit = 64.0 * 1.05;
-        let focus = focus(&mut app);
-        assert!(
-            focus.x >= -limit - 1e-3 && focus.z >= -limit - 1e-3,
-            "{focus:?} escaped the map"
-        );
-    }
-
-    #[test]
     fn wasd_matches_the_arrow_keys() {
         let mut app = test_app();
         hold(&mut app, KeyCode::ArrowLeft);
@@ -681,14 +700,14 @@ mod tests {
 
     #[test]
     fn the_focus_sits_on_the_ground() {
-        let mut app = test_app_on_terrain();
-        let terrain = TerrainGenerator::new(&MapConfig::square(1024, 20_040_112));
+        let (mut app, world, centre) = test_app_on_terrain();
 
-        // The first frame that can see the terrain puts the camera down on it
-        // rather than easing from sea level.
+        // Dropped onto the island, the first frame that can see the terrain
+        // puts the camera down on it rather than easing from sea level.
+        place_camera(&mut app, centre, DEFAULT_DISTANCE, YAW);
         let start = read(&mut app, |c| c.focus);
         assert!(
-            (start.y - terrain.height(start.x, start.z)).abs() < 1e-3,
+            (start.y - world.height(start.x, start.z)).abs() < 1e-3,
             "camera started at {} rather than on the ground",
             start.y
         );
@@ -698,46 +717,42 @@ mod tests {
 
         let target = focus(&mut app);
         assert!(
-            (target.y - terrain.height(target.x, target.z)).abs() < 1e-3,
+            (target.y - world.height(target.x, target.z)).abs() < 1e-3,
             "focus left the ground while panning"
         );
     }
 
     #[test]
     fn the_eye_never_gets_inside_the_ground() {
-        let terrain = TerrainGenerator::new(&MapConfig::square(1024, 20_040_112));
-
-        // Put the camera down all over the map rather than panning to each
+        // Put the camera down all over an island rather than panning to each
         // spot: panning is wall-clock driven, so a headless run covers almost
         // no ground. The closest zoom is the dangerous one — that's where the
         // eye sits lowest — and a handful of yaws puts it on a different side
         // of whatever it's looking at.
-        let mut app = test_app_on_terrain();
+        let (mut app, world, centre) = test_app_on_terrain();
+        let spec = world
+            .island_at(centre.x, centre.z)
+            .expect("the camera is on an island");
+        let half = spec.extent() * 0.5 - 32.0;
         let mut clamped = 0;
 
-        // Yaws that aren't the four diagonals the map was laid out on, since
-        // the view is free to stop between them now.
+        // Yaws that aren't the four diagonals islands are laid out on, since
+        // the view is free to stop between them.
         for turn in 0..5 {
-            for iz in 0..16 {
-                for ix in 0..16 {
-                    let spot = Vec3::new(ix as f32 * 64.0 - 480.0, 0.0, iz as f32 * 64.0 - 480.0);
-
-                    {
-                        let mut camera = app
-                            .world_mut()
-                            .query::<&mut MapCamera>()
-                            .single_mut(app.world_mut())
-                            .expect("camera should exist");
-                        camera.focus = spot;
-                        camera.target_focus = spot;
-                        camera.distance = MIN_DISTANCE;
-                        camera.target_distance = MIN_DISTANCE;
-                        camera.yaw = YAW + turn as f32 * std::f32::consts::TAU / 5.0;
-                        camera.target_yaw = camera.yaw;
-                        // Snap onto the ground rather than easing towards it.
-                        camera.grounded = false;
-                    }
-                    app.update();
+            for iz in 0..12 {
+                for ix in 0..12 {
+                    let spot = centre
+                        + Vec3::new(
+                            (ix as f32 / 11.0 * 2.0 - 1.0) * half.x,
+                            0.0,
+                            (iz as f32 / 11.0 * 2.0 - 1.0) * half.y,
+                        );
+                    place_camera(
+                        &mut app,
+                        spot,
+                        MIN_DISTANCE,
+                        YAW + turn as f32 * std::f32::consts::TAU / 5.0,
+                    );
 
                     let eye = app
                         .world_mut()
@@ -746,7 +761,7 @@ mod tests {
                         .expect("camera should exist")
                         .translation;
 
-                    let clearance = eye.y - terrain.height(eye.x, eye.z);
+                    let clearance = eye.y - world.height(eye.x, eye.z);
                     assert!(
                         clearance >= MIN_CLEARANCE - 1e-3,
                         "eye was {clearance} m above the ground at {eye:?}"

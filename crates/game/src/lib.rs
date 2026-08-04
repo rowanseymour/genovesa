@@ -38,8 +38,8 @@ pub const WINDOW: UVec2 = UVec2::new(1280, 720);
 pub enum AppState {
     #[default]
     MainMenu,
-    /// Choosing map size and seed.
-    NewMap,
+    /// Choosing the seed of the world about to be entered.
+    NewWorld,
     /// Choosing which key does what.
     Settings,
     InWorld,

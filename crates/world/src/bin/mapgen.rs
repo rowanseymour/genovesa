@@ -10,6 +10,7 @@
 //! cargo run --release --bin mapgen -- grid
 //! cargo run --release --bin mapgen -- map --size 1536x1024 --seed 99
 //! cargo run --release --bin mapgen -- collage --out collage.png
+//! cargo run --release --bin mapgen -- world --seed 7 --span 8192
 //! ```
 //!
 //! The collage that ships in the README is not written by hand from here:
@@ -18,8 +19,9 @@
 
 use std::process::ExitCode;
 
-use glam::UVec2;
+use glam::{UVec2, Vec2};
 
+use world::archipelago::{Archipelago, WorldConfig};
 use world::plan;
 use world::terrain::{MapConfig, CHUNK_TILES};
 
@@ -43,6 +45,7 @@ Commands:
   grid       nine seeds in a 3x3 grid, one file per map shape — the view a
              change to the generator gets judged on
   collage    the sixteen-map collage at the top of the README
+  world      a region of the open world, for judging the island layout
 
 Options:
   --size <W|WxD>   map size in metres, rounded to whole 128 m chunks
@@ -50,7 +53,9 @@ Options:
   --seed <n>       the seed to draw [default: {map_seed}]; for grid and
                    collage, which draw many maps, the seed the set of them is
                    spread from [default: {DEFAULT_SET_SEED}]
-  --scale <m>      metres of ground per pixel (map, grid)
+  --scale <m>      metres of ground per pixel (map, grid, world)
+  --focus <x,z>    world point a `world` render is centred on [default: 0,0]
+  --span <W|WxD>   metres of world a `world` render covers [default: 8192]
   --out <path>     where to write; grids get one file per shape, each
                    suffixed with its size unless --size named just one
 "
@@ -74,6 +79,8 @@ struct Args {
     /// One map's seed, or the seed a whole set is spread from.
     seed: Option<u32>,
     scale: Option<f32>,
+    focus: Option<Vec2>,
+    span: Option<Vec2>,
     out: Option<String>,
 }
 
@@ -83,6 +90,7 @@ fn run() -> Result<(), String> {
         "map" => map(&args),
         "grid" => grid(&args),
         "collage" => collage(&args),
+        "world" => world(&args),
         other => Err(format!("unknown command `{other}`\n\n{}", usage())),
     }
 }
@@ -102,6 +110,8 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
         size: None,
         seed: None,
         scale: None,
+        focus: None,
+        span: None,
         out: None,
     };
 
@@ -133,6 +143,28 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
                     return Err("--scale must be more than zero metres per pixel".into());
                 }
                 parsed.scale = Some(scale);
+            }
+            "--focus" => {
+                let (x, z) = value
+                    .split_once(',')
+                    .ok_or_else(|| format!("`{value}` is not a point, e.g. 2000,-3000"))?;
+                let parse = |s: &str| {
+                    s.trim()
+                        .parse::<f32>()
+                        .map_err(|_| format!("`{value}` is not a point, e.g. 2000,-3000"))
+                };
+                parsed.focus = Some(Vec2::new(parse(x)?, parse(z)?));
+            }
+            "--span" => {
+                let (w, d) = value.split_once('x').unwrap_or((value, value));
+                let parse = |s: &str| {
+                    s.trim()
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|m| *m > 0.0)
+                        .ok_or_else(|| format!("`{value}` is not a span in metres, e.g. 8192"))
+                };
+                parsed.span = Some(Vec2::new(parse(w)?, parse(d)?));
             }
             "--out" => parsed.out = Some(value.clone()),
             other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
@@ -225,6 +257,34 @@ fn collage(args: &Args) -> Result<(), String> {
         &image,
         &path,
         format_args!("collage of {} maps from seed {base}", seeds.len()),
+    )
+}
+
+/// A region of the open world around a point, at a scale coarse enough to
+/// take in the layout — many islands and the ocean between them.
+fn world(args: &Args) -> Result<(), String> {
+    let config = WorldConfig {
+        seed: args.seed.unwrap_or_else(|| WorldConfig::default().seed),
+    };
+    let focus = args.focus.unwrap_or(Vec2::ZERO);
+    let span = args.span.unwrap_or(Vec2::splat(8192.0));
+    let scale = args.scale.unwrap_or_else(|| (span.x / 2048.0).max(1.0));
+
+    let world = Archipelago::new(&config);
+    let image = plan::render_region(
+        &world,
+        focus,
+        span,
+        (span.x / scale).round().max(1.0) as u32,
+    );
+    let path = args.out.clone().unwrap_or_else(|| "world.png".into());
+    write(
+        &image,
+        &path,
+        format_args!(
+            "world seed {}  {}x{} m around ({}, {})  {scale} m/px",
+            config.seed, span.x, span.y, focus.x, focus.y
+        ),
     )
 }
 

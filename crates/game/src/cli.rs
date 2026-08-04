@@ -16,12 +16,12 @@
 //!   --yaw 225 --shot behind.png
 //! ```
 //!
-//! One process, one map generated, three pictures.
+//! One process, one world, three pictures.
 
-use bevy::math::{UVec2, Vec3};
+use bevy::math::{UVec2, Vec2, Vec3};
 
 use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
-use crate::terrain::MapConfig;
+use crate::terrain::{Archipelago, WorldConfig};
 use crate::AppState;
 
 /// Size of a captured picture, in pixels. Matches the shots already in
@@ -31,7 +31,7 @@ const DEFAULT_RESOLUTION: UVec2 = UVec2::new(2560, 1440);
 /// What the command line asked for.
 pub struct Args {
     pub state: AppState,
-    pub config: MapConfig,
+    pub config: WorldConfig,
     /// Where the camera starts. With shots to take this is where the last of
     /// them left it, which nobody sees, since capturing quits at the end.
     pub view: View,
@@ -65,25 +65,22 @@ impl Args {
 /// Built rather than written out so the defaults it quotes are read from the
 /// code itself and cannot drift.
 fn usage() -> String {
-    let map = MapConfig::default();
+    let world = WorldConfig::default();
     let view = View::default();
-    let size = map.tiles();
     format!(
         "\
-Genovesa — generates a map and lets you look around it.
+Genovesa — an endless ocean of generated islands to look around.
 
 Usage: game [options]
 
 Options:
-  --state <screen>  start on `mainmenu`, `newmap`, `settings` or `inworld`
+  --state <screen>  start on `mainmenu`, `newworld`, `settings` or `inworld`
                     [default: mainmenu, or inworld when shots are asked for]
-  --size <W|WxD>    map size in metres, rounded to whole 128 m chunks
-                    [default: {}x{}]
-  --seed <n>        the seed to generate from [default: {}]
+  --seed <n>        the world to generate [default: {}]
 
 View options, applied in the order given:
-  --focus <x,z>     point on the map to look at, in metres from its centre
-                    [default: {},{}]
+  --focus <x,z>     world point to look at, in metres
+                    [default: the island nearest the origin]
   --zoom <m>        camera distance in metres, {MIN_DISTANCE} to {MAX_DISTANCE}
                     [default: {}]
   --yaw <deg>       bearing to look from [default: {}]
@@ -96,11 +93,7 @@ Capture options:
 Capturing needs no window: the shots are rendered off screen, so a run can
 take its pictures without stealing the display.
 ",
-        size.x,
-        size.y,
-        map.seed,
-        view.focus.x,
-        view.focus.z,
+        world.seed,
         view.distance,
         view.yaw.to_degrees(),
         DEFAULT_RESOLUTION.x,
@@ -118,12 +111,13 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
 
     let mut args = Args {
         state: AppState::MainMenu,
-        config: MapConfig::default(),
+        config: WorldConfig::default(),
         view: View::default(),
         shots: Vec::new(),
         resolution: DEFAULT_RESOLUTION,
     };
     let mut state_given = false;
+    let mut focus_given = false;
 
     // Every option here takes a value, so an option in the last position is
     // always a missing value rather than a flag that stands on its own.
@@ -137,17 +131,15 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                 args.state = state(value)?;
                 state_given = true;
             }
-            "--size" => {
-                args.config.chunks = MapConfig::parse_size(value).ok_or_else(|| {
-                    format!("`{value}` is not a size in metres, e.g. 1024 or 1536x1024")
-                })?;
-            }
             "--seed" => {
                 args.config.seed = value
                     .parse()
                     .map_err(|_| format!("`{value}` is not a seed"))?;
             }
-            "--focus" => args.view.focus = focus(value)?,
+            "--focus" => {
+                args.view.focus = focus(value)?;
+                focus_given = true;
+            }
             "--zoom" => args.view.distance = zoom(value)?,
             "--yaw" => args.view.yaw = yaw(value)?,
             "--resolution" => args.resolution = resolution(value)?,
@@ -167,17 +159,42 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     if args.is_capture() && !state_given {
         args.state = AppState::InWorld;
     }
+
+    // Nobody said where to look, so look at land. [`View`]'s own default is
+    // the origin, which is the only honest default a view type with no world
+    // behind it can have — and on essentially every seed the origin is open
+    // ocean, so a run that took it opened on a flat blue plane and a caller
+    // wanting a picture of terrain had to go and find some first.
+    //
+    // Once, and for the whole command line, rather than per shot: the shots
+    // are a sweep over one world, and moving each of them to its own nearest
+    // island would break a sequence that says "here, then a bit further" into
+    // an unrelated set of pictures. Answering the layout costs a few hash
+    // mixes and generates nothing, so the world built here is thrown away and
+    // the match builds its own.
+    if !focus_given {
+        let centre = Archipelago::new(&args.config)
+            .nearest_island(Vec2::ZERO)
+            .map(|spec| spec.centre());
+        if let Some(centre) = centre {
+            let focus = Vec3::new(centre.x, 0.0, centre.y);
+            args.view.focus = focus;
+            for shot in &mut args.shots {
+                shot.view.focus = focus;
+            }
+        }
+    }
     Ok(args)
 }
 
 fn state(value: &str) -> Result<AppState, String> {
     match value {
         "mainmenu" => Ok(AppState::MainMenu),
-        "newmap" => Ok(AppState::NewMap),
+        "newworld" => Ok(AppState::NewWorld),
         "settings" => Ok(AppState::Settings),
         "inworld" => Ok(AppState::InWorld),
         other => Err(format!(
-            "`{other}` is not a screen — try mainmenu, newmap, settings or inworld"
+            "`{other}` is not a screen — try mainmenu, newworld, settings or inworld"
         )),
     }
 }
@@ -243,16 +260,14 @@ mod tests {
     fn defaults_play_the_game_from_the_main_menu() {
         let args = ok("");
         assert_eq!(args.state, AppState::MainMenu);
-        assert_eq!(args.config.seed, MapConfig::default().seed);
+        assert_eq!(args.config.seed, WorldConfig::default().seed);
         assert!(!args.is_capture());
     }
 
     #[test]
-    fn sets_up_the_map_and_the_view() {
-        let args =
-            ok("--state inworld --size 1536x1024 --seed 7 --focus 98,-317 --zoom 150 --yaw 90");
+    fn sets_up_the_world_and_the_view() {
+        let args = ok("--state inworld --seed 7 --focus 98,-317 --zoom 150 --yaw 90");
         assert_eq!(args.state, AppState::InWorld);
-        assert_eq!(args.config.tiles(), UVec2::new(1536, 1024));
         assert_eq!(args.config.seed, 7);
         assert_eq!(args.view.focus, Vec3::new(98.0, 0.0, -317.0));
         assert_eq!(args.view.distance, 150.0);
@@ -262,9 +277,52 @@ mod tests {
     #[test]
     fn opens_on_any_of_the_screens_by_name() {
         assert_eq!(ok("--state mainmenu").state, AppState::MainMenu);
-        assert_eq!(ok("--state newmap").state, AppState::NewMap);
+        assert_eq!(ok("--state newworld").state, AppState::NewWorld);
         assert_eq!(ok("--state settings").state, AppState::Settings);
         assert_eq!(ok("--state inworld").state, AppState::InWorld);
+    }
+
+    #[test]
+    fn with_no_focus_given_the_view_opens_on_the_nearest_island() {
+        // The origin is open ocean on essentially every seed, so a run that
+        // said nothing about where to look has to be moved onto land — both
+        // the starting view and every shot, so a sweep stays a sweep.
+        let args = ok("--seed 777 --shot a.png --zoom 300 --shot b.png");
+        let world = Archipelago::new(&args.config);
+        let island = world
+            .nearest_island(Vec2::ZERO)
+            .expect("seed 777 should have an island near the origin");
+
+        assert_ne!(args.view.focus, Vec3::ZERO, "the view still opens on water");
+        for view in [args.view, args.shots[0].view, args.shots[1].view] {
+            let focus = Vec2::new(view.focus.x, view.focus.z);
+            let out = (focus - island.centre()).abs() - island.extent() * 0.5;
+            assert!(
+                out.max_element() <= 0.0,
+                "{focus} is outside the nearest island's frame"
+            );
+        }
+        // And only the focus moved — the shots keep their own zooms.
+        assert_eq!(args.shots[0].view.distance, View::default().distance);
+        assert_eq!(args.shots[1].view.distance, 300.0);
+    }
+
+    #[test]
+    fn an_explicit_focus_is_honoured_wherever_it_points() {
+        // Including at the origin, which is what the snap above would
+        // otherwise have moved: somebody asking for open water is entitled to
+        // a picture of open water.
+        assert_eq!(ok("--focus 0,0").view.focus, Vec3::ZERO);
+        assert_eq!(
+            ok("--focus 98,-317 --shot a.png").shots[0].view.focus,
+            Vec3::new(98.0, 0.0, -317.0)
+        );
+        // A focus given after a shot still counts as one being given, so the
+        // shot before it keeps the default view rather than a snapped one.
+        assert_eq!(
+            ok("--shot a.png --focus 10,20").shots[0].view.focus,
+            Vec3::ZERO
+        );
     }
 
     #[test]

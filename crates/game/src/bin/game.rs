@@ -1,4 +1,4 @@
-//! The game itself: generates a map and lets you look around it.
+//! The game itself: an endless ocean of generated islands to look around.
 //!
 //! What `cargo run` runs, being the crate's `default-run`. The other binary,
 //! `mapgen`, draws the same terrain from above without opening a window.

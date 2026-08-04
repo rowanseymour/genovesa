@@ -6,6 +6,7 @@
 //! server or for wasm without a renderer coming along. The game's own crate
 //! holds everything that draws: meshes, materials, cameras and menus.
 
+pub mod archipelago;
 pub mod noise;
 pub mod plan;
 pub mod terrain;
