@@ -101,10 +101,12 @@ Usage: game [options]
 
 Options:
   --state <screen>  start on `mainmenu`, `newworld`, `settings` or `inworld`
-                    [default: mainmenu, or inworld when shots are asked for]
+                    [default: mainmenu, or inworld when shots or a server are
+                    asked for]
   --seed <n>        the world to generate [default: {}]
   --join <host[:port]>  play in a served world instead of a local one; the
-                    server provides the seed and where the world is entered
+                    server provides the seed and where the world is entered,
+                    and the run starts in that world rather than on a screen
                     [port: {DEFAULT_PORT}]
   --debug           overlay frame rate, geometry counts and the current view
                     on the window; ignored when capturing, so shots stay clean
@@ -202,6 +204,18 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         return Err(
             "`--seed` picks a world to generate, but a joined world is the server's — \
              its seed arrives with the welcome"
+                .into(),
+        );
+    }
+
+    // And a joined session is only a session in the served world. Starting on
+    // any other screen leaves it running behind a menu whose "new world"
+    // builds a *local* one — the run would go on reporting its position into
+    // an ocean it is no longer standing in, and draw the other players' markers
+    // on ground that isn't theirs.
+    if args.join.is_some() && state_given && args.state != AppState::InWorld {
+        return Err(
+            "`--join` plays in the served world, so a joined run cannot start on another screen"
                 .into(),
         );
     }
@@ -409,8 +423,14 @@ mod tests {
         let args = ok("--join example.com:4000");
         assert_eq!(args.join.as_deref(), Some("example.com:4000"));
         assert_eq!(args.state, AppState::InWorld);
-        // A named screen still wins, as it does over shots.
-        assert_eq!(ok("--state mainmenu --join x").state, AppState::MainMenu);
+
+        // Saying so as well is fine; saying anything else is not, since a
+        // joined session has nowhere but the served world to be.
+        assert_eq!(ok("--state inworld --join x").state, AppState::InWorld);
+        assert!(
+            parse_args("--state mainmenu --join x").is_err(),
+            "a joined run cannot start behind a menu"
+        );
     }
 
     #[test]

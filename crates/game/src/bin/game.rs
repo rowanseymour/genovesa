@@ -71,7 +71,7 @@ fn run(args: Args, online: Option<Connection>) {
     }
 
     if let Some(connection) = online {
-        app.insert_resource(Online(connection));
+        app.insert_resource(Online::new(connection));
     }
 
     app.insert_state(args.state)

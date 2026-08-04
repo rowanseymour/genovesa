@@ -13,10 +13,12 @@
 //! once a frame ([`receive`]), and the player's own movements trickle back
 //! the other way ([`report_position`]).
 
-use std::net::TcpStream;
+use std::collections::HashMap;
+use std::net::{Shutdown, TcpStream};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 use bevy::prelude::*;
 
@@ -33,6 +35,14 @@ const REPORT_INTERVAL: f32 = 0.1;
 /// Metres of movement below which nothing is reported — a player standing
 /// still costs the wire nothing.
 const REPORT_THRESHOLD: f32 = 0.25;
+
+/// How long a report may spend trying to reach the server. Reports are written
+/// straight from the schedule, so this is time the player would spend watching
+/// a frozen frame: a server that stopped reading its socket would otherwise
+/// hold the game still the moment the send buffer filled. Kept short because a
+/// lost report costs nothing — positions are absolute, not steps, and the next
+/// one supersedes it a tenth of a second later.
+const REPORT_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// How quickly a marker eases towards where the server last put its player.
 /// Positions arrive a few times a second, so the easing is what turns the
@@ -83,7 +93,7 @@ impl Connection {
         // would otherwise hang the game before it opened. The session itself
         // has no deadline — going quiet is what an idle server sounds like —
         // so the welcome lifts the timeout again below.
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
         (ToServer::Hello {
             version: PROTOCOL_VERSION,
@@ -94,6 +104,7 @@ impl Connection {
         match ToClient::read(&mut &stream) {
             Ok(ToClient::Welcome { id, seed, spawn }) => {
                 let _ = stream.set_read_timeout(None);
+                let _ = stream.set_write_timeout(Some(REPORT_TIMEOUT));
                 // From here the socket splits: this thread reads it forever,
                 // the schedule writes it. The channel closing on either side
                 // — the game dropping the connection, the server hanging up
@@ -125,13 +136,22 @@ impl Connection {
         }
     }
 
-    /// Tells the server where the player is. A failed write means the server
-    /// is gone — the reader thread notices the same thing, and [`drain`]
-    /// is where the loss is surfaced.
+    /// Tells the server where the player is.
+    ///
+    /// A write that failed — the server gone, or [`REPORT_TIMEOUT`] spent
+    /// waiting on one that has stopped reading — may have left half a frame on
+    /// the wire, and nothing sent after that could be read as a message. So
+    /// the line is finished off here rather than limped along: the reader
+    /// thread ends with it, and [`drain`] is where the loss is surfaced, once.
     ///
     /// [`drain`]: Connection::drain
     fn report(&self, position: Vec2) {
-        let _ = (ToServer::Move { position }).write(&mut &self.stream);
+        if (ToServer::Move { position })
+            .write(&mut &self.stream)
+            .is_err()
+        {
+            let _ = self.stream.shutdown(Shutdown::Both);
+        }
     }
 
     /// Everything heard since the last frame, and whether the line is still
@@ -149,10 +169,52 @@ impl Connection {
     }
 }
 
+/// Hanging up, and meaning it.
+///
+/// Letting the socket drop is not enough on its own: the reader thread holds a
+/// clone of the same connection, blocked in a read, and a connection with a
+/// second owner stays open. The server would go on holding a phantom player,
+/// still relaying their last position to everyone else, for as long as this
+/// process lived — and the reader thread would never end. Shutting down closes
+/// it for both owners at once, which ends the thread and lets the server hear
+/// the departure it is entitled to.
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
 /// The joined session. Present only when the run was started with `--join`;
 /// every system here conditions on it, so offline runs pay nothing.
 #[derive(Resource)]
-pub struct Online(pub Connection);
+pub struct Online {
+    connection: Connection,
+    /// The marker standing in for each player the server has introduced.
+    ///
+    /// Kept, rather than found by looking through the markers themselves,
+    /// because a marker is spawned through `Commands` and so does not exist
+    /// until the system that spawned it has ended. Two messages about one
+    /// player in a single frame's drain — an arrival and a departure, an
+    /// arrival and a move — would otherwise be searching for an entity that
+    /// is still only a queued command: the departure would find nothing and
+    /// leave a marker nobody can ever remove, and the move would be dropped.
+    ///
+    /// Living in this resource is what keeps it from going stale. Markers are
+    /// `DespawnOnExit(AppState::InWorld)` and this resource is removed on the
+    /// same exit, so the map cannot outlive the entities it names.
+    markers: HashMap<PlayerId, Entity>,
+}
+
+impl Online {
+    /// A session with nobody in it yet — the server introduces the players it
+    /// already has as its first messages after the welcome.
+    pub fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            markers: HashMap::new(),
+        }
+    }
+}
 
 /// Marks another player's marker, and where the server last put them.
 #[derive(Component)]
@@ -179,9 +241,10 @@ impl Plugin for NetPlugin {
     }
 }
 
-/// Leaving the world ends the session: dropping the connection closes the
-/// socket, which is how the server hears it. A fresh world entered from the
-/// menu is a local one, where the served players would be strangers.
+/// Leaving the world ends the session: dropping the connection shuts the
+/// socket down, which is how the server hears it. A fresh world entered from
+/// the menu is a local one, where the served players would be strangers. The
+/// markers go with the resource, being `DespawnOnExit` of the same state.
 fn disconnect(mut commands: Commands) {
     commands.remove_resource::<Online>();
 }
@@ -197,13 +260,12 @@ fn marker_color(id: PlayerId) -> Color {
 /// and leaving, as markers coming, easing and going.
 fn receive(
     mut commands: Commands,
-    online: Res<Online>,
+    mut online: ResMut<Online>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut markers: Query<(Entity, &mut RemotePlayer)>,
     mut lost: Local<bool>,
 ) {
-    let (messages, connected) = online.0.drain();
+    let (messages, connected) = online.connection.drain();
     if !connected && !*lost {
         // Once, not every frame. The markers simply stand where they were —
         // losing the server needn't end what is still a walkable world.
@@ -214,35 +276,47 @@ fn receive(
     for message in messages {
         match message {
             ToClient::Joined { id, position } => {
-                commands.spawn((
-                    Name::new(id.to_string()),
-                    RemotePlayer {
-                        id,
-                        target: position,
-                    },
-                    DespawnOnExit(AppState::InWorld),
-                    Mesh3d(meshes.add(Capsule3d::new(MARKER_RADIUS, MARKER_LENGTH))),
-                    // Matte, like everything else in this look.
-                    MeshMaterial3d(materials.add(StandardMaterial {
-                        base_color: marker_color(id),
-                        perceptual_roughness: 1.0,
-                        metallic: 0.0,
-                        reflectance: 0.0,
-                        ..default()
-                    })),
-                    // On the ground plane for now — `place_markers` owns the
-                    // height from the next frame on.
-                    Transform::from_xyz(position.x, 0.0, position.y),
-                ));
+                let marker = commands
+                    .spawn((
+                        Name::new(id.to_string()),
+                        RemotePlayer {
+                            id,
+                            target: position,
+                        },
+                        DespawnOnExit(AppState::InWorld),
+                        Mesh3d(meshes.add(Capsule3d::new(MARKER_RADIUS, MARKER_LENGTH))),
+                        // Matte, like everything else in this look.
+                        MeshMaterial3d(materials.add(StandardMaterial {
+                            base_color: marker_color(id),
+                            perceptual_roughness: 1.0,
+                            metallic: 0.0,
+                            reflectance: 0.0,
+                            ..default()
+                        })),
+                        // On the ground plane for now — `place_markers` owns
+                        // the height from the next frame on.
+                        Transform::from_xyz(position.x, 0.0, position.y),
+                    ))
+                    .id();
+                online.markers.insert(id, marker);
             }
             ToClient::Moved { id, position } => {
-                if let Some((_, mut player)) = markers.iter_mut().find(|(_, p)| p.id == id) {
-                    player.target = position;
+                if let Some(&marker) = online.markers.get(&id) {
+                    // Written as a command rather than through a query for the
+                    // reason the map itself exists: a player who arrived
+                    // earlier in this same drain has no component to reach for
+                    // yet, only a spawn queued ahead of this. Overwriting is
+                    // the whole of the update — where the server last put a
+                    // player is all a marker knows about them.
+                    commands.entity(marker).insert(RemotePlayer {
+                        id,
+                        target: position,
+                    });
                 }
             }
             ToClient::Left { id } => {
-                if let Some((entity, _)) = markers.iter().find(|(_, player)| player.id == id) {
-                    commands.entity(entity).despawn();
+                if let Some(marker) = online.markers.remove(&id) {
+                    commands.entity(marker).despawn();
                 }
             }
             // The handshake consumed its own messages; a stray one now is a
@@ -271,7 +345,7 @@ fn report_position(
             return;
         }
     }
-    online.0.report(position);
+    online.connection.report(position);
     *last = Some((now, position));
 }
 
@@ -343,7 +417,7 @@ mod tests {
             .init_state::<AppState>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
-            .insert_resource(Online(connection));
+            .insert_resource(Online::new(connection));
         app.update();
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
@@ -415,6 +489,30 @@ mod tests {
     }
 
     #[test]
+    fn leaving_is_heard_at_the_other_end() {
+        let (addr, socket) = fake_server(1, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        // So that a connection which is not really closed fails this test
+        // instead of hanging it.
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set timeout");
+
+        drop(connection);
+
+        // End of file, not a timeout: the reader thread holds a clone of this
+        // same connection, so without an explicit shutdown the server would go
+        // on waiting for a player who has gone.
+        let error = ToServer::read(&mut &server).expect_err("the line should be closed");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "the server never heard the departure: {error}"
+        );
+    }
+
+    #[test]
     fn other_players_come_move_and_go_as_markers() {
         let (addr, socket) = fake_server(1, Vec2::ZERO);
         let connection = Connection::join(&addr).expect("join");
@@ -451,5 +549,50 @@ mod tests {
         run_until(&mut app, "the marker despawns", |app| {
             markers(app).is_empty()
         });
+    }
+
+    #[test]
+    fn a_whole_frames_worth_of_news_about_one_player_is_applied_in_order() {
+        // A marker is spawned through `Commands` and so is not there to be
+        // found until the frame ends, which is why the session keeps a map of
+        // them: two messages about one player in a single drain used to leave
+        // a marker nobody could remove, and lose a move outright.
+        let (addr, socket) = fake_server(1, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+
+        for message in [
+            ToClient::Joined {
+                id: PlayerId(9),
+                position: Vec2::new(64.0, -32.0),
+            },
+            ToClient::Moved {
+                id: PlayerId(9),
+                position: Vec2::new(80.0, 0.0),
+            },
+            ToClient::Joined {
+                id: PlayerId(10),
+                position: Vec2::new(8.0, 8.0),
+            },
+            ToClient::Left { id: PlayerId(10) },
+        ] {
+            message.write(&mut &server).expect("a message");
+        }
+
+        // Nothing has drawn a frame since, so this is the reader thread being
+        // given time to put all four in the channel — a slow machine that
+        // spread them over two frames would let the test pass without asking
+        // the question, but no machine can make it fail spuriously.
+        thread::sleep(Duration::from_millis(100));
+        run_until(&mut app, "the news is applied", |app| {
+            !markers(app).is_empty()
+        });
+
+        assert_eq!(
+            markers(&mut app),
+            [(PlayerId(9), Vec2::new(80.0, 0.0))],
+            "the one who left is still standing there, or the move was lost"
+        );
     }
 }

@@ -197,10 +197,18 @@ impl ToClient {
 /// Frames a payload and writes it in one call, so a frame reaches the socket
 /// whole and small messages travel as single packets.
 fn write_frame(to: &mut impl Write, payload: &[u8]) -> io::Result<()> {
-    debug_assert!(
-        payload.len() <= MAX_FRAME as usize,
-        "message over MAX_FRAME"
-    );
+    // Unreachable for the messages defined above, whose fields were counted
+    // against the ceiling; the check is for the message added after this line
+    // was last read. Refusing to send beats a length prefix that quietly
+    // wrapped in the `as u16` below, which would frame the whole rest of the
+    // session as garbage — and only in release builds, where an assertion is
+    // not there to say so.
+    if payload.len() > MAX_FRAME as usize {
+        return Err(corrupt(format!(
+            "a {}-byte message does not fit a {MAX_FRAME}-byte frame",
+            payload.len()
+        )));
+    }
     let mut frame = Vec::with_capacity(2 + payload.len());
     put_u16(&mut frame, payload.len() as u16);
     frame.extend_from_slice(payload);
@@ -353,11 +361,33 @@ mod tests {
         // The exact bytes, pinned the way the world pins its digests: a server
         // must understand clients built from other checkouts, so changing any
         // of this means bumping PROTOCOL_VERSION, not re-recording the test.
+        //
+        // Every variant of both enums appears, because the round trip above
+        // cannot see any of the ways this format could move while still
+        // agreeing with itself: renumbered tags, fields swapped within a
+        // message, a length counted wrong. All of those read back perfectly
+        // and would still leave two builds unable to talk.
+        //
+        // The point (1.5, -2.0) is shared by every message that carries one:
+        // both halves are exact in binary, and the two differ in every byte
+        // that matters, so a pair of axes that swapped places would show.
         assert_eq!(
             bytes_of_client(ToServer::Hello { version: 1 }),
             [3, 0, 0, 1, 0],
             "hello: length 3, tag 0, version LE"
         );
+        assert_eq!(
+            bytes_of_client(ToServer::Move {
+                position: Vec2::new(1.5, -2.0),
+            }),
+            [
+                9, 0, // length
+                1, // tag
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // y = -2.0
+            ],
+        );
+
         assert_eq!(
             bytes_of_server(ToClient::Welcome {
                 id: PlayerId(7),
@@ -373,6 +403,56 @@ mod tests {
                 0, 0, 0, 0xC0, // y = -2.0
             ],
         );
+        assert_eq!(
+            bytes_of_server(ToClient::Refused { version: 9 }),
+            [3, 0, 1, 9, 0],
+            "refused: length 3, tag 1, version LE"
+        );
+        assert_eq!(
+            bytes_of_server(ToClient::Joined {
+                id: PlayerId(7),
+                position: Vec2::new(1.5, -2.0),
+            }),
+            [
+                13, 0, // length
+                2, // tag
+                7, 0, 0, 0, // id
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // y = -2.0
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(ToClient::Moved {
+                id: PlayerId(7),
+                position: Vec2::new(1.5, -2.0),
+            }),
+            [
+                13, 0, // length
+                3, // tag — Joined's twin, and only the tag tells them apart
+                7, 0, 0, 0, // id
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // y = -2.0
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(ToClient::Left { id: PlayerId(7) }),
+            [
+                5, 0, // length
+                4, // tag
+                7, 0, 0, 0, // id
+            ],
+        );
+    }
+
+    #[test]
+    fn a_message_too_big_to_frame_is_refused() {
+        // No message defined here can reach the ceiling, so this asks the
+        // framing directly. The length prefix is a u16 and the ceiling is far
+        // below one, so an oversized payload written anyway would arrive as a
+        // plausible short frame followed by the rest of it read as messages.
+        let mut wire = Vec::new();
+        assert!(write_frame(&mut wire, &vec![0u8; MAX_FRAME as usize + 1]).is_err());
+        assert!(wire.is_empty(), "half a frame reached the wire");
     }
 
     #[test]

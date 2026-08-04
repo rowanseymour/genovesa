@@ -60,13 +60,43 @@ fn a_client_is_welcomed_with_the_world() {
     let (_client, _id, seed, spawn) = Client::join(addr);
 
     assert_eq!(seed, 7, "the welcome names a different world");
-    // The spawn is the island a lone run of the seed would open on — layout
-    // only, so the expectation is cheap to recompute here.
-    let expected = Archipelago::new(&WorldConfig { seed: 7 })
+    // Players enter on the island a lone run of the seed would open on —
+    // layout only, so the expectation is cheap to recompute here. Not on its
+    // exact centre, since arrivals are scattered around it, so what is pinned
+    // is that the spawn is somewhere on that island.
+    let island = Archipelago::new(&WorldConfig { seed: 7 })
         .nearest_island(Vec2::ZERO)
-        .expect("seed 7 has land near the origin")
-        .centre();
-    assert_eq!(spawn, expected, "players would enter in the wrong place");
+        .expect("seed 7 has land near the origin");
+    let out = (spawn - island.centre()).abs() - island.extent() * 0.5;
+    assert!(
+        out.max_element() <= 0.0,
+        "{spawn} is not on the island players should enter on"
+    );
+}
+
+#[test]
+fn two_players_are_never_put_down_in_the_same_spot() {
+    // Otherwise the first thing a joined session shows is one marker where
+    // there are two players.
+    let addr = host(1);
+    let (_alice, _a, _, first) = Client::join(addr);
+    let (_bob, _b, _, second) = Client::join(addr);
+    assert_ne!(first, second, "two players' markers would stack");
+}
+
+#[test]
+fn a_position_no_player_could_reach_ends_the_session() {
+    let addr = host(1);
+    let (alice, _a, _, _) = Client::join(addr);
+    let (bob, b, _, _) = Client::join(addr);
+    let _ = alice.hear(); // Bob's arrival
+
+    // Far enough out that `f32` has stopped resolving the ground, which no
+    // client walks to and every client would be dragged towards.
+    bob.say(ToServer::Move {
+        position: Vec2::new(1e30, 0.0),
+    });
+    assert_eq!(alice.hear(), ToClient::Left { id: b });
 }
 
 #[test]
@@ -91,24 +121,25 @@ fn the_wrong_dialect_is_refused() {
 #[test]
 fn players_meet_move_and_part() {
     let addr = host(1);
-    let (alice, a, _, spawn) = Client::join(addr);
-    let (bob, b, _, _) = Client::join(addr);
+    let (alice, a, _, alices_spawn) = Client::join(addr);
+    let (bob, b, _, bobs_spawn) = Client::join(addr);
     assert_ne!(a, b, "two players were dealt one id");
 
     // Introductions both ways: the newcomer hears who was already here, and
-    // whoever is here hears the newcomer.
+    // whoever is here hears the newcomer — each at their own spawn, arrivals
+    // being scattered around the island rather than stacked on its centre.
     assert_eq!(
         bob.hear(),
         ToClient::Joined {
             id: a,
-            position: spawn
+            position: alices_spawn
         }
     );
     assert_eq!(
         alice.hear(),
         ToClient::Joined {
             id: b,
-            position: spawn
+            position: bobs_spawn
         }
     );
 
@@ -128,19 +159,19 @@ fn players_meet_move_and_part() {
     // Alice having heard the move is what guarantees the server had processed
     // it before Carol connected. The roster iterates in no particular order,
     // so sort what she hears before pinning it.
-    let (carol, c, _, _) = Client::join(addr);
+    let (carol, c, _, carols_spawn) = Client::join(addr);
     assert_eq!(
         alice.hear(),
         ToClient::Joined {
             id: c,
-            position: spawn
+            position: carols_spawn
         }
     );
     assert_eq!(
         bob.hear(),
         ToClient::Joined {
             id: c,
-            position: spawn
+            position: carols_spawn
         }
     );
     let mut introductions = [carol.hear(), carol.hear()];
@@ -153,7 +184,7 @@ fn players_meet_move_and_part() {
         [
             ToClient::Joined {
                 id: a,
-                position: spawn
+                position: alices_spawn
             },
             ToClient::Joined {
                 id: b,
