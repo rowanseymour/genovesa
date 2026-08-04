@@ -85,13 +85,22 @@ impl Default for MapCamera {
             .and_then(|v| parse_focus(&v))
             .unwrap_or(Vec3::ZERO);
 
+        // `KASSITER_YAW` starts the view turned to a given bearing in degrees,
+        // so the same spot can be screenshotted from several sides without
+        // holding Q or E for exactly the right length of time.
+        let yaw = std::env::var("KASSITER_YAW")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .map(f32::to_radians)
+            .unwrap_or(YAW);
+
         Self {
             focus,
             target_focus: focus,
             distance,
             target_distance: distance,
-            yaw: YAW,
-            target_yaw: YAW,
+            yaw,
+            target_yaw: yaw,
             grounded: false,
         }
     }
@@ -146,8 +155,8 @@ fn spawn_camera(mut commands: Commands) {
         DistanceFog {
             color: crate::SKY,
             falloff: FogFalloff::Linear {
-                start: 320.0,
-                end: 900.0,
+                start: crate::HAZE_START,
+                end: crate::HAZE_END,
             },
             ..default()
         },

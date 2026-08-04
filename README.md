@@ -99,6 +99,7 @@ Environment variables for the app, all optional:
 | `KASSITER_SEED` | Initial map seed |
 | `KASSITER_ZOOM` | Initial camera distance in metres |
 | `KASSITER_FOCUS` | `x,z` in metres from the map centre — start the camera there |
+| `KASSITER_YAW` | Initial camera bearing in degrees |
 | `KASSITER_SCREENSHOT` | Render ~270 frames, save a PNG to this path, exit |
 
 Three `#[ignore]`-d tests measure rather than draw, run like:

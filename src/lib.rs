@@ -16,6 +16,15 @@ use bevy::prelude::*;
 /// same colour, so the two meet seamlessly.
 pub const SKY: Color = Color::srgb(0.63, 0.80, 0.93);
 
+/// Distance from the eye at which aerial haze starts to take the ground over,
+/// in metres.
+pub const HAZE_START: f32 = 320.0;
+/// Distance at which the haze has fully replaced the ground with [`SKY`]. This
+/// is the edge of what the camera can see at all, whatever it is pointed at, so
+/// anything the picture depends on has to reach at least this far — the sun's
+/// shadows included.
+pub const HAZE_END: f32 = 900.0;
+
 /// Top-level screen the app is on.
 #[derive(States, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum AppState {

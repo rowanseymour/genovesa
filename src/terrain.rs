@@ -2285,9 +2285,7 @@ fn spawn_world(
         Transform::from_xyz(0.0, 0.08, 0.0),
     ));
 
-    // Sun. The cascade config is tuned for the shallow, wide view a camera
-    // pitched down at a fixed angle has — the default bounds are far too tight
-    // for it.
+    // Sun.
     commands.spawn((
         Name::new("Sun"),
         DespawnOnExit(AppState::InWorld),
@@ -2304,9 +2302,14 @@ fn spawn_world(
             shadow_normal_bias: 2.2,
             ..default()
         },
+        // Cascades are fitted to the camera's own frustum, so the far end of the
+        // shadowed region travels with the camera. It has to sit past everything
+        // the camera can see, or that end lands on ground that is in shot and
+        // whole hillsides gain and lose their shadows as the view moves. Out at
+        // the haze it can't be seen doing it.
         CascadeShadowConfigBuilder {
             first_cascade_far_bound: 60.0,
-            maximum_distance: 280.0,
+            maximum_distance: crate::HAZE_END,
             ..default()
         }
         .build(),
