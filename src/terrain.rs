@@ -3,8 +3,9 @@
 //! # Scale
 //!
 //! One world unit is one metre, matching Bevy's own convention (its lighting is
-//! in real lux). One terrain tile is one metre square, so a map's `size` is both
-//! its tile count per side and its width in metres.
+//! in real lux). One terrain tile is one metre square, and a map is a whole
+//! number of [`CHUNK_TILES`]-tile chunks along each axis — any number on each,
+//! from a single chunk up, square or not.
 //!
 //! The tile is the map's unit of ground, not the mesh's: the height field is
 //! continuous, and it is drawn every [`MESH_STEP`] metres. See [`MESH_STEP`] and
@@ -72,14 +73,19 @@ const LAND_FRACTION: f32 = 0.34;
 /// clears the ring on its own and the full share is safe.
 const LAND_FRACTION_SMALL: f32 = 0.28;
 
-/// The land share for a given map size, continuous in the size so nothing
-/// jumps as a size control sweeps through it. Measured in how many times the
+/// The land share for a given map extent, continuous in it so nothing jumps
+/// as a size control sweeps through it. Measured in how many times the
 /// landmass field repeats across the map, since that is what decides whether
 /// the land is one blob or several lobes: up to about one repeat it is one
 /// blob and gets [`LAND_FRACTION_SMALL`], by one and a half it is lobed
 /// enough to carry the full [`LAND_FRACTION`].
-fn land_fraction(size: u32) -> f32 {
-    let cycles = size as f32 / CONTINENT_SCALE;
+///
+/// On a rectangular map the repeats are counted across the geometric mean of
+/// the two extents — how many lobes the field can fit goes with the map's
+/// *area* against the field's wavelength squared, so a long thin map earns
+/// back along its length what it gave up across its width.
+fn land_fraction(extent: Vec2) -> f32 {
+    let cycles = (extent.x * extent.y).sqrt() / CONTINENT_SCALE;
     LAND_FRACTION_SMALL + (LAND_FRACTION - LAND_FRACTION_SMALL) * smoothstep(1.2, 1.5, cycles)
 }
 
@@ -105,6 +111,23 @@ const MOOR_HEIGHT: f32 = 37.0;
 /// hundred metres and another nearly three hundred — and it is most of what
 /// makes one map feel tame and the next absurd.
 const HEIGHT_SCALE: f32 = 125.0;
+
+/// The tallest peak a map is allowed as a share of its geometric-mean extent,
+/// which caps [`HEIGHT_SCALE`] on small maps. A mountain is mostly climb, and
+/// a map has to have room for the climb: fitted to the full height, a map a
+/// couple of hundred metres across comes out as one grey cone with a beach —
+/// all flank, no country. Held to this pitch, the summit shrinks with the
+/// ground available until, by the smallest maps, there is no mountain at all
+/// and the map is the grassy outcrop it has room to be. At and above the
+/// half-kilometre-odd where the share reaches [`HEIGHT_SCALE`], it does
+/// nothing.
+const PEAK_PITCH: f32 = 0.18;
+
+/// What this map's mountains are fitted to, in metres: the [`PEAK_PITCH`]
+/// share of its extent, up to the full [`HEIGHT_SCALE`].
+fn peak_height(extent: Vec2) -> f32 {
+    (PEAK_PITCH * (extent.x * extent.y).sqrt()).min(HEIGHT_SCALE)
+}
 
 /// Height above which summits hold snow, in metres. High enough that only the
 /// tops of the biggest ranges reach it, so it stays an event rather than a
@@ -445,42 +468,72 @@ const SEA_EXTENT: f32 = 8000.0;
 /// Parameters the map is generated from.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct MapConfig {
-    /// Tiles along each edge of the (square) map. Tiles are one metre, so this
-    /// is the map's width in metres too.
-    pub size: u32,
+    /// Chunks along X and Z. A chunk is [`CHUNK_TILES`] tiles and a tile is a
+    /// metre, so each axis is `chunks * CHUNK_TILES` metres — any pair of
+    /// counts makes a map, down to a single chunk.
+    pub chunks: UVec2,
     pub seed: u32,
 }
 
 impl Default for MapConfig {
     fn default() -> Self {
         Self {
-            size: 1024,
+            chunks: UVec2::splat(8),
             seed: 20_040_112,
         }
     }
 }
 
 impl MapConfig {
-    /// Distance from the map centre to its edge, in metres.
-    pub fn half_extent(&self) -> f32 {
-        self.size as f32 * TILE_SIZE * 0.5
+    /// A square map of `metres` per side, which must be a whole number of
+    /// chunks.
+    pub fn square(metres: u32, seed: u32) -> Self {
+        debug_assert_eq!(metres % CHUNK_TILES, 0, "maps are whole chunks");
+        Self {
+            chunks: UVec2::splat(metres / CHUNK_TILES),
+            seed,
+        }
     }
 
-    /// Chunks along each edge. The last one in a row is partial when the map
-    /// size isn't a whole number of chunks.
-    pub fn chunks_per_side(&self) -> u32 {
-        self.size.div_ceil(CHUNK_TILES)
+    /// Tiles along each axis. Tiles are one metre, so this is the map's extent
+    /// in metres too.
+    pub fn tiles(&self) -> UVec2 {
+        self.chunks * CHUNK_TILES
+    }
+
+    /// The map's extent in metres, per axis.
+    pub fn extent(&self) -> Vec2 {
+        self.tiles().as_vec2() * TILE_SIZE
+    }
+
+    /// Distance from the map centre to its edge, in metres, per axis.
+    pub fn half_extent(&self) -> Vec2 {
+        self.extent() * 0.5
+    }
+
+    /// Parses a size given in metres — `"1024"` for a square, `"1536x1024"`
+    /// for a rectangle — into chunk counts, each axis rounded to the nearest
+    /// whole chunk of at least one.
+    pub fn parse_size(spec: &str) -> Option<UVec2> {
+        let (w, d) = spec.split_once('x').unwrap_or((spec, spec));
+        let axis = |s: &str| {
+            s.trim()
+                .parse::<f32>()
+                .ok()
+                .map(|m| ((m / CHUNK_TILES as f32).round() as u32).max(1))
+        };
+        Some(UVec2::new(axis(w)?, axis(d)?))
     }
 
     /// Overrides from `KASSITER_SIZE` / `KASSITER_SEED`, for trying out maps
     /// without going through the menu.
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        if let Some(size) = std::env::var("KASSITER_SIZE")
+        if let Some(chunks) = std::env::var("KASSITER_SIZE")
             .ok()
-            .and_then(|v| v.parse::<u32>().ok())
+            .and_then(|v| Self::parse_size(&v))
         {
-            config.size = size.max(CHUNK_TILES);
+            config.chunks = chunks;
         }
         if let Some(seed) = std::env::var("KASSITER_SEED")
             .ok()
@@ -533,12 +586,19 @@ pub struct TerrainGenerator {
     range_ceiling: GridField,
     calibration: Calibration,
     coast: CoastDistance,
-    /// This map's land share — [`land_fraction`] of its size.
+    /// This map's land share — [`land_fraction`] of its extent.
     land: f32,
+    /// How much of the full mountain height this map has room for —
+    /// [`peak_height`] of its extent as a share of [`HEIGHT_SCALE`], 1.0 on
+    /// anything but a small map.
+    relief: f32,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
     coast_scale: f32,
-    half_extent: f32,
+    half_extent: Vec2,
+    /// The warp's drift at the map centre, which the falloff measures every
+    /// other point's drift against. See [`TerrainGenerator::falloff`].
+    centre_drift: Vec2,
 }
 
 /// One grid point's landform, split at the one term the fit is free to scale.
@@ -587,16 +647,20 @@ impl TerrainGenerator {
             calibration: Calibration::default(),
             coast: CoastDistance::default(),
             coast_scale: 1.0,
-            land: land_fraction(config.size),
+            land: land_fraction(config.extent()),
+            relief: peak_height(config.extent()) / HEIGHT_SCALE,
             half_extent: config.half_extent(),
+            centre_drift: Vec2::ZERO,
         };
+        generator.centre_drift = generator.warped(0.0, 0.0).1;
 
-        let samples = generator.fit_ranges(config.size);
+        let samples = generator.fit_ranges(config.tiles());
         generator.fit_range_height(&samples);
-        let (raw, side, origin) = generator.sample_raw(config.size);
-        generator.calibration = Calibration::fit(&mut raw.clone(), generator.land);
-        generator.coast = CoastDistance::from_raw(&raw, side, origin, &generator.calibration);
-        generator.fit_coast_scale(&raw, side, origin);
+        let (raw, dims, origin) = generator.sample_raw(config.tiles());
+        generator.calibration =
+            Calibration::fit(&mut raw.clone(), generator.land, generator.relief);
+        generator.coast = CoastDistance::from_raw(&raw, dims, origin, &generator.calibration);
+        generator.fit_coast_scale(&raw, dims, origin);
         generator
     }
 
@@ -613,9 +677,9 @@ impl TerrainGenerator {
     /// [`RANGE_FOOTPRINT`] of the map and reaches its full height only at its
     /// highest point, the second builds the field either side of the one term
     /// that is still free.
-    fn fit_ranges(&mut self, size: u32) -> Vec<Sample> {
-        let side = (size as f32 / COAST_GRID).ceil() as usize + 1;
-        let origin = -(size as f32) * 0.5;
+    fn fit_ranges(&mut self, tiles: UVec2) -> Vec<Sample> {
+        let (nx, nz) = grid_dims(tiles);
+        let origin = -tiles.as_vec2() * 0.5;
 
         // The seat field is sampled on a grid padded by the ceiling's window,
         // so that the window never runs off the edge of what was sampled —
@@ -623,26 +687,26 @@ impl TerrainGenerator {
         // size, and the same seed would put different mountains at the same
         // world coordinates on different sizes.
         let pad = (MASSIF_WINDOW / COAST_GRID).ceil() as usize;
-        let padded = side + 2 * pad;
-        let pad_origin = origin - pad as f32 * COAST_GRID;
+        let (px, pz) = (nx + 2 * pad, nz + 2 * pad);
+        let pad_origin = origin - Vec2::splat(pad as f32 * COAST_GRID);
 
         // Every in-map grid point's warped position, its share of the terms
         // that do not depend on the massif, and what the falloff does to it —
         // and, over the padded grid, the massif's seat. Worked out once and
         // used by every pass after this one.
-        let mut seat = vec![0.0f32; padded * padded];
-        let mut points = Vec::with_capacity(side * side);
-        for iz in 0..padded {
-            let wz = pad_origin + iz as f32 * COAST_GRID;
-            for ix in 0..padded {
-                let wx = pad_origin + ix as f32 * COAST_GRID;
+        let mut seat = vec![0.0f32; px * pz];
+        let mut points = Vec::with_capacity(nx * nz);
+        for iz in 0..pz {
+            let wz = pad_origin.y + iz as f32 * COAST_GRID;
+            for ix in 0..px {
+                let wx = pad_origin.x + ix as f32 * COAST_GRID;
                 let (n, drift) = self.warped(wx, wz);
                 let continent = self
                     .continent
                     .fbm(n.x * CONTINENT_FREQ, n.y * CONTINENT_FREQ, 4);
-                seat[iz * padded + ix] = self.range_seat(n, continent);
+                seat[iz * px + ix] = self.range_seat(n, continent);
 
-                if (pad..padded - pad).contains(&ix) && (pad..padded - pad).contains(&iz) {
+                if (pad..px - pad).contains(&ix) && (pad..pz - pad).contains(&iz) {
                     let hills = self.hills.fbm(n.x * 0.9, n.y * 0.9, 5);
                     let (damp, push) = self.falloff(wx, wz, n, drift);
                     (points).push((wx, wz, n, continent, 0.62 * continent + 0.26 * hills, damp, push));
@@ -653,10 +717,10 @@ impl TerrainGenerator {
         // Where the massif starts counting, and the map-wide span — fitted
         // against the map itself, not the padding, since the footprint is a
         // share of *this map*.
-        let mut field = Vec::with_capacity(side * side);
-        for iz in pad..padded - pad {
-            for ix in pad..padded - pad {
-                field.push(seat[iz * padded + ix]);
+        let mut field = Vec::with_capacity(nx * nz);
+        for iz in pad..pz - pad {
+            for ix in pad..px - pad {
+                field.push(seat[iz * px + ix]);
             }
         }
         field.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a noise field"));
@@ -670,12 +734,12 @@ impl TerrainGenerator {
         // carries gradient creases where the winning peak changes hands, and
         // anything the massif is divided by ends up printed on the mountains.
         let mut ceiling = seat;
-        window_max(&mut ceiling, padded, pad);
-        blur(&mut ceiling, padded);
-        blur(&mut ceiling, padded);
+        window_max(&mut ceiling, (px, pz), pad);
+        blur(&mut ceiling, (px, pz));
+        blur(&mut ceiling, (px, pz));
         self.range_ceiling = GridField {
             cells: ceiling,
-            side: padded,
+            dims: (px, pz),
             origin: pad_origin,
         };
 
@@ -691,7 +755,7 @@ impl TerrainGenerator {
     }
 
     /// Scales the massif until the highest ground on the map stands at
-    /// [`HEIGHT_SCALE`].
+    /// [`peak_height`] — [`HEIGHT_SCALE`], on any map big enough to hold it.
     ///
     /// Fitting the footprint is not enough on its own. How far a summit gets
     /// above the line where the mountains start is set by how sharply this
@@ -714,9 +778,13 @@ impl TerrainGenerator {
         let peak_at = |gain: f32| {
             let mut raw: Vec<f32> = samples.iter().map(|s| s.raw(gain)).collect();
             // Sorts in place, so the last entry is the summit afterwards.
-            let calibration = Calibration::fit(&mut raw, self.land);
+            let calibration = Calibration::fit(&mut raw, self.land, self.relief);
             calibration.metres(raw[raw.len() - 1])
         };
+
+        // What this map's summit is fitted to — the full height, less
+        // whatever [`peak_height`] took off for the map being small.
+        let target = HEIGHT_SCALE * self.relief;
 
         // Two brackets to start from, a decade apart. The lower is well under
         // anything that produces mountains and the upper well over it, so the
@@ -727,7 +795,7 @@ impl TerrainGenerator {
         // cannot be thrown off by a flat stretch the way a secant can.
         for _ in 0..18 {
             let mid = 0.5 * (lo + hi);
-            if peak_at(mid) < HEIGHT_SCALE {
+            if peak_at(mid) < target {
                 lo = mid;
             } else {
                 hi = mid;
@@ -737,20 +805,20 @@ impl TerrainGenerator {
     }
 
     /// A grid of raw landform samples covering the whole map, at
-    /// [`COAST_GRID`] spacing. Returned with the grid's size and world origin,
-    /// because both the things that need it need those too.
-    fn sample_raw(&self, size: u32) -> (Vec<f32>, usize, f32) {
-        let side = (size as f32 / COAST_GRID).ceil() as usize + 1;
-        let origin = -(size as f32) * 0.5;
+    /// [`COAST_GRID`] spacing. Returned with the grid's dimensions and world
+    /// origin, because both the things that need it need those too.
+    fn sample_raw(&self, tiles: UVec2) -> (Vec<f32>, (usize, usize), Vec2) {
+        let (nx, nz) = grid_dims(tiles);
+        let origin = -tiles.as_vec2() * 0.5;
 
-        let mut raw = Vec::with_capacity(side * side);
-        for iz in 0..side {
-            let wz = origin + iz as f32 * COAST_GRID;
-            for ix in 0..side {
-                raw.push(self.landform_raw(origin + ix as f32 * COAST_GRID, wz));
+        let mut raw = Vec::with_capacity(nx * nz);
+        for iz in 0..nz {
+            let wz = origin.y + iz as f32 * COAST_GRID;
+            for ix in 0..nx {
+                raw.push(self.landform_raw(origin.x + ix as f32 * COAST_GRID, wz));
             }
         }
-        (raw, side, origin)
+        (raw, (nx, nz), origin)
     }
 
     /// Fits how much taller than tuned this seed's coastal band has to be for
@@ -769,24 +837,28 @@ impl TerrainGenerator {
     /// would paint grey, and take the smallest band that gets that share under
     /// [`BEACH_STEEP_TARGET`]. Gentle seeds pass at 1.0 and keep the tuned
     /// look untouched.
-    fn fit_coast_scale(&mut self, raw: &[f32], side: usize, origin: f32) {
+    fn fit_coast_scale(&mut self, raw: &[f32], dims: (usize, usize), origin: Vec2) {
+        let (nx, nz) = dims;
         // Every waterline crossing on the fitting grid whose stretch of coast
         // the character field calls a beach.
         let sea = self.calibration.sea_level;
         let mut points: Vec<(f32, f32)> = Vec::new();
-        for iz in 1..side - 1 {
-            for ix in 1..side - 1 {
-                if raw[iz * side + ix] <= sea {
+        for iz in 1..nz - 1 {
+            for ix in 1..nx - 1 {
+                if raw[iz * nx + ix] <= sea {
                     continue;
                 }
-                let shoreline = [iz * side + ix - 1, iz * side + ix + 1]
+                let shoreline = [iz * nx + ix - 1, iz * nx + ix + 1]
                     .iter()
-                    .chain(&[(iz - 1) * side + ix, (iz + 1) * side + ix])
+                    .chain(&[(iz - 1) * nx + ix, (iz + 1) * nx + ix])
                     .any(|i| raw[*i] <= sea);
                 if !shoreline {
                     continue;
                 }
-                let (wx, wz) = (origin + ix as f32 * COAST_GRID, origin + iz as f32 * COAST_GRID);
+                let (wx, wz) = (
+                    origin.x + ix as f32 * COAST_GRID,
+                    origin.y + iz as f32 * COAST_GRID,
+                );
                 if self.shore(wx, wz) == Shore::Beach {
                     points.push((wx, wz));
                 }
@@ -971,18 +1043,41 @@ impl TerrainGenerator {
         // land usually does reach the falloff: at 0.55 the field put barely a
         // lobe on a 768 m island's outline, and every small map read as the
         // same rounded square.
-        // The bend's amplitude shrinks on maps the landmass field cannot
-        // break up — the same regime the land share tapers in, measured the
-        // same way. The warp's dominant component is over a kilometre long,
-        // and on a map that small a displacement of full amplitude is not a
-        // lobe on the ring, it is a translation of the whole ring, off the
-        // edge of the map — and the coast on that side ends up drawn by the
-        // rim in a straight line along the frame. On larger maps the same
-        // displacement is a lobe, and is most of what un-squircles them, so
-        // it fades back in as soon as the map can afford it.
+        // Only how the drift *varies* around the ring draws lobes on it;
+        // whatever the whole map's drift has in common is a displacement of
+        // the entire ring — and the ring has very little room to be
+        // displaced, since land survives to nearly the top of the ramp and
+        // the ramp ends barely past the frame. The warp's dominant component
+        // is over a kilometre long, so on maps up to that order the shared
+        // part is most of the drift: taken raw, it slid the ring off the edge
+        // of the map, and the coast on that side was drawn by the rim in a
+        // dead straight line along the frame. Two guards keep the ring on the
+        // map, each for the scale the other cannot cover.
+        //
+        // The shared part — read at the map centre — is held to a tolerance
+        // of a tenth of each half extent, and only what exceeds it is
+        // subtracted, everywhere. A seed whose drift is centred keeps its
+        // shape untouched; a seed blown off the map is slid back onto it,
+        // with every lobe intact, because a constant subtraction changes
+        // nothing about how the drift varies. Full recentring is deliberately
+        // *not* done: past the warp's wavelength the centre stops predicting
+        // the drift at the ring, and anchoring the ring to it there pushes
+        // maps off their frames instead of back onto them.
+        //
+        // And on maps the landmass field cannot break up — the same regime
+        // the land share tapers in, judged on the tighter axis — the whole
+        // bend is damped, because down there even the drift's local variation
+        // outruns the few metres of margin the ring has, and what the
+        // subtraction leaves still cuts the coast off at the frame. On larger
+        // maps the same variation is a lobe, and is most of what
+        // un-squircles them, so it fades back in as soon as the map can
+        // afford it.
         let cycles = self.half_extent * 2.0 / CONTINENT_SCALE;
-        let room = smoothstep(1.1, 1.55, cycles);
-        let bend = drift * FEATURE_SCALE * 0.7 * (0.25 + 0.75 * room);
+        let room = smoothstep(1.1, 1.55, cycles.x.min(cycles.y));
+        let tolerance = self.half_extent * 0.1;
+        let centre = self.centre_drift * FEATURE_SCALE * 0.7;
+        let excess = centre - centre.clamp(-tolerance, tolerance);
+        let bend = (drift * FEATURE_SCALE * 0.7 - excess) * (0.25 + 0.75 * room);
         let reach = 1.0 + 0.7 * self.continent.fbm(n.x * 0.85 - 12.4, n.y * 0.85 + 9.8, 2);
         // The clamp is asymmetric: the radius may pull well in, carving deep
         // bays out of the ring, but only push a little out — pushed further,
@@ -1018,12 +1113,13 @@ impl TerrainGenerator {
         (damp * damp, edge * 0.7 * (1.0 - rim) + rim * 1.4)
     }
 
-    /// Distance from the middle of the map, as a fraction of its half extent,
-    /// measured on a squircle. `power` picks how square: 2 is a circle, and
-    /// larger reaches further into the corners.
+    /// Distance from the middle of the map, as a fraction of each axis's half
+    /// extent, measured on a squircle — so on a rectangular map the contours
+    /// are rounded rectangles that follow the frame. `power` picks how square:
+    /// 2 is a circle, and larger reaches further into the corners.
     fn squircle(&self, wx: f32, wz: f32, power: f32) -> f32 {
-        let dx = (wx / self.half_extent).abs();
-        let dz = (wz / self.half_extent).abs();
+        let dx = (wx / self.half_extent.x).abs();
+        let dz = (wz / self.half_extent.y).abs();
         (dx.powf(power) + dz.powf(power)).powf(1.0 / power)
     }
 
@@ -1271,8 +1367,8 @@ impl TerrainGenerator {
     }
 
     /// Builds the mesh for one chunk. `origin` is the chunk's lower-corner tile
-    /// index into the map; `tiles` is its extent, which is smaller than
-    /// [`CHUNK_TILES`] for the partial chunks along the far edges.
+    /// index into the map, whose full extent in tiles is `map_tiles` — every
+    /// chunk is full-sized, since a map is a whole number of chunks.
     ///
     /// The mesh is flat shaded: every triangle carries its own normal and its
     /// own single colour, so no vertex is shared between two triangles. That
@@ -1283,27 +1379,20 @@ impl TerrainGenerator {
     ///
     /// Vertex positions are relative to the chunk's own origin, so the entity
     /// transform carries the world offset and the bounding box stays tight.
-    pub fn build_chunk(&self, origin: UVec2, tiles: UVec2, map_size: u32) -> Mesh {
-        let half = map_size as f32 * TILE_SIZE * 0.5;
+    pub fn build_chunk(&self, origin: UVec2, map_tiles: UVec2) -> Mesh {
+        let half = map_tiles.as_vec2() * TILE_SIZE * 0.5;
         let step = MESH_STEP as f32;
 
-        // Quads, not tiles. A map size that isn't a whole number of quads makes
-        // the last chunk overhang by less than one, which is under water on
-        // every map anyway.
-        let quads = UVec2::new(
-            tiles.x.div_ceil(MESH_STEP).max(1),
-            tiles.y.div_ceil(MESH_STEP).max(1),
-        );
-        let (qx, qz) = (quads.x as usize, quads.y as usize);
+        let (qx, qz) = ((CHUNK_TILES / MESH_STEP) as usize, (CHUNK_TILES / MESH_STEP) as usize);
         let (vx, vz) = (qx + 1, qz + 1);
 
         // Corner heights, shared between the quads that meet there even though
         // the vertices themselves won't be.
         let mut heights = vec![0.0f32; vx * vz];
         for iz in 0..vz {
-            let wz = (origin.y + iz as u32 * MESH_STEP) as f32 - half;
+            let wz = (origin.y + iz as u32 * MESH_STEP) as f32 - half.y;
             for ix in 0..vx {
-                let wx = (origin.x + ix as u32 * MESH_STEP) as f32 - half;
+                let wx = (origin.x + ix as u32 * MESH_STEP) as f32 - half.x;
                 heights[iz * vx + ix] = self.height(wx, wz);
             }
         }
@@ -1315,7 +1404,7 @@ impl TerrainGenerator {
         let mut colors = Vec::with_capacity(count);
 
         // Where this chunk's local origin sits in the world.
-        let base = Vec2::new(origin.x as f32 - half, origin.y as f32 - half);
+        let base = Vec2::new(origin.x as f32 - half.x, origin.y as f32 - half.y);
 
         for iz in 0..qz {
             for ix in 0..qx {
@@ -1355,7 +1444,10 @@ impl TerrainGenerator {
                     let c = Color::srgb(c.x, c.y, c.z).to_linear().to_f32_array();
                     // UVs span the whole map, so a future overlay lines up
                     // across chunk boundaries.
-                    let uv = [(wx + half) / map_size as f32, (wz + half) / map_size as f32];
+                    let uv = [
+                        (wx + half.x) / map_tiles.x as f32,
+                        (wz + half.y) / map_tiles.y as f32,
+                    ];
 
                     for corner in tri {
                         positions.push([corner.x, corner.y, corner.z]);
@@ -1378,16 +1470,15 @@ impl TerrainGenerator {
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
     }
+}
 
-    /// Extent of the chunk at `chunk`, in tiles. Chunks along the far edges are
-    /// short when the map size isn't a whole number of chunks.
-    fn chunk_extent(chunk: UVec2, map_size: u32) -> UVec2 {
-        let origin = chunk * CHUNK_TILES;
-        UVec2::new(
-            (map_size - origin.x).min(CHUNK_TILES),
-            (map_size - origin.y).min(CHUNK_TILES),
-        )
-    }
+/// Dimensions of a [`COAST_GRID`]-spaced grid covering a map of `tiles`,
+/// inclusive of both edges.
+fn grid_dims(tiles: UVec2) -> (usize, usize) {
+    (
+        (tiles.x as f32 / COAST_GRID).ceil() as usize + 1,
+        (tiles.y as f32 / COAST_GRID).ceil() as usize + 1,
+    )
 }
 
 /// Turns the raw landform field into metres, fitted to the map it was sampled
@@ -1455,12 +1546,20 @@ struct Calibration {
 
 impl Calibration {
     /// Fits to a grid of raw samples covering the whole map. `raw` is sorted in
-    /// place — it is the caller's scratch, not a field of anything.
-    fn fit(raw: &mut [f32], land: f32) -> Self {
+    /// place — it is the caller's scratch, not a field of anything. `relief`
+    /// scales the above-water targets down on maps too small for full-height
+    /// mountains — see [`peak_height`].
+    fn fit(raw: &mut [f32], land: f32, relief: f32) -> Self {
         raw.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a height field"));
         let quantile = |q: f32| raw[((raw.len() - 1) as f32 * q) as usize];
 
         let sea_level = quantile(1.0 - land);
+
+        // The above-water heights this map is aimed at. Scaling both together
+        // keeps the lowland floor below the mountain line whatever the map
+        // size, so the bent mapping below can never fold back on itself.
+        let mountain_height = MOUNTAIN_HEIGHT * relief;
+        let lowland_floor = LOWLAND_FLOOR * relief;
 
         // One point fixes the line: the height mountains start at, placed so
         // that exactly the intended share of land is above it. Everything else
@@ -1468,7 +1567,7 @@ impl Calibration {
         // the field's own shape, which is the point.
         let mountain = quantile(1.0 - land * MOUNTAIN_FRACTION) - sea_level;
         let slope = if mountain > 1e-4 {
-            MOUNTAIN_HEIGHT / mountain
+            mountain_height / mountain
         } else {
             // A flat field, or one with no land in it at all. Nothing to fit;
             // take something harmless rather than dividing by zero.
@@ -1482,11 +1581,11 @@ impl Calibration {
         let knee = quantile(1.0 - land * 0.5) - sea_level;
         let natural = slope * knee;
         let (knee_height, slope_low, slope_high) =
-            if natural < LOWLAND_FLOOR && knee > 1e-4 && mountain - knee > 1e-4 {
+            if natural < lowland_floor && knee > 1e-4 && mountain - knee > 1e-4 {
                 (
-                    LOWLAND_FLOOR,
-                    LOWLAND_FLOOR / knee,
-                    (MOUNTAIN_HEIGHT - LOWLAND_FLOOR) / (mountain - knee),
+                    lowland_floor,
+                    lowland_floor / knee,
+                    (mountain_height - lowland_floor) / (mountain - knee),
                 )
             } else {
                 (natural, slope, slope)
@@ -1558,15 +1657,15 @@ impl Calibration {
 struct CoastDistance {
     /// Distance in cells. Metres come from multiplying by [`COAST_GRID`].
     cells: Vec<f32>,
-    side: usize,
-    /// World coordinate of the first cell, on both axes.
-    origin: f32,
+    dims: (usize, usize),
+    /// World coordinate of the first cell.
+    origin: Vec2,
 }
 
 impl CoastDistance {
     /// Measures out from wherever the calibration put the waterline in an
     /// already-sampled grid of raw landform values.
-    fn from_raw(raw: &[f32], side: usize, origin: f32, calibration: &Calibration) -> Self {
+    fn from_raw(raw: &[f32], dims: (usize, usize), origin: Vec2, calibration: &Calibration) -> Self {
         let mut cells: Vec<f32> = raw
             .iter()
             .map(|v| {
@@ -1578,7 +1677,7 @@ impl CoastDistance {
             })
             .collect();
 
-        chamfer(&mut cells, side);
+        chamfer(&mut cells, dims);
         // The transform is exact, and exact is the problem: everywhere two
         // wavefronts meet — down the middle of every neck and strait, and in
         // a fan of branches behind every scalloped stretch of coast — the
@@ -1591,11 +1690,11 @@ impl CoastDistance {
         // that the shore-character displacement sweeps across a crease instead
         // of leaping it.
         for _ in 0..4 {
-            blur(&mut cells, side);
+            blur(&mut cells, dims);
         }
         Self {
             cells,
-            side,
+            dims,
             origin,
         }
     }
@@ -1605,17 +1704,17 @@ impl CoastDistance {
     /// four-metre steps. Outside the grid it reads the edge, which is open sea
     /// on every map.
     fn metres(&self, wx: f32, wz: f32) -> f32 {
-        if self.side == 0 {
+        let (nx, nz) = self.dims;
+        if nx == 0 {
             return f32::INFINITY;
         }
-        let last = (self.side - 1) as f32;
-        let fx = ((wx - self.origin) / COAST_GRID).clamp(0.0, last);
-        let fz = ((wz - self.origin) / COAST_GRID).clamp(0.0, last);
+        let fx = ((wx - self.origin.x) / COAST_GRID).clamp(0.0, (nx - 1) as f32);
+        let fz = ((wz - self.origin.y) / COAST_GRID).clamp(0.0, (nz - 1) as f32);
 
         let (x0, z0) = (fx.floor() as usize, fz.floor() as usize);
-        let (x1, z1) = ((x0 + 1).min(self.side - 1), (z0 + 1).min(self.side - 1));
+        let (x1, z1) = ((x0 + 1).min(nx - 1), (z0 + 1).min(nz - 1));
         let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
-        let at = |x: usize, z: usize| self.cells[z * self.side + x];
+        let at = |x: usize, z: usize| self.cells[z * nx + x];
 
         let near = at(x0, z0) + (at(x1, z0) - at(x0, z0)) * tx;
         let far = at(x0, z1) + (at(x1, z1) - at(x0, z1)) * tx;
@@ -1630,23 +1729,24 @@ impl CoastDistance {
 /// Weighting a diagonal step by √2 keeps the result close enough to a true
 /// Euclidean distance for something only ever used to shape and fade a coast,
 /// at two linear passes rather than a search.
-fn chamfer(cells: &mut [f32], side: usize) {
+fn chamfer(cells: &mut [f32], dims: (usize, usize)) {
     const DIAGONAL: f32 = std::f32::consts::SQRT_2;
+    let (nx, nz) = dims;
 
     let mut pass = |x: usize, z: usize, neighbours: [(isize, isize, f32); 4]| {
-        let mut best = cells[z * side + x];
+        let mut best = cells[z * nx + x];
         for (dx, dz, cost) in neighbours {
-            let (nx, nz) = (x as isize + dx, z as isize + dz);
-            if (0..side as isize).contains(&nx) && (0..side as isize).contains(&nz) {
-                best = best.min(cells[nz as usize * side + nx as usize] + cost);
+            let (cx, cz) = (x as isize + dx, z as isize + dz);
+            if (0..nx as isize).contains(&cx) && (0..nz as isize).contains(&cz) {
+                best = best.min(cells[cz as usize * nx + cx as usize] + cost);
             }
         }
-        cells[z * side + x] = best;
+        cells[z * nx + x] = best;
     };
 
     // Forward, reaching back at the cells already settled this pass...
-    for z in 0..side {
-        for x in 0..side {
+    for z in 0..nz {
+        for x in 0..nx {
             pass(
                 x,
                 z,
@@ -1661,8 +1761,8 @@ fn chamfer(cells: &mut [f32], side: usize) {
     }
     // ...then backward over the mirror image of the same neighbourhood, which
     // is what lets distance travel in every direction.
-    for z in (0..side).rev() {
-        for x in (0..side).rev() {
+    for z in (0..nz).rev() {
+        for x in (0..nx).rev() {
             pass(
                 x,
                 z,
@@ -1682,24 +1782,24 @@ fn chamfer(cells: &mut [f32], side: usize) {
 #[derive(Default)]
 struct GridField {
     cells: Vec<f32>,
-    side: usize,
-    /// World coordinate of the first cell, on both axes.
-    origin: f32,
+    dims: (usize, usize),
+    /// World coordinate of the first cell.
+    origin: Vec2,
 }
 
 impl GridField {
     fn at(&self, wx: f32, wz: f32) -> f32 {
-        if self.side == 0 {
+        let (nx, nz) = self.dims;
+        if nx == 0 {
             return 0.0;
         }
-        let last = (self.side - 1) as f32;
-        let fx = ((wx - self.origin) / COAST_GRID).clamp(0.0, last);
-        let fz = ((wz - self.origin) / COAST_GRID).clamp(0.0, last);
+        let fx = ((wx - self.origin.x) / COAST_GRID).clamp(0.0, (nx - 1) as f32);
+        let fz = ((wz - self.origin.y) / COAST_GRID).clamp(0.0, (nz - 1) as f32);
 
         let (x0, z0) = (fx.floor() as usize, fz.floor() as usize);
-        let (x1, z1) = ((x0 + 1).min(self.side - 1), (z0 + 1).min(self.side - 1));
+        let (x1, z1) = ((x0 + 1).min(nx - 1), (z0 + 1).min(nz - 1));
         let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
-        let at = |x: usize, z: usize| self.cells[z * self.side + x];
+        let at = |x: usize, z: usize| self.cells[z * nx + x];
 
         let near = at(x0, z0) + (at(x1, z0) - at(x0, z0)) * tx;
         let far = at(x0, z1) + (at(x1, z1) - at(x0, z1)) * tx;
@@ -1710,7 +1810,8 @@ impl GridField {
 /// Replaces every cell with the largest value within `radius` cells of it —
 /// a square sliding-window maximum, done as two 1D passes with a monotonic
 /// deque, so the whole thing is linear in the grid size.
-fn window_max(cells: &mut [f32], side: usize, radius: usize) {
+fn window_max(cells: &mut [f32], dims: (usize, usize), radius: usize) {
+    let (nx, nz) = dims;
     let window = |line: &mut Vec<f32>, out: &mut Vec<f32>| {
         // Deque of indices whose values are decreasing; the front is always
         // the maximum of the window around `i`.
@@ -1733,27 +1834,28 @@ fn window_max(cells: &mut [f32], side: usize, radius: usize) {
         }
     };
 
-    let mut line = Vec::with_capacity(side);
-    let mut out = Vec::with_capacity(side);
-    for row in 0..side {
+    let mut line = Vec::with_capacity(nx.max(nz));
+    let mut out = Vec::with_capacity(nx.max(nz));
+    for row in 0..nz {
         line.clear();
-        line.extend_from_slice(&cells[row * side..(row + 1) * side]);
+        line.extend_from_slice(&cells[row * nx..(row + 1) * nx]);
         window(&mut line, &mut out);
-        cells[row * side..(row + 1) * side].copy_from_slice(&out);
+        cells[row * nx..(row + 1) * nx].copy_from_slice(&out);
     }
-    for col in 0..side {
+    for col in 0..nx {
         line.clear();
-        line.extend((0..side).map(|row| cells[row * side + col]));
+        line.extend((0..nz).map(|row| cells[row * nx + col]));
         window(&mut line, &mut out);
         for (row, v) in out.iter().enumerate() {
-            cells[row * side + col] = *v;
+            cells[row * nx + col] = *v;
         }
     }
 }
 
 /// One pass of 3×3 box blur over a grid, in place. Used to take the creases
 /// off the distance field; run twice it approximates a small tent kernel.
-fn blur(cells: &mut [f32], side: usize) {
+fn blur(cells: &mut [f32], dims: (usize, usize)) {
+    let (nx, nz) = dims;
     let mut pass = |stride: usize, len: usize, lanes: usize, lane_stride: usize| {
         for lane in 0..lanes {
             let base = lane * lane_stride;
@@ -1767,8 +1869,8 @@ fn blur(cells: &mut [f32], side: usize) {
         }
     };
     // Rows, then columns — a box blur is separable.
-    pass(1, side, side, side);
-    pass(side, side, side, 1);
+    pass(1, nx, nz, nx);
+    pass(nx, nz, nx, 1);
 }
 
 /// The three kinds of coast, in the order the character field runs through
@@ -1947,25 +2049,24 @@ struct ChunkMesh {
 
 /// Builds every chunk of the map, in parallel across the task pool.
 fn build_chunks(generator: &TerrainGenerator, config: &MapConfig) -> Vec<ChunkMesh> {
-    let per_side = config.chunks_per_side();
     let half = config.half_extent();
+    let tiles = config.tiles();
 
     ComputeTaskPool::get().scope(|scope| {
-        for cz in 0..per_side {
-            for cx in 0..per_side {
+        for cz in 0..config.chunks.y {
+            for cx in 0..config.chunks.x {
                 scope.spawn(async move {
                     let chunk = UVec2::new(cx, cz);
                     let origin_tiles = chunk * CHUNK_TILES;
-                    let tiles = TerrainGenerator::chunk_extent(chunk, config.size);
 
                     ChunkMesh {
                         coords: chunk,
                         origin: Vec3::new(
-                            origin_tiles.x as f32 * TILE_SIZE - half,
+                            origin_tiles.x as f32 * TILE_SIZE - half.x,
                             0.0,
-                            origin_tiles.y as f32 * TILE_SIZE - half,
+                            origin_tiles.y as f32 * TILE_SIZE - half.y,
                         ),
-                        mesh: generator.build_chunk(origin_tiles, tiles, config.size),
+                        mesh: generator.build_chunk(origin_tiles, tiles),
                     }
                 });
             }
@@ -2045,8 +2146,9 @@ fn spawn_world(
     }
 
     info!(
-        "generated {size} x {size} m map (seed {seed}) as {chunk_count} chunks in {elapsed:.1?}",
-        size = config.size,
+        "generated {} x {} m map (seed {seed}) as {chunk_count} chunks in {elapsed:.1?}",
+        config.tiles().x,
+        config.tiles().y,
         seed = config.seed,
     );
 
@@ -2134,8 +2236,11 @@ mod tests {
         values.clone()
     }
 
-    fn generator(size: u32, seed: u32) -> (MapConfig, TerrainGenerator) {
-        let config = MapConfig { size, seed };
+    fn generator(chunks_x: u32, chunks_z: u32, seed: u32) -> (MapConfig, TerrainGenerator) {
+        let config = MapConfig {
+            chunks: UVec2::new(chunks_x, chunks_z),
+            seed,
+        };
         let generator = TerrainGenerator::new(&config);
         (config, generator)
     }
@@ -2148,16 +2253,15 @@ mod tests {
         // on one seed and nearly three hundred on the next — which is most of
         // what made one map feel tame and another absurd.
         for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
-            let size = 1024;
-            let (config, gen) = generator(size, seed);
+            let (config, gen) = generator(8, 8, seed);
             let half = config.half_extent();
 
             // On the same grid the fit itself used, so this is testing the
             // solve rather than how the summit falls between samples.
             let mut peak = 0.0f32;
-            for iz in (0..size).step_by(COAST_GRID as usize) {
-                for ix in (0..size).step_by(COAST_GRID as usize) {
-                    peak = peak.max(gen.landform(ix as f32 - half, iz as f32 - half));
+            for iz in (0..config.tiles().y).step_by(COAST_GRID as usize) {
+                for ix in (0..config.tiles().x).step_by(COAST_GRID as usize) {
+                    peak = peak.max(gen.landform(ix as f32 - half.x, iz as f32 - half.y));
                 }
             }
 
@@ -2179,16 +2283,16 @@ mod tests {
         // entitled to cut the shore itself down and the detail noise averages
         // out to nothing.
         for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
-            let size = 1024;
-            let (config, gen) = generator(size, seed);
+            let (config, gen) = generator(8, 8, seed);
             let half = config.half_extent();
+            let tiles = config.tiles();
 
-            let mut land: Vec<f32> = (0..size)
+            let mut land: Vec<f32> = (0..tiles.y)
                 .step_by(COAST_GRID as usize)
                 .flat_map(|iz| {
-                    (0..size).step_by(COAST_GRID as usize).map(move |ix| (ix, iz))
+                    (0..tiles.x).step_by(COAST_GRID as usize).map(move |ix| (ix, iz))
                 })
-                .map(|(ix, iz)| gen.landform(ix as f32 - half, iz as f32 - half))
+                .map(|(ix, iz)| gen.landform(ix as f32 - half.x, iz as f32 - half.y))
                 .filter(|h| *h > 0.0)
                 .collect();
             land.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a height field"));
@@ -2208,10 +2312,7 @@ mod tests {
         // pure luck of the mask field, so a large map came out as many grey
         // lumps under one white cap. The local ceiling — [`MASSIF_EQUALITY`] —
         // is what entitles every range to a summit of its own.
-        let config = MapConfig {
-            size: 2048,
-            seed: 20_040_112,
-        };
+        let config = MapConfig::square(2048, 20_040_112);
         let gen = TerrainGenerator::new(&config);
         let half = config.half_extent();
 
@@ -2219,9 +2320,9 @@ mod tests {
         // so that one massif counts once. Measured on the landform, so the
         // detail layers cannot invent one.
         let mut peaks: Vec<(f32, f32, f32)> = Vec::new();
-        for iz in (0..config.size as i32).step_by(8) {
-            for ix in (0..config.size as i32).step_by(8) {
-                let (wx, wz) = (ix as f32 - half, iz as f32 - half);
+        for iz in (0..config.tiles().y as i32).step_by(8) {
+            for ix in (0..config.tiles().x as i32).step_by(8) {
+                let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                 let h = gen.landform(wx, wz);
                 if h < HEIGHT_SCALE * 0.6 {
                     continue;
@@ -2250,13 +2351,15 @@ mod tests {
 
     #[test]
     fn heights_are_finite_and_bounded() {
-        let (config, gen) = generator(256, 7);
+        // On a rectangular map, so the whole pipeline is exercised off the
+        // square path it grew up on.
+        let (config, gen) = generator(2, 1, 7);
         let half = config.half_extent();
 
-        for iz in 0..=256 {
-            for ix in 0..=256 {
-                let wx = ix as f32 - half;
-                let wz = iz as f32 - half;
+        for iz in 0..=config.tiles().y {
+            for ix in 0..=config.tiles().x {
+                let wx = ix as f32 - half.x;
+                let wz = iz as f32 - half.y;
                 let h = gen.height(wx, wz);
                 assert!(h.is_finite(), "height at ({wx}, {wz}) was {h}");
                 assert!(h >= -MAX_DEPTH, "height {h} below the depth floor");
@@ -2267,12 +2370,12 @@ mod tests {
 
     #[test]
     fn normals_are_unit_length_and_point_upwards() {
-        let (config, gen) = generator(256, 7);
+        let (config, gen) = generator(2, 2, 7);
         let half = config.half_extent();
 
         for iz in 0..=256 {
             for ix in 0..=256 {
-                let n = gen.normal(ix as f32 - half, iz as f32 - half);
+                let n = gen.normal(ix as f32 - half.x, iz as f32 - half.y);
                 assert!(
                     (n.length() - 1.0).abs() < 1e-3,
                     "normal {n:?} not normalised"
@@ -2286,25 +2389,73 @@ mod tests {
 
     #[test]
     fn map_edges_are_under_water() {
-        let (config, gen) = generator(512, 12345);
+        // On a rectangle, where the falloff has a different half extent on
+        // each axis to get wrong.
+        let (config, gen) = generator(4, 2, 12345);
         let half = config.half_extent();
 
-        for i in 0..=512 {
-            let t = i as f32 - half;
-            for (wx, wz) in [(-half, t), (half, t), (t, -half), (t, half)] {
+        for i in 0..=config.tiles().x {
+            let t = i as f32 - half.x;
+            for wz in [-half.y, half.y] {
                 assert!(
-                    gen.height(wx, wz) < 0.0,
-                    "map edge at ({wx}, {wz}) is above sea level"
+                    gen.height(t, wz) < 0.0,
+                    "map edge at ({t}, {wz}) is above sea level"
+                );
+            }
+        }
+        for i in 0..=config.tiles().y {
+            let t = i as f32 - half.y;
+            for wx in [-half.x, half.x] {
+                assert!(
+                    gen.height(wx, t) < 0.0,
+                    "map edge at ({wx}, {t}) is above sea level"
                 );
             }
         }
     }
 
     #[test]
+    fn a_single_chunk_map_is_an_islet_with_a_sea_margin() {
+        // The smallest map there is — one chunk, 128 m — is far below the
+        // wavelength of every field that shapes an island, and it should still
+        // come out as an island in miniature: some land in the middle, open
+        // water along every edge.
+        for seed in [1u32, 7, 99, 12_345] {
+            let (config, gen) = generator(1, 1, seed);
+            let half = config.half_extent();
+
+            let mut land = 0;
+            for iz in 0..=128 {
+                for ix in 0..=128 {
+                    if gen.height(ix as f32 - half.x, iz as f32 - half.y) > 0.0 {
+                        land += 1;
+                    }
+                }
+            }
+            let share = land as f32 / (129.0 * 129.0);
+            assert!(
+                share > 0.05,
+                "seed {seed}'s single-chunk map is {:.0}% land — all sea",
+                share * 100.0
+            );
+
+            for i in 0..=128 {
+                let t = i as f32 - half.x;
+                for (wx, wz) in [(t, -half.y), (t, half.y), (-half.x, t), (half.x, t)] {
+                    assert!(
+                        gen.height(wx, wz) < 0.0,
+                        "seed {seed}'s single-chunk map has land on its edge at ({wx}, {wz})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn same_seed_gives_same_map() {
-        let (_, a) = generator(256, 99);
-        let (_, b) = generator(256, 99);
-        let (_, c) = generator(256, 100);
+        let (_, a) = generator(2, 2, 99);
+        let (_, b) = generator(2, 2, 99);
+        let (_, c) = generator(2, 2, 100);
 
         assert_eq!(a.height(3.0, -7.0), b.height(3.0, -7.0));
         assert_ne!(a.height(3.0, -7.0), c.height(3.0, -7.0));
@@ -2318,8 +2469,10 @@ mod tests {
         // raw unit is worth is fitted to each map's own distribution, and a
         // bigger map is a different distribution, so the two agree on the shape
         // of the land without agreeing on its height.
-        let (_, small) = generator(1024, 42);
-        let (_, big) = generator(2048, 42);
+        // The bigger map is rectangular too, so growing one axis alone also
+        // has to leave the landscape where it was.
+        let (_, small) = generator(8, 8, 42);
+        let (_, big) = generator(16, 8, 42);
 
         // Along a transect through the middle of both — far enough inside the
         // smaller one to be clear of its falloff — the same hills should turn
@@ -2359,10 +2512,10 @@ mod tests {
     /// and judging it by the second calls every beach at the foot of a hill a
     /// cliff — which, on an island with mountains on it, is most of them.
     fn waterline(size: u32, seed: u32) -> Vec<(Shore, f32, f32)> {
-        let config = MapConfig { size, seed };
+        let config = MapConfig::square(size, seed);
         let gen = TerrainGenerator::new(&config);
         let half = config.half_extent();
-        let at = |ix: i32, iz: i32| gen.height(ix as f32 - half, iz as f32 - half);
+        let at = |ix: i32, iz: i32| gen.height(ix as f32 - half.x, iz as f32 - half.y);
 
         let mut found = Vec::new();
         for iz in (0..size as i32).step_by(2) {
@@ -2378,7 +2531,7 @@ mod tests {
                     continue;
                 }
 
-                let (wx, wz) = (ix as f32 - half, iz as f32 - half);
+                let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                 let steepest = (0..8)
                     .map(|i| {
                         let a = i as f32 * std::f32::consts::TAU / 8.0;
@@ -2453,17 +2606,14 @@ mod tests {
         // The reshaping is gated on distance to water rather than on height,
         // because most of this island is low: without that a cliff coast lifts
         // and terraces plains half a kilometre inland.
-        let config = MapConfig {
-            size: 1024,
-            seed: 20_040_112,
-        };
+        let config = MapConfig::square(1024, 20_040_112);
         let gen = TerrainGenerator::new(&config);
         let half = config.half_extent();
 
         let (mut land, mut inland) = (0, 0);
         for iz in (0..1024).step_by(4) {
             for ix in (0..1024).step_by(4) {
-                let (wx, wz) = (ix as f32 - half, iz as f32 - half);
+                let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                 if gen.height(wx, wz) <= 0.0 {
                     continue;
                 }
@@ -2497,22 +2647,19 @@ mod tests {
     fn distance_to_water_is_zero_at_sea_and_grows_inland() {
         // At the default size — a small map's land share is deliberately
         // shrunk, and with it how far inland anywhere can be.
-        let config = MapConfig {
-            size: 1024,
-            seed: 42,
-        };
+        let config = MapConfig::square(1024, 42);
         let gen = TerrainGenerator::new(&config);
         let half = config.half_extent();
 
         // The map edge is open sea on every map.
-        assert_eq!(gen.coast.metres(-half, 0.0), 0.0);
-        assert_eq!(gen.coast.metres(0.0, half), 0.0);
+        assert_eq!(gen.coast.metres(-half.x, 0.0), 0.0);
+        assert_eq!(gen.coast.metres(0.0, half.y), 0.0);
 
         let mut deepest_inland = 0.0f32;
         for iz in (0..1024).step_by(8) {
-            let wz = iz as f32 - half;
+            let wz = iz as f32 - half.y;
             for ix in (0..1024).step_by(8) {
-                let wx = ix as f32 - half;
+                let wx = ix as f32 - half.x;
                 deepest_inland = deepest_inland.max(gen.coast.metres(wx, wz));
 
                 // Never climbs faster than a metre per metre — a distance
@@ -2577,33 +2724,20 @@ mod tests {
     }
 
     #[test]
-    fn chunks_tile_the_map_exactly() {
-        for size in [128u32, 256, 768, 1024, 1536] {
-            let config = MapConfig { size, seed: 1 };
-            let per_side = config.chunks_per_side();
-
-            let covered: u32 = (0..per_side)
-                .map(|cx| TerrainGenerator::chunk_extent(UVec2::new(cx, 0), size).x)
-                .sum();
-            assert_eq!(covered, size, "chunks do not cover a {size} m map");
-        }
-    }
-
-    #[test]
-    fn ragged_map_sizes_get_a_short_final_chunk() {
-        // 300 is two full chunks and a 44-tile remainder.
-        let size = 300;
-        assert_eq!(MapConfig { size, seed: 1 }.chunks_per_side(), 3);
-        assert_eq!(
-            TerrainGenerator::chunk_extent(UVec2::new(2, 2), size),
-            UVec2::splat(44)
-        );
+    fn size_spec_parses_to_whole_chunks() {
+        // Metres in, chunk counts out — each axis rounded to the nearest whole
+        // chunk of at least one, and a lone number meaning a square.
+        assert_eq!(MapConfig::parse_size("1024"), Some(UVec2::splat(8)));
+        assert_eq!(MapConfig::parse_size("1536x1024"), Some(UVec2::new(12, 8)));
+        assert_eq!(MapConfig::parse_size("300"), Some(UVec2::splat(2)));
+        assert_eq!(MapConfig::parse_size("10"), Some(UVec2::splat(1)));
+        assert_eq!(MapConfig::parse_size("islands"), None);
     }
 
     #[test]
     fn chunk_mesh_has_two_flat_triangles_per_quad() {
-        let (_, gen) = generator(256, 1);
-        let mesh = gen.build_chunk(UVec2::ZERO, UVec2::splat(CHUNK_TILES), 256);
+        let (config, gen) = generator(2, 2, 1);
+        let mesh = gen.build_chunk(UVec2::ZERO, config.tiles());
 
         // Six vertices per quad: two triangles, sharing nothing.
         let quads = (CHUNK_TILES / MESH_STEP) as usize;
@@ -2616,8 +2750,8 @@ mod tests {
 
     #[test]
     fn every_triangle_is_one_flat_facet() {
-        let (_, gen) = generator(256, 1);
-        let mesh = gen.build_chunk(UVec2::ZERO, UVec2::splat(64), 256);
+        let (config, gen) = generator(2, 2, 1);
+        let mesh = gen.build_chunk(UVec2::ZERO, config.tiles());
 
         let normals = float3(&mesh, Mesh::ATTRIBUTE_NORMAL);
         let colors = float4(&mesh);
@@ -2646,17 +2780,12 @@ mod tests {
         // The whole point of the styling: no gradients anywhere on the ground.
         // Every facet on a whole map has to land on one of the palette entries,
         // times one of three shade steps.
-        let (_, gen) = generator(512, 77);
+        let (config, gen) = generator(4, 4, 77);
         let mut seen = std::collections::HashSet::new();
 
-        for cz in 0..4 {
-            for cx in 0..4 {
-                let chunk = UVec2::new(cx, cz);
-                let mesh = gen.build_chunk(
-                    chunk * CHUNK_TILES,
-                    TerrainGenerator::chunk_extent(chunk, 512),
-                    512,
-                );
+        for cz in 0..config.chunks.y {
+            for cx in 0..config.chunks.x {
+                let mesh = gen.build_chunk(UVec2::new(cx, cz) * CHUNK_TILES, config.tiles());
                 for c in float4(&mesh) {
                     seen.insert(c.map(|v| v.to_bits()));
                 }
@@ -2689,10 +2818,9 @@ mod tests {
 
     #[test]
     fn chunk_positions_are_local_and_offset_by_the_transform() {
-        let size = 256;
-        let (_, gen) = generator(size, 1);
+        let (config, gen) = generator(2, 2, 1);
         let origin = UVec2::splat(CHUNK_TILES);
-        let mesh = gen.build_chunk(origin, UVec2::splat(CHUNK_TILES), size);
+        let mesh = gen.build_chunk(origin, config.tiles());
         let positions = float3(&mesh, Mesh::ATTRIBUTE_POSITION);
 
         // First vertex sits at the chunk's own origin, not the map's.
@@ -2700,22 +2828,21 @@ mod tests {
         assert_eq!(positions[0][2], 0.0);
 
         // And its height matches the world position the transform will put it at.
-        let half = size as f32 * 0.5;
+        let half = config.half_extent();
         let expected = gen.height(
-            origin.x as f32 * TILE_SIZE - half,
-            origin.y as f32 * TILE_SIZE - half,
+            origin.x as f32 * TILE_SIZE - half.x,
+            origin.y as f32 * TILE_SIZE - half.y,
         );
         assert_eq!(positions[0][1], expected);
     }
 
     #[test]
     fn neighbouring_chunks_agree_along_their_shared_edge() {
-        let size = 256;
-        let (_, gen) = generator(size, 5);
-        let tiles = UVec2::splat(CHUNK_TILES);
+        // On a rectangular map, whose two chunks sit side by side.
+        let (config, gen) = generator(2, 1, 5);
 
-        let left = gen.build_chunk(UVec2::ZERO, tiles, size);
-        let right = gen.build_chunk(UVec2::new(CHUNK_TILES, 0), tiles, size);
+        let left = gen.build_chunk(UVec2::ZERO, config.tiles());
+        let right = gen.build_chunk(UVec2::new(CHUNK_TILES, 0), config.tiles());
 
         // Every vertex sitting on the shared plane, as (z, height) pairs. Flat
         // shading repeats each corner across the triangles that touch it, so
@@ -2757,10 +2884,10 @@ mod bench {
         );
         for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
             let size = 1024;
-            let config = MapConfig { size, seed };
+            let config = MapConfig::square(size, seed);
             let gen = TerrainGenerator::new(&config);
             let half = config.half_extent();
-            let at = |ix: i32, iz: i32| gen.height(ix as f32 - half, iz as f32 - half);
+            let at = |ix: i32, iz: i32| gen.height(ix as f32 - half.x, iz as f32 - half.y);
 
             let (mut land, mut mountain, mut edges) = (0u32, 0u32, 0u32);
             let mut peak = 0.0f32;
@@ -2791,7 +2918,7 @@ mod bench {
             let mut slopes: Vec<f32> = Vec::new();
             for iz in (0..size as i32).step_by(8) {
                 for ix in (0..size as i32).step_by(8) {
-                    let (wx, wz) = (ix as f32 - half, iz as f32 - half);
+                    let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                     if gen.height(wx, wz) > 0.0 {
                         slopes.push(gen.normal(wx, wz).y.acos().to_degrees());
                     }
@@ -2822,20 +2949,20 @@ mod bench {
     }
 
     /// Renders one map in plan, hill-shaded, using the same colour function the
-    /// mesh does, into a `side`-by-`side` block of RGB triples.
+    /// mesh does, into a `width`-by-`height` block of RGB triples.
     ///
     /// Shared by [`plan_view`] and [`plan_grid`] so that a map looks the same
     /// whether it is being examined on its own or compared with eight others.
-    fn plan_pixels(config: &MapConfig, side: u32) -> Vec<u8> {
+    fn plan_pixels(config: &MapConfig, width: u32, height: u32) -> Vec<u8> {
         let gen = TerrainGenerator::new(config);
         let half = config.half_extent();
-        let step = config.size as f32 / side as f32;
+        let step = config.extent() / Vec2::new(width as f32, height as f32);
 
-        let mut out = Vec::with_capacity((side * side) as usize * 3);
-        for iz in 0..side {
-            for ix in 0..side {
-                let wx = ix as f32 * step - half;
-                let wz = iz as f32 * step - half;
+        let mut out = Vec::with_capacity((width * height) as usize * 3);
+        for iz in 0..height {
+            for ix in 0..width {
+                let wx = ix as f32 * step.x - half.x;
+                let wz = iz as f32 * step.y - half.y;
                 let normal = gen.normal(wx, wz);
                 let height = gen.height(wx, wz);
 
@@ -2854,9 +2981,9 @@ mod bench {
         out
     }
 
-    /// Writes a `side`-by-`side` RGB buffer out as a binary PPM.
-    fn write_ppm(path: &str, side: u32, pixels: &[u8]) {
-        let mut out = format!("P6\n{side} {side}\n255\n").into_bytes();
+    /// Writes a `width`-by-`height` RGB buffer out as a binary PPM.
+    fn write_ppm(path: &str, width: u32, height: u32, pixels: &[u8]) {
+        let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
         out.extend_from_slice(pixels);
         std::fs::write(path, out).expect("dump should be writable");
     }
@@ -2872,8 +2999,14 @@ mod bench {
     /// hide exactly the thing worth checking.
     const PLAN_METRES_PER_PIXEL: f32 = 3.0;
 
+    /// The map shapes a generator change gets judged on, in chunks per axis:
+    /// the square sizes the dialog offers, the smallest map there is, and
+    /// rectangles modest and wide — a map is any X by Z chunks, so shapes off
+    /// the square diagonal have to stay honest too.
+    const PLAN_SHAPES: [(u32, u32); 5] = [(1, 1), (3, 2), (6, 6), (8, 8), (12, 8)];
+
     /// Nine maps at once, in a 3x3 grid, from nine unrelated seeds — and one
-    /// grid per map size the setup dialog offers.
+    /// grid per shape in [`PLAN_SHAPES`].
     ///
     /// The one that matters for judging a change to the generator. Every number
     /// [`island_shape`] reports is an average over a map, and every look at a
@@ -2881,14 +3014,15 @@ mod bench {
     /// constant until one favourite map improves and eight others quietly get
     /// worse. Nine at a glance makes that obvious instead.
     ///
-    /// The same nine seeds are drawn at every size, so a row of three files is
-    /// also a straight answer to what a size does to a given map: the noise is
+    /// The same nine seeds are drawn at every shape, so a row of files is
+    /// also a straight answer to what a shape does to a given map: the noise is
     /// the same, only how much of it fits has changed.
     ///
     /// `KASSITER_BATCH` picks which nine. Changing it draws a fresh set, which
     /// is the point: a change that only looks good on the batch it was tuned
     /// against has not been tested. Keeping it fixed across a before and after
-    /// is what makes the two comparable. `KASSITER_SIZE` narrows it to one size.
+    /// is what makes the two comparable. `KASSITER_SIZE` (metres, `W` or
+    /// `WxD`) narrows it to one shape.
     #[test]
     #[ignore]
     fn plan_grid() {
@@ -2913,58 +3047,120 @@ mod bench {
             println!("  {row:?}");
         }
 
-        // Every size the dialog offers, unless one was asked for by name.
-        let sizes: Vec<(&str, u32)> = match std::env::var("KASSITER_SIZE").ok() {
-            Some(v) => vec![("", v.parse().expect("KASSITER_SIZE should be a number"))],
-            None => crate::menu::SIZE_PRESETS.to_vec(),
+        // Every shape in the list, unless one was asked for by name.
+        let shapes: Vec<UVec2> = match std::env::var("KASSITER_SIZE").ok() {
+            Some(v) => vec![MapConfig::parse_size(&v).expect("KASSITER_SIZE should be metres")],
+            None => PLAN_SHAPES
+                .iter()
+                .map(|&(x, z)| UVec2::new(x, z))
+                .collect(),
         };
+        let single = shapes.len() == 1;
 
-        for (name, size) in sizes {
-            let cell = (size as f32 / PLAN_METRES_PER_PIXEL) as u32;
+        for chunks in shapes {
+            let extent = chunks * CHUNK_TILES;
+            let cell_w = (extent.x as f32 / PLAN_METRES_PER_PIXEL) as u32;
+            let cell_h = (extent.y as f32 / PLAN_METRES_PER_PIXEL) as u32;
             let cells: Vec<Vec<u8>> = seeds
                 .iter()
-                .map(|&seed| plan_pixels(&MapConfig { size, seed }, cell))
+                .map(|&seed| plan_pixels(&MapConfig { chunks, seed }, cell_w, cell_h))
                 .collect();
 
             // Stitched with a one-pixel rule between cells, so a map that runs
             // right to its own edge is still told apart from its neighbour.
-            let side = cell * 3 + 2;
-            let mut out = vec![255u8; (side * side) as usize * 3];
+            let width = cell_w * 3 + 2;
+            let height = cell_h * 3 + 2;
+            let mut out = vec![255u8; (width * height) as usize * 3];
             for (i, pixels) in cells.iter().enumerate() {
                 let (cx, cz) = (i as u32 % 3, i as u32 / 3);
-                for row in 0..cell {
-                    let x = cx * (cell + 1);
-                    let y = cz * (cell + 1) + row;
-                    let dst = ((y * side + x) * 3) as usize;
-                    let src = (row * cell * 3) as usize;
-                    out[dst..dst + (cell * 3) as usize]
-                        .copy_from_slice(&pixels[src..src + (cell * 3) as usize]);
+                for row in 0..cell_h {
+                    let x = cx * (cell_w + 1);
+                    let y = cz * (cell_h + 1) + row;
+                    let dst = ((y * width + x) * 3) as usize;
+                    let src = (row * cell_w * 3) as usize;
+                    out[dst..dst + (cell_w * 3) as usize]
+                        .copy_from_slice(&pixels[src..src + (cell_w * 3) as usize]);
                 }
             }
 
-            // One file per size, named for it — except when a size was asked
+            // One file per shape, named for it — except when a shape was asked
             // for outright, where the path given is the path meant.
-            let out_path = if name.is_empty() {
+            let out_path = if single {
                 path.clone()
             } else {
+                let tag = format!("{}x{}", extent.x, extent.y);
                 match path.rsplit_once('.') {
-                    Some((stem, ext)) => format!("{stem}-{size}.{ext}"),
-                    None => format!("{path}-{size}"),
+                    Some((stem, ext)) => format!("{stem}-{tag}.{ext}"),
+                    None => format!("{path}-{tag}"),
                 }
             };
-            write_ppm(&out_path, side, &out);
-            println!("  {name:<7} {size:>5} m  {side}x{side}  {out_path}");
+            write_ppm(&out_path, width, height, &out);
+            println!(
+                "  {}x{} chunks  {:>5}x{} m  {width}x{height}  {out_path}",
+                chunks.x, chunks.y, extent.x, extent.y
+            );
         }
     }
 
-    /// Fifteen maps for the README: a row of five seeds at each preset size,
-    /// smallest at the top. Every map is drawn to the same cell width — unlike
-    /// [`plan_grid`], which holds the scale constant because its job is to
-    /// make sizes comparable, this one's job is to fill a page well.
+    /// The README collage: sixteen maps of assorted shapes tiling a 3:2
+    /// canvas exactly, every one drawn at the same scale — so the collage
+    /// itself says what the generator is about, from a couple of continents
+    /// down to single-chunk islets, with relative sizes told honestly.
     ///
-    /// To refresh `docs/maps.png`, quantising to a 256-colour PNG on the way
-    /// (the flat palette dithers down to a fifth of the size losslessly to the
-    /// eye):
+    /// Each entry is a map's slot in chunk units: `(x, y, w, h)` on a
+    /// [`COLLAGE_SPAN`]-chunk-wide canvas. The rectangles tile it with no
+    /// gaps, which the `readme_collage_tiles_exactly` test holds them to.
+    const COLLAGE: [(u32, u32, u32, u32); 16] = [
+        (0, 0, 12, 8),
+        (12, 0, 8, 8),
+        (20, 0, 4, 4),
+        (20, 4, 4, 4),
+        (0, 8, 6, 6),
+        (0, 14, 3, 2),
+        (3, 14, 3, 2),
+        (6, 8, 6, 8),
+        (12, 8, 4, 6),
+        (12, 14, 4, 2),
+        (16, 8, 8, 6),
+        (16, 14, 2, 2),
+        (18, 14, 1, 1),
+        (18, 15, 1, 1),
+        (19, 14, 2, 2),
+        (21, 14, 3, 2),
+    ];
+
+    /// The collage canvas, in chunks: 24 across by 16 down, which is the 3:2
+    /// of the page it fills.
+    const COLLAGE_SPAN: (u32, u32) = (24, 16);
+
+    #[test]
+    fn readme_collage_tiles_exactly() {
+        // Every chunk of the canvas belongs to exactly one map — a gap prints
+        // as a white hole in the README and an overlap draws one island over
+        // another.
+        let (span_x, span_y) = COLLAGE_SPAN;
+        let mut covered = vec![false; (span_x * span_y) as usize];
+        for (x, y, w, h) in COLLAGE {
+            for cy in y..y + h {
+                for cx in x..x + w {
+                    assert!(cx < span_x && cy < span_y, "({cx},{cy}) is off the canvas");
+                    let cell = &mut covered[(cy * span_x + cx) as usize];
+                    assert!(!*cell, "({cx},{cy}) is covered twice");
+                    *cell = true;
+                }
+            }
+        }
+        assert!(covered.iter().all(|c| *c), "the collage leaves a gap");
+    }
+
+    /// Pixels per chunk in the collage, and the white rule inset around each
+    /// map. 54 px over a 128 m chunk is a little under 2.4 m/px.
+    const COLLAGE_SCALE: u32 = 54;
+    const COLLAGE_GUTTER: u32 = 2;
+
+    /// Renders the README collage. To refresh `docs/maps.png`, quantising to
+    /// a 256-colour PNG on the way (the flat palette dithers down to a fifth
+    /// of the size losslessly to the eye):
     ///
     /// ```sh
     /// KASSITER_DUMP=readme.ppm cargo test --release readme_grid -- --ignored --nocapture
@@ -2981,41 +3177,43 @@ mod bench {
             .unwrap_or(1);
         let path = std::env::var("KASSITER_DUMP").unwrap_or_else(|_| "readme.ppm".into());
 
-        // Fifteen seeds spread the same way plan_grid's are.
-        let seeds: Vec<u32> = (0..15)
+        // One seed per slot, spread the same way plan_grid's are.
+        let count = COLLAGE.len() as u64;
+        let seeds: Vec<u32> = (0..count)
             .map(|i| {
-                let mut s = (batch as u64 * 15 + i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let mut s = (batch as u64 * count + i + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
                 s ^= s >> 31;
                 (s >> 32) as u32 % 1_000_000
             })
             .collect();
 
-        const CELL: u32 = 256;
-        let (cols, rows) = (5u32, crate::menu::SIZE_PRESETS.len() as u32);
-        let width = cols * CELL + (cols - 1);
-        let height = rows * CELL + (rows - 1);
+        let width = COLLAGE_SPAN.0 * COLLAGE_SCALE;
+        let height = COLLAGE_SPAN.1 * COLLAGE_SCALE;
         let mut out = vec![255u8; (width * height) as usize * 3];
 
-        for (row, (name, size)) in crate::menu::SIZE_PRESETS.iter().enumerate() {
-            println!("  {name:<7} {size:>5} m  seeds {:?}", &seeds[row * 5..row * 5 + 5]);
-            for col in 0..cols {
-                let seed = seeds[row * 5 + col as usize];
-                let pixels = plan_pixels(&MapConfig { size: *size, seed }, CELL);
-                for line in 0..CELL {
-                    let x = col * (CELL + 1);
-                    let y = row as u32 * (CELL + 1) + line;
-                    let dst = ((y * width + x) * 3) as usize;
-                    let src = (line * CELL * 3) as usize;
-                    out[dst..dst + (CELL * 3) as usize]
-                        .copy_from_slice(&pixels[src..src + (CELL * 3) as usize]);
-                }
+        for (&(x, y, w, h), &seed) in COLLAGE.iter().zip(&seeds) {
+            let config = MapConfig {
+                chunks: UVec2::new(w, h),
+                seed,
+            };
+            println!("  {w:>2}x{h} chunks at ({x:>2},{y:>2})  seed {seed}");
+
+            // The map inset within its slot, leaving the white rule.
+            let cell_w = w * COLLAGE_SCALE - 2 * COLLAGE_GUTTER;
+            let cell_h = h * COLLAGE_SCALE - 2 * COLLAGE_GUTTER;
+            let pixels = plan_pixels(&config, cell_w, cell_h);
+            for line in 0..cell_h {
+                let px = x * COLLAGE_SCALE + COLLAGE_GUTTER;
+                let py = y * COLLAGE_SCALE + COLLAGE_GUTTER + line;
+                let dst = ((py * width + px) * 3) as usize;
+                let src = (line * cell_w * 3) as usize;
+                out[dst..dst + (cell_w * 3) as usize]
+                    .copy_from_slice(&pixels[src..src + (cell_w * 3) as usize]);
             }
         }
 
-        let mut file = format!("P6\n{width} {height}\n255\n").into_bytes();
-        file.extend_from_slice(&out);
-        std::fs::write(&path, file).expect("dump should be writable");
-        println!("  wrote {width}x{height} readme grid to {path}");
+        write_ppm(&path, width, height, &out);
+        println!("  wrote {width}x{height} readme collage to {path}");
     }
 
     /// Dumps a plan view of a single map to a PPM. [`plan_grid`] is the better
@@ -3028,37 +3226,16 @@ mod bench {
     fn plan_view() {
         let config = MapConfig::from_env();
         let path = std::env::var("KASSITER_DUMP").unwrap_or_else(|_| "map.ppm".into());
-        let gen = TerrainGenerator::new(&config);
-        let half = config.half_extent();
+        let tiles = config.tiles();
 
-        let step = (config.size / 1024).max(1);
-        let side = config.size / step;
-        let mut out = format!("P6\n{side} {side}\n255\n").into_bytes();
-
-        for iz in 0..side {
-            for ix in 0..side {
-                let wx = (ix * step) as f32 - half;
-                let wz = (iz * step) as f32 - half;
-                let normal = gen.normal(wx, wz);
-                let height = gen.height(wx, wz);
-
-                let mut c = gen.color(wx, wz, height, normal);
-                if height < 0.0 {
-                    // Stand in for the translucent sea plane.
-                    c = c * 0.45 + Vec3::new(0.10, 0.42, 0.62) * 0.55;
-                }
-                // Cheap hillshade from a sun over the -x/-z corner, so relief
-                // reads in plan.
-                let lit = 0.72 + 0.55 * normal.dot(Vec3::new(-0.5, 0.72, -0.48).normalize());
-                let c = (c * lit).clamp(Vec3::ZERO, Vec3::ONE) * 255.0;
-                out.extend_from_slice(&[c.x as u8, c.y as u8, c.z as u8]);
-            }
-        }
-
-        std::fs::write(&path, out).expect("dump should be writable");
+        // Metre-per-pixel up to a thousand-odd pixels, then coarser.
+        let step = (tiles.x.max(tiles.y) / 1024).max(1);
+        let (width, height) = (tiles.x / step, tiles.y / step);
+        let pixels = plan_pixels(&config, width, height);
+        write_ppm(&path, width, height, &pixels);
         println!(
-            "wrote {side}x{side} plan of a {} m map to {path}",
-            config.size
+            "wrote {width}x{height} plan of a {} x {} m map to {path}",
+            tiles.x, tiles.y
         );
     }
 
@@ -3069,7 +3246,7 @@ mod bench {
     #[ignore]
     fn shore_mix() {
         for seed in [20_040_112u32, 1, 7, 99, 12_345] {
-            let config = MapConfig { size: 1024, seed };
+            let config = MapConfig::square(1024, seed);
             let gen = TerrainGenerator::new(&config);
             let half = config.half_extent();
 
@@ -3082,11 +3259,11 @@ mod bench {
             let mut slopes: [Vec<f32>; 3] = Default::default();
             let (mut land, mut reshaped, mut rocks) = (0u32, 0u32, 0u32);
 
-            let at = |ix: i32, iz: i32| gen.height(ix as f32 - half, iz as f32 - half);
+            let at = |ix: i32, iz: i32| gen.height(ix as f32 - half.x, iz as f32 - half.y);
 
             for iz in (0..1024).step_by(2) {
                 for ix in (0..1024).step_by(2) {
-                    let (wx, wz) = (ix as f32 - half, iz as f32 - half);
+                    let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                     let h = at(ix, iz);
                     if h <= 0.0 {
                         continue;
@@ -3171,26 +3348,29 @@ mod bench {
     #[test]
     #[ignore]
     fn mesh_build_cost() {
-        for size in [512u32, 1024, 1536, 2048, 4096] {
-            let config = MapConfig { size, seed: 1 };
+        for chunks in [(4u32, 4u32), (8, 8), (12, 8), (16, 16), (32, 32)] {
+            let config = MapConfig {
+                chunks: UVec2::new(chunks.0, chunks.1),
+                seed: 1,
+            };
             let generator = TerrainGenerator::new(&config);
-            let per_side = config.chunks_per_side();
 
             let start = Instant::now();
             let mut tris = 0;
-            for cz in 0..per_side {
-                for cx in 0..per_side {
-                    let chunk = UVec2::new(cx, cz);
-                    let tiles = TerrainGenerator::chunk_extent(chunk, size);
-                    let mesh = generator.build_chunk(chunk * CHUNK_TILES, tiles, size);
+            for cz in 0..config.chunks.y {
+                for cx in 0..config.chunks.x {
+                    let mesh =
+                        generator.build_chunk(UVec2::new(cx, cz) * CHUNK_TILES, config.tiles());
                     tris += mesh.count_vertices() / 3;
                 }
             }
             let elapsed = start.elapsed();
 
             println!(
-                "{size:5} m  {:>4} chunks  {tris:>11} tris  {elapsed:>8.0?}",
-                per_side * per_side
+                "{:5}x{} m  {:>4} chunks  {tris:>11} tris  {elapsed:>8.0?}",
+                config.tiles().x,
+                config.tiles().y,
+                config.chunks.x * config.chunks.y
             );
         }
     }
