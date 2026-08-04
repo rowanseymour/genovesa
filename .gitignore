@@ -1,7 +1,7 @@
 # Build artifacts
 /target
 
-# Screenshots written by KASSITER_SCREENSHOT
+# Screenshots written by the game's --shot option
 /screenshots
 
 # Plan renders written by mapgen into the working directory

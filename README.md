@@ -1,4 +1,4 @@
-# Kassiter
+# Genovesa
 
 An experiment in procedural 3D terrain, built with [Bevy](https://bevy.org).
 Where it goes is undecided.

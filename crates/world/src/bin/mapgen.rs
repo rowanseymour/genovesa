@@ -34,7 +34,7 @@ fn usage() -> String {
     let map_seed = MapConfig::default().seed;
     format!(
         "\
-Renders Kassiter maps in plan, as PNG.
+Renders Genovesa maps in plan, as PNG.
 
 Usage: mapgen <command> [options]
 

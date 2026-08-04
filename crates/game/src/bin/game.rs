@@ -84,7 +84,7 @@ fn window_plugin(args: &Args) -> WindowPlugin {
 
     WindowPlugin {
         primary_window: Some(Window {
-            title: "Kassiter".into(),
+            title: "Genovesa".into(),
             resolution: (WINDOW.x, WINDOW.y).into(),
             ..default()
         }),

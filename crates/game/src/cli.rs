@@ -70,7 +70,7 @@ fn usage() -> String {
     let size = map.tiles();
     format!(
         "\
-Kassiter — generates a map and lets you look around it.
+Genovesa — generates a map and lets you look around it.
 
 Usage: game [options]
 

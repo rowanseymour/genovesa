@@ -131,7 +131,7 @@ fn spawn_main_menu(mut commands: Commands) {
         ))
         .with_children(|screen| {
             screen.spawn((
-                Text::new("KASSITER"),
+                Text::new("GENOVESA"),
                 TextFont {
                     font_size: FontSize::Px(64.0),
                     ..default()
