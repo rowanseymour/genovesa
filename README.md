@@ -6,8 +6,7 @@ Where it goes is undecided.
 ![Sixteen generated islands](docs/maps.png)
 
 *Sixteen maps of assorted shapes — from single-chunk islets 128 m across to
-1.5 km continents — all drawn to one scale, rendered in plan by the
-`readme_grid` test.*
+1.5 km continents — all drawn to one scale, rendered by `mapgen collage`.*
 
 ## Running
 
@@ -21,6 +20,9 @@ iteration afterwards:
 ```bash
 cargo run --features dev
 ```
+
+There is a second binary, `mapgen`, which renders maps from above as PNG
+without opening a window — see [Looking at maps](#looking-at-maps).
 
 ## Controls
 
@@ -56,38 +58,61 @@ comments in [`src/terrain.rs`](src/terrain.rs). [`src/noise.rs`](src/noise.rs)
 is a dependency-free Perlin implementation, kept in-tree so a seed always
 produces the same map.
 
+## Looking at maps
+
+Judging the generator means seeing many maps from above, not walking around
+one. The `mapgen` binary renders them in plan straight to PNG, with no window
+and no GPU:
+
+```bash
+cargo run --release --bin mapgen -- grid
+```
+
+| Command | What it draws |
+| --- | --- |
+| `grid` | nine seeds per map shape — squares, rectangles and the single-chunk map — all at one scale, a file each; the view a generator change gets judged on |
+| `map` | one map on its own, for looking hard at a single seed |
+| `collage` | the image at the top of this page |
+
+Options: `--size` (metres, `1024` or `1536x1024`), `--seed`, `--batch` to pick
+which set of seeds the grid and collage draw, `--scale` in metres per pixel,
+and `--out`. Run `mapgen --help` for the details.
+
+To refresh the collage at the top of this page, quantising on the way — the
+flat palette goes down to 256 colours losslessly to the eye and about a third
+of the size, which is worth doing to a file that ships in the README:
+
+```bash
+cargo run --release --bin mapgen -- collage --out collage.png
+ffmpeg -y -i collage.png -filter_complex \
+  "[0:v]palettegen=max_colors=256:stats_mode=full[p];[0:v][p]paletteuse=dither=floyd_steinberg" \
+  docs/maps.png
+```
+
 ## Development helpers
 
-Environment variables, all optional:
+Environment variables for the app, all optional:
 
 | Variable | Effect |
 | --- | --- |
 | `KASSITER_STATE` | `newmap` or `inworld` — start on that screen |
-| `KASSITER_SIZE` | Initial map size in metres — `1024` or `1536x1024` — rounded to whole 128 m chunks; also narrows `plan_grid` to that one shape |
+| `KASSITER_SIZE` | Initial map size in metres — `1024` or `1536x1024` — rounded to whole 128 m chunks |
 | `KASSITER_SEED` | Initial map seed |
 | `KASSITER_ZOOM` | Initial camera distance in metres |
 | `KASSITER_FOCUS` | `x,z` in metres from the map centre — start the camera there |
 | `KASSITER_SCREENSHOT` | Render ~270 frames, save a PNG to this path, exit |
-| `KASSITER_DUMP` | Where the plan renders below write their PPM |
-| `KASSITER_BATCH` | Which seeds the grid renders draw |
 
-Six `#[ignore]`-d tests render or measure what the generator produces, run like:
+Three `#[ignore]`-d tests measure rather than draw, run like:
 
 ```bash
-KASSITER_DUMP=grid.ppm cargo test --release plan_grid -- --ignored --nocapture
+cargo test --release island_shape -- --ignored --nocapture
 ```
 
 | Test | What it shows |
 | --- | --- |
-| `plan_grid` | nine seeds in plan, one grid per map shape — squares, rectangles and the single-chunk map — at a constant 3 m/px; the tool for judging a generator change |
-| `plan_view` | one map in plan, honouring `KASSITER_SIZE` / `KASSITER_SEED` |
-| `readme_grid` | the image at the top of this page |
 | `island_shape` | per-seed numbers: land and mountain shares, peak height, slopes, coastline |
 | `shore_mix` | how each seed's waterline divides between beach, rocky shore and cliff |
 | `mesh_build_cost` | generation cost per map size |
-
-The renders write binary PPM; convert with
-`sips -s format png <in>.ppm --out <out>.png` on macOS.
 
 ## Tests
 

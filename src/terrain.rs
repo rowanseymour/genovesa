@@ -778,7 +778,15 @@ impl TerrainGenerator {
                 if (pad..px - pad).contains(&ix) && (pad..pz - pad).contains(&iz) {
                     let hills = self.hills.fbm(n.x * 0.9, n.y * 0.9, 5);
                     let (damp, push) = self.falloff(wx, wz, n, drift);
-                    (points).push((wx, wz, n, continent, 0.62 * continent + 0.26 * hills, damp, push));
+                    (points).push((
+                        wx,
+                        wz,
+                        n,
+                        continent,
+                        0.62 * continent + 0.26 * hills,
+                        damp,
+                        push,
+                    ));
                 }
             }
         }
@@ -1082,7 +1090,8 @@ impl TerrainGenerator {
             .fbm(nx * CONTINENT_FREQ, nz * CONTINENT_FREQ, 4);
         let hills = self.hills.fbm(nx * 0.9, nz * 0.9, 5);
 
-        let h = 0.62 * continent + 0.26 * hills + self.range_gain * self.ranges(wx, wz, n, continent);
+        let h =
+            0.62 * continent + 0.26 * hills + self.range_gain * self.ranges(wx, wz, n, continent);
 
         let (damp, push) = self.falloff(wx, wz, n, drift);
         h * damp - push
@@ -1353,7 +1362,7 @@ impl TerrainGenerator {
     /// things do it: the edges wander off the level by [`BAND_WANDER`], and the
     /// patchwork either side of them is cut from one field, so the parcels line
     /// up through the join. See [`LOWLAND_PARCELS`].
-    fn color(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Vec3 {
+    pub fn color(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Vec3 {
         // 0 on flat ground, approaching 1 on a cliff face.
         let slope = 1.0 - normal.y;
 
@@ -1642,7 +1651,11 @@ impl Calibration {
     /// map's [`Targets`]. `raw` is sorted in place — it is the caller's
     /// scratch, not a field of anything.
     fn fit(raw: &mut [f32], targets: &Targets) -> Self {
-        let Targets { land, relief, shoal } = *targets;
+        let Targets {
+            land,
+            relief,
+            shoal,
+        } = *targets;
         raw.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a height field"));
         let quantile = |q: f32| raw[((raw.len() - 1) as f32 * q) as usize];
 
@@ -2087,7 +2100,8 @@ fn shape_coast(height: f32, distance: f32, character: f32, scale: f32) -> f32 {
     // natural ground rather than a terrace held at full height across
     // everything low behind it.
     let top = band * cliffiness(character);
-    let face = (distance * CLIFF_RISE).min(top) - CLIFF_BACK_PITCH * (distance - top / CLIFF_RISE).max(0.0);
+    let face = (distance * CLIFF_RISE).min(top)
+        - CLIFF_BACK_PITCH * (distance - top / CLIFF_RISE).max(0.0);
     height.max(face)
 }
 
@@ -2378,7 +2392,9 @@ mod tests {
             let mut land: Vec<f32> = (0..tiles.y)
                 .step_by(COAST_GRID as usize)
                 .flat_map(|iz| {
-                    (0..tiles.x).step_by(COAST_GRID as usize).map(move |ix| (ix, iz))
+                    (0..tiles.x)
+                        .step_by(COAST_GRID as usize)
+                        .map(move |ix| (ix, iz))
                 })
                 .map(|(ix, iz)| gen.landform(ix as f32 - half.x, iz as f32 - half.y))
                 .filter(|h| *h > 0.0)
@@ -3031,311 +3047,6 @@ mod bench {
                 decile(90),
             );
         }
-    }
-
-    /// Renders one map in plan, hill-shaded, using the same colour function the
-    /// mesh does, into a `width`-by-`height` block of RGB triples.
-    ///
-    /// Shared by [`plan_view`] and [`plan_grid`] so that a map looks the same
-    /// whether it is being examined on its own or compared with eight others.
-    fn plan_pixels(config: &MapConfig, width: u32, height: u32) -> Vec<u8> {
-        let gen = TerrainGenerator::new(config);
-        let half = config.half_extent();
-        let step = config.extent() / Vec2::new(width as f32, height as f32);
-
-        let mut out = Vec::with_capacity((width * height) as usize * 3);
-        for iz in 0..height {
-            for ix in 0..width {
-                let wx = ix as f32 * step.x - half.x;
-                let wz = iz as f32 * step.y - half.y;
-                let normal = gen.normal(wx, wz);
-                let height = gen.height(wx, wz);
-
-                let mut c = gen.color(wx, wz, height, normal);
-                if height < 0.0 {
-                    // Stand in for the translucent sea plane.
-                    c = c * 0.45 + Vec3::new(0.10, 0.42, 0.62) * 0.55;
-                }
-                // Cheap hillshade from a sun over the -x/-z corner, so relief
-                // reads in plan.
-                let lit = 0.72 + 0.55 * normal.dot(Vec3::new(-0.5, 0.72, -0.48).normalize());
-                let c = (c * lit).clamp(Vec3::ZERO, Vec3::ONE) * 255.0;
-                out.extend_from_slice(&[c.x as u8, c.y as u8, c.z as u8]);
-            }
-        }
-        out
-    }
-
-    /// Writes a `width`-by-`height` RGB buffer out as a binary PPM.
-    fn write_ppm(path: &str, width: u32, height: u32, pixels: &[u8]) {
-        let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
-        out.extend_from_slice(pixels);
-        std::fs::write(path, out).expect("dump should be writable");
-    }
-
-    /// `count` seeds for batch `batch`, spread by the same splitmix the noise
-    /// uses on its own, so that consecutive batches are as unrelated as
-    /// consecutive seeds are.
-    fn batch_seeds(batch: u32, count: u32) -> Vec<u32> {
-        (0..count as u64)
-            .map(|i| {
-                let mut s =
-                    (batch as u64 * count as u64 + i + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                s ^= s >> 31;
-                (s >> 32) as u32 % 1_000_000
-            })
-            .collect()
-    }
-
-    /// Copies one rendered map into an RGB canvas at pixel offset `(x, y)`.
-    fn blit(canvas: &mut [u8], canvas_width: u32, pixels: &[u8], width: u32, height: u32, x: u32, y: u32) {
-        for row in 0..height {
-            let dst = (((y + row) * canvas_width + x) * 3) as usize;
-            let src = (row * width * 3) as usize;
-            canvas[dst..dst + (width * 3) as usize]
-                .copy_from_slice(&pixels[src..src + (width * 3) as usize]);
-        }
-    }
-
-    /// Metres of ground per pixel in a grid, held the same at every map size.
-    ///
-    /// Which is the whole reason the sizes are worth rendering separately. The
-    /// wavelengths are fixed in metres, so a bigger map is meant to hold *more*
-    /// landscape rather than the same landscape stretched — and at a constant
-    /// scale that claim is visible: a bay or a range should come out the same
-    /// size on the page whichever grid it is in, and a large map should simply
-    /// have more of them. Fitting each size to the same square instead would
-    /// hide exactly the thing worth checking.
-    const PLAN_METRES_PER_PIXEL: f32 = 3.0;
-
-    /// The map shapes a generator change gets judged on, in chunks per axis:
-    /// the square sizes the dialog offers, the smallest map there is, and
-    /// rectangles modest and wide — a map is any X by Z chunks, so shapes off
-    /// the square diagonal have to stay honest too.
-    const PLAN_SHAPES: [UVec2; 5] = [
-        UVec2::new(1, 1),
-        UVec2::new(3, 2),
-        UVec2::new(6, 6),
-        UVec2::new(8, 8),
-        UVec2::new(12, 8),
-    ];
-
-    /// Nine maps at once, in a 3x3 grid, from nine unrelated seeds — and one
-    /// grid per shape in [`PLAN_SHAPES`].
-    ///
-    /// The one that matters for judging a change to the generator. Every number
-    /// [`island_shape`] reports is an average over a map, and every look at a
-    /// single seed is an anecdote — between them it is very easy to tune a
-    /// constant until one favourite map improves and eight others quietly get
-    /// worse. Nine at a glance makes that obvious instead.
-    ///
-    /// The same nine seeds are drawn at every shape, so a row of files is
-    /// also a straight answer to what a shape does to a given map: the noise is
-    /// the same, only how much of it fits has changed.
-    ///
-    /// `KASSITER_BATCH` picks which nine. Changing it draws a fresh set, which
-    /// is the point: a change that only looks good on the batch it was tuned
-    /// against has not been tested. Keeping it fixed across a before and after
-    /// is what makes the two comparable. `KASSITER_SIZE` (metres, `W` or
-    /// `WxD`) narrows it to one shape.
-    #[test]
-    #[ignore]
-    fn plan_grid() {
-        let batch: u32 = std::env::var("KASSITER_BATCH")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1);
-        let path = std::env::var("KASSITER_DUMP").unwrap_or_else(|_| "grid.ppm".into());
-
-        let seeds = batch_seeds(batch, 9);
-
-        println!("batch {batch}, reading left to right, top to bottom:");
-        for row in seeds.chunks(3) {
-            println!("  {row:?}");
-        }
-
-        // Every shape in the list, unless one was asked for by name.
-        let shapes: Vec<UVec2> = match std::env::var("KASSITER_SIZE").ok() {
-            Some(v) => vec![MapConfig::parse_size(&v).expect("KASSITER_SIZE should be metres")],
-            None => PLAN_SHAPES.to_vec(),
-        };
-        let single = shapes.len() == 1;
-
-        for chunks in shapes {
-            let extent = chunks * CHUNK_TILES;
-            let cell_w = (extent.x as f32 / PLAN_METRES_PER_PIXEL) as u32;
-            let cell_h = (extent.y as f32 / PLAN_METRES_PER_PIXEL) as u32;
-            let cells: Vec<Vec<u8>> = seeds
-                .iter()
-                .map(|&seed| plan_pixels(&MapConfig { chunks, seed }, cell_w, cell_h))
-                .collect();
-
-            // Stitched with a one-pixel rule between cells, so a map that runs
-            // right to its own edge is still told apart from its neighbour.
-            let width = cell_w * 3 + 2;
-            let height = cell_h * 3 + 2;
-            let mut out = vec![255u8; (width * height) as usize * 3];
-            for (i, pixels) in cells.iter().enumerate() {
-                let (cx, cz) = (i as u32 % 3, i as u32 / 3);
-                blit(
-                    &mut out,
-                    width,
-                    pixels,
-                    cell_w,
-                    cell_h,
-                    cx * (cell_w + 1),
-                    cz * (cell_h + 1),
-                );
-            }
-
-            // One file per shape, named for it — except when a shape was asked
-            // for outright, where the path given is the path meant.
-            let out_path = if single {
-                path.clone()
-            } else {
-                let tag = format!("{}x{}", extent.x, extent.y);
-                match path.rsplit_once('.') {
-                    Some((stem, ext)) => format!("{stem}-{tag}.{ext}"),
-                    None => format!("{path}-{tag}"),
-                }
-            };
-            write_ppm(&out_path, width, height, &out);
-            println!(
-                "  {}x{} chunks  {:>5}x{} m  {width}x{height}  {out_path}",
-                chunks.x, chunks.y, extent.x, extent.y
-            );
-        }
-    }
-
-    /// The README collage: sixteen maps of assorted shapes tiling a 3:2
-    /// canvas exactly, every one drawn at the same scale — so the collage
-    /// itself says what the generator is about, from a couple of continents
-    /// down to single-chunk islets, with relative sizes told honestly.
-    ///
-    /// Each entry is a map's slot in chunk units: `(x, y, w, h)` on a
-    /// [`COLLAGE_SPAN`]-chunk-wide canvas. The rectangles tile it with no
-    /// gaps, which the `readme_collage_tiles_exactly` test holds them to.
-    const COLLAGE: [(u32, u32, u32, u32); 16] = [
-        (0, 0, 12, 8),
-        (12, 0, 8, 8),
-        (20, 0, 4, 4),
-        (20, 4, 4, 4),
-        (0, 8, 6, 6),
-        (0, 14, 3, 2),
-        (3, 14, 3, 2),
-        (6, 8, 6, 8),
-        (12, 8, 4, 6),
-        (12, 14, 4, 2),
-        (16, 8, 8, 6),
-        (16, 14, 2, 2),
-        (18, 14, 1, 1),
-        (18, 15, 1, 1),
-        (19, 14, 2, 2),
-        (21, 14, 3, 2),
-    ];
-
-    /// The collage canvas, in chunks: 24 across by 16 down, which is the 3:2
-    /// of the page it fills.
-    const COLLAGE_SPAN: UVec2 = UVec2::new(24, 16);
-
-    #[test]
-    fn readme_collage_tiles_exactly() {
-        // Every chunk of the canvas belongs to exactly one map — a gap prints
-        // as a white hole in the README and an overlap draws one island over
-        // another.
-        let (span_x, span_y) = (COLLAGE_SPAN.x, COLLAGE_SPAN.y);
-        let mut covered = vec![false; (span_x * span_y) as usize];
-        for (x, y, w, h) in COLLAGE {
-            for cy in y..y + h {
-                for cx in x..x + w {
-                    assert!(cx < span_x && cy < span_y, "({cx},{cy}) is off the canvas");
-                    let cell = &mut covered[(cy * span_x + cx) as usize];
-                    assert!(!*cell, "({cx},{cy}) is covered twice");
-                    *cell = true;
-                }
-            }
-        }
-        assert!(covered.iter().all(|c| *c), "the collage leaves a gap");
-    }
-
-    /// Pixels per chunk in the collage, and the white rule inset around each
-    /// map. 54 px over a 128 m chunk is a little under 2.4 m/px.
-    const COLLAGE_SCALE: u32 = 54;
-    const COLLAGE_GUTTER: u32 = 2;
-
-    /// Renders the README collage. To refresh `docs/maps.png`, quantising to
-    /// a 256-colour PNG on the way (the flat palette dithers down to a fifth
-    /// of the size losslessly to the eye):
-    ///
-    /// ```sh
-    /// KASSITER_DUMP=readme.ppm cargo test --release readme_grid -- --ignored --nocapture
-    /// ffmpeg -y -i readme.ppm -filter_complex \
-    ///   "[0:v]palettegen=max_colors=256:stats_mode=full[p];[0:v][p]paletteuse=dither=floyd_steinberg" \
-    ///   docs/maps.png
-    /// ```
-    #[test]
-    #[ignore]
-    fn readme_grid() {
-        let batch: u32 = std::env::var("KASSITER_BATCH")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1);
-        let path = std::env::var("KASSITER_DUMP").unwrap_or_else(|_| "readme.ppm".into());
-
-        // One seed per slot.
-        let seeds = batch_seeds(batch, COLLAGE.len() as u32);
-
-        let width = COLLAGE_SPAN.x * COLLAGE_SCALE;
-        let height = COLLAGE_SPAN.y * COLLAGE_SCALE;
-        let mut out = vec![255u8; (width * height) as usize * 3];
-
-        for (&(x, y, w, h), &seed) in COLLAGE.iter().zip(&seeds) {
-            let config = MapConfig {
-                chunks: UVec2::new(w, h),
-                seed,
-            };
-            println!("  {w:>2}x{h} chunks at ({x:>2},{y:>2})  seed {seed}");
-
-            // The map inset within its slot, leaving the white rule.
-            let cell_w = w * COLLAGE_SCALE - 2 * COLLAGE_GUTTER;
-            let cell_h = h * COLLAGE_SCALE - 2 * COLLAGE_GUTTER;
-            let pixels = plan_pixels(&config, cell_w, cell_h);
-            blit(
-                &mut out,
-                width,
-                &pixels,
-                cell_w,
-                cell_h,
-                x * COLLAGE_SCALE + COLLAGE_GUTTER,
-                y * COLLAGE_SCALE + COLLAGE_GUTTER,
-            );
-        }
-
-        write_ppm(&path, width, height, &out);
-        println!("  wrote {width}x{height} readme collage to {path}");
-    }
-
-    /// Dumps a plan view of a single map to a PPM. [`plan_grid`] is the better
-    /// tool for judging a change; this one is for looking hard at one map.
-    ///
-    /// `KASSITER_SIZE` / `KASSITER_SEED` choose the map; the file lands in the
-    /// path given by `KASSITER_DUMP`.
-    #[test]
-    #[ignore]
-    fn plan_view() {
-        let config = MapConfig::from_env();
-        let path = std::env::var("KASSITER_DUMP").unwrap_or_else(|_| "map.ppm".into());
-        let tiles = config.tiles();
-
-        // Metre-per-pixel up to a thousand-odd pixels, then coarser.
-        let step = (tiles.x.max(tiles.y) / 1024).max(1);
-        let (width, height) = (tiles.x / step, tiles.y / step);
-        let pixels = plan_pixels(&config, width, height);
-        write_ppm(&path, width, height, &pixels);
-        println!(
-            "wrote {width}x{height} plan of a {} x {} m map to {path}",
-            tiles.x, tiles.y
-        );
     }
 
     /// How the coastline of a few maps divides between beach, rocky shore and

@@ -6,6 +6,9 @@ license = "GPL-3.0-only"
 
 [dependencies]
 bevy = "0.19"
+# PNG encoding for the `mapgen` binary's plan renders. Bevy already pulls this
+# in, so only the encoder itself is new.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 # Much faster incremental builds while iterating: `cargo run --features dev`

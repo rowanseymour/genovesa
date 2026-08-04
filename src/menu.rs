@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::terrain::{MapConfig, CHUNK_TILES};
+use crate::terrain::MapConfig;
 use crate::AppState;
 
 /// Map sizes offered in the setup dialog, in metres per side — each a whole
@@ -36,8 +36,7 @@ impl Plugin for MenuPlugin {
                 (
                     highlight_buttons,
                     main_menu_actions.run_if(in_state(AppState::MainMenu)),
-                    (dialog_actions, type_seed, refresh_dialog)
-                        .run_if(in_state(AppState::NewMap)),
+                    (dialog_actions, type_seed, refresh_dialog).run_if(in_state(AppState::NewMap)),
                     leave_world.run_if(in_state(AppState::InWorld)),
                 ),
             );
@@ -423,6 +422,7 @@ fn random_seed() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain::CHUNK_TILES;
     use bevy::state::app::StatesPlugin;
 
     /// A headless app running the menu systems, with no renderer attached.
@@ -573,7 +573,11 @@ mod tests {
     fn size_presets_are_distinct_ordered_whole_chunks() {
         let sizes: Vec<u32> = SIZE_PRESETS.iter().map(|(_, size)| *size).collect();
         for size in &sizes {
-            assert_eq!(size % CHUNK_TILES, 0, "{size} m is not a whole number of chunks");
+            assert_eq!(
+                size % CHUNK_TILES,
+                0,
+                "{size} m is not a whole number of chunks"
+            );
         }
         let mut sorted = sizes.clone();
         sorted.sort_unstable();
