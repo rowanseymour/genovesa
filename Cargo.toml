@@ -3,6 +3,9 @@ name = "kassiter"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
+# Two binaries live here — the game and the map renderer — so a bare
+# `cargo run` has to be told which one it means.
+default-run = "game"
 
 [dependencies]
 bevy = "0.19"
