@@ -8,8 +8,12 @@
 //! ```sh
 //! cargo run --release --bin mapgen -- grid
 //! cargo run --release --bin mapgen -- map --size 1536x1024 --seed 99
-//! cargo run --release --bin mapgen -- collage --out docs/maps.png
+//! cargo run --release --bin mapgen -- collage --out collage.png
 //! ```
+//!
+//! The collage that ships in the README is not written by hand from here:
+//! `tools/readme-collage.sh` runs this binary and quantises the result on the
+//! way to `docs/maps.png`.
 
 use std::process::ExitCode;
 
@@ -18,7 +22,17 @@ use bevy::math::UVec2;
 use kassiter::plan;
 use kassiter::terrain::{MapConfig, CHUNK_TILES};
 
-const USAGE: &str = "\
+/// The seed the grid and collage spread their set from when none is given.
+/// The collage in the README is this one, so leaving it alone redraws the
+/// picture that is already there.
+const DEFAULT_SET_SEED: u32 = 1;
+
+/// Built rather than written out so the two seed defaults it quotes are read
+/// from the constants themselves and cannot drift.
+fn usage() -> String {
+    let map_seed = MapConfig::default().seed;
+    format!(
+        "\
 Renders Kassiter maps in plan, as PNG.
 
 Usage: mapgen <command> [options]
@@ -32,17 +46,15 @@ Commands:
 Options:
   --size <W|WxD>   map size in metres, rounded to whole 128 m chunks
                    (map: the map's size; grid: render only this shape)
-  --seed <n>       the seed to draw; for grid and collage, which draw many
-                   maps, the seed the set of them is spread from
+  --seed <n>       the seed to draw [default: {map_seed}]; for grid and
+                   collage, which draw many maps, the seed the set of them is
+                   spread from [default: {DEFAULT_SET_SEED}]
   --scale <m>      metres of ground per pixel (map, grid)
   --out <path>     where to write; grids get one file per shape, each
                    suffixed with its size unless --size named just one
-";
-
-/// The seed the grid and collage spread their set from when none is given.
-/// The collage in the README is this one, so leaving it alone redraws the
-/// picture that is already there.
-const DEFAULT_SET_SEED: u32 = 1;
+"
+    )
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -70,18 +82,18 @@ fn run() -> Result<(), String> {
         "map" => map(&args),
         "grid" => grid(&args),
         "collage" => collage(&args),
-        other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
+        other => Err(format!("unknown command `{other}`\n\n{}", usage())),
     }
 }
 
 fn parse(argv: Vec<String>) -> Result<Args, String> {
     if argv.iter().any(|a| a == "-h" || a == "--help") {
-        print!("{USAGE}");
+        print!("{}", usage());
         std::process::exit(0);
     }
     let command = argv
         .first()
-        .ok_or_else(|| format!("no command given\n\n{USAGE}"))?
+        .ok_or_else(|| format!("no command given\n\n{}", usage()))?
         .clone();
 
     let mut parsed = Args {
@@ -122,7 +134,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
                 parsed.scale = Some(scale);
             }
             "--out" => parsed.out = Some(value.clone()),
-            other => return Err(format!("unknown option `{other}`\n\n{USAGE}")),
+            other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
         }
     }
     Ok(parsed)

@@ -81,10 +81,8 @@ at once, `--seed` is the seed the whole set is spread from. Run
 
 The collage at the top of this page is redrawn by
 [`tools/readme-collage.sh`](tools/readme-collage.sh), which runs `mapgen` and
-quantises the result through ffmpeg — the flat palette goes down to 256 colours
-losslessly to the eye and about a third of the size, which is worth doing to a
-file that ships in the README. It takes the seed, so trying a few and keeping
-the one you like is just running it again:
+quantises the result through ffmpeg. It takes the seed, so trying a few and
+keeping the one you like is just running it again:
 
 ```bash
 tools/readme-collage.sh 7
