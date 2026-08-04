@@ -73,12 +73,43 @@ const LAND_FRACTION: f32 = 0.34;
 /// clears the ring on its own and the full share is safe.
 const LAND_FRACTION_SMALL: f32 = 0.28;
 
+/// The land share on the smallest maps of all, where even the shrunken blob
+/// fills the falloff ring's whole interior. Down there the noise has no
+/// wavelength short enough to texture the outline, so a coast anywhere near
+/// the ring is *drawn by* the ring and every islet comes out a circle. This
+/// pulls the sea-level contour well inside the ring, onto the flat of the
+/// falloff, where the noise's short octaves are the steepest thing left and
+/// get to draw the outline instead.
+const LAND_FRACTION_TINY: f32 = 0.16;
+
+/// How far the sea-depth anchor slides from the sea's median towards its
+/// shallow side as the map shrinks: 0 leaves the [`Calibration`] knee on the
+/// median, 1 moves it to the shallowest sixth or so of the sea.
+///
+/// The smallest maps need it moved, because their sorted field is nearly
+/// radial order: over half of any map is falloff ring, and with no noise to
+/// interleave the two, every quantile from the median down lands *in* the
+/// ring. Anchored there, the whole visible lagoon maps to centimetres of
+/// water, and the map paints as an islet in the middle of one huge pale
+/// bank — the bullseye that made every small map read as a circle. Anchoring
+/// on the shallow side puts the knee among the cells the player actually
+/// sees, and the lagoon gets a real gradient down to dark water. On maps
+/// with wavelengths to spare the noise interleaves ring and interior and the
+/// median anchor is both safe and better — a shallow-side anchor there was
+/// tried once, bent healthy seeds and starved their beaches — so it fades
+/// out entirely before the preset sizes.
+fn shoal_shift(extent: Vec2) -> f32 {
+    let cycles = (extent.x * extent.y).sqrt() / CONTINENT_SCALE;
+    1.0 - smoothstep(0.35, 1.0, cycles)
+}
+
 /// The land share for a given map extent, continuous in it so nothing jumps
 /// as a size control sweeps through it. Measured in how many times the
-/// landmass field repeats across the map, since that is what decides whether
-/// the land is one blob or several lobes: up to about one repeat it is one
-/// blob and gets [`LAND_FRACTION_SMALL`], by one and a half it is lobed
-/// enough to carry the full [`LAND_FRACTION`].
+/// landmass field repeats across the map, since that is what decides what
+/// the land can be: down near a fifth of a repeat the coast has to fit
+/// inside the falloff ring and gets [`LAND_FRACTION_TINY`], up to about one
+/// repeat the land is a single blob and gets [`LAND_FRACTION_SMALL`], and by
+/// one and a half it is lobed enough to carry the full [`LAND_FRACTION`].
 ///
 /// On a rectangular map the repeats are counted across the geometric mean of
 /// the two extents — how many lobes the field can fit goes with the map's
@@ -86,7 +117,9 @@ const LAND_FRACTION_SMALL: f32 = 0.28;
 /// back along its length what it gave up across its width.
 fn land_fraction(extent: Vec2) -> f32 {
     let cycles = (extent.x * extent.y).sqrt() / CONTINENT_SCALE;
-    LAND_FRACTION_SMALL + (LAND_FRACTION - LAND_FRACTION_SMALL) * smoothstep(1.2, 1.5, cycles)
+    LAND_FRACTION_TINY
+        + (LAND_FRACTION_SMALL - LAND_FRACTION_TINY) * smoothstep(0.15, 0.7, cycles)
+        + (LAND_FRACTION - LAND_FRACTION_SMALL) * smoothstep(1.2, 1.5, cycles)
 }
 
 /// Share of that land standing high enough to count as mountain.
@@ -592,6 +625,9 @@ pub struct TerrainGenerator {
     /// [`peak_height`] of its extent as a share of [`HEIGHT_SCALE`], 1.0 on
     /// anything but a small map.
     relief: f32,
+    /// How far this map's sea-depth anchor slides to the shallow side —
+    /// [`shoal_shift`] of its extent, 0 on anything but a small map.
+    shoal: f32,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
     coast_scale: f32,
@@ -649,6 +685,7 @@ impl TerrainGenerator {
             coast_scale: 1.0,
             land: land_fraction(config.extent()),
             relief: peak_height(config.extent()) / HEIGHT_SCALE,
+            shoal: shoal_shift(config.extent()),
             half_extent: config.half_extent(),
             centre_drift: Vec2::ZERO,
         };
@@ -657,8 +694,12 @@ impl TerrainGenerator {
         let samples = generator.fit_ranges(config.tiles());
         generator.fit_range_height(&samples);
         let (raw, dims, origin) = generator.sample_raw(config.tiles());
-        generator.calibration =
-            Calibration::fit(&mut raw.clone(), generator.land, generator.relief);
+        generator.calibration = Calibration::fit(
+            &mut raw.clone(),
+            generator.land,
+            generator.relief,
+            generator.shoal,
+        );
         generator.coast = CoastDistance::from_raw(&raw, dims, origin, &generator.calibration);
         generator.fit_coast_scale(&raw, dims, origin);
         generator
@@ -778,7 +819,8 @@ impl TerrainGenerator {
         let peak_at = |gain: f32| {
             let mut raw: Vec<f32> = samples.iter().map(|s| s.raw(gain)).collect();
             // Sorts in place, so the last entry is the summit afterwards.
-            let calibration = Calibration::fit(&mut raw, self.land, self.relief);
+            let calibration =
+                Calibration::fit(&mut raw, self.land, self.relief, self.shoal);
             calibration.metres(raw[raw.len() - 1])
         };
 
@@ -1094,7 +1136,20 @@ impl TerrainGenerator {
         // further out has been tried twice and is worse both times: the land
         // reaches the rim and is cut off dead straight, or the sea floods the
         // interior into fragments.
-        let edge = smoothstep(0.72, 1.12, shaped);
+        // A last, unwarped guard on the outcome, because the two guards above
+        // both act on the bend's *inputs* and the warp has one more trick: a
+        // drift that diverges across the map — pulling outward on both ends
+        // of an axis at once — inflates the ring past both frame edges
+        // without any net translation for the subtraction to catch or, on a
+        // large map, any taper to damp. Whatever the warp does, the edge is
+        // forced closed by the last few per cent of the frame, so every map
+        // keeps a sea margin; where it binds the coast follows the unwarped
+        // contour for a stretch, which is an arc, and an arc is the ring
+        // showing — far better than the frame showing. It starts well outside
+        // the ring's usual reach, so the healthy majority of coasts never
+        // touch it.
+        let guard = smoothstep(0.86, 0.99, self.squircle(wx, wz, 2.6));
+        let edge = smoothstep(0.72, 1.12, shaped).max(guard);
 
         // The rim, in unwarped coordinates and narrower still, so that whatever
         // the warp does the very edge of the map is open sea. Not wider: the
@@ -1548,8 +1603,9 @@ impl Calibration {
     /// Fits to a grid of raw samples covering the whole map. `raw` is sorted in
     /// place — it is the caller's scratch, not a field of anything. `relief`
     /// scales the above-water targets down on maps too small for full-height
-    /// mountains — see [`peak_height`].
-    fn fit(raw: &mut [f32], land: f32, relief: f32) -> Self {
+    /// mountains — see [`peak_height`] — and `shoal` slides the sea-depth
+    /// anchor to the shallow side on those same maps — see [`shoal_shift`].
+    fn fit(raw: &mut [f32], land: f32, relief: f32, shoal: f32) -> Self {
         raw.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a height field"));
         let quantile = |q: f32| raw[((raw.len() - 1) as f32 * q) as usize];
 
@@ -1591,19 +1647,24 @@ impl Calibration {
                 (natural, slope, slope)
             };
 
-        // The same again below the waterline: the sea's median, and where
-        // the straight slope through the deep anchor would put it. Only a
-        // median that comes out shallower than the floor bends the line.
+        // The same again below the waterline: the sea's median — slid to the
+        // shallow side on the smallest maps, whose median is in the falloff
+        // ring, see [`shoal_shift`] — and where the straight slope through
+        // the deep anchor would put it. Only an anchor that comes out
+        // shallower than the floor bends the line. The floor eases with the
+        // slide: the shallower the anchored cells, the less depth they have
+        // to be guaranteed.
         let deep = sea_level - quantile(DEEP_FRACTION);
         let depth_gain = MAX_DEPTH / deep.max(1e-4);
-        let sea_knee = sea_level - quantile((1.0 - land) * 0.5);
+        let shallows_floor = SHALLOWS_FLOOR - 1.5 * shoal;
+        let sea_knee = sea_level - quantile((1.0 - land) * (0.5 + 0.35 * shoal));
         let natural_depth = depth_gain * sea_knee;
         let (sea_knee_depth, depth_shallow, depth_deep) =
-            if natural_depth < SHALLOWS_FLOOR && sea_knee > 1e-4 && deep - sea_knee > 1e-4 {
+            if natural_depth < shallows_floor && sea_knee > 1e-4 && deep - sea_knee > 1e-4 {
                 (
-                    SHALLOWS_FLOOR,
-                    SHALLOWS_FLOOR / sea_knee,
-                    (MAX_DEPTH - SHALLOWS_FLOOR) / (deep - sea_knee),
+                    shallows_floor,
+                    shallows_floor / sea_knee,
+                    (MAX_DEPTH - shallows_floor) / (deep - sea_knee),
                 )
             } else {
                 (natural_depth, depth_gain, depth_gain)
