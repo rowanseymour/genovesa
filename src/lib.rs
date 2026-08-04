@@ -3,6 +3,7 @@
 //! The crate is a library so that more than one binary can share it: `kassiter`
 //! is the game, and `mapgen` renders maps in plan without opening a window.
 
+pub mod bindings;
 pub mod camera;
 pub mod menu;
 pub mod noise;
@@ -23,15 +24,18 @@ pub enum AppState {
     MainMenu,
     /// Choosing map size and seed.
     NewMap,
+    /// Choosing which key does what.
+    Settings,
     InWorld,
 }
 
 impl AppState {
-    /// `KASSITER_STATE=newmap|inworld` skips straight to a screen, so that
-    /// working on one doesn't mean clicking through the others every run.
+    /// `KASSITER_STATE=newmap|settings|inworld` skips straight to a screen, so
+    /// that working on one doesn't mean clicking through the others every run.
     pub fn from_env() -> Self {
         match std::env::var("KASSITER_STATE").as_deref() {
             Ok("newmap") => Self::NewMap,
+            Ok("settings") => Self::Settings,
             Ok("inworld") => Self::InWorld,
             _ => Self::MainMenu,
         }

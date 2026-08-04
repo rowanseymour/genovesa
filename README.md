@@ -33,6 +33,16 @@ without opening a window — see [Looking at maps](#looking-at-maps).
 | Mouse wheel / trackpad | Zoom |
 | Escape | Back to the main menu |
 
+**Controls** on the main menu reassigns any of those keys: click the key beside
+an action and press the one you would rather use. Two actions can't hold the
+same key, so giving one away trades it for the key the other had.
+
+The arrow keys and Escape are deliberately not reassignable — whatever else the
+controls are set to, the map can always be panned and a match can always be
+left. Bindings are held by key *position* rather than by letter, so they are
+shown by what your own keyboard types rather than by where a US layout would put
+them. They last for the run; nothing is written to disk yet.
+
 ## The terrain, briefly
 
 Every map is an island: a height field of layered Perlin noise, domain-warped so
