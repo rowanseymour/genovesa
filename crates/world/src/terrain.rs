@@ -1206,17 +1206,6 @@ impl TerrainGenerator {
         }
     }
 
-    /// The landscape before the coast gets to it — continent, hills and ranges
-    /// — in metres, with sea level at 0.
-    ///
-    /// Split out from [`TerrainGenerator::height`] because the coastal
-    /// reshaping has to know how far away the water is, and this smooth field
-    /// is what that gets measured against. The detail layers are deliberately
-    /// not part of it: their gradient is as steep as the landform's own, so
-    /// including them would drown out the very thing being measured.
-    /// The shape of the land, in arbitrary units, before [`Calibration`] decides
-    /// what any of it means. Higher is higher; where sea level falls in it is
-    /// not settled until the whole field has been looked at.
     /// Where a world point lands once the domain warp has moved it, and how far
     /// it moved. Two scales of warp: a long one that bends whole coastlines
     /// into peninsulas and gulfs, and a shorter one for the wandering of the
@@ -1313,6 +1302,9 @@ impl TerrainGenerator {
         massif * massif * (0.55 + 0.45 * crest)
     }
 
+    /// The shape of the land, in arbitrary units, before [`Calibration`] decides
+    /// what any of it means. Higher is higher; where sea level falls in it is
+    /// not settled until the whole field has been looked at.
     fn landform_raw(&self, wx: f32, wz: f32) -> f32 {
         let (n, drift) = self.warped(wx, wz);
         let (nx, nz) = (n.x, n.y);
@@ -1458,7 +1450,14 @@ impl TerrainGenerator {
         pow(pow(dx, power) + pow(dz, power), 1.0 / power)
     }
 
-    /// Terrain height in metres before the coast reshapes it. Sea level is 0.
+    /// The landscape before the coast gets to it — continent, hills and ranges
+    /// — in metres, with sea level at 0.
+    ///
+    /// Split out from [`TerrainGenerator::height`] because the coastal
+    /// reshaping has to know how far away the water is, and this smooth field
+    /// is what that gets measured against. The detail layers are deliberately
+    /// not part of it: their gradient is as steep as the landform's own, so
+    /// including them would drown out the very thing being measured.
     fn landform(&self, wx: f32, wz: f32) -> f32 {
         under_ceiling(
             self.calibration.metres(self.landform_raw(wx, wz)),
@@ -2359,8 +2358,6 @@ fn window_max(cells: &mut [f32], dims: (usize, usize), radius: usize) {
     }
 }
 
-/// One pass of 3×3 box blur over a grid, in place. Used to take the creases
-/// off the distance field; run twice it approximates a small tent kernel.
 /// Share of the ground within `radius` cells of each cell that is water, from a
 /// 0-or-1 mask of it — a separable box blur, done with a running sum so the
 /// radius costs nothing.
@@ -2416,6 +2413,8 @@ fn water_fraction(wet: &[f32], dims: (usize, usize), radius: usize) -> Vec<f32> 
     out
 }
 
+/// One pass of 3×3 box blur over a grid, in place. Used to take the creases
+/// off the distance field; run twice it approximates a small tent kernel.
 fn blur(cells: &mut [f32], dims: (usize, usize)) {
     let (nx, nz) = dims;
     let mut pass = |stride: usize, len: usize, lanes: usize, lane_stride: usize| {
