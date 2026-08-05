@@ -96,8 +96,11 @@ impl Plugin for MenuPlugin {
                     highlight_buttons,
                     settle_dialing.run_if(resource_exists::<Dialing>),
                     main_menu_actions.run_if(in_state(AppState::MainMenu)),
-                    (dialog_actions, share_world, type_seed, refresh_dialog)
+                    (dialog_actions, share_world, refresh_dialog)
                         .run_if(in_state(AppState::NewWorld)),
+                    // `type_seed` carries no run condition of its own, for
+                    // the reason `join_keys` and `settings_keys` carry none.
+                    type_seed,
                     // `join_keys` carries no run condition of its own, for the
                     // reason `settings_keys` below carries none.
                     (
@@ -555,28 +558,44 @@ fn share_world(
 }
 
 /// Digit-by-digit editing of the seed field.
-fn type_seed(keys: Res<ButtonInput<KeyCode>>, mut settings: ResMut<NewWorldSettings>) {
-    for key in keys.get_just_pressed() {
-        let digit = match key {
-            KeyCode::Digit0 | KeyCode::Numpad0 => '0',
-            KeyCode::Digit1 | KeyCode::Numpad1 => '1',
-            KeyCode::Digit2 | KeyCode::Numpad2 => '2',
-            KeyCode::Digit3 | KeyCode::Numpad3 => '3',
-            KeyCode::Digit4 | KeyCode::Numpad4 => '4',
-            KeyCode::Digit5 | KeyCode::Numpad5 => '5',
-            KeyCode::Digit6 | KeyCode::Numpad6 => '6',
-            KeyCode::Digit7 | KeyCode::Numpad7 => '7',
-            KeyCode::Digit8 | KeyCode::Numpad8 => '8',
-            KeyCode::Digit9 | KeyCode::Numpad9 => '9',
+///
+/// Asks what the keyboard *typed* rather than which positions were pressed,
+/// exactly as the address field does — so the game's two text fields are
+/// edited by one mechanism instead of two. It also spares this a table of
+/// every key that produces a digit: the main row and the number pad both
+/// simply type one, and so does whatever a layout puts them on.
+///
+/// Runs on every screen rather than only this one, for the reason
+/// [`join_keys`] does: a reader left to lag would deliver whatever was
+/// pressed on the way here the instant the dialog opened — and on this
+/// screen that would land in the seed.
+fn type_seed(
+    state: Res<State<AppState>>,
+    mut presses: MessageReader<KeyboardInput>,
+    mut settings: ResMut<NewWorldSettings>,
+) {
+    let on_screen = *state.get() == AppState::NewWorld;
+
+    for press in presses.read() {
+        // A held key repeats, which is what a text field wants: holding
+        // backspace should clear the seed rather than one digit of it.
+        if !on_screen || press.state != ButtonState::Pressed {
+            continue;
+        }
+
+        match press.key_code {
             KeyCode::Backspace => {
                 settings.seed.pop();
-                continue;
             }
-            _ => continue,
-        };
-
-        if settings.seed.len() < MAX_SEED_DIGITS {
-            settings.seed.push(digit);
+            _ => {
+                if let Key::Character(typed) = &press.logical_key {
+                    for digit in typed.chars().filter(char::is_ascii_digit) {
+                        if settings.seed.len() < MAX_SEED_DIGITS {
+                            settings.seed.push(digit);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1563,12 +1582,51 @@ mod tests {
         let mut app = test_app(AppState::NewWorld);
         app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
 
-        press_key(&mut app, KeyCode::Digit4);
-        press_key(&mut app, KeyCode::Digit2);
+        type_key(&mut app, KeyCode::Digit4, "4");
+        // The number pad types the same digit from a different position,
+        // which is the whole reason the field reads what was typed.
+        type_key(&mut app, KeyCode::Numpad2, "2");
         assert_eq!(app.world().resource::<NewWorldSettings>().seed, "42");
 
-        press_key(&mut app, KeyCode::Backspace);
+        type_key(&mut app, KeyCode::Backspace, "\u{8}");
         assert_eq!(app.world().resource::<NewWorldSettings>().seed, "4");
+    }
+
+    #[test]
+    fn the_seed_field_takes_only_digits() {
+        let mut app = test_app(AppState::NewWorld);
+        app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
+
+        // A letter, a symbol and a space: a seed is a number, and anything
+        // else would only fail to parse back out of the field.
+        type_key(&mut app, KeyCode::KeyA, "a");
+        type_key(&mut app, KeyCode::Period, ".");
+        type_key(&mut app, KeyCode::Space, " ");
+        assert_eq!(app.world().resource::<NewWorldSettings>().seed, "");
+
+        type_key(&mut app, KeyCode::Digit7, "7");
+        assert_eq!(app.world().resource::<NewWorldSettings>().seed, "7");
+    }
+
+    #[test]
+    fn keys_pressed_before_the_new_world_dialog_opened_are_not_typed_into_it() {
+        // The same backlog the join and controls screens have to ignore: the
+        // reader runs on every screen so its cursor keeps up, which means it
+        // has to refuse everything pressed before this screen was the one on
+        // it.
+        // Held against the seed the dialog already had rather than against a
+        // fresh default, which would be a different world every time it was
+        // asked for — that being the point of `NewWorldSettings::default`.
+        let mut app = test_app(AppState::InWorld);
+        let before = app.world().resource::<NewWorldSettings>().seed.clone();
+        type_key(&mut app, KeyCode::Digit9, "9");
+
+        go_to(&mut app, AppState::NewWorld);
+        assert_eq!(
+            app.world().resource::<NewWorldSettings>().seed,
+            before,
+            "a digit pressed on the way here landed in the seed"
+        );
     }
 
     #[test]
@@ -1577,7 +1635,7 @@ mod tests {
         app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
 
         for _ in 0..MAX_SEED_DIGITS + 5 {
-            press_key(&mut app, KeyCode::Digit9);
+            type_key(&mut app, KeyCode::Digit9, "9");
         }
 
         let seed = &app.world().resource::<NewWorldSettings>().seed;

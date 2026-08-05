@@ -19,7 +19,7 @@ use bevy::prelude::*;
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
 use crate::terrain::WorldTerrain;
-use crate::{matte, AppState};
+use crate::{eased, matte, AppState};
 
 /// Length overall, in metres. A small sailing boat: at the default zoom the
 /// visible ground is some tens of metres across, so this reads as a boat
@@ -63,7 +63,9 @@ const ASTERN_SPEED: f32 = 4.0;
 
 /// Seconds of lag between the speed the keys ask for and the speed the hull
 /// makes — the time constant of an exponential ease, so most of any change
-/// arrives within this long and it is all but done in three times it. The
+/// arrives within this long and it is all but done in three times it. Named
+/// as a duration rather than as the rate [`eased`] takes, seven metres of
+/// timber having a weight that is easier to think about in seconds. The
 /// ease is what gives seven metres of timber its weight: the hull gathers
 /// way over a few seconds instead of leaping to [`SPEED`] on the frame the
 /// key goes down, and carries it for a couple of lengths' glide when the
@@ -219,10 +221,8 @@ fn steer(
     }
 
     let target = drive * speed;
-    // The fraction of the gap to the target that survives this frame — the
-    // exact solution of the ease over the frame's own length, not a per-frame
-    // step that a fast machine would run more often.
-    let keep = (-time.delta_secs() / WAY_RESPONSE).exp();
+    // A response named in seconds is a rate of its reciprocal.
+    let t = eased(1.0 / WAY_RESPONSE, time.delta_secs());
 
     for (mut transform, mut boat) in &mut boats {
         if helm != 0.0 {
@@ -231,7 +231,7 @@ fn steer(
         // Written only while something is happening, so an idle boat holds
         // still without being marked changed every frame.
         if target != 0.0 || boat.way != 0.0 {
-            let way = target + (boat.way - target) * keep;
+            let way = boat.way + (target - boat.way) * t;
             boat.way = if target == 0.0 && way.abs() < WAY_STOPPED {
                 0.0
             } else {

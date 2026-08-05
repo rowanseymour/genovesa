@@ -59,6 +59,25 @@ pub fn matte(base_color: Color) -> StandardMaterial {
     }
 }
 
+/// How far of the way to a target an exponential ease travels in `dt`
+/// seconds, as a fraction to interpolate by: `value.lerp(target, eased(..))`.
+///
+/// `rate` is how fast the gap closes, in e-foldings per second — its
+/// reciprocal is the time constant, so most of any change arrives within
+/// `1/rate` seconds and it is all but done in three times that.
+///
+/// The exponential is what makes the ease frame-rate independent. Taking a
+/// fixed fraction of the gap each frame would close it at whatever speed the
+/// machine happened to render at; this is the exact solution over the frame's
+/// own length, so the same movement takes the same time everywhere.
+///
+/// Note that this never quite arrives — it only ever closes a fraction of
+/// what is left. Anything that has to *stop* needs a threshold of its own to
+/// snap the tail, as the boat's way does.
+pub fn eased(rate: f32, dt: f32) -> f32 {
+    1.0 - (-rate * dt).exp()
+}
+
 /// Top-level screen the app is on.
 #[derive(States, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum AppState {

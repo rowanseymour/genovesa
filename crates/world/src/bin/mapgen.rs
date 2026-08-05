@@ -22,6 +22,7 @@ use std::process::ExitCode;
 use glam::{UVec2, Vec2};
 
 use world::archipelago::{Archipelago, WorldConfig};
+use world::args::{metres, pair, pair_or_single};
 use world::plan;
 use world::terrain::{MapConfig, CHUNK_TILES};
 
@@ -154,42 +155,27 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
 }
 
 /// Reads the `x,z` world point a `world` render is centred on, in metres.
-///
-/// A point has to be finite, as the game's own `--focus` insists. `inf` and
-/// `nan` both parse happily as floats and neither is anywhere: the render
-/// walks out from the point it is given, so a non-finite one samples the
-/// world at non-finite coordinates and writes a picture of nothing, having
-/// said nothing about it.
+/// Finite, for the reason [`metres`] gives.
 fn focus(value: &str) -> Result<Vec2, String> {
-    let bad = || format!("`{value}` is not a point, e.g. 2000,-3000");
-    let axis = |s: &str| s.trim().parse::<f32>().ok().filter(|v: &f32| v.is_finite());
-    let (x, z) = value.split_once(',').ok_or_else(bad)?;
-    Ok(Vec2::new(
-        axis(x).ok_or_else(bad)?,
-        axis(z).ok_or_else(bad)?,
-    ))
+    let (x, z) = pair(value, ',', metres, "a point, e.g. 2000,-3000")?;
+    Ok(Vec2::new(x, z))
 }
 
 /// Reads how much world a `world` render covers, in metres — `8192` for a
 /// square window, `8192x4096` for a rectangle, as [`MapConfig::parse_size`]
 /// takes a map's own size.
 ///
-/// Finite for the same reason a focus is, and the greater-than-zero test
-/// cannot stand in for it: `inf` is greater than zero, and an infinite span
-/// divides out to an infinite scale and a picture one pixel tall.
+/// Finite *and* positive, and the greater-than-zero test cannot stand in for
+/// the first: `inf` is greater than zero, and an infinite span divides out to
+/// an infinite scale and a picture one pixel tall.
 fn span(value: &str) -> Result<Vec2, String> {
-    let bad = || format!("`{value}` is not a span in metres, e.g. 8192");
-    let axis = |s: &str| {
-        s.trim()
-            .parse::<f32>()
-            .ok()
-            .filter(|m: &f32| m.is_finite() && *m > 0.0)
-    };
-    let (w, d) = value.split_once('x').unwrap_or((value, value));
-    Ok(Vec2::new(
-        axis(w).ok_or_else(bad)?,
-        axis(d).ok_or_else(bad)?,
-    ))
+    let (w, d) = pair_or_single(
+        value,
+        'x',
+        |s| metres(s).filter(|m| *m > 0.0),
+        "a span in metres, e.g. 8192",
+    )?;
+    Ok(Vec2::new(w, d))
 }
 
 /// Writes an image out, reporting where it went and how big it is.

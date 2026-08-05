@@ -7,6 +7,7 @@
 //! holds everything that draws: meshes, materials, cameras and menus.
 
 pub mod archipelago;
+pub mod args;
 pub mod noise;
 pub mod plan;
 pub mod terrain;

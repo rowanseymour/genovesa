@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
 use crate::terrain::{Archipelago, WorldTerrain};
-use crate::AppState;
+use crate::{eased, AppState};
 
 /// Downward tilt of the camera, from horizontal.
 const PITCH: f32 = std::f32::consts::FRAC_PI_4 * 1.15;
@@ -43,7 +43,10 @@ const PIXELS_PER_NOTCH: f32 = 50.0;
 /// hillside swallow it.
 const MIN_CLEARANCE: f32 = 12.0;
 
-/// How quickly following, turning and zooming ease towards their targets.
+/// How quickly following, turning and zooming ease towards their targets,
+/// in e-foldings per second — see [`eased`]. A twelfth of a second to close
+/// most of a gap: quick enough that the camera never feels towed along, slow
+/// enough to take the step out of a snapped view.
 const SMOOTHING: f32 = 12.0;
 
 /// Somewhere to point the camera, as a whole. Enough to describe a view
@@ -327,8 +330,7 @@ fn apply_transform(
     terrain: Option<Res<WorldTerrain>>,
     mut cameras: Query<(&mut MapCamera, &mut Transform)>,
 ) {
-    // Frame-rate independent exponential easing.
-    let t = 1.0 - (-SMOOTHING * time.delta_secs()).exp();
+    let t = eased(SMOOTHING, time.delta_secs());
 
     for (mut camera, mut transform) in &mut cameras {
         camera.focus = camera.focus.lerp(camera.target_focus, t);

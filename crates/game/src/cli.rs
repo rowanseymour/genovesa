@@ -20,6 +20,7 @@
 
 use bevy::math::{UVec2, Vec2, Vec3};
 use protocol::DEFAULT_PORT;
+use world::args::{metres, pair};
 
 use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
 use crate::terrain::{random_seed, Archipelago, WorldConfig};
@@ -45,7 +46,7 @@ pub struct Args {
     /// Whether `--focus` was given — what lets [`Args::centre_on`] tell
     /// "nobody chose" from "somebody chose the origin".
     focus_given: bool,
-    /// Whether `--yaw` was given, so [`Args::open_on`] only turns a view
+    /// Whether `--yaw` was given, so [`Args::enter`] only turns a view
     /// nobody aimed.
     yaw_given: bool,
     /// Whether `--seed` was given. A run that did not name one is in a world
@@ -80,7 +81,7 @@ impl Args {
 
     /// Points the whole run — the starting view and every shot — at a ground
     /// point, unless `--focus` already chose one. Parsing uses it to point a
-    /// capture run at the island nearest the origin; [`Args::open_on`] rides
+    /// capture run at the island nearest the origin; [`Args::enter`] rides
     /// on it for everything else.
     pub fn centre_on(&mut self, centre: Vec2) {
         if self.focus_given {
@@ -315,37 +316,10 @@ fn state(value: &str) -> Result<AppState, String> {
     }
 }
 
-/// Reads a two-part option — `98,-317`, `2560x1440` — as both halves parsed
-/// the same way, or one error naming what it should have looked like.
-///
-/// The two that use it split on different characters into different types, and
-/// nothing else about them differs: the same trim, the same "if either half is
-/// nonsense the whole option is", the same message for whichever half it was.
-/// Saying that once is also what keeps the two options failing alike, which is
-/// the part a caller notices.
-fn pair<T>(
-    value: &str,
-    separator: char,
-    axis: impl Fn(&str) -> Option<T>,
-    expected: &str,
-) -> Result<(T, T), String> {
-    let bad = || format!("`{value}` is not {expected}");
-    let (first, second) = value.split_once(separator).ok_or_else(bad)?;
-    Ok((
-        axis(first.trim()).ok_or_else(bad)?,
-        axis(second.trim()).ok_or_else(bad)?,
-    ))
-}
-
 /// Reads an `x,z` pair of metres. The height is left at zero: the camera puts
 /// itself down on the ground on its first frame.
 fn focus(value: &str) -> Result<Vec3, String> {
-    let (x, z) = pair(
-        value,
-        ',',
-        |s| s.parse::<f32>().ok().filter(|v| v.is_finite()),
-        "an x,z point in metres, e.g. 98,-317",
-    )?;
+    let (x, z) = pair(value, ',', metres, "an x,z point in metres, e.g. 98,-317")?;
     Ok(Vec3::new(x, 0.0, z))
 }
 
