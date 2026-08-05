@@ -7,7 +7,7 @@ use std::time::Duration;
 use glam::Vec2;
 use protocol::{PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
 use server::{Host, Server};
-use world::archipelago::{Archipelago, WorldConfig};
+use world::archipelago::WorldConfig;
 
 /// A hosted world on a loopback port of the machine's choosing, running until
 /// the test process ends. Most of what is tested here is a conversation, not a
@@ -81,17 +81,13 @@ fn a_client_is_welcomed_with_the_world() {
     let (_client, _id, seed, spawn) = Client::join(addr);
 
     assert_eq!(seed, 7, "the welcome names a different world");
-    // Players enter on the island a lone run of the seed would open on —
-    // layout only, so the expectation is cheap to recompute here. Not on its
-    // exact centre, since arrivals are scattered around it, so what is pinned
-    // is that the spawn is somewhere on that island.
-    let island = Archipelago::new(&WorldConfig { seed: 7 })
-        .nearest_island(Vec2::ZERO)
-        .expect("seed 7 has land near the origin");
-    let out = (spawn - island.centre()).abs() - island.extent() * 0.5;
+    // Players enter on the open water the world keeps clear around the
+    // origin — the same point a lone run of the seed opens on — scattered a
+    // few boat-lengths so arrivals don't stack. What is pinned is that the
+    // spawn stays inside that scatter, and so inside the clearing.
     assert!(
-        out.max_element() <= 0.0,
-        "{spawn} is not on the island players should enter on"
+        spawn.length() <= server::SPAWN_SCATTER,
+        "{spawn} is not the patch of water players enter on"
     );
 }
 
