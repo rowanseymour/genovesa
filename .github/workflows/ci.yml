@@ -65,7 +65,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # `cache-on-failure` because the default is a trap for exactly this
+      # workspace. The cache is normally written only by a job that passed, so
+      # a job that fails its tests saves nothing and the next run compiles the
+      # engine from cold again — three quarters of an hour, every time, for as
+      # long as the branch is red. That is backwards: a red branch is when the
+      # loop most needs to be short. The engine underneath is the same whether
+      # the tests passed or not, so cache it either way.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -100,6 +109,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Same reasoning as above, and this matrix is where a red branch is most
+      # likely: these are the jobs that fail when a platform stops agreeing.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Engine-free tests
         run: cargo test --locked -p world -p protocol -p server
