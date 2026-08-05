@@ -76,10 +76,10 @@ impl Args {
     }
 
     /// Points the whole run — the starting view and every shot — at a ground
-    /// point, unless `--focus` already chose one. Parsing uses it to open on
-    /// the island nearest the origin; a joined run uses it again, from the
-    /// game binary, once the server's welcome has said where its world is
-    /// entered.
+    /// point, unless `--focus` already chose one. Parsing uses it to point a
+    /// capture run at the island nearest the origin; a joined run uses it
+    /// again, from the game binary, once the server's welcome has said where
+    /// its world is entered.
     pub fn centre_on(&mut self, centre: Vec2) {
         if self.focus_given {
             return;
@@ -121,7 +121,8 @@ port {DEFAULT_PORT} for others to `--join` — the same session a dedicated
 
 View options, applied in the order given:
   --focus <x,z>     world point to put the player down at and centre the view
-                    on, in metres [default: the island nearest the origin]
+                    on, in metres [default: the origin, where every world is
+                    entered; shots default to the island nearest it]
   --zoom <m>        camera distance in metres, {MIN_DISTANCE} to {MAX_DISTANCE}
                     [default: {}]
   --yaw <deg>       bearing to look from [default: {}]
@@ -239,11 +240,12 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         args.state = AppState::InWorld;
     }
 
-    // Nobody said where to look, so look at land. [`View`]'s own default is
-    // the origin, which is the only honest default a view type with no world
-    // behind it can have — and on essentially every seed the origin is open
-    // ocean, so a run that took it opened on a flat blue plane and a caller
-    // wanting a picture of terrain had to go and find some first.
+    // A played run that said nothing about where to look needs no help:
+    // [`View`]'s own default is the origin, which is where every world is
+    // entered — the world keeps it clear of land, so opening on open water is
+    // the game now, not a blank page. A *capture* run is different: a shot
+    // nearly always means a shot of terrain, and the origin is the one place
+    // guaranteed to show none, so shots go and find the nearest land.
     //
     // Once, and for the whole command line, rather than per shot: the shots
     // are a sweep over one world, and moving each of them to its own nearest
@@ -255,7 +257,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // A joined run skips this entirely: its world is the server's, so a
     // focus from a locally laid-out ocean would point at the wrong one. The
     // game binary calls `centre_on` with the served spawn point instead.
-    if args.join.is_none() {
+    if args.is_capture() && args.join.is_none() {
         let centre = Archipelago::new(&args.config)
             .nearest_island(Vec2::ZERO)
             .map(|spec| spec.centre());
@@ -388,10 +390,19 @@ mod tests {
     }
 
     #[test]
-    fn with_no_focus_given_the_view_opens_on_the_nearest_island() {
-        // The origin is open ocean on essentially every seed, so a run that
-        // said nothing about where to look has to be moved onto land — both
-        // the starting view and every shot, so a sweep stays a sweep.
+    fn with_no_focus_given_a_played_run_opens_on_the_spawn() {
+        // Every world is entered at the origin, and the world keeps it clear
+        // of land — so a run that said nothing about where to look starts the
+        // view, and with it the boat, exactly there.
+        let args = ok("--seed 777 --state inworld");
+        assert_eq!(args.view.focus, Vec3::ZERO);
+    }
+
+    #[test]
+    fn with_no_focus_given_shots_are_taken_of_the_nearest_island() {
+        // The origin is guaranteed open water, so a capture run that said
+        // nothing about where to look has to be moved onto land — both the
+        // starting view and every shot, so a sweep stays a sweep.
         let args = ok("--seed 777 --shot a.png --zoom 300 --shot b.png");
         let world = Archipelago::new(&args.config);
         let island = world

@@ -140,6 +140,27 @@ const LAYERS: [Layer; 2] = [
 /// coast ever has to know the other exists.
 const CLEARANCE: i32 = 3;
 
+/// Chunks of guaranteed open water around the origin, where every world is
+/// entered. No island's frame ever stands within this many chunks of the
+/// origin, on any seed — measured per axis like every other layout gap, so
+/// the clearing is a square.
+///
+/// Entering at the origin is what lets every machine agree on the spawn
+/// without consulting anything: a server and a lone run put the player down
+/// at the same point by construction, not by both asking the layout the same
+/// question. The clearing is what makes that point worth standing on — it
+/// turns "the origin is open water on essentially every seed" into a
+/// guarantee, so entry is always the same experience: a boat at sea, land
+/// somewhere past the horizon, and a first sail to go and find it.
+///
+/// Eight chunks is just over a kilometre — about as far as the game streams
+/// ground in around the camera, so the opening view is honestly empty rather
+/// than teasing a coastline at its edge. It is also less than one fine
+/// parcel, and four of five of those hold an island: the first land waits
+/// just past the clearing in nearly every direction, a couple of minutes
+/// away at boat speed rather than a voyage.
+const SPAWN_CLEARING: i32 = 8;
+
 /// Skews a uniform draw towards zero, so that island sizes come out mostly
 /// small: the median lands in the lower quarter of its layer's range and the
 /// top of the range stays a rare event, which is the right way round — an
@@ -468,11 +489,22 @@ impl Archipelago {
         };
         let offset = IVec2::new(jitter(&mut rng, chunks.x), jitter(&mut rng, chunks.y));
 
-        Some(IslandSpec {
+        let spec = IslandSpec {
             origin: parcel * l.parcel + offset,
             chunks: chunks.as_uvec2(),
             seed: (rng.next() >> 32) as u32,
-        })
+        };
+
+        // The one veto that is not the parcel's own dice: nothing may stand
+        // in the spawn clearing. Suppressed here, as though the island was
+        // never drawn, rather than in `spec_at` beside the cross-layer test —
+        // an island that is not there suppresses no skerries, so land can
+        // ring the clearing as densely as the layers allow.
+        let apart = spec.origin.max(-spec.end()).max(IVec2::ZERO);
+        if apart.max_element() < SPAWN_CLEARING {
+            return None;
+        }
+        Some(spec)
     }
 
     /// What a parcel of one layer actually holds: its raw island, unless a
@@ -543,10 +575,12 @@ impl Archipelago {
     /// The island nearest a world point, by the distance between the point and
     /// the island's centre — layout only, generating nothing.
     ///
-    /// What "start somewhere" means in an endless ocean. Every entry into the
-    /// world has to choose a point, and the honest default — the origin — is
-    /// open water on essentially every seed, so a game that took it opened on
-    /// a flat blue plane with the nearest land over the horizon.
+    /// The world is *entered* on open water — the origin, kept clear of land
+    /// by [`SPAWN_CLEARING`] — so play never needs this. What does is
+    /// anything that wants a picture of terrain rather than of sea: a capture
+    /// run with no `--focus` has to go and find some land to photograph, and
+    /// the tests use the same question to pin that the clearing keeps land
+    /// out of reach but never out of range.
     ///
     /// Searched over windows that double until one holds something, rather
     /// than over a single wide one: the layout is cheap but not free, and the
@@ -815,13 +849,23 @@ mod tests {
     }
 
     #[test]
-    fn there_is_always_land_within_reach() {
-        // What entering the world leans on: wherever a player is put down, the
-        // nearest island can be found without generating anything. The origin
-        // is the case that matters — it is where every default view starts,
-        // and it is open water on essentially every seed.
+    fn the_world_is_entered_on_open_water_with_land_in_reach() {
+        // The spawn guarantee, both halves. Every world is entered at the
+        // origin, and the clearing keeps every island's frame at least
+        // [`SPAWN_CLEARING`] chunks from it — so entry is a boat at sea on
+        // every seed, not just on essentially every one. And the ocean past
+        // the clearing is as full as ever: the nearest island can still be
+        // found without generating anything, so the first sail is short.
         for seed in [1, 7, 99, 777, 20_040_112] {
             let ocean = world(seed);
+            for spec in specs(&ocean) {
+                let apart = spec.origin.max(-spec.end()).max(IVec2::ZERO);
+                assert!(
+                    apart.max_element() >= SPAWN_CLEARING,
+                    "seed {seed}: {spec:?} stands in the spawn clearing"
+                );
+            }
+
             let near = ocean
                 .nearest_island(Vec2::ZERO)
                 .unwrap_or_else(|| panic!("seed {seed} has no island near the origin"));
@@ -1054,7 +1098,7 @@ mod tests {
         let ground = digest(floats(heights));
 
         println!("layout digests to {layout:#018X}, ground to {ground:#018X}");
-        assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
+        assert_eq!(layout, 0xF3A1_64E9_5983_9EA7, "the layout changed");
         assert_eq!(ground, 0xFA89_ABF4_A2FC_48A1, "the ground changed");
     }
 }

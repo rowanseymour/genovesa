@@ -96,9 +96,10 @@ impl Plugin for BoatPlugin {
 /// way the opening view looks.
 ///
 /// The view names where the player enters the world, so the boat goes there
-/// rather than anywhere of its own choosing. That leaves it aground when a
-/// world opens inland, which is what the entry point currently is; the
-/// movement keys will drive it to the water.
+/// rather than anywhere of its own choosing. Entry is the origin, which the
+/// world keeps clear of land, so the boat starts afloat — though a `--focus`
+/// can still put it down inland, aground until the movement keys drive it
+/// back to the sea.
 fn launch(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,

@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use glam::Vec2;
 use protocol::{PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
-use world::archipelago::{Archipelago, WorldConfig};
+use world::archipelago::WorldConfig;
 
 /// How long a fresh connection has to say hello. Generous for a slow link,
 /// and the point is only that a connection which arrives and then says
@@ -40,10 +40,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// stays connected.
 const OUTBOX_DEPTH: usize = 256;
 
-/// How far from the island's centre an arriving player may be put down, in
-/// metres. A few strides: enough that two markers are plainly two markers,
-/// small enough that everyone still arrives on the same beach.
-const SPAWN_SCATTER: f32 = 12.0;
+/// How far from the origin an arriving player may be put down, in metres. A
+/// few boat-lengths: enough that two markers are plainly two markers, small
+/// enough that everyone still arrives in the same patch of open water.
+///
+/// Public so a test of the welcome can pin "players enter at the origin"
+/// without repeating the number.
+pub const SPAWN_SCATTER: f32 = 12.0;
 
 /// How often a listening server looks up from its accept to see whether it
 /// has been asked to stop.
@@ -82,11 +85,6 @@ pub struct Server {
 /// What every connection's thread shares.
 struct Shared {
     config: WorldConfig,
-    /// The island players enter on: the one nearest the origin — the same rule
-    /// a lone run uses to point its opening view, so joining a server lands on
-    /// the very island a solo run of the seed would open on. Where on it each
-    /// player lands is [`Shared::spawn_for`].
-    centre: Vec2,
     /// Dealt in joining order, and never reused within a session.
     next_id: AtomicU32,
     players: Mutex<HashMap<PlayerId, Player>>,
@@ -105,19 +103,15 @@ struct Player {
 }
 
 impl Server {
-    /// Binds the listener and settles everything a session hands out — the
-    /// spawn point costs a few hash mixes of layout, no terrain.
+    /// Binds the listener. Nothing about the world is computed here: players
+    /// enter at the origin, which the world keeps clear of land, so the spawn
+    /// is a constant rather than a question.
     pub fn bind(addr: impl ToSocketAddrs, config: WorldConfig) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        let centre = Archipelago::new(&config)
-            .nearest_island(Vec2::ZERO)
-            .map(|spec| spec.centre())
-            .unwrap_or(Vec2::ZERO);
         Ok(Self {
             listener,
             shared: Arc::new(Shared {
                 config,
-                centre,
                 next_id: AtomicU32::new(1),
                 players: Mutex::new(HashMap::new()),
                 report: Box::new(|_| {}),
@@ -251,10 +245,11 @@ fn accept(listener: &TcpListener, shared: &Arc<Shared>, stopping: &AtomicBool) {
 }
 
 impl Shared {
-    /// Where a given player is put down. Everyone enters on the same island,
-    /// but not on the same square metre: markers standing exactly on top of
-    /// each other read as one player, and what a joined session has to show
-    /// first is that there is somebody else here.
+    /// Where a given player is put down. Everyone enters on the origin's
+    /// open water — guaranteed open by the world's spawn clearing — but not
+    /// on the same square metre: markers standing exactly on top of each
+    /// other read as one player, and what a joined session has to show first
+    /// is that there is somebody else here.
     ///
     /// The offset is the player's id run through two irrational strides — the
     /// golden angle for the bearing, and a smaller one for how far out — so
@@ -262,11 +257,11 @@ impl Shared {
     /// leaving one small circle, however many ids a long-lived server has
     /// dealt. Deterministic, so a client could work out the same point, and
     /// cheap, because it is arithmetic on an integer and touches no terrain.
-    fn spawn_for(&self, id: PlayerId) -> Vec2 {
+    fn spawn_for(id: PlayerId) -> Vec2 {
         let n = id.0 as f32;
         let bearing = n * 137.508_f32.to_radians();
         let out = SPAWN_SCATTER * (0.4 + 0.6 * (n * 0.618_034).fract());
-        self.centre + Vec2::from_angle(bearing) * out
+        Vec2::from_angle(bearing) * out
     }
 }
 
@@ -316,7 +311,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) {
     });
 
     let player = Player {
-        position: shared.spawn_for(id),
+        position: Shared::spawn_for(id),
         outbox,
         line: stream,
     };
