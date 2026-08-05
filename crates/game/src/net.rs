@@ -35,7 +35,7 @@ use server::{Host, Server};
 
 use crate::boat::Boat;
 use crate::terrain::{WorldConfig, WorldTerrain};
-use crate::AppState;
+use crate::{matte, AppState};
 
 /// Seconds between position reports, at least. Ten a second reads as
 /// continuous once markers ease between them, and keeps an idle wire quiet.
@@ -412,14 +412,7 @@ fn receive(
                         },
                         DespawnOnExit(AppState::InWorld),
                         Mesh3d(meshes.add(Capsule3d::new(MARKER_RADIUS, MARKER_LENGTH))),
-                        // Matte, like everything else in this look.
-                        MeshMaterial3d(materials.add(StandardMaterial {
-                            base_color: marker_color(id),
-                            perceptual_roughness: 1.0,
-                            metallic: 0.0,
-                            reflectance: 0.0,
-                            ..default()
-                        })),
+                        MeshMaterial3d(materials.add(matte(marker_color(id)))),
                         // On the ground plane for now — `place_markers` owns
                         // the height from the next frame on.
                         Transform::from_xyz(position.x, 0.0, position.y),
@@ -490,13 +483,13 @@ fn place_markers(
         let at = Vec2::new(transform.translation.x, transform.translation.z);
         let at = at.lerp(player.target, t);
 
-        // Feet on the ground where it has streamed in, and on the surface
-        // where the ground is under water — a player crossing open ocean is
-        // sailing it, not walking the seabed. Ground still generating keeps
-        // the last height, exactly as the camera's own focus does.
+        // Standing on the surface, capsule half-height above it, so a player
+        // crossing open ocean is sailing it rather than walking the seabed.
+        // Ground still generating keeps the last height, exactly as the boat
+        // and the camera's own focus do.
         let mut height = transform.translation.y;
-        if let Some(ground) = terrain.as_ref().and_then(|t| t.0.ready_height(at.x, at.y)) {
-            height = ground.max(0.0) + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
+        if let Some(surface) = terrain.as_ref().and_then(|t| t.surface(at.x, at.y)) {
+            height = surface + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
         }
         transform.translation = Vec3::new(at.x, height, at.y);
     }

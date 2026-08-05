@@ -93,22 +93,27 @@ impl Args {
         }
     }
 
-    /// Opens the run on a world's spawn: centres on the point and turns the
-    /// view to face the island it stands off, so the first land is dead
-    /// ahead of a bow already pointing at it. Each half yields to the
-    /// command line — a `--focus` keeps the whole view where it was put,
-    /// and a `--yaw` keeps its own bearing.
-    pub fn open_on(&mut self, spawn: Vec2, island: Vec2) {
+    /// Opens the run on where a world is entered — what [`View::enter`] does
+    /// to one view, done to the starting view and every shot alike, and read
+    /// the same way: `point` is the spawn a server already named, and `None`
+    /// takes the world's own.
+    ///
+    /// Each half yields to the command line: a `--focus` keeps the whole view
+    /// where it was put, and a `--yaw` keeps its own bearing.
+    pub fn enter(&mut self, world: &Archipelago, point: Option<Vec2>) {
         if self.focus_given {
             return;
         }
-        self.centre_on(spawn);
+        let spawn = world.spawn();
+        self.centre_on(point.or(spawn.map(|s| s.point)).unwrap_or(Vec2::ZERO));
         if self.yaw_given {
             return;
         }
-        self.view.face(island);
-        for shot in &mut self.shots {
-            shot.view.face(island);
+        if let Some(island) = spawn.map(|s| s.island.centre()) {
+            self.view.face(island);
+            for shot in &mut self.shots {
+                shot.view.face(island);
+            }
         }
     }
 }
@@ -283,15 +288,15 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     //
     // A joined run skips this entirely: its world is the server's, so a
     // focus from a locally laid-out ocean would point at the wrong one. The
-    // game binary calls `open_on` with the served spawn point instead.
+    // game binary calls `enter` with the served spawn point instead.
     if args.join.is_none() {
         let world = Archipelago::new(&args.config);
         if args.is_capture() {
             if let Some(centre) = world.nearest_island(Vec2::ZERO).map(|spec| spec.centre()) {
                 args.centre_on(centre);
             }
-        } else if let Some(spawn) = world.spawn() {
-            args.open_on(spawn.point, spawn.island.centre());
+        } else {
+            args.enter(&world, None);
         }
     }
     Ok(args)
@@ -557,7 +562,8 @@ mod tests {
         // from a spot the player chose would be facing it from the wrong
         // place.
         let mut args = ok("--join x --focus 5,6");
-        args.open_on(Vec2::new(10.0, 20.0), Vec2::new(500.0, 20.0));
+        let world = Archipelago::new(&args.config);
+        args.enter(&world, Some(Vec2::new(10.0, 20.0)));
         assert_eq!(args.view.focus, Vec3::new(5.0, 0.0, 6.0));
         assert_eq!(args.view.yaw, View::default().yaw);
     }

@@ -7,7 +7,7 @@ use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
-use crate::terrain::WorldTerrain;
+use crate::terrain::{Archipelago, WorldTerrain};
 use crate::AppState;
 
 /// Downward tilt of the camera, from horizontal.
@@ -72,6 +72,29 @@ impl Default for View {
 }
 
 impl View {
+    /// Opens the view on a world: focused where that world is entered, and
+    /// turned to face the island the entry stands off — so a match opens
+    /// with its first land dead ahead of a bow already pointing at it.
+    ///
+    /// `point` is where this player is actually put down, which in a served
+    /// world is the server's call — the world's own spawn, scattered a few
+    /// boat-lengths, and not for a client to recompute. `None` takes the
+    /// world's spawn itself, which is what a world of one's own enters on.
+    /// The *facing* always asks the local layout, that being the same layout
+    /// on every machine.
+    ///
+    /// A world whose layout offers nowhere to enter — broken rather than
+    /// empty, see [`Archipelago::spawn`] — leaves the bearing alone and falls
+    /// back to the origin, which every world keeps clear.
+    pub fn enter(&mut self, world: &Archipelago, point: Option<Vec2>) {
+        let spawn = world.spawn();
+        let at = point.or(spawn.map(|s| s.point)).unwrap_or(Vec2::ZERO);
+        self.focus = Vec3::new(at.x, 0.0, at.y);
+        if let Some(spawn) = spawn {
+            self.face(spawn.island.centre());
+        }
+    }
+
     /// Turns the view to look from its focus towards a ground point. The
     /// boat launches pointing down the view's yaw, so this also points the
     /// bow there — it is what entry uses to open facing the island the
@@ -238,15 +261,15 @@ fn follow_player(
         // Put down outright the first time the ground under the player can be
         // answered, rather than easing there from sea level. Asked of the
         // terrain rather than read off the boat because the boat's own height
-        // is a leftover until that same ground arrives — same surface rule,
+        // is a leftover until that same ground arrives — the same surface,
         // one frame earlier.
-        let Some(ground) = terrain
+        let Some(surface) = terrain
             .as_ref()
-            .and_then(|t| t.0.ready_height(boat.translation.x, boat.translation.z))
+            .and_then(|t| t.surface(boat.translation.x, boat.translation.z))
         else {
             continue;
         };
-        let focus = Vec3::new(boat.translation.x, ground.max(0.0), boat.translation.z);
+        let focus = Vec3::new(boat.translation.x, surface, boat.translation.z);
         camera.focus = focus;
         camera.target_focus = focus;
         camera.grounded = true;
@@ -335,6 +358,7 @@ fn apply_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{elapsed, hold, rebind, run_frames, test_world};
     use bevy::state::app::StatesPlugin;
     use bevy::time::TimePlugin;
 
@@ -355,22 +379,13 @@ mod tests {
         app
     }
 
-    /// The same app with real ground under it — a world with one island
-    /// already generated, so the camera's ready-height queries have something
-    /// to answer with — plus that island, to point the camera at.
-    fn test_app_on_terrain() -> (App, std::sync::Arc<world::archipelago::Archipelago>, Vec3) {
-        use world::archipelago::{Archipelago, WorldConfig};
+    /// The same app with real ground under it, and the middle of the island
+    /// that ground belongs to — somewhere to point the camera.
+    fn test_app_on_terrain() -> (App, std::sync::Arc<Archipelago>, Vec3) {
+        let (world, spec) = test_world();
+        let centre = spec.centre();
 
         let mut app = test_app();
-        let world = std::sync::Arc::new(Archipelago::new(&WorldConfig { seed: 1 }));
-        let spec = world
-            .islands_within(Vec2::splat(-6_000.0), Vec2::splat(6_000.0))
-            .into_iter()
-            .max_by_key(|s| s.chunks.x * s.chunks.y)
-            .expect("a world should have an island within a few kilometres");
-        world.island(spec);
-
-        let centre = spec.centre();
         app.insert_resource(WorldTerrain(world.clone()));
         spawn_boat(&mut app, Vec3::ZERO);
         app.update();
@@ -411,12 +426,6 @@ mod tests {
         app.update();
     }
 
-    fn hold(app: &mut App, key: KeyCode) {
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(key);
-    }
-
     /// Reads one field off the single camera.
     fn read<T>(app: &mut App, f: impl Fn(&MapCamera) -> T) -> T {
         f(app
@@ -428,25 +437,6 @@ mod tests {
 
     fn focus(app: &mut App) -> Vec3 {
         read(app, |c| c.target_focus)
-    }
-
-    /// Runs frames with whatever keys are down. Clears the just-pressed flags
-    /// between them the way the real input plugin does, so a key held here
-    /// reads as held rather than as pressed afresh every frame.
-    fn run_frames(app: &mut App, count: usize) {
-        for _ in 0..count {
-            app.update();
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .clear();
-        }
-    }
-
-    /// Seconds of clock the app has run for. Frames take however long they take
-    /// in a headless run, so anything driven by `delta_secs` has to be measured
-    /// against the time that actually passed rather than a frame count.
-    fn elapsed(app: &App) -> f32 {
-        app.world().resource::<Time>().elapsed_secs()
     }
 
     /// Radians per second the view turns at while `key` is held.
@@ -471,13 +461,6 @@ mod tests {
             .count();
         assert_eq!(count, 1);
         assert_eq!(focus(&mut app), Vec3::ZERO);
-    }
-
-    /// Puts an action on a key, as the controls screen does.
-    fn rebind(app: &mut App, action: Action, key: KeyCode) {
-        app.world_mut()
-            .resource_mut::<KeyBindings>()
-            .bind(action, key, None);
     }
 
     #[test]

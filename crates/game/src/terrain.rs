@@ -23,7 +23,7 @@ pub use world::archipelago::*;
 pub use world::terrain::*;
 
 use crate::camera::MapCamera;
-use crate::AppState;
+use crate::{matte, AppState};
 
 /// How far the ocean floor plane hangs below [`MAX_DEPTH`], in metres. It only
 /// has to back the water beyond the terrain meshes, so all this has to do is
@@ -111,6 +111,24 @@ impl Plugin for TerrainPlugin {
 #[derive(Resource, Clone)]
 pub struct WorldTerrain(pub Arc<Archipelago>);
 
+impl WorldTerrain {
+    /// The height of the surface at a world point: the ground where it stands
+    /// above the sea, and the waterline where it does not.
+    ///
+    /// What everything riding the world rides — the boat, the camera centred
+    /// on it, and the markers other players stand as — so that a hull crossing
+    /// open ocean floats rather than walking the seabed, and one that has run
+    /// aground sits in the hillside.
+    ///
+    /// `None` where the ground is still being generated. Absent rather than
+    /// sea level, deliberately: a rider keeps the height it had for the few
+    /// frames an island takes to arrive, instead of dropping to the waterline
+    /// and climbing back out as the ground lands.
+    pub fn surface(&self, x: f32, z: f32) -> Option<f32> {
+        Some(self.0.ready_height(x, z)?.max(0.0))
+    }
+}
+
 /// Every chunk that currently exists as an entity — spawned and meshed, or
 /// still building in a task — and the one material they all share.
 #[derive(Resource)]
@@ -174,17 +192,10 @@ fn enter_world(
     // Terrain material. Base colour is white so the vertex colours come
     // through unmodified — StandardMaterial multiplies the two together.
     // Every chunk shares the one material, so they still batch into a single
-    // draw call each. Fully matte: a specular highlight is a gradient, and
-    // gradients are the one thing this look can't have.
+    // draw call each.
     commands.insert_resource(ChunkIndex {
         chunks: HashMap::new(),
-        ground: materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
-            reflectance: 0.0,
-            ..default()
-        }),
+        ground: materials.add(matte(Color::WHITE)),
     });
 
     // Ocean floor. The sea is translucent, so without something opaque beneath
@@ -221,17 +232,11 @@ fn enter_world(
         // edge of every island's chunk rectangle.
         NotShadowReceiver,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(
-                OCEAN_FLOOR_COLOR.x,
-                OCEAN_FLOOR_COLOR.y,
-                OCEAN_FLOOR_COLOR.z,
-            ),
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
-            reflectance: 0.0,
-            ..default()
-        })),
+        MeshMaterial3d(materials.add(matte(Color::srgb(
+            OCEAN_FLOOR_COLOR.x,
+            OCEAN_FLOOR_COLOR.y,
+            OCEAN_FLOOR_COLOR.z,
+        )))),
         Transform::from_xyz(0.0, -MAX_DEPTH - SEA_FLOOR_CLEARANCE, 0.0),
     ));
 
@@ -249,17 +254,15 @@ fn enter_world(
         // cliff's shadow out across the water at its foot.
         NotShadowCaster,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
+        // Flat and bright rather than glassy — matte like everything else,
+        // give or take the barest reflectance. Still partly transparent, so
+        // the sand band running under the waterline shows through as a
+        // turquoise ring around every coast: two flat tones of water, which
+        // is the whole effect.
         MeshMaterial3d(materials.add(StandardMaterial {
-            // Flat and bright rather than glassy. Still partly transparent, so
-            // the sand band running under the waterline shows through as a
-            // turquoise ring around every coast — two flat tones of water,
-            // which is the whole effect.
-            base_color: Color::srgba(0.10, 0.42, 0.62, 0.84),
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
             reflectance: 0.02,
             alpha_mode: AlphaMode::Blend,
-            ..default()
+            ..matte(Color::srgba(0.10, 0.42, 0.62, 0.84))
         })),
         // Nudged above y = 0 so it doesn't z-fight with terrain sitting exactly
         // at sea level.

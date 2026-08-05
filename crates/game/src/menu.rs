@@ -509,20 +509,11 @@ fn dialog_actions(
                 *config = WorldConfig {
                     seed: settings.seed_value(),
                 };
-                // Every world is entered on its own spawn — open water just
-                // off the first island, facing it — so the view is brought
-                // there rather than trusted: it carries over from wherever
-                // it last was, which on a new world chosen from within a
-                // match is a point in a world that no longer exists. The
-                // origin is the fallback the world keeps open should its
-                // layout offer nothing.
-                match Archipelago::new(&config).spawn() {
-                    Some(spawn) => {
-                        view.focus = Vec3::new(spawn.point.x, 0.0, spawn.point.y);
-                        view.face(spawn.island.centre());
-                    }
-                    None => view.focus = Vec3::ZERO,
-                }
+                // Every world is entered on its own spawn, so the view is
+                // brought there rather than trusted: it carries over from
+                // wherever it last was, which on a new world chosen from
+                // within a match is a point in a world that no longer exists.
+                view.enter(&Archipelago::new(&config), None);
                 next.set(AppState::InWorld);
             }
             _ => {}
@@ -799,16 +790,9 @@ fn settle_dialing(
     *config = WorldConfig {
         seed: session.connection.seed,
     };
-    // Where the server puts arrivals down — the same spawn a lone run of
-    // the seed opens on, scattered a few boat-lengths. The point is the
-    // server's call, not recomputed here: everybody in a session has to
-    // enter it where the server says. The *facing* asks the local layout,
-    // which is the same layout, for the island that spawn stands off.
-    let spawn = session.connection.spawn;
-    view.focus = Vec3::new(spawn.x, 0.0, spawn.y);
-    if let Some(world_spawn) = Archipelago::new(&config).spawn() {
-        view.face(world_spawn.island.centre());
-    }
+    // On the spawn the server named, facing the island the local layout says
+    // it stands off.
+    view.enter(&Archipelago::new(&config), Some(session.connection.spawn));
 
     if let Some(host) = session.hosting {
         commands.insert_resource(Hosting(host));

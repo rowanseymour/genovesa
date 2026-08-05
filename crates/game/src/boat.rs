@@ -19,7 +19,7 @@ use bevy::prelude::*;
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
 use crate::terrain::WorldTerrain;
-use crate::AppState;
+use crate::{matte, AppState};
 
 /// Length overall, in metres. A small sailing boat: at the default zoom the
 /// visible ground is some tens of metres across, so this reads as a boat
@@ -127,19 +127,8 @@ fn launch(
     mut materials: ResMut<Assets<StandardMaterial>>,
     view: Res<View>,
 ) {
-    // Matte, like everything else in this look — see the terrain's own
-    // materials for why a specular highlight would be wrong here.
-    let mut matte = |base_color| {
-        materials.add(StandardMaterial {
-            base_color,
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
-            reflectance: 0.0,
-            ..default()
-        })
-    };
-    let hull_material = matte(HULL_COLOR);
-    let spar_material = matte(SPAR_COLOR);
+    let hull_material = materials.add(matte(HULL_COLOR));
+    let spar_material = materials.add(matte(SPAR_COLOR));
 
     commands.spawn((
         Name::new("Boat"),
@@ -165,23 +154,19 @@ fn launch(
     info!("boat launched at {}, {}", view.focus.x, view.focus.z);
 }
 
-/// Keeps the boat on the surface it is over: the sea, or the ground where the
-/// ground is above the sea.
+/// Keeps the boat on the surface it is over — [`WorldTerrain::surface`], the
+/// same rule the other players' markers ride.
 ///
-/// The same rule the other players' markers ride, and for the same reason —
-/// ground still streaming in reads as absent and the boat keeps the height it
-/// had, rather than dropping to sea level for the few frames an island takes to
-/// arrive. The waterline is the origin, so a boat that has run aground is
+/// The waterline is the hull's origin, so a boat that has run aground is
 /// half-buried in the hillside; that is what aground looks like, and steering
 /// is what will keep it off.
 fn float(terrain: Option<Res<WorldTerrain>>, mut boats: Query<&mut Transform, With<Boat>>) {
     for mut transform in &mut boats {
-        let Some(ground) = terrain.as_ref().and_then(|t| {
-            t.0.ready_height(transform.translation.x, transform.translation.z)
-        }) else {
+        let at = transform.translation;
+        let Some(surface) = terrain.as_ref().and_then(|t| t.surface(at.x, at.z)) else {
             continue;
         };
-        transform.translation.y = ground.max(0.0);
+        transform.translation.y = surface;
     }
 }
 
@@ -334,6 +319,7 @@ mod tests {
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
     use super::*;
+    use crate::testing::{elapsed, hold, rebind, run_frames, test_world};
 
     /// How long every test frame lasts. Headless frames take next to no real
     /// time, which the old instant throttle never noticed — but the eased one
@@ -375,39 +361,6 @@ mod tests {
     fn heading_yaw(app: &mut App) -> f32 {
         let forward = boat(app).forward();
         f32::atan2(-forward.x, -forward.z)
-    }
-
-    fn hold(app: &mut App, key: KeyCode) {
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(key);
-    }
-
-    /// Puts an action on a key, as the controls screen does.
-    fn rebind(app: &mut App, action: Action, key: KeyCode) {
-        app.world_mut()
-            .resource_mut::<KeyBindings>()
-            .bind(action, key, None);
-    }
-
-    /// Runs frames with whatever keys are down. Clears the just-pressed flags
-    /// between them the way the real input plugin does, so a key held here
-    /// reads as held rather than as pressed afresh every frame.
-    fn run_frames(app: &mut App, count: usize) {
-        for _ in 0..count {
-            app.update();
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .clear();
-        }
-    }
-
-    /// Seconds of clock the app has run for. Frames take however long they
-    /// take in a headless run, so anything driven by `delta_secs` has to be
-    /// measured against the time that actually passed rather than a frame
-    /// count.
-    fn elapsed(app: &App) -> f32 {
-        app.world().resource::<Time>().elapsed_secs()
     }
 
     /// Radians per second the bow comes round at while `key` is held. A rate
@@ -693,19 +646,9 @@ mod tests {
 
     #[test]
     fn the_boat_rides_the_surface_it_is_over() {
-        use std::sync::Arc;
-        use world::archipelago::{Archipelago, WorldConfig, CHUNK_METRES};
+        use crate::terrain::CHUNK_METRES;
 
-        // A world with one island already generated, so the ready-height
-        // queries have something to answer with.
-        let world = Arc::new(Archipelago::new(&WorldConfig { seed: 1 }));
-        let spec = world
-            .islands_within(Vec2::splat(-6_000.0), Vec2::splat(6_000.0))
-            .into_iter()
-            .max_by_key(|s| s.chunks.x * s.chunks.y)
-            .expect("a world should have an island within a few kilometres");
-        world.island(spec);
-
+        let (world, spec) = test_world();
         let mut app = test_app();
         app.insert_resource(WorldTerrain(world.clone()));
 

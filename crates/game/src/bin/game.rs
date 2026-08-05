@@ -52,10 +52,8 @@ fn main() -> ExitCode {
                 // The server says where its world puts this player down; the
                 // island that entry stands off follows from the seed, so the
                 // view can face it without being told.
-                match Archipelago::new(&args.config).spawn() {
-                    Some(spawn) => args.open_on(connection.spawn, spawn.island.centre()),
-                    None => args.centre_on(connection.spawn),
-                }
+                let world = Archipelago::new(&args.config);
+                args.enter(&world, Some(connection.spawn));
                 Some(connection)
             }
             Err(message) => {
