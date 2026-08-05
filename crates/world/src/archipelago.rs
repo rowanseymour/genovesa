@@ -150,16 +150,15 @@ const CLEARANCE: i32 = 3;
 /// at the same point by construction, not by both asking the layout the same
 /// question. The clearing is what makes that point worth standing on — it
 /// turns "the origin is open water on essentially every seed" into a
-/// guarantee, so entry is always the same experience: a boat at sea, land
-/// somewhere past the horizon, and a first sail to go and find it.
+/// guarantee, so entry is always the same experience: a boat at sea, and a
+/// first sail to reach land.
 ///
-/// Eight chunks is just over a kilometre — about as far as the game streams
-/// ground in around the camera, so the opening view is honestly empty rather
-/// than teasing a coastline at its edge. It is also less than one fine
-/// parcel, and four of five of those hold an island: the first land waits
-/// just past the clearing in nearly every direction, a couple of minutes
-/// away at boat speed rather than a voyage.
-const SPAWN_CLEARING: i32 = 8;
+/// Two chunks is a modest clearing — a four-by-four-chunk square of sea, so
+/// the nearest possible coast is a quarter kilometre out. Enough that entry
+/// is always a boat afloat rather than a hillside, while the first island
+/// may already stand in view; one number to grow when the opening sail
+/// should be longer.
+const SPAWN_CLEARING: i32 = 2;
 
 /// Skews a uniform draw towards zero, so that island sizes come out mostly
 /// small: the median lands in the lower quarter of its layer's range and the
@@ -1098,7 +1097,7 @@ mod tests {
         let ground = digest(floats(heights));
 
         println!("layout digests to {layout:#018X}, ground to {ground:#018X}");
-        assert_eq!(layout, 0xF3A1_64E9_5983_9EA7, "the layout changed");
+        assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0xFA89_ABF4_A2FC_48A1, "the ground changed");
     }
 }

@@ -245,7 +245,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // entered — the world keeps it clear of land, so opening on open water is
     // the game now, not a blank page. A *capture* run is different: a shot
     // nearly always means a shot of terrain, and the origin is the one place
-    // guaranteed to show none, so shots go and find the nearest land.
+    // guaranteed to centre on water, so shots go and find the nearest land.
     //
     // Once, and for the whole command line, rather than per shot: the shots
     // are a sweep over one world, and moving each of them to its own nearest
