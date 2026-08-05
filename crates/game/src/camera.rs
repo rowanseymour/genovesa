@@ -1,10 +1,12 @@
-//! A camera with a fixed pitch that pans and turns over the map.
+//! A camera with a fixed pitch, kept centred on the player and free to turn
+//! and zoom around them.
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
+use crate::boat::Boat;
 use crate::terrain::WorldTerrain;
 use crate::AppState;
 
@@ -36,13 +38,12 @@ const ZOOM_STEP: f32 = 1.15;
 /// alike makes a single flick cross the whole zoom range.
 const PIXELS_PER_NOTCH: f32 = 50.0;
 
-/// How close the eye may get to the ground beneath it, in metres. Panning onto
-/// rising ground lifts the camera rather than letting a hillside swallow it.
+/// How close the eye may get to the ground beneath it, in metres. Following
+/// the player onto rising ground lifts the camera rather than letting a
+/// hillside swallow it.
 const MIN_CLEARANCE: f32 = 12.0;
 
-/// Metres per second at the default zoom level.
-const PAN_SPEED: f32 = 45.0;
-/// How quickly panning and zooming ease towards their targets.
+/// How quickly following, turning and zooming ease towards their targets.
 const SMOOTHING: f32 = 12.0;
 
 /// Somewhere to point the camera, as a whole. Enough to describe a view
@@ -50,8 +51,9 @@ const SMOOTHING: f32 = 12.0;
 /// the start of a match, or stepped through a list of shots.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct View {
-    /// Point on the ground the camera is centred on. The height is ignored —
-    /// [`follow_terrain`] puts it down on the ground.
+    /// Point on the ground the camera is centred on — and, the camera being
+    /// pinned to the player, where the player is put down. The height is
+    /// ignored: [`follow_player`] takes it from the surface they ride.
     pub focus: Vec3,
     /// How far back the camera sits, in metres.
     pub distance: f32,
@@ -72,7 +74,8 @@ impl Default for View {
 /// The camera's ground-level target. The camera itself sits back and above it.
 #[derive(Component)]
 pub struct MapCamera {
-    /// Point on the ground plane the camera is centred on.
+    /// Point on the ground plane the camera is centred on — the player,
+    /// whenever there is one to centre on.
     pub focus: Vec3,
     /// Where `focus` is heading — the camera eases towards it.
     target_focus: Vec3,
@@ -84,10 +87,10 @@ pub struct MapCamera {
     /// way is.
     pub yaw: f32,
     target_yaw: f32,
-    /// False until the camera has been put down on the ground for this match.
-    /// [`recentre`] can't do it: the terrain resource doesn't exist yet when it
-    /// runs, so the first frame that can see the ground snaps to it instead of
-    /// easing down from sea level.
+    /// False until the camera has been put down on the player's surface for
+    /// this match. [`recentre`] can't do it: the terrain resource doesn't
+    /// exist yet when it runs, so the first frame that can see the ground
+    /// snaps to it instead of easing down from sea level.
     grounded: bool,
 }
 
@@ -125,7 +128,7 @@ impl MapCamera {
         self.yaw = view.yaw;
         self.target_yaw = view.yaw;
         // The focus carries no useful height — dropping it back on the ground
-        // is `follow_terrain`'s job, on the next frame.
+        // is `follow_player`'s job, on the next frame.
         self.grounded = false;
     }
 }
@@ -146,7 +149,7 @@ impl Plugin for MapCameraPlugin {
             .add_systems(OnEnter(AppState::InWorld), recentre)
             .add_systems(
                 Update,
-                (pan, zoom, rotate, follow_terrain, apply_transform)
+                (follow_player, zoom, rotate, apply_transform)
                     .chain()
                     .run_if(in_state(AppState::InWorld)),
             );
@@ -195,94 +198,46 @@ fn eye(camera: &MapCamera) -> Vec3 {
 }
 
 /// The direction "away from the viewer" on the ground plane, at a given yaw.
-fn forward(yaw: f32) -> Vec3 {
+/// Steering reads it too — movement keys mean directions on the screen.
+pub(crate) fn forward(yaw: f32) -> Vec3 {
     -Vec3::new(yaw.sin(), 0.0, yaw.cos())
 }
 
-/// True while an action's own key is down, or the arrow key that permanently
-/// shadows it. The arrows aren't rebindable and aren't listed in the settings
-/// screen: they're the floor under it, so that no set of bindings, however
-/// muddled, can leave the map impossible to move.
-fn held(
-    keys: &ButtonInput<KeyCode>,
-    bindings: &KeyBindings,
-    action: Action,
-    arrow: KeyCode,
-) -> bool {
-    keys.any_pressed([bindings.key(action), arrow])
-}
-
-fn pan(
-    keys: Res<ButtonInput<KeyCode>>,
-    bindings: Res<KeyBindings>,
-    time: Res<Time>,
+/// Keeps the camera centred on the player's boat. The boat rides the surface
+/// it is over, so following its whole translation is also what raises the
+/// camera onto a hillside and keeps it at the waterline over open sea.
+fn follow_player(
+    terrain: Option<Res<WorldTerrain>>,
+    boats: Query<&Transform, With<Boat>>,
     mut cameras: Query<&mut MapCamera>,
 ) {
-    let mut input = Vec2::ZERO;
-    if held(&keys, &bindings, Action::PanForward, KeyCode::ArrowUp) {
-        input.y += 1.0;
-    }
-    if held(&keys, &bindings, Action::PanBack, KeyCode::ArrowDown) {
-        input.y -= 1.0;
-    }
-    if held(&keys, &bindings, Action::PanRight, KeyCode::ArrowRight) {
-        input.x += 1.0;
-    }
-    if held(&keys, &bindings, Action::PanLeft, KeyCode::ArrowLeft) {
-        input.x -= 1.0;
-    }
-
-    if input == Vec2::ZERO {
-        return;
-    }
-    let input = input.normalize();
-
-    for mut camera in &mut cameras {
-        // Movement is relative to the way the camera faces, so "up" always means
-        // "away from the viewer" however far round the view has been turned.
-        // Taken from the eased `yaw`, not the target, so panning mid-turn goes
-        // where the picture on screen says it should.
-        let forward = forward(camera.yaw);
-        let right = forward.cross(Vec3::Y);
-
-        // Panning covers more ground when zoomed out, which keeps the apparent
-        // speed on screen roughly constant.
-        let speed = PAN_SPEED * (camera.distance / DEFAULT_DISTANCE);
-        let delta = (forward * input.y + right * input.x) * speed * time.delta_secs();
-
-        // Nothing clamps the ground plane: the world is an endless ocean, and
-        // sailing over open water towards the next island is the point.
-        // `follow_terrain` owns the height.
-        camera.target_focus += delta;
-    }
-}
-
-/// Keeps the focus point on the ground, so panning onto a hill raises the whole
-/// camera with it instead of burying it.
-fn follow_terrain(terrain: Option<Res<WorldTerrain>>, mut cameras: Query<&mut MapCamera>) {
-    // Absent in the menu, and in tests that only care about panning maths.
-    let Some(terrain) = terrain else {
+    // Absent in tests that only care about turning and zooming; a match
+    // always has one.
+    let Ok(boat) = boats.single() else {
         return;
     };
 
     for mut camera in &mut cameras {
-        // Only ground that can be answered without generating anything — a
-        // frame is not the place to pay for an island. Until the island under
-        // the focus has streamed in, the camera keeps its last height; the
-        // ground arrives within a few frames of the mesh the player is
-        // waiting on anyway.
+        camera.target_focus = boat.translation;
+
+        if camera.grounded {
+            continue;
+        }
+        // Put down outright the first time the ground under the player can be
+        // answered, rather than easing there from sea level. Asked of the
+        // terrain rather than read off the boat because the boat's own height
+        // is a leftover until that same ground arrives — same surface rule,
+        // one frame earlier.
         let Some(ground) = terrain
-            .0
-            .ready_height(camera.target_focus.x, camera.target_focus.z)
+            .as_ref()
+            .and_then(|t| t.0.ready_height(boat.translation.x, boat.translation.z))
         else {
             continue;
         };
-        camera.target_focus.y = ground;
-
-        if !camera.grounded {
-            camera.focus.y = ground;
-            camera.grounded = true;
-        }
+        let focus = Vec3::new(boat.translation.x, ground.max(0.0), boat.translation.z);
+        camera.focus = focus;
+        camera.target_focus = focus;
+        camera.grounded = true;
     }
 }
 
@@ -306,8 +261,8 @@ fn zoom(scroll: Res<AccumulatedMouseScroll>, mut cameras: Query<&mut MapCamera>)
 
 /// The turn keys swing the view round for as long as they're held, so it can be
 /// left facing any direction rather than only the four the map was laid out on.
-/// Unlike panning these have no arrow-key fallback — a view that can't be turned
-/// is awkward, not stranded.
+/// Unlike movement these have no arrow-key fallback — a view that can't be
+/// turned is awkward, not stranded.
 fn rotate(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
@@ -352,7 +307,7 @@ fn apply_transform(
         // up inside the hillside behind it. Lifting it straight up steepens the
         // angle a little, which is a far better failure than being underground.
         // Ground still generating reads as absent, like the focus's own — see
-        // `follow_terrain`.
+        // `follow_player`.
         if let Some(floor) = terrain
             .as_ref()
             .and_then(|t| t.0.ready_height(eye.x, eye.z))
@@ -405,13 +360,29 @@ mod tests {
 
         let centre = spec.centre();
         app.insert_resource(WorldTerrain(world.clone()));
+        spawn_boat(&mut app, Vec3::ZERO);
         app.update();
         (app, world, Vec3::new(centre.x, 0.0, centre.y))
     }
 
-    /// Puts the camera down at a spot outright, mid-match, and lets one frame
-    /// run so the terrain systems ground it.
-    fn place_camera(app: &mut App, spot: Vec3, distance: f32, yaw: f32) {
+    /// Drops a bare boat entity into the world — enough for the camera to
+    /// follow. The real one, mesh and all, is `BoatPlugin`'s to spawn.
+    fn spawn_boat(app: &mut App, at: Vec3) {
+        app.world_mut()
+            .spawn((Boat, Transform::from_translation(at)));
+    }
+
+    /// Puts the player down at a spot outright, mid-match, with the camera
+    /// already settled there, and lets one frame run so the terrain systems
+    /// ground the view.
+    fn place_player(app: &mut App, spot: Vec3, distance: f32, yaw: f32) {
+        let mut boats = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<Boat>>();
+        boats
+            .single_mut(app.world_mut())
+            .expect("boat should exist")
+            .translation = spot;
         let mut camera = app
             .world_mut()
             .query::<&mut MapCamera>()
@@ -445,19 +416,6 @@ mod tests {
 
     fn focus(app: &mut App) -> Vec3 {
         read(app, |c| c.target_focus)
-    }
-
-    /// Puts the view at a given yaw outright. Turning there by holding a key
-    /// would take as long as the wall clock says, which a headless run has no
-    /// patience for.
-    fn turn_to(app: &mut App, yaw: f32) {
-        let mut camera = app
-            .world_mut()
-            .query::<&mut MapCamera>()
-            .single_mut(app.world_mut())
-            .expect("camera should exist");
-        camera.yaw = yaw;
-        camera.target_yaw = yaw;
     }
 
     /// Runs frames with whatever keys are down. Clears the just-pressed flags
@@ -511,51 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn a_rebound_key_pans_and_the_key_it_replaced_stops() {
-        let mut app = test_app();
-        rebind(&mut app, Action::PanForward, KeyCode::KeyJ);
-
-        hold(&mut app, KeyCode::KeyJ);
-        run_frames(&mut app, 20);
-        assert!(
-            focus(&mut app).length() > 0.0,
-            "the newly bound key did not pan"
-        );
-
-        // J was nobody's key, so nothing was traded for it and W is now bound to
-        // nothing at all. Holding it has to leave the camera where it stands.
-        let mut app = test_app();
-        rebind(&mut app, Action::PanForward, KeyCode::KeyJ);
-        hold(&mut app, KeyCode::KeyW);
-        run_frames(&mut app, 20);
-        assert_eq!(
-            focus(&mut app),
-            Vec3::ZERO,
-            "W still pans after being rebound away"
-        );
-    }
-
-    #[test]
-    fn the_arrow_keys_pan_whatever_the_bindings_say() {
-        let mut app = test_app();
-        // Hand every pan action to keys nowhere near the arrows.
-        rebind(&mut app, Action::PanForward, KeyCode::KeyI);
-        rebind(&mut app, Action::PanBack, KeyCode::KeyK);
-        rebind(&mut app, Action::PanLeft, KeyCode::KeyJ);
-        rebind(&mut app, Action::PanRight, KeyCode::KeyL);
-
-        hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 20);
-
-        let focus = focus(&mut app);
-        let forward = forward(read(&mut app, |c| c.yaw));
-        assert!(
-            focus.dot(forward) > 0.0,
-            "the arrow keys stopped panning once the letters moved"
-        );
-    }
-
-    #[test]
     fn a_rebound_key_turns_the_view() {
         let mut app = test_app();
         rebind(&mut app, Action::TurnLeft, KeyCode::KeyN);
@@ -571,72 +484,23 @@ mod tests {
     }
 
     #[test]
-    fn arrow_up_pans_away_from_the_viewer() {
+    fn the_camera_follows_the_boat() {
         let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 20);
+        spawn_boat(&mut app, Vec3::new(30.0, 2.0, -14.0));
+        app.update();
+        assert_eq!(focus(&mut app), Vec3::new(30.0, 2.0, -14.0));
 
-        let focus = focus(&mut app);
-        // The camera looks down the -X/-Z diagonal, so "up" moves that way.
-        assert!(focus.x < 0.0, "expected -X movement, got {focus:?}");
-        assert!(focus.z < 0.0, "expected -Z movement, got {focus:?}");
-        // Panning is on the ground plane only.
-        assert_eq!(focus.y, 0.0);
-    }
-
-    #[test]
-    fn opposite_keys_pan_in_opposite_directions() {
-        let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 20);
-        let up = focus(&mut app);
-
-        let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowDown);
-        run_frames(&mut app, 20);
-        let down = focus(&mut app);
-
-        // Only the direction is comparable — the distance covered depends on
-        // how much wall-clock time each run happened to take.
-        let (up, down) = (up.normalize(), down.normalize());
-        assert!(
-            (up + down).length() < 1e-3,
-            "{up:?} and {down:?} are not opposites"
-        );
-    }
-
-    #[test]
-    fn right_is_perpendicular_to_up() {
-        let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 20);
-        let up = focus(&mut app).normalize();
-
-        let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowRight);
-        run_frames(&mut app, 20);
-        let right = focus(&mut app).normalize();
-
-        assert!(
-            up.dot(right).abs() < 1e-3,
-            "{up:?} and {right:?} are not perpendicular"
-        );
-    }
-
-    #[test]
-    fn wasd_matches_the_arrow_keys() {
-        let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowLeft);
-        run_frames(&mut app, 20);
-        let arrows = focus(&mut app);
-
-        let mut app = test_app();
-        hold(&mut app, KeyCode::KeyA);
-        run_frames(&mut app, 20);
-        let wasd = focus(&mut app);
-
-        let (arrows, wasd) = (arrows.normalize(), wasd.normalize());
-        assert!((arrows - wasd).length() < 1e-3, "{arrows:?} != {wasd:?}");
+        // And keeps following: wherever the boat goes, the focus goes whole —
+        // height included, since the boat rides the surface the camera wants.
+        let mut boats = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<Boat>>();
+        boats
+            .single_mut(app.world_mut())
+            .expect("boat should exist")
+            .translation = Vec3::new(-5.0, 0.5, 41.0);
+        app.update();
+        assert_eq!(focus(&mut app), Vec3::new(-5.0, 0.5, 41.0));
     }
 
     #[test]
@@ -675,58 +539,27 @@ mod tests {
     }
 
     #[test]
-    fn panning_follows_the_view_round() {
-        let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 20);
-        let before = focus(&mut app).normalize();
-
-        // An angle that isn't a multiple of a quarter turn, which the view can
-        // now come to rest at.
-        let turn = 0.7;
-        let mut app = test_app();
-        turn_to(&mut app, YAW + turn);
-        hold(&mut app, KeyCode::ArrowUp);
-        let start = focus(&mut app);
-        run_frames(&mut app, 20);
-        let after = (focus(&mut app) - start).normalize();
-
-        // Turning the view turns "away from me" with it.
-        let expected = Quat::from_rotation_y(turn) * before;
-        assert!(
-            (after - expected).length() < 1e-2,
-            "{after:?} is not {before:?} turned by {turn} rad"
-        );
-    }
-
-    #[test]
-    fn the_focus_sits_on_the_ground() {
+    fn the_focus_snaps_onto_the_ground_the_player_is_dropped_on() {
         let (mut app, world, centre) = test_app_on_terrain();
 
         // Dropped onto the island, the first frame that can see the terrain
-        // puts the camera down on it rather than easing from sea level.
-        place_camera(&mut app, centre, DEFAULT_DISTANCE, YAW);
+        // puts the camera down on it rather than easing from sea level. The
+        // boat placed by `place_player` still carries a stale height, which is
+        // exactly the situation at the start of a match — the snap has to ask
+        // the ground, not the boat.
+        place_player(&mut app, centre, DEFAULT_DISTANCE, YAW);
         let start = read(&mut app, |c| c.focus);
         assert!(
             (start.y - world.height(start.x, start.z)).abs() < 1e-3,
             "camera started at {} rather than on the ground",
             start.y
         );
-
-        hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 60);
-
-        let target = focus(&mut app);
-        assert!(
-            (target.y - world.height(target.x, target.z)).abs() < 1e-3,
-            "focus left the ground while panning"
-        );
     }
 
     #[test]
     fn the_eye_never_gets_inside_the_ground() {
-        // Put the camera down all over an island rather than panning to each
-        // spot: panning is wall-clock driven, so a headless run covers almost
+        // Put the player down all over an island rather than sailing to each
+        // spot: movement is wall-clock driven, so a headless run covers almost
         // no ground. The closest zoom is the dangerous one — that's where the
         // eye sits lowest — and a handful of yaws puts it on a different side
         // of whatever it's looking at.
@@ -748,7 +581,7 @@ mod tests {
                             0.0,
                             (iz as f32 / 11.0 * 2.0 - 1.0) * half.y,
                         );
-                    place_camera(
+                    place_player(
                         &mut app,
                         spot,
                         MIN_DISTANCE,

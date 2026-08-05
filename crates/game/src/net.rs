@@ -33,7 +33,7 @@ use bevy::prelude::*;
 use protocol::{PlayerId, ToClient, ToServer, DEFAULT_PORT, PROTOCOL_VERSION};
 use server::{Host, Server};
 
-use crate::camera::MapCamera;
+use crate::boat::Boat;
 use crate::terrain::{WorldConfig, WorldTerrain};
 use crate::AppState;
 
@@ -453,18 +453,18 @@ fn receive(
     }
 }
 
-/// Tells the server where the player is — which, until there is an avatar to
-/// walk around, means where their view is focused.
+/// Tells the server where the player is: where their boat is, the boat being
+/// the avatar the movement keys drive.
 fn report_position(
     time: Res<Time>,
     online: Res<Online>,
-    cameras: Query<&MapCamera>,
+    boats: Query<&Transform, With<Boat>>,
     mut last: Local<Option<(f32, Vec2)>>,
 ) {
-    let Ok(camera) = cameras.single() else {
+    let Ok(boat) = boats.single() else {
         return;
     };
-    let position = Vec2::new(camera.focus.x, camera.focus.z);
+    let position = Vec2::new(boat.translation.x, boat.translation.z);
     let now = time.elapsed_secs();
 
     if let Some((reported_at, reported)) = *last {
