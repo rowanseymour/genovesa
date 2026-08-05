@@ -16,6 +16,9 @@ pub mod menu;
 pub mod net;
 pub mod terrain;
 
+#[cfg(test)]
+mod testing;
+
 use bevy::prelude::*;
 
 /// Colour of the sky above the horizon. The camera's distance fog fades to the

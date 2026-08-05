@@ -52,6 +52,10 @@ const INK_LIGHT: Color = Color::srgba(1.0, 0.97, 0.88, 0.28);
 /// How far the rules either side of the title run out.
 const TITLE_RULE: f32 = 64.0;
 
+/// How big a dialog's own title is drawn — well under [`TITLE_SIZE`], since it
+/// names a screen rather than the game.
+const HEADING_SIZE: f32 = 34.0;
+
 pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
@@ -410,90 +414,64 @@ fn spawn_new_world_dialog(mut commands: Commands, settings: Res<NewWorldSettings
             screen(),
         ))
         .with_children(|screen| {
-            screen
-                .spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        padding: UiRect::all(Val::Px(32.0)),
-                        border: UiRect::all(Val::Px(2.0)),
-                        row_gap: Val::Px(10.0),
+            screen.spawn(panel(10.0)).with_children(|panel| {
+                heading(panel, "New World", 20.0);
+
+                label(panel, "Seed");
+                panel.spawn((
+                    SeedText,
+                    Text::new(settings.seed.clone()),
+                    TextFont {
+                        font_size: FontSize::Px(26.0),
                         ..default()
                     },
-                    BackgroundColor(PANEL),
-                    BorderColor::all(EDGE),
-                ))
-                .with_children(|panel| {
-                    panel.spawn((
-                        Text::new("New World"),
-                        TextFont {
-                            font_size: FontSize::Px(34.0),
-                            ..default()
-                        },
-                        TextColor(TEXT),
-                        Node {
-                            margin: UiRect::bottom(Val::Px(20.0)),
-                            ..default()
-                        },
-                    ));
+                    TextColor(TEXT),
+                ));
+                panel.spawn((
+                    Text::new("type digits, backspace to edit"),
+                    TextFont {
+                        font_size: FontSize::Px(13.0),
+                        ..default()
+                    },
+                    TextColor(TEXT_DIM),
+                ));
+                spawn_button(panel, MenuButton::RandomSeed, "Random", 160.0);
 
-                    label(panel, "Seed");
-                    panel.spawn((
-                        SeedText,
-                        Text::new(settings.seed.clone()),
-                        TextFont {
-                            font_size: FontSize::Px(26.0),
-                            ..default()
-                        },
-                        TextColor(TEXT),
-                    ));
-                    panel.spawn((
-                        Text::new("type digits, backspace to edit"),
-                        TextFont {
-                            font_size: FontSize::Px(13.0),
-                            ..default()
-                        },
-                        TextColor(TEXT_DIM),
-                    ));
-                    spawn_button(panel, MenuButton::RandomSeed, "Random", 160.0);
+                // Sharing. A world of one's own needs no server at all, so
+                // this is the switch between playing alone and hosting.
+                // No label of its own, unlike the seed above: a switch that
+                // says which way it is set has already said what it is.
+                panel
+                    .spawn(Node {
+                        margin: UiRect::top(Val::Px(20.0)),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn(button(MenuButton::ToggleShare, 160.0))
+                            .with_children(|button| {
+                                button
+                                    .spawn((ShareText, button_label(share_label(settings.share))));
+                            });
+                    });
+                // Phrased as what the switch does rather than as what is
+                // happening, since it is read in both positions.
+                label(
+                    panel,
+                    &format!("sharing hosts the world on port {DEFAULT_PORT}"),
+                );
 
-                    // Sharing. A world of one's own needs no server at all, so
-                    // this is the switch between playing alone and hosting.
-                    // No label of its own, unlike the seed above: a switch that
-                    // says which way it is set has already said what it is.
-                    panel
-                        .spawn(Node {
-                            margin: UiRect::top(Val::Px(20.0)),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            row.spawn(button(MenuButton::ToggleShare, 160.0))
-                                .with_children(|button| {
-                                    button.spawn((
-                                        ShareText,
-                                        button_label(share_label(settings.share)),
-                                    ));
-                                });
-                        });
-                    // Phrased as what the switch does rather than as what is
-                    // happening, since it is read in both positions.
-                    label(
-                        panel,
-                        &format!("sharing hosts the world on port {DEFAULT_PORT}"),
-                    );
-
-                    status_line(panel);
-                    panel
-                        .spawn(Node {
-                            column_gap: Val::Px(8.0),
-                            margin: UiRect::top(Val::Px(8.0)),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            spawn_button(row, MenuButton::Back, "Back", 130.0);
-                            spawn_button(row, MenuButton::Start, "Start", 130.0);
-                        });
-                });
+                status_line(panel);
+                panel
+                    .spawn(Node {
+                        column_gap: Val::Px(8.0),
+                        margin: UiRect::top(Val::Px(8.0)),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        spawn_button(row, MenuButton::Back, "Back", 130.0);
+                        spawn_button(row, MenuButton::Start, "Start", 130.0);
+                    });
+            });
         });
 }
 
@@ -653,58 +631,34 @@ fn spawn_join_dialog(mut commands: Commands, settings: Res<JoinSettings>) {
             screen(),
         ))
         .with_children(|screen| {
-            screen
-                .spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        padding: UiRect::all(Val::Px(32.0)),
-                        border: UiRect::all(Val::Px(2.0)),
-                        row_gap: Val::Px(10.0),
+            screen.spawn(panel(10.0)).with_children(|panel| {
+                heading(panel, "Join World", 20.0);
+
+                label(panel, "Server");
+                panel.spawn((
+                    AddressText,
+                    Text::new(settings.address.clone()),
+                    TextFont {
+                        font_size: FontSize::Px(26.0),
                         ..default()
                     },
-                    BackgroundColor(PANEL),
-                    BorderColor::all(EDGE),
-                ))
-                .with_children(|panel| {
-                    panel.spawn((
-                        Text::new("Join World"),
-                        TextFont {
-                            font_size: FontSize::Px(34.0),
-                            ..default()
-                        },
-                        TextColor(TEXT),
-                        Node {
-                            margin: UiRect::bottom(Val::Px(20.0)),
-                            ..default()
-                        },
-                    ));
+                    TextColor(TEXT),
+                ));
+                label(panel, "type an address, backspace to edit");
+                label(panel, &format!("a bare name joins on port {DEFAULT_PORT}"));
 
-                    label(panel, "Server");
-                    panel.spawn((
-                        AddressText,
-                        Text::new(settings.address.clone()),
-                        TextFont {
-                            font_size: FontSize::Px(26.0),
-                            ..default()
-                        },
-                        TextColor(TEXT),
-                    ));
-                    label(panel, "type an address, backspace to edit");
-                    label(panel, &format!("a bare name joins on port {DEFAULT_PORT}"));
-
-                    status_line(panel);
-                    panel
-                        .spawn(Node {
-                            column_gap: Val::Px(8.0),
-                            margin: UiRect::top(Val::Px(8.0)),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            spawn_button(row, MenuButton::Back, "Back", 130.0);
-                            spawn_button(row, MenuButton::Connect, "Join", 130.0);
-                        });
-                });
+                status_line(panel);
+                panel
+                    .spawn(Node {
+                        column_gap: Val::Px(8.0),
+                        margin: UiRect::top(Val::Px(8.0)),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        spawn_button(row, MenuButton::Back, "Back", 130.0);
+                        spawn_button(row, MenuButton::Connect, "Join", 130.0);
+                    });
+            });
         });
 }
 
@@ -894,63 +848,39 @@ fn spawn_settings(mut commands: Commands, bindings: Res<KeyBindings>) {
             screen(),
         ))
         .with_children(|screen| {
-            screen
-                .spawn((
-                    Node {
+            screen.spawn(panel(8.0)).with_children(|panel| {
+                heading(panel, "Controls", 6.0);
+                label(panel, "click a key, then press the one you want");
+
+                panel
+                    .spawn(Node {
                         flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        padding: UiRect::all(Val::Px(32.0)),
-                        border: UiRect::all(Val::Px(2.0)),
-                        row_gap: Val::Px(8.0),
+                        row_gap: Val::Px(6.0),
+                        margin: UiRect::vertical(Val::Px(16.0)),
                         ..default()
-                    },
-                    BackgroundColor(PANEL),
-                    BorderColor::all(EDGE),
-                ))
-                .with_children(|panel| {
-                    panel.spawn((
-                        Text::new("Controls"),
-                        TextFont {
-                            font_size: FontSize::Px(34.0),
-                            ..default()
-                        },
-                        TextColor(TEXT),
-                        Node {
-                            margin: UiRect::bottom(Val::Px(6.0)),
-                            ..default()
-                        },
-                    ));
-                    label(panel, "click a key, then press the one you want");
+                    })
+                    .with_children(|rows| {
+                        for action in Action::ALL {
+                            spawn_key_row(rows, action, &bindings.name(action));
+                        }
+                    });
 
-                    panel
-                        .spawn(Node {
-                            flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(6.0),
-                            margin: UiRect::vertical(Val::Px(16.0)),
-                            ..default()
-                        })
-                        .with_children(|rows| {
-                            for action in Action::ALL {
-                                spawn_key_row(rows, action, &bindings.name(action));
-                            }
-                        });
+                // Plain punctuation only: the default font has no dash of
+                // any kind and draws a missing glyph as an empty box.
+                label(panel, "the arrow keys always pan, and escape always");
+                label(panel, "leaves; neither can be reassigned");
 
-                    // Plain punctuation only: the default font has no dash of
-                    // any kind and draws a missing glyph as an empty box.
-                    label(panel, "the arrow keys always pan, and escape always");
-                    label(panel, "leaves; neither can be reassigned");
-
-                    panel
-                        .spawn(Node {
-                            column_gap: Val::Px(8.0),
-                            margin: UiRect::top(Val::Px(24.0)),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            spawn_button(row, MenuButton::ResetKeys, "Defaults", 130.0);
-                            spawn_button(row, MenuButton::Back, "Back", 130.0);
-                        });
-                });
+                panel
+                    .spawn(Node {
+                        column_gap: Val::Px(8.0),
+                        margin: UiRect::top(Val::Px(24.0)),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        spawn_button(row, MenuButton::ResetKeys, "Defaults", 130.0);
+                        spawn_button(row, MenuButton::Back, "Back", 130.0);
+                    });
+            });
         });
 }
 
@@ -1115,6 +1045,46 @@ fn screen() -> impl Bundle {
     )
 }
 
+/// The bordered box a dialog is built inside — every screen but the main menu,
+/// which stands on open water rather than on a panel.
+///
+/// `row_gap` is the space between the rows stacked in it, and is the only
+/// thing the dialogs differ by: the controls screen packs a list of key rows
+/// and wants them tighter than a dialog of a few fields does.
+fn panel(row_gap: f32) -> impl Bundle {
+    (
+        Node {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            padding: UiRect::all(Val::Px(32.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            row_gap: Val::Px(row_gap),
+            ..default()
+        },
+        BackgroundColor(PANEL),
+        BorderColor::all(EDGE),
+    )
+}
+
+/// A dialog's title, and how much room it keeps between itself and what
+/// follows — which is a whole line's worth on the dialogs that open with a
+/// field, and almost nothing on the controls screen, where the line under it
+/// is part of the same thought.
+fn heading(parent: &mut ChildSpawnerCommands, text: &str, below: f32) {
+    parent.spawn((
+        Text::new(text),
+        TextFont {
+            font_size: FontSize::Px(HEADING_SIZE),
+            ..default()
+        },
+        TextColor(TEXT),
+        Node {
+            margin: UiRect::bottom(Val::Px(below)),
+            ..default()
+        },
+    ));
+}
+
 /// The line a dialog reports a dial on. Spawned empty and left that way until
 /// there is something to say, but spawned all the same: a line that appeared
 /// only when it had text would push the buttons under it down the moment the
@@ -1208,13 +1178,14 @@ fn highlight_buttons(
 mod tests {
     use std::net::TcpListener;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use bevy::input::keyboard::Key;
     use bevy::state::app::StatesPlugin;
 
     use super::*;
     use crate::net::fake_server;
+    use crate::testing::run_until;
 
     /// A host that accepts a connection and then says nothing — a dial that
     /// stays in the air for as long as the test needs it to. Its listener is
@@ -1223,21 +1194,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("addr").to_string();
         (listener, address)
-    }
-
-    /// Runs frames until the condition holds. Dials cross real sockets and a
-    /// thread, so a frame or two of patience is legitimate — five seconds of
-    /// it is a failure.
-    fn run_until(app: &mut App, what: &str, mut done: impl FnMut(&App) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            app.update();
-            if done(app) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        panic!("timed out waiting until {what}");
     }
 
     /// A headless app running the menu systems, with no renderer attached.

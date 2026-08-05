@@ -537,6 +537,7 @@ mod tests {
     use bevy::time::TimePlugin;
 
     use super::*;
+    use crate::testing::run_until;
 
     /// A headless app with the net systems running in a match, and no
     /// terrain — markers then keep their height, which these tests ignore.
@@ -553,21 +554,6 @@ mod tests {
             .set(AppState::InWorld);
         app.update();
         app
-    }
-
-    /// Runs frames until the condition holds. The messages cross a real
-    /// socket and a channel, so a frame or two of patience is legitimate —
-    /// five seconds of it is a failure.
-    fn run_until(app: &mut App, what: &str, mut done: impl FnMut(&mut App) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            app.update();
-            if done(app) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        panic!("timed out waiting until {what}");
     }
 
     fn markers(app: &mut App) -> Vec<(PlayerId, Vec2)> {

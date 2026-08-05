@@ -279,17 +279,38 @@ fn state(value: &str) -> Result<AppState, String> {
     }
 }
 
+/// Reads a two-part option — `98,-317`, `2560x1440` — as both halves parsed
+/// the same way, or one error naming what it should have looked like.
+///
+/// The two that use it split on different characters into different types, and
+/// nothing else about them differs: the same trim, the same "if either half is
+/// nonsense the whole option is", the same message for whichever half it was.
+/// Saying that once is also what keeps the two options failing alike, which is
+/// the part a caller notices.
+fn pair<T>(
+    value: &str,
+    separator: char,
+    axis: impl Fn(&str) -> Option<T>,
+    expected: &str,
+) -> Result<(T, T), String> {
+    let bad = || format!("`{value}` is not {expected}");
+    let (first, second) = value.split_once(separator).ok_or_else(bad)?;
+    Ok((
+        axis(first.trim()).ok_or_else(bad)?,
+        axis(second.trim()).ok_or_else(bad)?,
+    ))
+}
+
 /// Reads an `x,z` pair of metres. The height is left at zero: the camera puts
 /// itself down on the ground on its first frame.
 fn focus(value: &str) -> Result<Vec3, String> {
-    let bad = || format!("`{value}` is not an x,z point in metres, e.g. 98,-317");
-    let (x, z) = value.split_once(',').ok_or_else(bad)?;
-    let axis = |s: &str| s.trim().parse::<f32>().ok().filter(|v| v.is_finite());
-    Ok(Vec3::new(
-        axis(x).ok_or_else(bad)?,
-        0.0,
-        axis(z).ok_or_else(bad)?,
-    ))
+    let (x, z) = pair(
+        value,
+        ',',
+        |s| s.parse::<f32>().ok().filter(|v| v.is_finite()),
+        "an x,z point in metres, e.g. 98,-317",
+    )?;
+    Ok(Vec3::new(x, 0.0, z))
 }
 
 fn zoom(value: &str) -> Result<f32, String> {
@@ -315,13 +336,13 @@ fn yaw(value: &str) -> Result<f32, String> {
 }
 
 fn resolution(value: &str) -> Result<UVec2, String> {
-    let bad = || format!("`{value}` is not a size in pixels, e.g. 2560x1440");
-    let (w, h) = value.split_once('x').ok_or_else(bad)?;
-    let axis = |s: &str| s.trim().parse::<u32>().ok().filter(|v| *v > 0);
-    Ok(UVec2::new(
-        axis(w).ok_or_else(bad)?,
-        axis(h).ok_or_else(bad)?,
-    ))
+    let (w, h) = pair(
+        value,
+        'x',
+        |s| s.parse::<u32>().ok().filter(|v| *v > 0),
+        "a size in pixels, e.g. 2560x1440",
+    )?;
+    Ok(UVec2::new(w, h))
 }
 
 #[cfg(test)]

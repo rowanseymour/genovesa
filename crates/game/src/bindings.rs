@@ -60,15 +60,14 @@ impl Action {
     }
 
     /// Position in [`Action::ALL`], which is how [`KeyBindings`] indexes them.
+    ///
+    /// The discriminant, since the variants are declared in the order `ALL`
+    /// lists them and carry no data. Spelling the mapping out a third time was
+    /// only a third place for it to disagree with the other two;
+    /// `every_action_indexes_to_its_own_slot` is what holds the two that are
+    /// left together.
     fn index(self) -> usize {
-        match self {
-            Action::PanForward => 0,
-            Action::PanBack => 1,
-            Action::PanLeft => 2,
-            Action::PanRight => 3,
-            Action::TurnLeft => 4,
-            Action::TurnRight => 5,
-        }
+        self as usize
     }
 }
 

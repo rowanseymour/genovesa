@@ -10,3 +10,6 @@ pub mod archipelago;
 pub mod noise;
 pub mod plan;
 pub mod terrain;
+
+#[cfg(test)]
+mod testing;

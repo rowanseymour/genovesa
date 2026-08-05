@@ -1579,11 +1579,7 @@ impl TerrainGenerator {
     /// normal for ground queries: which way something standing here would tip,
     /// whether ground is too steep to cross.
     pub fn normal(&self, wx: f32, wz: f32) -> Vec3 {
-        let hl = self.height(wx - TILE_SIZE, wz);
-        let hr = self.height(wx + TILE_SIZE, wz);
-        let hd = self.height(wx, wz - TILE_SIZE);
-        let hu = self.height(wx, wz + TILE_SIZE);
-        normal_from_neighbours(hl, hr, hd, hu)
+        normal_at(wx, wz, |x, z| self.height(x, z))
     }
 
     /// Surface colour for one facet, picked from a fixed palette.
@@ -1975,6 +1971,34 @@ struct Calibration {
     slope_high: f32,
 }
 
+/// One half of the mapping, bent if it has to be to clear a floor.
+///
+/// Both halves of [`Calibration`] are fitted this way — the land above the
+/// waterline and the sea below it — and they are the same arithmetic with the
+/// sign turned round, so it is written once here rather than twice there.
+///
+/// A healthy seed gets a straight line of `gain` per raw unit, which would put
+/// its median at `gain * knee`. Where that falls short of `floor` the line
+/// bends at the median instead: the near segment steepens until the median
+/// lands exactly on the floor, and the far segment is re-fitted so that `far`
+/// still maps to `far_value` and the two meet without a step.
+///
+/// Returns what the knee maps to and the slopes either side of it. A seed that
+/// needed no bend comes back with both slopes equal, which is what lets
+/// [`Calibration::metres`] read the bent and the straight case with one
+/// expression instead of asking which kind of seed it has.
+fn bent_line(knee: f32, gain: f32, floor: f32, far: f32, far_value: f32) -> (f32, f32, f32) {
+    let natural = gain * knee;
+    // A knee at the waterline, or one that has already reached the far anchor,
+    // leaves no segment to bend — take the straight line rather than dividing
+    // by the width of a gap that isn't there.
+    if natural < floor && knee > 1e-4 && far - knee > 1e-4 {
+        (floor, floor / knee, (far_value - floor) / (far - knee))
+    } else {
+        (natural, gain, gain)
+    }
+}
+
 impl Calibration {
     /// Fits to a grid of raw samples covering the whole map, steering by the
     /// map's [`Targets`]. `raw` is sorted in place — it is the caller's
@@ -2014,17 +2038,8 @@ impl Calibration {
         // still filled in on the straight seeds, with both slopes equal, so
         // `metres` never has to ask which kind of seed this is.
         let knee = quantile(1.0 - land * 0.5) - sea_level;
-        let natural = slope * knee;
         let (knee_height, slope_low, slope_high) =
-            if natural < lowland_floor && knee > 1e-4 && mountain - knee > 1e-4 {
-                (
-                    lowland_floor,
-                    lowland_floor / knee,
-                    (mountain_height - lowland_floor) / (mountain - knee),
-                )
-            } else {
-                (natural, slope, slope)
-            };
+            bent_line(knee, slope, lowland_floor, mountain, mountain_height);
 
         // The same again below the waterline: the sea's median — slid to the
         // shallow side on the smallest maps, whose median is in the falloff
@@ -2037,17 +2052,8 @@ impl Calibration {
         let depth_gain = MAX_DEPTH / deep.max(1e-4);
         let shallows_floor = SHALLOWS_FLOOR - 1.5 * shoal;
         let sea_knee = sea_level - quantile((1.0 - land) * (0.5 + 0.35 * shoal));
-        let natural_depth = depth_gain * sea_knee;
         let (sea_knee_depth, depth_shallow, depth_deep) =
-            if natural_depth < shallows_floor && sea_knee > 1e-4 && deep - sea_knee > 1e-4 {
-                (
-                    shallows_floor,
-                    shallows_floor / sea_knee,
-                    (MAX_DEPTH - shallows_floor) / (deep - sea_knee),
-                )
-            } else {
-                (natural_depth, depth_gain, depth_gain)
-            };
+            bent_line(sea_knee, depth_gain, shallows_floor, deep, MAX_DEPTH);
 
         Self {
             sea_level,
@@ -2587,14 +2593,25 @@ fn beachiness(character: f32) -> f32 {
     smoothstep(0.0, -ROCKY_SHORE * 1.8, -character)
 }
 
-/// Heightfield normal from the four neighbouring samples, one tile out.
-pub(crate) fn normal_from_neighbours(left: f32, right: f32, down: f32, up: f32) -> Vec3 {
-    Vec3::new(left - right, 2.0 * TILE_SIZE, down - up).normalize()
+/// Heightfield normal at a world point, from central differences one tile out.
+///
+/// Takes the field rather than four sampled heights because all three things
+/// that own a height field — a lone map, an island, the world the islands sit
+/// in — want exactly this and would otherwise each spell the four samples out.
+/// The spacing is part of the answer, so it belongs with the arithmetic.
+pub(crate) fn normal_at(wx: f32, wz: f32, height: impl Fn(f32, f32) -> f32) -> Vec3 {
+    Vec3::new(
+        height(wx - TILE_SIZE, wz) - height(wx + TILE_SIZE, wz),
+        2.0 * TILE_SIZE,
+        height(wx, wz - TILE_SIZE) - height(wx, wz + TILE_SIZE),
+    )
+    .normalize()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{digest, floats};
 
     fn generator(chunks_x: u32, chunks_z: u32, seed: u32) -> (MapConfig, TerrainGenerator) {
         let config = MapConfig {
@@ -2893,20 +2910,6 @@ mod tests {
         assert_ne!(a.height(3.0, -7.0), c.height(3.0, -7.0));
     }
 
-    /// FNV-1a folded over the bit patterns of a stream of floats.
-    /// Dependency-free like the noise, and for the same reason: the digest has
-    /// to mean the same thing in every build there will ever be.
-    fn digest(values: impl IntoIterator<Item = f32>) -> u64 {
-        let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
-        for value in values {
-            for byte in value.to_bits().to_le_bytes() {
-                hash ^= byte as u64;
-                hash = hash.wrapping_mul(0x100_0000_01B3);
-            }
-        }
-        hash
-    }
-
     #[test]
     fn a_seed_is_the_same_map_down_to_the_bit() {
         // `same_seed_gives_same_map` says two generators in one process agree.
@@ -2960,7 +2963,7 @@ mod tests {
             values.extend(geometry.uvs.iter().flatten());
             values.extend(geometry.colors.iter().flatten());
 
-            let got = digest(values);
+            let got = digest(floats(values));
             println!("seed {seed} digests to {got:#018X}");
             assert_eq!(
                 got, expected,

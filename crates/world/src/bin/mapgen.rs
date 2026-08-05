@@ -144,33 +144,37 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
                 }
                 parsed.scale = Some(scale);
             }
-            "--focus" => {
-                let (x, z) = value
-                    .split_once(',')
-                    .ok_or_else(|| format!("`{value}` is not a point, e.g. 2000,-3000"))?;
-                let parse = |s: &str| {
-                    s.trim()
-                        .parse::<f32>()
-                        .map_err(|_| format!("`{value}` is not a point, e.g. 2000,-3000"))
-                };
-                parsed.focus = Some(Vec2::new(parse(x)?, parse(z)?));
-            }
-            "--span" => {
-                let (w, d) = value.split_once('x').unwrap_or((value, value));
-                let parse = |s: &str| {
-                    s.trim()
-                        .parse::<f32>()
-                        .ok()
-                        .filter(|m| *m > 0.0)
-                        .ok_or_else(|| format!("`{value}` is not a span in metres, e.g. 8192"))
-                };
-                parsed.span = Some(Vec2::new(parse(w)?, parse(d)?));
-            }
+            "--focus" => parsed.focus = Some(focus(value)?),
+            "--span" => parsed.span = Some(span(value)?),
             "--out" => parsed.out = Some(value.clone()),
             other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
         }
     }
     Ok(parsed)
+}
+
+/// Reads the `x,z` world point a `world` render is centred on, in metres.
+fn focus(value: &str) -> Result<Vec2, String> {
+    let bad = || format!("`{value}` is not a point, e.g. 2000,-3000");
+    let (x, z) = value.split_once(',').ok_or_else(bad)?;
+    let axis = |s: &str| s.trim().parse::<f32>().ok();
+    Ok(Vec2::new(
+        axis(x).ok_or_else(bad)?,
+        axis(z).ok_or_else(bad)?,
+    ))
+}
+
+/// Reads how much world a `world` render covers, in metres — `8192` for a
+/// square window, `8192x4096` for a rectangle, as [`MapConfig::parse_size`]
+/// takes a map's own size.
+fn span(value: &str) -> Result<Vec2, String> {
+    let bad = || format!("`{value}` is not a span in metres, e.g. 8192");
+    let (w, d) = value.split_once('x').unwrap_or((value, value));
+    let axis = |s: &str| s.trim().parse::<f32>().ok().filter(|m| *m > 0.0);
+    Ok(Vec2::new(
+        axis(w).ok_or_else(bad)?,
+        axis(d).ok_or_else(bad)?,
+    ))
 }
 
 /// Writes an image out, reporting where it went and how big it is.

@@ -49,8 +49,8 @@ use glam::{IVec2, UVec2, Vec2, Vec3};
 
 use crate::noise::smoothstep;
 use crate::terrain::{
-    facet_geometry_from_heights, facet_heights, ChunkGeometry, MapConfig, TerrainGenerator,
-    CHUNK_TILES, MAX_DEPTH, SEABED, TILE_SIZE,
+    facet_geometry_from_heights, facet_heights, normal_at, ChunkGeometry, MapConfig,
+    TerrainGenerator, CHUNK_TILES, MAX_DEPTH, SEABED, TILE_SIZE,
 };
 
 /// Metres along the edge of one chunk — the world's unit of streaming, and the
@@ -394,12 +394,7 @@ impl Island {
 
     /// Surface normal at a world point, from central differences one tile out.
     pub fn normal(&self, wx: f32, wz: f32) -> Vec3 {
-        crate::terrain::normal_from_neighbours(
-            self.height(wx - TILE_SIZE, wz),
-            self.height(wx + TILE_SIZE, wz),
-            self.height(wx, wz - TILE_SIZE),
-            self.height(wx, wz + TILE_SIZE),
-        )
+        normal_at(wx, wz, |x, z| self.height(x, z))
     }
 }
 
@@ -635,12 +630,7 @@ impl Archipelago {
     /// — the smooth ground-query normal, exactly as [`TerrainGenerator::normal`]
     /// is for a lone map.
     pub fn normal(&self, wx: f32, wz: f32) -> Vec3 {
-        crate::terrain::normal_from_neighbours(
-            self.height(wx - TILE_SIZE, wz),
-            self.height(wx + TILE_SIZE, wz),
-            self.height(wx, wz - TILE_SIZE),
-            self.height(wx, wz + TILE_SIZE),
-        )
+        normal_at(wx, wz, |x, z| self.height(x, z))
     }
 
     /// Surface colour at a world point: the owning island's palette, or the
@@ -734,6 +724,7 @@ pub fn chunk_at(world: Vec2) -> IVec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{digest, floats, ints};
 
     /// A window of the world big enough to hold many parcels of both layers:
     /// four coarse parcels and sixty-four fine ones per quadrant corner case.
@@ -1024,27 +1015,6 @@ mod tests {
         );
     }
 
-    /// FNV-1a over the bytes of a stream of ints and floats — the same digest
-    /// idea as the map's own, for the same reason: a seed has to be the same
-    /// *world* in every build there will ever be, or a server and its clients
-    /// drift apart island by island.
-    fn digest(ints: impl IntoIterator<Item = i64>, floats: impl IntoIterator<Item = f32>) -> u64 {
-        let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
-        let mut eat = |bytes: &[u8]| {
-            for byte in bytes {
-                hash ^= *byte as u64;
-                hash = hash.wrapping_mul(0x100_0000_01B3);
-            }
-        };
-        for value in ints {
-            eat(&value.to_le_bytes());
-        }
-        for value in floats {
-            eat(&value.to_bits().to_le_bytes());
-        }
-        hash
-    }
-
     #[test]
     fn a_seed_is_the_same_world_down_to_the_bit() {
         // The layout of a whole window, and the ground of one island — frame,
@@ -1056,18 +1026,15 @@ mod tests {
         let world = world(20_040_112);
         let found = specs(&world);
 
-        let layout = digest(
-            found.iter().flat_map(|s| {
-                [
-                    s.origin.x as i64,
-                    s.origin.y as i64,
-                    s.chunks.x as i64,
-                    s.chunks.y as i64,
-                    s.seed as i64,
-                ]
-            }),
-            [],
-        );
+        let layout = digest(ints(found.iter().flat_map(|s| {
+            [
+                s.origin.x as i64,
+                s.origin.y as i64,
+                s.chunks.x as i64,
+                s.chunks.y as i64,
+                s.seed as i64,
+            ]
+        })));
 
         let spec = found
             .iter()
@@ -1084,7 +1051,7 @@ mod tests {
                 heights.push(island.height(w.x, w.y));
             }
         }
-        let ground = digest([], heights);
+        let ground = digest(floats(heights));
 
         println!("layout digests to {layout:#018X}, ground to {ground:#018X}");
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
