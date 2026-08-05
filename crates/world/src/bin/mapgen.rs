@@ -154,10 +154,16 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
 }
 
 /// Reads the `x,z` world point a `world` render is centred on, in metres.
+///
+/// A point has to be finite, as the game's own `--focus` insists. `inf` and
+/// `nan` both parse happily as floats and neither is anywhere: the render
+/// walks out from the point it is given, so a non-finite one samples the
+/// world at non-finite coordinates and writes a picture of nothing, having
+/// said nothing about it.
 fn focus(value: &str) -> Result<Vec2, String> {
     let bad = || format!("`{value}` is not a point, e.g. 2000,-3000");
+    let axis = |s: &str| s.trim().parse::<f32>().ok().filter(|v: &f32| v.is_finite());
     let (x, z) = value.split_once(',').ok_or_else(bad)?;
-    let axis = |s: &str| s.trim().parse::<f32>().ok();
     Ok(Vec2::new(
         axis(x).ok_or_else(bad)?,
         axis(z).ok_or_else(bad)?,
@@ -167,10 +173,19 @@ fn focus(value: &str) -> Result<Vec2, String> {
 /// Reads how much world a `world` render covers, in metres — `8192` for a
 /// square window, `8192x4096` for a rectangle, as [`MapConfig::parse_size`]
 /// takes a map's own size.
+///
+/// Finite for the same reason a focus is, and the greater-than-zero test
+/// cannot stand in for it: `inf` is greater than zero, and an infinite span
+/// divides out to an infinite scale and a picture one pixel tall.
 fn span(value: &str) -> Result<Vec2, String> {
     let bad = || format!("`{value}` is not a span in metres, e.g. 8192");
+    let axis = |s: &str| {
+        s.trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|m: &f32| m.is_finite() && *m > 0.0)
+    };
     let (w, d) = value.split_once('x').unwrap_or((value, value));
-    let axis = |s: &str| s.trim().parse::<f32>().ok().filter(|m| *m > 0.0);
     Ok(Vec2::new(
         axis(w).ok_or_else(bad)?,
         axis(d).ok_or_else(bad)?,
@@ -297,5 +312,36 @@ fn suffixed(path: &str, tag: &str) -> String {
     match path.rsplit_once('.') {
         Some((stem, ext)) => format!("{stem}-{tag}.{ext}"),
         None => format!("{path}-{tag}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_focus_is_a_finite_pair_of_metres() {
+        assert_eq!(focus("2000,-3000"), Ok(Vec2::new(2000.0, -3000.0)));
+        assert_eq!(focus(" 2000 , -3000 "), Ok(Vec2::new(2000.0, -3000.0)));
+
+        // Both axes, and both of them a number that is somewhere. `inf` and
+        // `nan` parse as floats and used to be taken, which drew a picture of
+        // the world at coordinates no world has.
+        for bad in ["2000", "north,south", "1,2,3", "inf,0", "0,nan", "-inf,0"] {
+            assert!(focus(bad).is_err(), "`{bad}` was accepted as a point");
+        }
+    }
+
+    #[test]
+    fn a_span_is_a_finite_stretch_of_world() {
+        assert_eq!(span("8192"), Ok(Vec2::splat(8192.0)));
+        assert_eq!(span("8192x4096"), Ok(Vec2::new(8192.0, 4096.0)));
+
+        // Zero and back-to-front are obvious; `inf` is the one the
+        // greater-than-zero test alone let through, and it rendered as a
+        // single row of pixels.
+        for bad in ["0", "-5", "8192xzero", "inf", "8192xinf", "nan"] {
+            assert!(span(bad).is_err(), "`{bad}` was accepted as a span");
+        }
     }
 }
