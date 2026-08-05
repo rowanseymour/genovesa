@@ -19,7 +19,11 @@ protocol = { path = "../protocol" }
 # a game that starts one runs the very same session a dedicated `server` does —
 # there is no second, lesser implementation for playing alone.
 server = { path = "../server" }
-bevy.workspace = true
+# `system_font_discovery` puts the machine's own fonts in reach of a
+# `FontSource::Family` or a generic one like `FontSource::Serif`, which is what
+# the menu's title is set in. Without it Bevy has only the face compiled into
+# it, and asking for a serif silently gets the same mono as everything else.
+bevy = { workspace = true, features = ["system_font_discovery"] }
 
 [features]
 # Much faster incremental builds while iterating: `cargo run --features dev`

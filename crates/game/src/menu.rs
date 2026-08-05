@@ -3,7 +3,8 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
-use bevy::text::FontSize;
+use bevy::text::{FontSize, FontSource, FontStyle};
+use bevy::ui::{UiTransform, Val2};
 
 use protocol::DEFAULT_PORT;
 
@@ -21,13 +22,34 @@ const MAX_SEED_DIGITS: usize = 9;
 const MAX_ADDRESS: usize = 60;
 
 const PANEL: Color = Color::srgba(0.09, 0.11, 0.10, 0.94);
-const PANEL_EDGE: Color = Color::srgb(0.42, 0.40, 0.28);
+/// Every edge the menu draws — panels and buttons alike. Pale rather than the
+/// olive it used to be: the main menu stands on open water rather than on a
+/// panel, and a dark line there is the one thing on the screen that goes
+/// missing. One colour for all of them, so a button can never come out
+/// brighter than the frame it sits in.
+const EDGE: Color = Color::srgb(0.70, 0.69, 0.62);
 const BUTTON: Color = Color::srgb(0.17, 0.20, 0.16);
 const BUTTON_HOVER: Color = Color::srgb(0.26, 0.31, 0.22);
 const BUTTON_PRESS: Color = Color::srgb(0.35, 0.42, 0.28);
 const BUTTON_ON: Color = Color::srgb(0.44, 0.40, 0.18);
 const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
 const TEXT_DIM: Color = Color::srgb(0.60, 0.60, 0.55);
+
+/// The word on the front of the box, the line under it, and how big each is
+/// drawn.
+const TITLE: &str = "GENOVESA";
+const TITLE_SIZE: f32 = 56.0;
+const SUBTITLE: &str = "the sea is charted no further";
+const SUBTITLE_SIZE: f32 = 19.0;
+/// The copies a line is drawn against: a near-black one a pixel below it and a
+/// faint warm one a pixel above. On the title the pair reads as a letter cut
+/// into a plate; on the line under it the shadow alone is what holds small
+/// italics off the water, which behind the menu is bright enough to swallow
+/// them.
+const INK_SHADOW: Color = Color::srgb(0.02, 0.03, 0.03);
+const INK_LIGHT: Color = Color::srgba(1.0, 0.97, 0.88, 0.28);
+/// How far the rules either side of the title run out.
+const TITLE_RULE: f32 = 64.0;
 
 pub struct MenuPlugin;
 
@@ -206,36 +228,145 @@ fn spawn_main_menu(mut commands: Commands) {
             screen(),
         ))
         .with_children(|screen| {
-            screen.spawn((
-                Text::new("GENOVESA"),
-                TextFont {
-                    font_size: FontSize::Px(64.0),
-                    ..default()
-                },
-                TextColor(TEXT),
-                Node {
-                    margin: UiRect::bottom(Val::Px(8.0)),
-                    ..default()
-                },
-            ));
-            screen.spawn((
-                Text::new("an ocean of islands in flat colours"),
-                TextFont {
-                    font_size: FontSize::Px(18.0),
-                    ..default()
-                },
-                TextColor(TEXT_DIM),
-                Node {
-                    margin: UiRect::bottom(Val::Px(48.0)),
-                    ..default()
-                },
-            ));
+            spawn_title(screen);
+            spawn_subtitle(screen);
 
             spawn_button(screen, MenuButton::NewWorld, "New World", 240.0);
             spawn_button(screen, MenuButton::JoinWorld, "Join World", 240.0);
             spawn_button(screen, MenuButton::Settings, "Controls", 240.0);
             spawn_button(screen, MenuButton::Exit, "Exit", 240.0);
         });
+}
+
+/// The title, engraved and ruled: tracked-out serif capitals with a hairline
+/// running out to either side of them, which is how a chart of the period puts
+/// its own name at the top.
+fn spawn_title(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn(Node {
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(24.0),
+            margin: UiRect::bottom(Val::Px(10.0)),
+            ..default()
+        })
+        .with_children(|row| {
+            spawn_hairline(row);
+            // The three copies of the word, one on top of the other. The stack
+            // takes its size from the ink alone — see [`layer`].
+            row.spawn(Node::default()).with_children(|stack| {
+                let word = spaced(TITLE);
+                stack.spawn(layer(&word, title_font(), INK_SHADOW, 1.0));
+                stack.spawn(layer(&word, title_font(), INK_LIGHT, -1.0));
+                stack.spawn((Text::new(word), title_font(), TextColor(TEXT)));
+            });
+            spawn_hairline(row);
+        });
+}
+
+/// The line under the title, in the hand a chart names its waters in.
+///
+/// Drawn in the same ink as the title rather than the dim grey the panels use
+/// for their asides: this one is read against open water, which the menu only
+/// dims rather than covers, and a grey that sits well on a panel disappears
+/// against it.
+fn spawn_subtitle(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn(Node {
+            margin: UiRect::bottom(Val::Px(48.0)),
+            ..default()
+        })
+        .with_children(|stack| {
+            stack.spawn(layer(SUBTITLE, subtitle_font(), INK_SHADOW, 1.0));
+            stack.spawn((Text::new(SUBTITLE), subtitle_font(), TextColor(TEXT)));
+        });
+}
+
+/// One of the offset copies the ink is drawn against.
+///
+/// Taken out of the flow and pinned to the stack's corner, so that the copies
+/// cost the line no room of its own and the ink — the one drawing still in the
+/// flow — is what the stack is sized to. The offset is then a transform rather
+/// than a position: two texts of different colours are still the same text, and
+/// any difference in how they were laid out would read as a blur rather than as
+/// a groove.
+fn layer(text: &str, font: TextFont, ink: Color, drop: f32) -> impl Bundle {
+    (
+        Text::new(text),
+        font,
+        TextColor(ink),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
+            ..default()
+        },
+        UiTransform::from_translation(Val2::px(0.0, drop)),
+    )
+}
+
+/// The face both lines are set in: resolved from the system's font database
+/// rather than shipped, so the menu gains a serif without the game gaining an
+/// assets directory. The exact face is the machine's to choose; every one of
+/// them has the strokes the engraving is drawn from.
+fn title_font() -> TextFont {
+    TextFont {
+        font: FontSource::Serif,
+        font_size: FontSize::Px(TITLE_SIZE),
+        ..default()
+    }
+}
+
+fn subtitle_font() -> TextFont {
+    TextFont {
+        style: FontStyle::Italic,
+        font_size: FontSize::Px(SUBTITLE_SIZE),
+        ..title_font()
+    }
+}
+
+/// One of the rules the title sits between, cut the same way the letters are:
+/// a line of ink with a dark one directly beneath it.
+///
+/// Full ink rather than [`EDGE`], which every border on screen is drawn in.
+/// These two belong to the title rather than to the furniture, and a rule that
+/// runs out of a letter has to be the same weight as the letter.
+fn spawn_hairline(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(TITLE_RULE),
+                height: Val::Px(1.0),
+                ..default()
+            },
+            BackgroundColor(TEXT),
+        ))
+        .with_children(|rule| {
+            rule.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(1.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Px(1.0),
+                    ..default()
+                },
+                BackgroundColor(INK_SHADOW),
+            ));
+        });
+}
+
+/// The letters of a word with a space between each. Tracking of the kind
+/// engraved capitals are set with is not something a text style can ask for, so
+/// it is spelled into the string instead.
+fn spaced(word: &str) -> String {
+    let mut spaced = String::with_capacity(word.len() * 2);
+    for letter in word.chars() {
+        if !spaced.is_empty() {
+            spaced.push(' ');
+        }
+        spaced.push(letter);
+    }
+    spaced
 }
 
 fn main_menu_actions(
@@ -282,7 +413,7 @@ fn spawn_new_world_dialog(mut commands: Commands, settings: Res<NewWorldSettings
                         ..default()
                     },
                     BackgroundColor(PANEL),
-                    BorderColor::all(PANEL_EDGE),
+                    BorderColor::all(EDGE),
                 ))
                 .with_children(|panel| {
                     panel.spawn((
@@ -525,7 +656,7 @@ fn spawn_join_dialog(mut commands: Commands, settings: Res<JoinSettings>) {
                         ..default()
                     },
                     BackgroundColor(PANEL),
-                    BorderColor::all(PANEL_EDGE),
+                    BorderColor::all(EDGE),
                 ))
                 .with_children(|panel| {
                     panel.spawn((
@@ -766,7 +897,7 @@ fn spawn_settings(mut commands: Commands, bindings: Res<KeyBindings>) {
                         ..default()
                     },
                     BackgroundColor(PANEL),
-                    BorderColor::all(PANEL_EDGE),
+                    BorderColor::all(EDGE),
                 ))
                 .with_children(|panel| {
                     panel.spawn((
@@ -1025,7 +1156,7 @@ fn button(action: MenuButton, width: f32) -> impl Bundle {
             ..default()
         },
         BackgroundColor(BUTTON),
-        BorderColor::all(PANEL_EDGE),
+        BorderColor::all(EDGE),
     )
 }
 
@@ -1197,6 +1328,14 @@ mod tests {
         let mut app = test_app(AppState::MainMenu);
         click(&mut app, MenuButton::NewWorld);
         assert_eq!(state(&app), AppState::NewWorld);
+    }
+
+    #[test]
+    fn the_title_is_tracked_out_letter_by_letter() {
+        // Every letter still there, and the word still readable as one word.
+        assert_eq!(spaced(TITLE), "G E N O V E S A");
+        assert_eq!(spaced(TITLE).replace(' ', ""), TITLE);
+        assert_eq!(spaced(""), "");
     }
 
     #[test]
