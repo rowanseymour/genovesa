@@ -363,7 +363,7 @@ mod tests {
     /// follow. The real one, mesh and all, is `BoatPlugin`'s to spawn.
     fn spawn_boat(app: &mut App, at: Vec3) {
         app.world_mut()
-            .spawn((Boat, Transform::from_translation(at)));
+            .spawn((Boat::default(), Transform::from_translation(at)));
     }
 
     /// Puts the player down at a spot outright, mid-match, with the camera

@@ -61,6 +61,21 @@ const SPEED: f32 = 10.0;
 /// cove, and slow enough that nobody crosses an ocean in reverse.
 const ASTERN_SPEED: f32 = 4.0;
 
+/// Seconds of lag between the speed the keys ask for and the speed the hull
+/// makes — the time constant of an exponential ease, so most of any change
+/// arrives within this long and it is all but done in three times it. The
+/// ease is what gives seven metres of timber its weight: the hull gathers
+/// way over a few seconds instead of leaping to [`SPEED`] on the frame the
+/// key goes down, and carries it for a couple of lengths' glide when the
+/// key comes up.
+const WAY_RESPONSE: f32 = 1.5;
+
+/// Way below this, with no drive asked for, is stopped, and [`steer`] snaps
+/// it to exactly zero. The ease only ever halves the remainder — left alone
+/// the boat would creep forever, never quite done stopping — and a hull at
+/// rest should be *at rest*: the same spot every frame, nothing moving.
+const WAY_STOPPED: f32 = 0.02;
+
 /// How fast the helm brings the bow round, in radians per second. Together
 /// with [`SPEED`] this fixes the turning circle at about five metres — tight
 /// enough to feel answerable from a camera forty metres up, wide enough that
@@ -75,8 +90,14 @@ const HULL_COLOR: Color = Color::srgb(0.62, 0.28, 0.22);
 const SPAR_COLOR: Color = Color::srgb(0.86, 0.80, 0.68);
 
 /// The player's boat. One per match, spawned where the world is entered.
-#[derive(Component)]
-pub struct Boat;
+///
+/// `way` is the speed the hull is actually making along its heading, in
+/// metres per second, ahead positive — the state the eased throttle lives
+/// in. The keys name a speed; [`steer`] brings `way` towards it.
+#[derive(Component, Default)]
+pub struct Boat {
+    way: f32,
+}
 
 pub struct BoatPlugin;
 
@@ -122,7 +143,7 @@ fn launch(
 
     commands.spawn((
         Name::new("Boat"),
-        Boat,
+        Boat::default(),
         DespawnOnExit(AppState::InWorld),
         Mesh3d(meshes.add(hull_mesh())),
         MeshMaterial3d(hull_material),
@@ -171,6 +192,14 @@ fn float(terrain: Option<Res<WorldTerrain>>, mut boats: Query<&mut Transform, Wi
 /// they do — which is what makes a long sail a held key rather than a chase
 /// between the camera's yaw and the boat's.
 ///
+/// The throttle is eased rather than instant: the keys name a target speed
+/// and the hull's way relaxes towards it on the [`WAY_RESPONSE`] curve,
+/// stepped exactly for however long the frame was, so the ramp is the same
+/// shape at any frame rate. That covers both ends of a sail — way gathered
+/// over seconds when the key goes down, and carried into a glide when it
+/// comes up — from one constant, with [`WAY_STOPPED`] closing the tail the
+/// exponential would otherwise never finish.
+///
 /// The helm answers even with no way on, which no rudder would; a boat that
 /// can't point where it's told while stationary is annoying before it is
 /// realistic. Nothing here knows about land either: a hull driven onto a
@@ -181,7 +210,7 @@ fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     time: Res<Time>,
-    mut boats: Query<&mut Transform, With<Boat>>,
+    mut boats: Query<(&mut Transform, &mut Boat)>,
 ) {
     // Direction first, speed second, so opposed keys cancel outright rather
     // than the faster gear winning by the difference.
@@ -203,14 +232,29 @@ fn steer(
     if bindings.held(&keys, Action::SteerRight, KeyCode::ArrowRight) {
         helm -= 1.0;
     }
-    if drive == 0.0 && helm == 0.0 {
-        return;
-    }
 
-    for mut boat in &mut boats {
-        boat.rotate_y(helm * TURN_RATE * time.delta_secs());
-        let advance = boat.forward() * drive * speed * time.delta_secs();
-        boat.translation += advance;
+    let target = drive * speed;
+    // The fraction of the gap to the target that survives this frame — the
+    // exact solution of the ease over the frame's own length, not a per-frame
+    // step that a fast machine would run more often.
+    let keep = (-time.delta_secs() / WAY_RESPONSE).exp();
+
+    for (mut transform, mut boat) in &mut boats {
+        if helm != 0.0 {
+            transform.rotate_y(helm * TURN_RATE * time.delta_secs());
+        }
+        // Written only while something is happening, so an idle boat holds
+        // still without being marked changed every frame.
+        if target != 0.0 || boat.way != 0.0 {
+            let way = target + (boat.way - target) * keep;
+            boat.way = if target == 0.0 && way.abs() < WAY_STOPPED {
+                0.0
+            } else {
+                way
+            };
+            let advance = transform.forward() * boat.way * time.delta_secs();
+            transform.translation += advance;
+        }
     }
 }
 
@@ -284,15 +328,28 @@ fn face_normal(face: &[Vec3; 3]) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use bevy::state::app::StatesPlugin;
-    use bevy::time::TimePlugin;
+    use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
     use super::*;
+
+    /// How long every test frame lasts. Headless frames take next to no real
+    /// time, which the old instant throttle never noticed — but the eased one
+    /// is a curve *in seconds*, so the clock is stepped by a fixed sixty-a-
+    /// second frame and the tests get the ramp a player would.
+    const FRAME: Duration = Duration::from_millis(16);
+
+    /// Frames enough for the ease to be indistinguishable from settled —
+    /// over eight time constants, a remainder of a few parts in ten thousand.
+    const SETTLED: usize = 800;
 
     /// A headless app with the boat systems running, already in a match.
     fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins((TimePlugin, StatesPlugin, BoatPlugin))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
             .init_state::<AppState>()
             .init_resource::<View>()
             .init_resource::<KeyBindings>()
@@ -432,14 +489,17 @@ mod tests {
         assert_eq!(moved.y, 0.0);
     }
 
-    /// Metres per second the boat covers in a straight line while `key` is
-    /// held, signed by whether it went ahead or astern.
+    /// Metres per second the boat settles to while `key` is held, signed by
+    /// whether it went ahead or astern — measured after the way is gathered,
+    /// so it is the speed made good and not some point on the ramp.
     fn speed_made(key: KeyCode) -> f32 {
         let mut app = test_app();
+        hold(&mut app, key);
+        run_frames(&mut app, SETTLED);
+
         let before = boat(&mut app);
         let start = elapsed(&app);
-        hold(&mut app, key);
-        run_frames(&mut app, 20);
+        run_frames(&mut app, 60);
         let seconds = elapsed(&app) - start;
         assert!(seconds > 0.0, "no time passed while the key was held");
 
@@ -461,6 +521,55 @@ mod tests {
         assert!(
             (astern + ASTERN_SPEED).abs() < ASTERN_SPEED * 0.01,
             "the boat made {astern} m/s astern, not -{ASTERN_SPEED}"
+        );
+    }
+
+    #[test]
+    fn the_boat_gathers_way_rather_than_leaping_to_speed() {
+        // The first half second of a standing start: under way at once, but
+        // nowhere near full speed — the ramp is the point of the ease.
+        let mut app = test_app();
+        let before = boat(&mut app).translation;
+        let start = elapsed(&app);
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 30);
+        let seconds = elapsed(&app) - start;
+
+        let made = (boat(&mut app).translation - before).length() / seconds;
+        assert!(made > 0.0, "the boat never began to move");
+        assert!(
+            made < SPEED * 0.5,
+            "{made} m/s inside the first half second is a leap, not gathered way"
+        );
+    }
+
+    #[test]
+    fn the_boat_carries_its_way_into_a_glide_and_then_stops() {
+        let mut app = test_app();
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release_all();
+
+        // Off the key at full speed: a glide of a few metres, not a dead stop.
+        let going = boat(&mut app).translation;
+        run_frames(&mut app, 30);
+        let glide = (boat(&mut app).translation - going).length();
+        assert!(
+            glide > 1.0,
+            "the boat stopped dead the moment the key came up"
+        );
+
+        // And the glide ends: the way snaps to stopped, and a boat at rest
+        // holds the same spot exactly, frame after frame.
+        run_frames(&mut app, SETTLED);
+        let at_rest = boat(&mut app).translation;
+        run_frames(&mut app, 10);
+        assert_eq!(
+            boat(&mut app).translation,
+            at_rest,
+            "the boat is still creeping"
         );
     }
 
