@@ -17,6 +17,12 @@ publish = false
 glam.workspace = true
 # PNG encoding for the plan renders.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# A pow this crate can trust. `f32::powf` is whatever libm the platform brought
+# — Apple's, glibc's, Microsoft's — and the three do not agree to the last bit,
+# which is enough to make a seed mean a different world on a different machine.
+# This one is a port of MUSL's libm in plain Rust, so it is the same arithmetic
+# everywhere it is compiled. See `pow` in terrain.rs.
+libm = "0.2"
 bevy_ecs = { workspace = true, optional = true }
 
 [features]

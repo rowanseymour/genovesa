@@ -145,8 +145,8 @@ const CLEARANCE: i32 = 3;
 ///
 /// This is `0.8u² + 0.2u³`, which stands in for an exponent of about 2.2 to
 /// within a couple of percent across the unit interval. The exponent is what
-/// this was written as first, and `powf` is exactly what it cannot be. The
-/// layout is a *format*: a seed has to lay out the same islands on every
+/// this was written as first, and `f32::powf` is exactly what it cannot be.
+/// The layout is a *format*: a seed has to lay out the same islands on every
 /// machine there will ever be, and a size in whole chunks is quantised — so a
 /// single-ULP difference in `powf` between two platforms is not a rounding
 /// error in a height, it is one island a chunk wider than another machine's,
@@ -154,6 +154,14 @@ const CLEARANCE: i32 = 3;
 /// and multiply are pinned by IEEE 754; transcendentals are not. See
 /// `a_seed_is_the_same_world_down_to_the_bit`, which exists to forbid exactly
 /// this drifting.
+///
+/// The first CI run to put that test on three operating systems proved the
+/// point twice over: this polynomial gave the same layout on all three, while
+/// the height field — which was still calling `f32::powf` — gave three
+/// different maps. Heights now go through [`crate::terrain::pow`], so the rest
+/// of the world keeps the promise this function was written to keep. A
+/// polynomial is still the better answer where one will do, being both exact
+/// and free.
 fn skewed_small(u: f32) -> f32 {
     u * u * (0.8 + 0.2 * u)
 }
@@ -1038,6 +1046,6 @@ mod tests {
 
         println!("layout digests to {layout:#018X}, ground to {ground:#018X}");
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
-        assert_eq!(ground, 0x74A7_742A_2E33_50BC, "the ground changed");
+        assert_eq!(ground, 0xFA89_ABF4_A2FC_48A1, "the ground changed");
     }
 }
