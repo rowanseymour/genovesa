@@ -15,6 +15,10 @@ world = { path = "../world", features = ["bevy"] }
 # The words of a served session — shared with the server crate, so the two
 # sides of the wire cannot drift.
 protocol = { path = "../protocol" }
+# A world the game hosts for itself. The server is engine-free and headless, so
+# a game that starts one runs the very same session a dedicated `server` does —
+# there is no second, lesser implementation for playing alone.
+server = { path = "../server" }
 bevy.workspace = true
 
 [features]

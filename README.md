@@ -70,12 +70,21 @@ on every machine, a server never sends terrain — it hands out the seed and
 keeps track of who is in the world and where. Clients generate the same ocean
 for themselves and meet in it.
 
-```bash
-cargo run --bin server -- --seed 7
-```
+A world started from the menu can be kept or shared. Sharing it hosts it, and
+the game then joins its own server over the loopback exactly as anyone else
+joins it over the network — there is no second, quieter kind of session for
+playing alone in a world of your own. Others get in from the menu's join
+screen, or straight from the command line:
 
 ```bash
 cargo run -- --join localhost
+```
+
+The same world can be hosted without anyone playing on that machine, which is
+what a dedicated server is:
+
+```bash
+cargo run --bin server -- --seed 7
 ```
 
 Everyone joins on the same island, and other players appear as coloured

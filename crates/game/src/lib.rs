@@ -40,8 +40,11 @@ pub const WINDOW: UVec2 = UVec2::new(1280, 720);
 pub enum AppState {
     #[default]
     MainMenu,
-    /// Choosing the seed of the world about to be entered.
+    /// Choosing the seed of the world about to be entered, and whether to
+    /// share it with anyone else.
     NewWorld,
+    /// Naming a server to play in.
+    JoinWorld,
     /// Choosing which key does what.
     Settings,
     InWorld,

@@ -100,14 +100,18 @@ Genovesa — an endless ocean of generated islands to look around.
 Usage: game [options]
 
 Options:
-  --state <screen>  start on `mainmenu`, `newworld`, `settings` or `inworld`
-                    [default: mainmenu, or inworld when shots or a server are
-                    asked for]
+  --state <screen>  start on `mainmenu`, `newworld`, `joinworld`, `settings`
+                    or `inworld` [default: mainmenu, or inworld when shots or
+                    a server are asked for]
   --seed <n>        the world to generate [default: {}]
   --join <host[:port]>  play in a served world instead of a local one; the
                     server provides the seed and where the world is entered,
                     and the run starts in that world rather than on a screen
                     [port: {DEFAULT_PORT}]
+
+A world started from the menu can be shared instead of kept, which hosts it on
+port {DEFAULT_PORT} for others to `--join` — the same session a dedicated
+`server` serves, run alongside the game that started it.
   --debug           overlay frame rate, geometry counts and the current view
                     on the window; ignored when capturing, so shots stay clean
 
@@ -258,10 +262,11 @@ fn state(value: &str) -> Result<AppState, String> {
     match value {
         "mainmenu" => Ok(AppState::MainMenu),
         "newworld" => Ok(AppState::NewWorld),
+        "joinworld" => Ok(AppState::JoinWorld),
         "settings" => Ok(AppState::Settings),
         "inworld" => Ok(AppState::InWorld),
         other => Err(format!(
-            "`{other}` is not a screen — try mainmenu, newworld, settings or inworld"
+            "`{other}` is not a screen — try mainmenu, newworld, joinworld, settings or inworld"
         )),
     }
 }
