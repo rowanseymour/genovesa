@@ -815,6 +815,26 @@ impl Sample {
     }
 }
 
+/// One point of the fitting grid, as far as the noise can take it before the
+/// massif's own floor is known.
+///
+/// [`TerrainGenerator::fit_ranges`] has to walk the grid twice — once to find
+/// where the massif starts counting, and again to build the [`Sample`] that
+/// needs it — and noise is what costs here, so the first pass keeps
+/// everything the second would otherwise have to sample afresh.
+struct GridPoint {
+    /// Where on the map, in metres.
+    at: Vec2,
+    /// The same point once the domain warp has moved it.
+    warped: Vec2,
+    /// The landmass field there, which the massif is partly seated on.
+    continent: f32,
+    /// Continent and hills together — the terms the massif does not touch.
+    base: f32,
+    damp: f32,
+    push: f32,
+}
+
 impl TerrainGenerator {
     pub fn new(config: &MapConfig) -> Self {
         let seed = config.seed;
@@ -978,15 +998,14 @@ impl TerrainGenerator {
                 if (pad..px - pad).contains(&ix) && (pad..pz - pad).contains(&iz) {
                     let hills = self.hills.fbm(n.x * 0.9, n.y * 0.9, 5);
                     let (damp, push) = self.falloff(wx, wz, n, drift);
-                    (points).push((
-                        wx,
-                        wz,
-                        n,
+                    points.push(GridPoint {
+                        at: Vec2::new(wx, wz),
+                        warped: n,
                         continent,
-                        0.62 * continent + 0.26 * hills,
+                        base: 0.62 * continent + 0.26 * hills,
                         damp,
                         push,
-                    ));
+                    });
                 }
             }
         }
@@ -1022,11 +1041,11 @@ impl TerrainGenerator {
 
         points
             .iter()
-            .map(|(wx, wz, n, continent, base, damp, push)| Sample {
-                base: *base,
-                range: self.ranges(*wx, *wz, *n, *continent),
-                damp: *damp,
-                push: *push,
+            .map(|point| Sample {
+                base: point.base,
+                range: self.ranges(point.at.x, point.at.y, point.warped, point.continent),
+                damp: point.damp,
+                push: point.push,
             })
             .collect()
     }
@@ -1162,10 +1181,14 @@ impl TerrainGenerator {
                 if cells[iz * nx + ix] <= sea {
                     continue;
                 }
-                let shoreline = [iz * nx + ix - 1, iz * nx + ix + 1]
-                    .iter()
-                    .chain(&[(iz - 1) * nx + ix, (iz + 1) * nx + ix])
-                    .any(|i| cells[*i] <= sea);
+                let shoreline = [
+                    iz * nx + ix - 1,
+                    iz * nx + ix + 1,
+                    (iz - 1) * nx + ix,
+                    (iz + 1) * nx + ix,
+                ]
+                .iter()
+                .any(|i| cells[*i] <= sea);
                 if !shoreline {
                     continue;
                 }

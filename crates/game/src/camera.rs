@@ -162,11 +162,12 @@ fn recentre(view: Res<View>, mut cameras: Query<&mut MapCamera>) {
 
 fn spawn_camera(mut commands: Commands, view: Res<View>) {
     let camera = MapCamera::looking(*view);
+    let transform = Transform::from_translation(eye(&camera)).looking_at(camera.focus, Vec3::Y);
     commands.spawn((
         Name::new("Camera"),
         Camera3d::default(),
-        MapCamera::looking(*view),
-        Transform::from_translation(eye(&camera)).looking_at(camera.focus, Vec3::Y),
+        camera,
+        transform,
         // Aerial haze, both to stop the far side of the map looking flat and to
         // hide where the sea plane is cut off by the far clip plane. The colour
         // has to match `ClearColor` and the fade has to finish before the far

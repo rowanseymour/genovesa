@@ -223,8 +223,11 @@ pub struct Dialing {
     /// Behind a mutex only because a Bevy resource must be `Sync`; nothing but
     /// [`Dialing::outcome`] locks it.
     outcome: Mutex<Receiver<Result<Session, String>>>,
-    /// What is being dialled, for the screen to say while it waits.
-    pub what: String,
+    /// What is being dialled, for the one thing that has to name it: a dial
+    /// whose thread died says so, and "dialling came to nothing" would leave
+    /// the player nothing to check. The screens write their own waiting line
+    /// from the address they already hold, so nothing outside reads this.
+    what: String,
 }
 
 impl Dialing {
