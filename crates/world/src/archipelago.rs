@@ -140,25 +140,33 @@ const LAYERS: [Layer; 2] = [
 /// coast ever has to know the other exists.
 const CLEARANCE: i32 = 3;
 
-/// Chunks of guaranteed open water around the origin, where every world is
-/// entered. No island's frame ever stands within this many chunks of the
-/// origin, on any seed — measured per axis like every other layout gap, so
-/// the clearing is a square.
+/// Chunks of guaranteed open water around the origin. No island's frame ever
+/// stands within this many chunks of it, on any seed — measured per axis like
+/// every other layout gap, so the clearing is a square.
 ///
-/// Entering at the origin is what lets every machine agree on the spawn
-/// without consulting anything: a server and a lone run put the player down
-/// at the same point by construction, not by both asking the layout the same
-/// question. The clearing is what makes that point worth standing on — it
-/// turns "the origin is open water on essentially every seed" into a
-/// guarantee, so entry is always the same experience: a boat at sea, and a
-/// first sail to reach land.
-///
-/// Two chunks is a modest clearing — a four-by-four-chunk square of sea, so
-/// the nearest possible coast is a quarter kilometre out. Enough that entry
-/// is always a boat afloat rather than a hillside, while the first island
-/// may already stand in view; one number to grow when the opening sail
-/// should be longer.
+/// The origin is the world's one fixed point — where [`Archipelago::spawn`]
+/// starts measuring — and the clearing is what keeps that point honest:
+/// should the layout ever fail to offer an island at all, the origin is
+/// still open water to enter on, on every seed rather than on essentially
+/// every one. Two chunks is a modest clearing — a four-by-four-chunk square
+/// of sea, a quarter kilometre to the nearest possible coast.
 const SPAWN_CLEARING: i32 = 2;
+
+/// Metres of open water between a world's spawn point and the waterline it
+/// faces. A judgement about the *camera*, not the layout: at the default
+/// zoom the eye sees a few dozen metres past the boat, so this is what puts
+/// the first coast on or just off the opening screen rather than a rumour
+/// beyond it — arrival in sight of land, with a boat-length or two of
+/// margin over a server's [scatter] and the waterline search's own stride.
+///
+/// [scatter]: Archipelago::spawn
+pub const SPAWN_OFFSHORE: f32 = 48.0;
+
+/// Metres between soundings when [`Archipelago::spawn`] walks in from the
+/// sea looking for the waterline. Fine enough not to step over a beach
+/// (coasts the generator draws are hundreds of metres long), coarse enough
+/// that the walk costs a few hundred height samples at worst.
+const SOUNDING: f32 = 4.0;
 
 /// Skews a uniform draw towards zero, so that island sizes come out mostly
 /// small: the median lands in the lower quarter of its layer's range and the
@@ -330,6 +338,16 @@ impl IslandSpec {
         chunk.cmpge(min).all() && chunk.cmplt(max).all()
     }
 
+    /// The point of the island's frame nearest a world point — the point
+    /// itself anywhere inside the frame. What [`Archipelago::spawn`] measures
+    /// coasts by: the frame is not the waterline, but land never stands
+    /// outside it, so distance to the frame is the honest lower bound on the
+    /// sail to this island.
+    pub fn frame_point(&self, world: Vec2) -> Vec2 {
+        let min = self.origin.as_vec2() * CHUNK_METRES;
+        world.clamp(min, min + self.extent())
+    }
+
     /// How far past the island's frame a world point stands, in metres —
     /// zero anywhere inside it. Chebyshev, like the skirt of chunks it is
     /// read across.
@@ -337,6 +355,16 @@ impl IslandSpec {
         let out = (world - self.centre()).abs() - self.extent() * 0.5;
         out.max(Vec2::ZERO).max_element()
     }
+}
+
+/// Where a world is entered, as [`Archipelago::spawn`] answers it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spawn {
+    /// The spawn point itself: water, [`SPAWN_OFFSHORE`] metres off the
+    /// island's shore on the side facing the origin.
+    pub point: Vec2,
+    /// The island the entry stands off — the first land in sight.
+    pub island: IslandSpec,
 }
 
 /// A deterministic stream of draws for one parcel — splitmix64, whose whole
@@ -574,12 +602,13 @@ impl Archipelago {
     /// The island nearest a world point, by the distance between the point and
     /// the island's centre — layout only, generating nothing.
     ///
-    /// The world is *entered* on open water — the origin, kept clear of land
-    /// by [`SPAWN_CLEARING`] — so play never needs this. What does is
-    /// anything that wants a picture of terrain rather than of sea: a capture
-    /// run with no `--focus` has to go and find some land to photograph, and
-    /// the tests use the same question to pin that the clearing keeps land
-    /// out of reach but never out of range.
+    /// Play enters a world by [`spawn`], which ranks coasts rather than
+    /// centres — this is for anything that wants a picture of terrain rather
+    /// than a place to float: a capture run with no `--focus` has to go and
+    /// find some land to photograph, and an island is photographed from its
+    /// middle, not from the water off its nearest corner.
+    ///
+    /// [`spawn`]: Archipelago::spawn
     ///
     /// Searched over windows that double until one holds something, rather
     /// than over a single wide one: the layout is cheap but not free, and the
@@ -612,6 +641,130 @@ impl Archipelago {
             }
         }
         None
+    }
+
+    /// Where this world is entered, the same on every machine: a point of
+    /// open water [`SPAWN_OFFSHORE`] metres off the waterline of the island
+    /// whose *frame* is nearest the origin, facing it from the origin's
+    /// side.
+    ///
+    /// Entry used to be the origin itself: one point every machine could
+    /// agree on without asking the world anything. What that saved in
+    /// questions it spent in sailing — the nearest land averages half a
+    /// kilometre out, past the haze on every seed's worse days, so a new
+    /// arrival saw water in every direction and steered blind. The world is
+    /// deterministic, so a better point is still one every machine computes
+    /// alike; entry now opens in sight of the first island's coast, and
+    /// finding land takes no search at all.
+    ///
+    /// Nearest by frame rather than by centre, as [`nearest_island`] ranks,
+    /// because it is the coast entry cares about — a big island's coast can
+    /// stand nearer than any small island's middle. And the waterline
+    /// rather than the frame, because the frame is a rectangle of map, not
+    /// of land: a fitted coast can recede hundreds of metres inside it, and
+    /// a spawn measured off the frame edge holds the island just past the
+    /// top of the opening screen. So the shore is found on the terrain
+    /// itself: the island's land nearest the origin, off a half-chunk
+    /// lattice over the frame, names the landfall; then the line from the
+    /// origin — water on every seed, by [`SPAWN_CLEARING`] — to that
+    /// landfall is *sounded*, [`SOUNDING`] metres a step, and the first
+    /// ground at sea level or above is the shore the spawn backs
+    /// [`SPAWN_OFFSHORE`] metres off. It steps further seaward should its
+    /// own spot prove dry — a spit beside the line, say — so the point is
+    /// water by measurement and not just by intent.
+    ///
+    /// Unlike the rest of the layout's questions this one generates its
+    /// island — the waterline is terrain — costing tens to hundreds of
+    /// milliseconds on a cold cache. Entry is exactly when that island is
+    /// about to be generated anyway, so within one [`Archipelago`] the cost
+    /// is borrowed rather than added.
+    ///
+    /// Every *other* island keeps its distance by construction: frames of
+    /// one layer never stand closer than twice their layer's margin, frames
+    /// of different layers keep [`CLEARANCE`] more, and every such gap is
+    /// hundreds of metres — so a point on or beside the chosen island's
+    /// frame is far outside everything else's ground.
+    ///
+    /// [`None`] means the layout offered no island at all, which as
+    /// [`nearest_island`] explains is a broken layout rather than a wide
+    /// sea; callers may fall back to the origin, which [`SPAWN_CLEARING`]
+    /// keeps open.
+    ///
+    /// [`nearest_island`]: Archipelago::nearest_island
+    pub fn spawn(&self) -> Option<Spawn> {
+        // The same widening search as `nearest_island`, with one more care:
+        // a minimum found beyond the window's own reach could still be
+        // undercut by a frame just outside the window, so it widens the
+        // search instead of answering it. Within reach, the minimum is
+        // global — any closer frame would have to reach into the window.
+        const SPANS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
+
+        let parcel = LAYERS[0].parcel as f32 * CHUNK_METRES;
+        let mut found = None;
+        for span in SPANS {
+            let reach = span * parcel;
+            let nearest = self
+                .islands_within(Vec2::splat(-reach), Vec2::splat(reach))
+                .into_iter()
+                .min_by(|a, b| {
+                    let d = |s: &IslandSpec| s.frame_point(Vec2::ZERO).length_squared();
+                    d(a).total_cmp(&d(b))
+                });
+            if let Some(island) = nearest {
+                let out = island.frame_point(Vec2::ZERO).length();
+                if out <= reach || span == SPANS[SPANS.len() - 1] {
+                    found = Some(island);
+                    break;
+                }
+            }
+        }
+        let island = found?;
+
+        // The island's land nearest the origin, off a half-chunk lattice
+        // over the frame — fine enough that even a single-chunk islet puts
+        // several samples on its ground. Swept in a fixed order with ties
+        // kept first, so the landfall is the seed's and not the machine's.
+        let terrain = self.island(island);
+        let min = island.origin.as_vec2() * CHUNK_METRES;
+        let cells = island.chunks.as_ivec2() * 2;
+        let landfall = (0..=cells.y)
+            .flat_map(|iz| (0..=cells.x).map(move |ix| IVec2::new(ix, iz)))
+            .map(|cell| min + cell.as_vec2() * (CHUNK_METRES * 0.5))
+            .filter(|at| terrain.height(at.x, at.y) >= 0.0)
+            .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
+
+        let point = match landfall {
+            Some(landfall) => {
+                // Sound the line from the origin — water on every seed, by
+                // the clearing — to the landfall: the first ground reached
+                // is the island's origin-facing shore.
+                let stride = landfall / landfall.length() * SOUNDING;
+                let soundings = (landfall.length() / SOUNDING) as i32;
+                let shore = (0..=soundings)
+                    .map(|i| stride * i as f32)
+                    .find(|at| terrain.height(at.x, at.y) >= 0.0)
+                    .unwrap_or(landfall);
+
+                // Off the shore, and further out still if the sample there
+                // is somehow dry — a spit beside the line, say. Bounded
+                // because the walk leaves the frame's skirt eventually, and
+                // past the skirt is flat ocean floor; in practice the first
+                // sample answers.
+                let mut point = shore - stride / SOUNDING * SPAWN_OFFSHORE;
+                while terrain.height(point.x, point.y) >= 0.0 {
+                    point -= stride;
+                }
+                point
+            }
+            // An island with no land on the lattice — the map is nearly all
+            // water. The frame's nearest edge is then the best "shore" there
+            // is to stand off.
+            None => {
+                let coast = island.frame_point(Vec2::ZERO);
+                coast * (1.0 - SPAWN_OFFSHORE / coast.length())
+            }
+        };
+        Some(Spawn { point, island })
     }
 
     /// This island's terrain, generated now if it never has been. Costs tens
@@ -849,12 +1002,11 @@ mod tests {
 
     #[test]
     fn the_world_is_entered_on_open_water_with_land_in_reach() {
-        // The spawn guarantee, both halves. Every world is entered at the
-        // origin, and the clearing keeps every island's frame at least
-        // [`SPAWN_CLEARING`] chunks from it — so entry is a boat at sea on
-        // every seed, not just on essentially every one. And the ocean past
-        // the clearing is as full as ever: the nearest island can still be
-        // found without generating anything, so the first sail is short.
+        // The spawn guarantee, all of it. The clearing keeps every island's
+        // frame at least [`SPAWN_CLEARING`] chunks from the origin; `spawn`
+        // stands entry [`SPAWN_OFFSHORE`] metres off the nearest coast, with
+        // that much water to every island's frame — so entry is a boat at
+        // sea beside land on every seed, not just on essentially every one.
         for seed in [1, 7, 99, 777, 20_040_112] {
             let ocean = world(seed);
             for spec in specs(&ocean) {
@@ -864,6 +1016,50 @@ mod tests {
                     "seed {seed}: {spec:?} stands in the spawn clearing"
                 );
             }
+
+            let spawn = ocean
+                .spawn()
+                .unwrap_or_else(|| panic!("seed {seed} offers nowhere to enter"));
+
+            // Afloat: the point is water, measured on the terrain itself.
+            let depth = ocean.height(spawn.point.x, spawn.point.y);
+            assert!(
+                depth < 0.0,
+                "seed {seed} enters on ground {depth} m above the sea"
+            );
+
+            // And in sight of land: walking on away from the origin — the
+            // line the spawn was sounded along — reaches shore in about the
+            // offshore distance, with a stride's worth of slack for the
+            // sounding walking past the exact waterline.
+            let towards = spawn.point.normalize();
+            let shore = (0..).map(|i| i as f32 * SOUNDING).find(|walked| {
+                let at = spawn.point + towards * *walked;
+                ocean.height(at.x, at.y) >= 0.0 || *walked > 4_000.0
+            });
+            assert!(
+                shore.unwrap() <= SPAWN_OFFSHORE + 2.0 * SOUNDING,
+                "seed {seed}: the first land is {} m out, not within {SPAWN_OFFSHORE}",
+                shore.unwrap()
+            );
+
+            // No other island's ground is anywhere near: every frame but the
+            // spawn's own keeps hundreds of metres away.
+            for spec in specs(&ocean) {
+                if spec == spawn.island {
+                    continue;
+                }
+                let apart = spec.frame_point(spawn.point).distance(spawn.point);
+                assert!(
+                    apart >= 2.0 * SKIRT_METRES,
+                    "seed {seed}: entry is {apart} m from the frame of {spec:?}"
+                );
+            }
+
+            // The same question is the same answer, on this machine and by
+            // construction on every other.
+            assert_eq!(ocean.spawn(), Some(spawn));
+            assert_eq!(world(seed).spawn(), Some(spawn));
 
             let near = ocean
                 .nearest_island(Vec2::ZERO)

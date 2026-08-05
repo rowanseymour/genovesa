@@ -71,6 +71,24 @@ impl Default for View {
     }
 }
 
+impl View {
+    /// Turns the view to look from its focus towards a ground point. The
+    /// boat launches pointing down the view's yaw, so this also points the
+    /// bow there — it is what entry uses to open facing the island the
+    /// spawn stands off, first land dead ahead rather than at the camera's
+    /// back. A target at the focus itself names no direction and leaves the
+    /// yaw where it was.
+    pub fn face(&mut self, target: Vec2) {
+        let towards = target - Vec2::new(self.focus.x, self.focus.z);
+        if towards == Vec2::ZERO {
+            return;
+        }
+        // The eye sits at +(sin yaw, cos yaw) from the focus, so looking
+        // along `towards` is the yaw whose sines oppose it.
+        self.yaw = f32::atan2(-towards.x, -towards.y);
+    }
+}
+
 /// The camera's ground-level target. The camera itself sits back and above it.
 #[derive(Component)]
 pub struct MapCamera {

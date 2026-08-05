@@ -11,7 +11,7 @@ use protocol::DEFAULT_PORT;
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
 use crate::camera::View;
 use crate::net::{Dialing, Hosting, Online};
-use crate::terrain::{random_seed, WorldConfig, MAX_SEED};
+use crate::terrain::{random_seed, Archipelago, WorldConfig, MAX_SEED};
 use crate::AppState;
 
 /// Longest seed the user can type — read off [`MAX_SEED`], so the field can
@@ -509,12 +509,20 @@ fn dialog_actions(
                 *config = WorldConfig {
                     seed: settings.seed_value(),
                 };
-                // Every world is entered at the origin — open water on every
-                // seed, by the world's spawn clearing — so the view is
-                // brought home rather than trusted: it carries over from
-                // wherever it last was, which on a new world chosen from
-                // within a match is a point in a world that no longer exists.
-                view.focus = Vec3::ZERO;
+                // Every world is entered on its own spawn — open water just
+                // off the first island, facing it — so the view is brought
+                // there rather than trusted: it carries over from wherever
+                // it last was, which on a new world chosen from within a
+                // match is a point in a world that no longer exists. The
+                // origin is the fallback the world keeps open should its
+                // layout offer nothing.
+                match Archipelago::new(&config).spawn() {
+                    Some(spawn) => {
+                        view.focus = Vec3::new(spawn.point.x, 0.0, spawn.point.y);
+                        view.face(spawn.island.centre());
+                    }
+                    None => view.focus = Vec3::ZERO,
+                }
                 next.set(AppState::InWorld);
             }
             _ => {}
@@ -791,11 +799,16 @@ fn settle_dialing(
     *config = WorldConfig {
         seed: session.connection.seed,
     };
-    // Where the server puts arrivals down, which on a hosted world is the
-    // island a lone run of the same seed would have opened on. No island snap
-    // of our own: everybody in a session has to enter it in the same place.
+    // Where the server puts arrivals down — the same spawn a lone run of
+    // the seed opens on, scattered a few boat-lengths. The point is the
+    // server's call, not recomputed here: everybody in a session has to
+    // enter it where the server says. The *facing* asks the local layout,
+    // which is the same layout, for the island that spawn stands off.
     let spawn = session.connection.spawn;
     view.focus = Vec3::new(spawn.x, 0.0, spawn.y);
+    if let Some(world_spawn) = Archipelago::new(&config).spawn() {
+        view.face(world_spawn.island.centre());
+    }
 
     if let Some(host) = session.hosting {
         commands.insert_resource(Hosting(host));
@@ -1336,16 +1349,29 @@ mod tests {
 
     #[test]
     fn start_puts_the_view_on_the_spawn() {
-        // Every world is entered at the origin, so starting from the dialog
-        // must bring the view home — the menu's own sea may have drifted it
-        // anywhere, and a match must not open wherever the menu was looking.
+        // Every world is entered on its own spawn, so starting from the
+        // dialog must bring the view there — the menu's own sea may have
+        // drifted it anywhere, and a match must not open wherever the menu
+        // was looking. Facing the island, too: the view opens with the
+        // first land dead ahead, not wherever the menu left the bearing.
         let mut app = test_app(AppState::NewWorld);
 
         app.world_mut().resource_mut::<View>().focus = Vec3::new(4_000.0, 0.0, -2_500.0);
         app.world_mut().resource_mut::<NewWorldSettings>().seed = "77".to_string();
         click(&mut app, MenuButton::Start);
 
-        assert_eq!(app.world().resource::<View>().focus, Vec3::ZERO);
+        let spawn = Archipelago::new(&WorldConfig { seed: 77 })
+            .spawn()
+            .expect("seed 77 should offer somewhere to enter");
+        let view = *app.world().resource::<View>();
+        assert_eq!(view.focus, Vec3::new(spawn.point.x, 0.0, spawn.point.y));
+
+        let ahead = Vec2::new(-view.yaw.sin(), -view.yaw.cos());
+        let towards = (spawn.island.centre() - spawn.point).normalize();
+        assert!(
+            ahead.dot(towards) > 0.999,
+            "the match opens looking {ahead}, not at the island {towards}"
+        );
     }
 
     #[test]

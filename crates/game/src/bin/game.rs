@@ -21,7 +21,7 @@ use game::cli::{self, Args};
 use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
 use game::net::{Connection, NetPlugin, Online};
-use game::terrain::TerrainPlugin;
+use game::terrain::{Archipelago, TerrainPlugin};
 use game::{SKY, WINDOW};
 
 fn main() -> ExitCode {
@@ -49,7 +49,13 @@ fn main() -> ExitCode {
         Some(addr) => match Connection::join(addr) {
             Ok(connection) => {
                 args.config.seed = connection.seed;
-                args.centre_on(connection.spawn);
+                // The server says where its world puts this player down; the
+                // island that entry stands off follows from the seed, so the
+                // view can face it without being told.
+                match Archipelago::new(&args.config).spawn() {
+                    Some(spawn) => args.open_on(connection.spawn, spawn.island.centre()),
+                    None => args.centre_on(connection.spawn),
+                }
                 Some(connection)
             }
             Err(message) => {

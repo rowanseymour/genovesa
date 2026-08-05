@@ -45,6 +45,9 @@ pub struct Args {
     /// Whether `--focus` was given — what lets [`Args::centre_on`] tell
     /// "nobody chose" from "somebody chose the origin".
     focus_given: bool,
+    /// Whether `--yaw` was given, so [`Args::open_on`] only turns a view
+    /// nobody aimed.
+    yaw_given: bool,
     /// Whether `--seed` was given. A run that did not name one is in a world
     /// picked off the clock, which is worth saying out loud: otherwise a
     /// picture worth keeping could never be taken twice.
@@ -77,9 +80,8 @@ impl Args {
 
     /// Points the whole run — the starting view and every shot — at a ground
     /// point, unless `--focus` already chose one. Parsing uses it to point a
-    /// capture run at the island nearest the origin; a joined run uses it
-    /// again, from the game binary, once the server's welcome has said where
-    /// its world is entered.
+    /// capture run at the island nearest the origin; [`Args::open_on`] rides
+    /// on it for everything else.
     pub fn centre_on(&mut self, centre: Vec2) {
         if self.focus_given {
             return;
@@ -88,6 +90,25 @@ impl Args {
         self.view.focus = focus;
         for shot in &mut self.shots {
             shot.view.focus = focus;
+        }
+    }
+
+    /// Opens the run on a world's spawn: centres on the point and turns the
+    /// view to face the island it stands off, so the first land is dead
+    /// ahead of a bow already pointing at it. Each half yields to the
+    /// command line — a `--focus` keeps the whole view where it was put,
+    /// and a `--yaw` keeps its own bearing.
+    pub fn open_on(&mut self, spawn: Vec2, island: Vec2) {
+        if self.focus_given {
+            return;
+        }
+        self.centre_on(spawn);
+        if self.yaw_given {
+            return;
+        }
+        self.view.face(island);
+        for shot in &mut self.shots {
+            shot.view.face(island);
         }
     }
 }
@@ -121,11 +142,13 @@ port {DEFAULT_PORT} for others to `--join` — the same session a dedicated
 
 View options, applied in the order given:
   --focus <x,z>     world point to put the player down at and centre the view
-                    on, in metres [default: the origin, where every world is
-                    entered; shots default to the island nearest it]
+                    on, in metres [default: where the world is entered — open
+                    water just off its first island; shots default to the
+                    island nearest the origin]
   --zoom <m>        camera distance in metres, {MIN_DISTANCE} to {MAX_DISTANCE}
                     [default: {}]
-  --yaw <deg>       bearing to look from [default: {}]
+  --yaw <deg>       bearing to look from [default: facing the island the
+                    entry stands off, or {} degrees wherever --focus points]
 
 Capture options:
   --shot <path>     write a PNG of the view as the options so far have left
@@ -162,6 +185,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         debug: false,
         view: View::default(),
         focus_given: false,
+        yaw_given: false,
         seed_given: false,
         shots: Vec::new(),
         resolution: DEFAULT_RESOLUTION,
@@ -197,7 +221,10 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                 args.focus_given = true;
             }
             "--zoom" => args.view.distance = zoom(value)?,
-            "--yaw" => args.view.yaw = yaw(value)?,
+            "--yaw" => {
+                args.view.yaw = yaw(value)?;
+                args.yaw_given = true;
+            }
             "--resolution" => args.resolution = resolution(value)?,
             // Takes a copy of the view as it stands, which is what makes the
             // options before a shot its own and the ones after it the next
@@ -240,29 +267,31 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         args.state = AppState::InWorld;
     }
 
-    // A played run that said nothing about where to look needs no help:
-    // [`View`]'s own default is the origin, which is where every world is
-    // entered — the world keeps it clear of land, so opening on open water is
-    // the game now, not a blank page. A *capture* run is different: a shot
-    // nearly always means a shot of terrain, and the origin is the one place
-    // guaranteed to centre on water, so shots go and find the nearest land.
+    // A run that said nothing about where to look opens where its world is
+    // entered: the spawn point just off the first island, facing it. A
+    // *capture* run is different — a shot nearly always means a shot of
+    // terrain, and photographing an island means centring on its middle
+    // rather than floating off its coast — so shots go to the nearest land.
     //
     // Once, and for the whole command line, rather than per shot: the shots
     // are a sweep over one world, and moving each of them to its own nearest
     // island would break a sequence that says "here, then a bit further" into
-    // an unrelated set of pictures. Answering the layout costs a few hash
-    // mixes and generates nothing, so the world built here is thrown away and
-    // the match builds its own.
+    // an unrelated set of pictures. The world built here is thrown away and
+    // the match builds its own — cheap for a capture run, which only asks
+    // the layout; a played run's spawn generates its entry island, a one-off
+    // cost the match was about to pay for the same island anyway.
     //
     // A joined run skips this entirely: its world is the server's, so a
     // focus from a locally laid-out ocean would point at the wrong one. The
-    // game binary calls `centre_on` with the served spawn point instead.
-    if args.is_capture() && args.join.is_none() {
-        let centre = Archipelago::new(&args.config)
-            .nearest_island(Vec2::ZERO)
-            .map(|spec| spec.centre());
-        if let Some(centre) = centre {
-            args.centre_on(centre);
+    // game binary calls `open_on` with the served spawn point instead.
+    if args.join.is_none() {
+        let world = Archipelago::new(&args.config);
+        if args.is_capture() {
+            if let Some(centre) = world.nearest_island(Vec2::ZERO).map(|spec| spec.centre()) {
+                args.centre_on(centre);
+            }
+        } else if let Some(spawn) = world.spawn() {
+            args.open_on(spawn.point, spawn.island.centre());
         }
     }
     Ok(args)
@@ -391,11 +420,33 @@ mod tests {
 
     #[test]
     fn with_no_focus_given_a_played_run_opens_on_the_spawn() {
-        // Every world is entered at the origin, and the world keeps it clear
-        // of land — so a run that said nothing about where to look starts the
-        // view, and with it the boat, exactly there.
+        // A run that said nothing about where to look starts the view, and
+        // with it the boat, exactly where the world is entered — the spawn
+        // point off the first island — with the bow aimed at the island, so
+        // holding forward is the whole of the first sail.
         let args = ok("--seed 777 --state inworld");
-        assert_eq!(args.view.focus, Vec3::ZERO);
+        let spawn = Archipelago::new(&args.config)
+            .spawn()
+            .expect("seed 777 should offer somewhere to enter");
+
+        assert_eq!(
+            args.view.focus,
+            Vec3::new(spawn.point.x, 0.0, spawn.point.y)
+        );
+
+        // The yaw convention the boat pins: forward is (-sin, -cos).
+        let ahead = Vec2::new(-args.view.yaw.sin(), -args.view.yaw.cos());
+        let towards = (spawn.island.centre() - spawn.point).normalize();
+        assert!(
+            ahead.dot(towards) > 0.999,
+            "the view opens looking {ahead}, not at the island {towards}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_yaw_keeps_its_bearing_over_the_spawn_facing() {
+        let args = ok("--seed 777 --state inworld --yaw 90");
+        assert_eq!(args.view.yaw, std::f32::consts::FRAC_PI_2);
     }
 
     #[test]
@@ -501,9 +552,14 @@ mod tests {
 
     #[test]
     fn an_explicit_focus_outranks_the_served_spawn() {
+        // Both halves of the opening: the view stays where `--focus` put it,
+        // and stays looking the way the default looks — facing an island
+        // from a spot the player chose would be facing it from the wrong
+        // place.
         let mut args = ok("--join x --focus 5,6");
-        args.centre_on(Vec2::new(10.0, 20.0));
+        args.open_on(Vec2::new(10.0, 20.0), Vec2::new(500.0, 20.0));
         assert_eq!(args.view.focus, Vec3::new(5.0, 0.0, 6.0));
+        assert_eq!(args.view.yaw, View::default().yaw);
     }
 
     #[test]
