@@ -488,14 +488,24 @@ mod tests {
     #[test]
     fn the_colour_conversion_matches_the_renderers() {
         // The geometry's vertex colours are converted to linear space by the
-        // world crate, which cannot ask Bevy how — so hold its conversion equal
-        // to the one the renderer's own colour types would have done.
+        // world crate, which cannot ask Bevy how — so hold its conversion to
+        // the one the renderer's own colour types would have done.
+        //
+        // Near equality rather than exact: the world crate decodes with its own
+        // `pow` so that a colour is the same on every machine, and Bevy calls
+        // the platform's `powf`, so the two part company in the last ULP or
+        // two. What this test is for survives that. A transfer function that
+        // has actually gone wrong — the linear leg cut at the wrong knee, 2.2
+        // where 2.4 belongs, sRGB encoded where it should be decoded — is out
+        // by a hundredth or more across this sweep, six orders of magnitude
+        // above the tolerance. Nothing that differs only in the last bits of
+        // the mantissa is a bug anyone can see.
         for step in 0..=100 {
             let c = step as f32 / 100.0;
-            assert_eq!(
-                srgb_to_linear(c),
-                Color::srgb(c, c, c).to_linear().red,
-                "sRGB {c} decodes differently to Bevy"
+            let (ours, bevys) = (srgb_to_linear(c), Color::srgb(c, c, c).to_linear().red);
+            assert!(
+                (ours - bevys).abs() < 1e-6,
+                "sRGB {c} decodes to {ours}, Bevy makes it {bevys}"
             );
         }
     }

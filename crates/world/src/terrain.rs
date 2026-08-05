@@ -25,6 +25,33 @@ use glam::{UVec2, Vec2, Vec3};
 
 use crate::noise::{smoothstep, Noise};
 
+/// `x` to the power `y`, the same way on every machine.
+///
+/// Not `f32::powf`, and that is the whole point of this function existing. Add,
+/// multiply and square root are pinned by IEEE 754 — every conforming machine
+/// returns the same bits — but powers are not, and `f32::powf` is whatever
+/// libm the platform happened to link: Apple's, glibc's, Microsoft's. Those
+/// three do not agree to the last bit, and this crate's promise is that a seed
+/// is a world *whoever generates it*. A server sends a seed and nothing else,
+/// so a client whose `powf` rounds differently doesn't render the world a
+/// shade differently — it walks different ground, in a session everyone else
+/// thinks is one place.
+///
+/// That was not a theory. The first CI run to put these tests on three
+/// operating systems came back with three different maps for seed 20040112,
+/// and two different islands; the one digest that survived was the layout,
+/// whose [`crate::archipelago::skewed_small`] had already been written as a
+/// polynomial for exactly this reason.
+///
+/// The implementation is MUSL's, ported to plain Rust — no platform dispatch
+/// and no hardware instruction to disagree about, so it is the same arithmetic
+/// wherever it is compiled. Bit-for-bit stability across *versions* of it is
+/// not promised either, which is what `--locked` and the digest tests are for:
+/// a bump that moved a result would fail them rather than pass unnoticed.
+pub(crate) fn pow(x: f32, y: f32) -> f32 {
+    libm::powf(x, y)
+}
+
 /// Metres per terrain tile — the map's unit of ground, and the spacing the
 /// height field is sampled at for ground queries.
 pub const TILE_SIZE: f32 = 1.0;
@@ -764,7 +791,7 @@ fn under_ceiling(h: f32, ceiling: f32) -> f32 {
     // No guard on the divisor: the ceiling is [`CLIFF_HEIGHT`] plus a distance
     // that cannot be negative, so it is never near zero.
     let ratio = h / ceiling;
-    h / (1.0 + ratio.powf(CEILING_KNEE)).powf(1.0 / CEILING_KNEE)
+    h / pow(1.0 + pow(ratio, CEILING_KNEE), 1.0 / CEILING_KNEE)
 }
 
 /// One grid point's landform, split at the one term the fit is free to scale.
@@ -1428,7 +1455,7 @@ impl TerrainGenerator {
     fn squircle(&self, wx: f32, wz: f32, power: f32) -> f32 {
         let dx = (wx / self.half_extent.x).abs();
         let dz = (wz / self.half_extent.y).abs();
-        (dx.powf(power) + dz.powf(power)).powf(1.0 / power)
+        pow(pow(dx, power) + pow(dz, power), 1.0 / power)
     }
 
     /// Terrain height in metres before the coast reshapes it. Sea level is 0.
@@ -1853,18 +1880,27 @@ pub struct ChunkGeometry {
 /// One sRGB channel decoded to linear, the standard piecewise transfer
 /// function. The palette is authored in sRGB and shaders blend in linear, so
 /// the conversion happens here, once, as the geometry is built — every
-/// renderer this feeds has to agree on it, and the game's tests hold it equal
-/// to what Bevy's own colour types compute.
+/// renderer this feeds has to agree on it, and the game's tests hold it to
+/// what Bevy's own colour types compute.
 ///
 /// Takes a channel in [0, 1], which is all the palette ever holds. Below zero
 /// this would carry the linear leg on down where a renderer hands the value
-/// back untouched, so the equality the tests check is over that range and no
+/// back untouched, so the agreement the tests check is over that range and no
 /// wider — nothing here has any business asking for more.
+///
+/// Uses this crate's [`pow`] rather than the platform's, which costs the exact
+/// bit-for-bit equality with Bevy that test once held: Bevy calls `powf` and
+/// this no longer does, so the two now part company in the last ULP or so. The
+/// swap is still the right way round. Colours reach the digests through
+/// [`ChunkGeometry::colors`], so a platform-dependent decode would leave the
+/// map digest unable to mean what it says on any machine but the one that
+/// recorded it — and being one ULP from Bevy in a colour nobody can see is a
+/// far smaller thing than being unable to check that a seed is a map at all.
 pub fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
     } else {
-        ((c + 0.055) / 1.055).powf(2.4)
+        pow((c + 0.055) / 1.055, 2.4)
     }
 }
 
@@ -2463,7 +2499,7 @@ fn shape_coast(height: f32, distance: f32, character: f32, scale: f32) -> f32 {
             1.0 + (BEACH_SHELF - 1.0) * beachiness(character)
         };
         let t = (-height / MAX_DEPTH).min(1.0);
-        return -MAX_DEPTH * t.powf(exponent);
+        return -MAX_DEPTH * pow(t, exponent);
     }
 
     let band = CLIFF_HEIGHT * scale;
@@ -2888,11 +2924,14 @@ mod tests {
         // — whether the change was good is mapgen's question, not this
         // test's. When it fails anywhere else — a new platform, a toolchain
         // upgrade, a different target — that is the bet being lost, and the
-        // first place to look is the transcendental calls (`powf`), the only
-        // maths here the hardware does not pin down.
+        // first place to look is still the powers, the only maths here the
+        // hardware does not pin down. They go through [`pow`] now rather than
+        // `f32::powf`, which is what makes this test able to pass on more than
+        // the machine that recorded it; a bumped `libm` would show up here the
+        // same way a new platform would.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x3031_FE9A_B432_AEC6u64),
-            (99, UVec2::new(3, 2), 0xA998_F6F6_BA63_6BE8u64),
+            (20_040_112u32, UVec2::new(4, 4), 0x69CE_AB02_11E1_998Bu64),
+            (99, UVec2::new(3, 2), 0x45EE_68F7_2739_ADD9u64),
         ];
 
         for (seed, chunks, expected) in cases {

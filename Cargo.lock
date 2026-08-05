@@ -5875,6 +5875,7 @@ dependencies = [
  "bevy_ecs",
  "glam",
  "image",
+ "libm",
 ]
 
 [[package]]
