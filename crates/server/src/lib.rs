@@ -97,6 +97,10 @@ struct Shared {
     /// Dealt in joining order, and never reused within a session.
     next_id: AtomicU32,
     players: Mutex<HashMap<PlayerId, Player>>,
+    /// Set once, by the end of the session, and read by every thread that
+    /// might still be joining one: see [`Host::drop`], which is what makes it
+    /// true, and [`serve`], which is what makes it mean something.
+    stopping: AtomicBool,
     report: Report,
 }
 
@@ -129,6 +133,7 @@ impl Server {
                 spawn,
                 next_id: AtomicU32::new(1),
                 players: Mutex::new(HashMap::new()),
+                stopping: AtomicBool::new(false),
                 report: Box::new(|_| {}),
             }),
         })
@@ -158,7 +163,7 @@ impl Server {
     /// own, from handshake to hang-up. What a dedicated server does, there
     /// being nothing else for its process to be doing.
     pub fn run(self) {
-        accept(&self.listener, &self.shared, &AtomicBool::new(false));
+        accept(&self.listener, &self.shared);
     }
 
     /// Serves on a thread of its own, and hands back the handle that ends it.
@@ -170,16 +175,14 @@ impl Server {
     /// is in, would outlive the match that made them.
     pub fn spawn(self) -> io::Result<Host> {
         let addr = self.listener.local_addr()?;
-        let stopping = Arc::new(AtomicBool::new(false));
         let shared = self.shared.clone();
         let thread = {
-            let (listener, shared, stopping) = (self.listener, self.shared, stopping.clone());
-            thread::spawn(move || accept(&listener, &shared, &stopping))
+            let (listener, shared) = (self.listener, self.shared);
+            thread::spawn(move || accept(&listener, &shared))
         };
         Ok(Host {
             addr,
             shared,
-            stopping,
             thread: Some(thread),
         })
     }
@@ -192,7 +195,6 @@ impl Server {
 pub struct Host {
     addr: SocketAddr,
     shared: Arc<Shared>,
-    stopping: Arc<AtomicBool>,
     /// Taken by [`Drop`], which is the only place it is looked at. An `Option`
     /// because joining a thread consumes its handle, and a value being dropped
     /// can only be borrowed.
@@ -209,7 +211,14 @@ impl Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Relaxed);
+        // Before the roster is read, not after: a connection still in its
+        // handshake is on nobody's roster, so the flag is the only thing that
+        // can reach it. Taking the lock below is what publishes it — a thread
+        // that joins the roster does so under the same lock, so it either got
+        // there first and is shut down here, or it arrives to find the flag
+        // set. There is no third case, and so nobody is left connected to a
+        // world that has ended.
+        self.shared.stopping.store(true, Ordering::Relaxed);
 
         // Everyone still connected is blocked in a read that only their own
         // client could end, and their threads each hold a share of the state
@@ -235,12 +244,12 @@ impl Drop for Host {
 }
 
 /// Takes connections until asked to stop, giving each a thread of its own.
-fn accept(listener: &TcpListener, shared: &Arc<Shared>, stopping: &AtomicBool) {
+fn accept(listener: &TcpListener, shared: &Arc<Shared>) {
     // Non-blocking, so that the stop above is noticed within [`STOP_POLL`]
     // rather than whenever the next connection happens to arrive.
     let _ = listener.set_nonblocking(true);
 
-    while !stopping.load(Ordering::Relaxed) {
+    while !shared.stopping.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
                 // An accepted socket inherits the listener's mode on some
@@ -330,35 +339,57 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) {
         outbox,
         line: stream,
     };
-    post(
-        &player,
-        ToClient::Welcome {
-            id,
-            seed: shared.config.seed,
-            spawn: player.position,
-        },
-    );
 
-    // Onto the roster under one hold of the lock: the newcomer hears exactly
-    // who is already here, everyone else hears the newcomer, and no move can
-    // slip between the two — a `Moved` about a player a client has not been
+    // Onto the roster and then welcomed, under one hold of the lock.
+    //
+    // In that order, because a client's join is over the moment it reads its
+    // welcome: a player welcomed before they were listed is, for that instant,
+    // one who believes they are in the world while the session cannot see them
+    // to hang up on them — and the end of a session is exactly the moment that
+    // instant is unaffordable. Listing them first costs the welcome nothing,
+    // since everything else that writes to a player takes this lock too, so
+    // nothing can get in front of it.
+    //
+    // The rest is why the hold is one hold: the newcomer hears exactly who is
+    // already here, everyone else hears the newcomer, and no move can slip
+    // between the two — a `Moved` about a player a client has not been
     // introduced to would be about nobody.
     {
         let mut players = shared.players.lock().expect("no poisoned lock");
-        for (other, existing) in players.iter() {
-            post(
-                &player,
-                ToClient::Joined {
-                    id: *other,
-                    position: existing.position,
-                },
-            );
+
+        // A world that has already ended has nobody to introduce and no way to
+        // hear of anyone arriving now. Its drop set this before reaching for
+        // the lock, so a connection that gets here afterwards finds it — and
+        // returning drops the socket, which is the same hang-up the drop would
+        // have delivered had this player made it onto the roster in time.
+        if shared.stopping.load(Ordering::Relaxed) {
+            return;
         }
+
+        let welcome = ToClient::Welcome {
+            id,
+            seed: shared.config.seed,
+            spawn: player.position,
+        };
         let arrival = ToClient::Joined {
             id,
             position: player.position,
         };
         players.insert(id, player);
+
+        let newcomer = &players[&id];
+        post(newcomer, welcome);
+        for (other, existing) in players.iter() {
+            if *other != id {
+                post(
+                    newcomer,
+                    ToClient::Joined {
+                        id: *other,
+                        position: existing.position,
+                    },
+                );
+            }
+        }
         broadcast(&players, id, arrival);
     }
     (shared.report)(&format!("{id} joined"));
