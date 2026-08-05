@@ -56,11 +56,21 @@ jobs:
       # -sys crates go looking for through pkg-config, and wayland matches the
       # defaults of Bevy's own CI action. No window is ever opened here; these
       # are needed to link, not to run.
+      #
+      # fontconfig is the one that isn't Bevy's by default: turning on
+      # `system_font_discovery` so the menu's title can ask for a serif puts
+      # fontique in the tree, and on Linux fontique reads the machine's font
+      # database through fontconfig. Its -sys crate resolves that at *build*
+      # time and panics outright when pkg-config can't find it, so a builder
+      # without this compiles nothing at all — not a link error at the end, a
+      # dead stop before the workspace is even checked. A feature that only
+      # shows on one screen is easy to add without thinking about the builder;
+      # this list is where that gets paid for.
       - name: Install Bevy's Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libasound2-dev libudev-dev libwayland-dev
+            libasound2-dev libudev-dev libwayland-dev libfontconfig1-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
