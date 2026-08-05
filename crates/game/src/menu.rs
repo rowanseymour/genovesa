@@ -1644,14 +1644,14 @@ mod tests {
     fn an_armed_row_says_it_is_waiting_and_then_shows_the_new_key() {
         let mut app = test_app(AppState::MainMenu);
         go_to(&mut app, AppState::Settings);
-        assert_eq!(row_text(&mut app, Action::MoveLeft), "A");
+        assert_eq!(row_text(&mut app, Action::SteerLeft), "A");
 
-        click(&mut app, MenuButton::Rebind(Action::MoveLeft));
-        assert_eq!(row_text(&mut app, Action::MoveLeft), "press a key");
+        click(&mut app, MenuButton::Rebind(Action::SteerLeft));
+        assert_eq!(row_text(&mut app, Action::SteerLeft), "press a key");
 
         type_key(&mut app, KeyCode::KeyH, "h");
         app.update();
-        assert_eq!(row_text(&mut app, Action::MoveLeft), "H");
+        assert_eq!(row_text(&mut app, Action::SteerLeft), "H");
     }
 
     #[test]
@@ -1706,7 +1706,7 @@ mod tests {
     fn defaults_puts_every_key_back() {
         let mut app = test_app(AppState::Settings);
 
-        click(&mut app, MenuButton::Rebind(Action::MoveLeft));
+        click(&mut app, MenuButton::Rebind(Action::SteerLeft));
         type_key(&mut app, KeyCode::KeyZ, "z");
         click(&mut app, MenuButton::ResetKeys);
 

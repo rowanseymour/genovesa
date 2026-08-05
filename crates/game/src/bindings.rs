@@ -12,14 +12,14 @@
 use bevy::input::keyboard::Key;
 use bevy::prelude::*;
 
-/// A control the player can put on a key of their choosing: moving their
-/// avatar, or turning the view around it.
+/// A control the player can put on a key of their choosing: driving their
+/// boat — ahead, astern, helm over — or turning the view around it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     MoveForward,
     MoveBack,
-    MoveLeft,
-    MoveRight,
+    SteerLeft,
+    SteerRight,
     TurnLeft,
     TurnRight,
 }
@@ -29,32 +29,35 @@ impl Action {
     pub const ALL: [Action; 6] = [
         Action::MoveForward,
         Action::MoveBack,
-        Action::MoveLeft,
-        Action::MoveRight,
+        Action::SteerLeft,
+        Action::SteerRight,
         Action::TurnLeft,
         Action::TurnRight,
     ];
 
-    /// How the settings screen names the action.
+    /// How the settings screen names the action. The last two say "view"
+    /// because steering left and turning left are different keys doing
+    /// different things, and a list that read "Steer left … Turn left" would
+    /// leave the player to guess which is which.
     pub fn label(self) -> &'static str {
         match self {
-            Action::MoveForward => "Move forward",
-            Action::MoveBack => "Move back",
-            Action::MoveLeft => "Move left",
-            Action::MoveRight => "Move right",
-            Action::TurnLeft => "Turn left",
-            Action::TurnRight => "Turn right",
+            Action::MoveForward => "Forward",
+            Action::MoveBack => "Back",
+            Action::SteerLeft => "Steer left",
+            Action::SteerRight => "Steer right",
+            Action::TurnLeft => "Turn view left",
+            Action::TurnRight => "Turn view right",
         }
     }
 
-    /// Where the action starts out: WASD to move and Q/E to turn, which is what
-    /// the game had before any of this was configurable.
+    /// Where the action starts out: WASD to drive and Q/E to turn the view,
+    /// which is what the game had before any of this was configurable.
     pub fn default_key(self) -> KeyCode {
         match self {
             Action::MoveForward => KeyCode::KeyW,
             Action::MoveBack => KeyCode::KeyS,
-            Action::MoveLeft => KeyCode::KeyA,
-            Action::MoveRight => KeyCode::KeyD,
+            Action::SteerLeft => KeyCode::KeyA,
+            Action::SteerRight => KeyCode::KeyD,
             Action::TurnLeft => KeyCode::KeyQ,
             Action::TurnRight => KeyCode::KeyE,
         }
@@ -325,7 +328,7 @@ mod tests {
         let bindings = KeyBindings::default();
         assert_eq!(
             bindings.action_bound_to(KeyCode::KeyA),
-            Some(Action::MoveLeft)
+            Some(Action::SteerLeft)
         );
         assert_eq!(bindings.action_bound_to(KeyCode::KeyM), None);
     }

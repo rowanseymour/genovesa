@@ -17,7 +17,7 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
-use crate::camera::{self, MapCamera, View};
+use crate::camera::View;
 use crate::terrain::WorldTerrain;
 use crate::AppState;
 
@@ -57,10 +57,14 @@ const MAST_STATION: f32 = -0.15;
 /// minutes away rather than tens of minutes.
 const SPEED: f32 = 10.0;
 
-/// How fast the bow comes round, in radians per second. Together with
-/// [`SPEED`] this fixes the turning circle at about five metres — tight enough
-/// to feel answerable from a camera forty metres up, wide enough that coming
-/// about reads as a turn rather than a spin.
+/// Metres per second going astern — enough to back off a beach or out of a
+/// cove, and slow enough that nobody crosses an ocean in reverse.
+const ASTERN_SPEED: f32 = 4.0;
+
+/// How fast the helm brings the bow round, in radians per second. Together
+/// with [`SPEED`] this fixes the turning circle at about five metres — tight
+/// enough to feel answerable from a camera forty metres up, wide enough that
+/// coming about reads as a turn rather than a spin.
 const TURN_RATE: f32 = 2.0;
 
 /// Timber. Nothing on an island or in the sea is anywhere near this hue, so the
@@ -159,66 +163,54 @@ fn float(terrain: Option<Res<WorldTerrain>>, mut boats: Query<&mut Transform, Wi
     }
 }
 
-/// Drives the boat by the movement keys, read relative to the way the view
-/// faces: forward is "away from the viewer" however far round the view has
-/// been turned, exactly as the keys read on screen. The bow comes round
-/// towards the asked-for direction while the hull advances along its heading,
-/// so a sideways key carves an arc rather than strafing — the one hint of
-/// handling this placeholder keeps ahead of anything resembling physics.
+/// Drives the boat in its own frame, the way a boat is driven: forward and
+/// back run the hull along its heading, and the steering keys are the helm,
+/// bringing the bow round for as long as they're held. The view plays no part
+/// — turning the camera changes what the keys look like on screen, never what
+/// they do — which is what makes a long sail a held key rather than a chase
+/// between the camera's yaw and the boat's.
 ///
-/// Nothing here knows about land: a hull driven onto a hillside ploughs
-/// through it, half-buried by [`float`]. Collision is deferred, deliberately —
-/// steering that *feels* right comes before running aground having
-/// consequences.
+/// The helm answers even with no way on, which no rudder would; a boat that
+/// can't point where it's told while stationary is annoying before it is
+/// realistic. Nothing here knows about land either: a hull driven onto a
+/// hillside ploughs through it, half-buried by [`float`]. Collision is
+/// deferred, deliberately — steering that *feels* right comes before running
+/// aground having consequences.
 fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     time: Res<Time>,
-    cameras: Query<&MapCamera>,
     mut boats: Query<&mut Transform, With<Boat>>,
 ) {
-    let mut input = Vec2::ZERO;
+    // Direction first, speed second, so opposed keys cancel outright rather
+    // than the faster gear winning by the difference.
+    let mut drive = 0.0;
     if bindings.held(&keys, Action::MoveForward, KeyCode::ArrowUp) {
-        input.y += 1.0;
+        drive += 1.0;
     }
     if bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown) {
-        input.y -= 1.0;
+        drive -= 1.0;
     }
-    if bindings.held(&keys, Action::MoveRight, KeyCode::ArrowRight) {
-        input.x += 1.0;
-    }
-    if bindings.held(&keys, Action::MoveLeft, KeyCode::ArrowLeft) {
-        input.x -= 1.0;
-    }
-    if input == Vec2::ZERO {
-        return;
-    }
+    let speed = if drive > 0.0 { SPEED } else { ASTERN_SPEED };
 
-    // Taken from the eased yaw, not its target, so steering mid-turn goes
-    // where the picture on screen says it should.
-    let Ok(view) = cameras.single() else {
+    // Port is a positive turn about the vertical, the same way round as the
+    // camera's own Q.
+    let mut helm = 0.0;
+    if bindings.held(&keys, Action::SteerLeft, KeyCode::ArrowLeft) {
+        helm += 1.0;
+    }
+    if bindings.held(&keys, Action::SteerRight, KeyCode::ArrowRight) {
+        helm -= 1.0;
+    }
+    if drive == 0.0 && helm == 0.0 {
         return;
-    };
-    let forward = camera::forward(view.yaw);
-    let right = forward.cross(Vec3::Y);
-    let asked = (forward * input.y + right * input.x).normalize();
+    }
 
     for mut boat in &mut boats {
-        // The shortest way round from the heading to the asked-for direction,
-        // no more of it than the turn rate allows this frame.
-        let turn = angle_to(*boat.forward(), asked);
-        let most = TURN_RATE * time.delta_secs();
-        boat.rotate_y(turn.clamp(-most, most));
-
-        let advance = boat.forward() * SPEED * time.delta_secs();
+        boat.rotate_y(helm * TURN_RATE * time.delta_secs());
+        let advance = boat.forward() * drive * speed * time.delta_secs();
         boat.translation += advance;
     }
-}
-
-/// Signed angle about the vertical from one ground-plane direction to another,
-/// in [-π, π] — positive the way [`Transform::rotate_y`] turns.
-fn angle_to(from: Vec3, to: Vec3) -> f32 {
-    f32::atan2(from.z * to.x - from.x * to.z, from.x * to.x + from.z * to.z)
 }
 
 /// The hull, as the triangles it is made of, wound so that every face looks
@@ -296,12 +288,8 @@ mod tests {
 
     use super::*;
 
-    /// A headless app with the boat systems running, already in a match, and a
-    /// camera looking from `yaw` for the steering to read its directions off.
-    /// The boat itself launches facing the default view regardless, which is
-    /// what lets a turned camera and an unturned boat be set up against each
-    /// other.
-    fn test_app_looking(yaw: f32) -> App {
+    /// A headless app with the boat systems running, already in a match.
+    fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins((TimePlugin, StatesPlugin, BoatPlugin))
             .init_state::<AppState>()
@@ -310,18 +298,12 @@ mod tests {
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>();
-        app.world_mut()
-            .spawn(MapCamera::looking(View { yaw, ..default() }));
         app.update();
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
             .set(AppState::InWorld);
         app.update();
         app
-    }
-
-    fn test_app() -> App {
-        test_app_looking(View::default().yaw)
     }
 
     fn boat(app: &mut App) -> Transform {
@@ -331,8 +313,7 @@ mod tests {
             .expect("a match should have a boat in it")
     }
 
-    /// The bow's bearing, in the same terms as a camera yaw — what
-    /// `camera::forward` of it would face.
+    /// The bow's bearing, in the same terms as a camera yaw.
     fn heading_yaw(app: &mut App) -> f32 {
         let forward = boat(app).forward();
         f32::atan2(-forward.x, -forward.z)
@@ -371,10 +352,11 @@ mod tests {
         app.world().resource::<Time>().elapsed_secs()
     }
 
-    /// Radians per second the bow comes round at in `app` while `key` is held.
-    /// A rate rather than an angle — proportionality to how long the key was
-    /// held is what makes a turn the same on any machine.
-    fn turn_rate(mut app: App, key: KeyCode) -> f32 {
+    /// Radians per second the bow comes round at while `key` is held. A rate
+    /// rather than an angle — proportionality to how long the key was held is
+    /// what makes a turn the same on any machine.
+    fn turn_rate(key: KeyCode) -> f32 {
+        let mut app = test_app();
         let start_yaw = heading_yaw(&mut app);
         let before = elapsed(&app);
         hold(&mut app, key);
@@ -431,79 +413,105 @@ mod tests {
     }
 
     #[test]
-    fn the_forward_key_drives_the_boat_the_way_the_view_faces() {
+    fn the_forward_key_drives_the_boat_the_way_the_bow_points() {
         let mut app = test_app();
-        let before = boat(&mut app).translation;
+        let before = boat(&mut app);
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 20);
-        let moved = boat(&mut app).translation - before;
+        let moved = boat(&mut app).translation - before.translation;
 
-        // Launched already facing the view's way, so no turning muddies it:
-        // the whole of the movement is "away from the viewer".
-        let forward = camera::forward(app.world().resource::<View>().yaw);
+        // Forward means the boat's own forward — no helm held, so the whole
+        // of the movement is dead ahead.
         assert!(moved.length() > 0.0, "the boat never moved");
         assert!(
-            moved.normalize().dot(forward) > 0.999,
-            "the boat went {moved:?} rather than along {forward:?}"
+            moved.normalize().dot(*before.forward()) > 0.999,
+            "the boat went {moved:?} rather than along its heading"
         );
         // And along the surface, not through it — height is `float`'s alone.
         assert_eq!(moved.y, 0.0);
     }
 
-    #[test]
-    fn under_way_the_boat_makes_its_speed() {
+    /// Metres per second the boat covers in a straight line while `key` is
+    /// held, signed by whether it went ahead or astern.
+    fn speed_made(key: KeyCode) -> f32 {
         let mut app = test_app();
-        let before = boat(&mut app).translation;
+        let before = boat(&mut app);
         let start = elapsed(&app);
-        hold(&mut app, KeyCode::ArrowUp);
+        hold(&mut app, key);
         run_frames(&mut app, 20);
         let seconds = elapsed(&app) - start;
         assert!(seconds > 0.0, "no time passed while the key was held");
 
-        let made = (boat(&mut app).translation - before).length() / seconds;
+        let moved = boat(&mut app).translation - before.translation;
+        moved.dot(*before.forward()) / seconds
+    }
+
+    #[test]
+    fn ahead_and_astern_each_make_their_own_speed() {
+        let ahead = speed_made(KeyCode::ArrowUp);
         assert!(
-            (made - SPEED).abs() < SPEED * 0.01,
-            "the boat made {made} m/s, not {SPEED}"
+            (ahead - SPEED).abs() < SPEED * 0.01,
+            "the boat made {ahead} m/s ahead, not {SPEED}"
+        );
+
+        // Backing off a beach is the whole use of astern, so it is slower and
+        // it is backwards — along the heading reversed, not a turn.
+        let astern = speed_made(KeyCode::ArrowDown);
+        assert!(
+            (astern + ASTERN_SPEED).abs() < ASTERN_SPEED * 0.01,
+            "the boat made {astern} m/s astern, not -{ASTERN_SPEED}"
         );
     }
 
     #[test]
-    fn the_bow_comes_round_at_the_turn_rate() {
-        // A sideways key asks for a direction square to the heading, so the
-        // whole run is spent turning: the clamp is what's being measured.
-        // Starboard is a negative turn, the same way round as the camera's E.
-        let rate = turn_rate(test_app(), KeyCode::ArrowRight);
+    fn the_helm_brings_the_bow_round_at_the_turn_rate() {
+        // Port is a positive turn about the vertical, the same way round as
+        // the camera's own Q; starboard its mirror.
+        let port = turn_rate(KeyCode::ArrowLeft);
+        let starboard = turn_rate(KeyCode::ArrowRight);
+
         let tolerance = TURN_RATE * 0.01;
         assert!(
-            (rate + TURN_RATE).abs() < tolerance,
-            "the bow came round at {rate} rad/s, not -{TURN_RATE}"
+            (port - TURN_RATE).abs() < tolerance,
+            "the bow came round at {port} rad/s to port, not {TURN_RATE}"
+        );
+        assert!(
+            (starboard + TURN_RATE).abs() < tolerance,
+            "the bow came round at {starboard} rad/s to starboard, not -{TURN_RATE}"
         );
     }
 
     #[test]
-    fn steering_reads_its_directions_off_the_view() {
-        // The camera looks a quarter-turn round from the way the boat faces,
-        // so the *forward* key now asks for a turn: to port, the way that
-        // brings the bow round to what the viewer sees as away. A boat
-        // steering by its own frame would sail straight on instead.
-        let quarter = std::f32::consts::FRAC_PI_2;
-        let app = test_app_looking(View::default().yaw + quarter);
-        let rate = turn_rate(app, KeyCode::ArrowUp);
-        let tolerance = TURN_RATE * 0.01;
-        assert!(
-            (rate - TURN_RATE).abs() < tolerance,
-            "the bow came round at {rate} rad/s, not {TURN_RATE}"
-        );
+    fn the_helm_answers_with_no_way_on() {
+        // Turning without moving: the bow swings, the hull stays put.
+        let mut app = test_app();
+        let before = boat(&mut app);
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, 20);
+        let after = boat(&mut app);
+
+        assert_eq!(after.translation, before.translation);
+        assert_ne!(after.rotation, before.rotation, "the bow never swung");
     }
 
     #[test]
     fn opposed_keys_hold_the_boat_still() {
+        // All four at once: ahead cancels astern outright — not by the faster
+        // gear's margin — and port cancels starboard.
         let mut app = test_app();
-        let before = boat(&mut app).translation;
-        hold(&mut app, KeyCode::ArrowUp);
-        hold(&mut app, KeyCode::ArrowDown);
+        let before = boat(&mut app);
+        for key in [
+            KeyCode::ArrowUp,
+            KeyCode::ArrowDown,
+            KeyCode::ArrowLeft,
+            KeyCode::ArrowRight,
+        ] {
+            hold(&mut app, key);
+        }
         run_frames(&mut app, 20);
-        assert_eq!(boat(&mut app).translation, before);
+        let after = boat(&mut app);
+        assert_eq!(after.translation, before.translation);
+        assert_eq!(after.rotation, before.rotation);
     }
 
     #[test]
@@ -540,8 +548,8 @@ mod tests {
         // Hand every movement action to keys nowhere near the arrows.
         rebind(&mut app, Action::MoveForward, KeyCode::KeyI);
         rebind(&mut app, Action::MoveBack, KeyCode::KeyK);
-        rebind(&mut app, Action::MoveLeft, KeyCode::KeyJ);
-        rebind(&mut app, Action::MoveRight, KeyCode::KeyL);
+        rebind(&mut app, Action::SteerLeft, KeyCode::KeyJ);
+        rebind(&mut app, Action::SteerRight, KeyCode::KeyL);
 
         let before = boat(&mut app).translation;
         hold(&mut app, KeyCode::ArrowUp);

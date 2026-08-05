@@ -197,12 +197,6 @@ fn eye(camera: &MapCamera) -> Vec3 {
     camera.focus + offset * camera.distance
 }
 
-/// The direction "away from the viewer" on the ground plane, at a given yaw.
-/// Steering reads it too — movement keys mean directions on the screen.
-pub(crate) fn forward(yaw: f32) -> Vec3 {
-    -Vec3::new(yaw.sin(), 0.0, yaw.cos())
-}
-
 /// Keeps the camera centred on the player's boat. The boat rides the surface
 /// it is over, so following its whole translation is also what raises the
 /// camera onto a hillside and keeps it at the waterline over open sea.
