@@ -867,7 +867,7 @@ fn spawn_settings(mut commands: Commands, bindings: Res<KeyBindings>) {
 
                 // Plain punctuation only: the default font has no dash of
                 // any kind and draws a missing glyph as an empty box.
-                label(panel, "the arrow keys always pan, and escape always");
+                label(panel, "the arrow keys always move, and escape always");
                 label(panel, "leaves; neither can be reassigned");
 
                 panel
@@ -1328,7 +1328,9 @@ mod tests {
         // the boat is a kilometre of ocean away from the only place anyone
         // looks for it.
         let mut app = test_app(AppState::NewWorld);
-        app.add_plugins(crate::boat::BoatPlugin)
+        // Time for the steering the boat plugin brings with it; the menu's own
+        // systems never ask what o'clock it is.
+        app.add_plugins((bevy::time::TimePlugin, crate::boat::BoatPlugin))
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>();
 
@@ -1607,11 +1609,11 @@ mod tests {
     fn a_row_waits_for_a_key_and_then_takes_it() {
         let mut app = test_app(AppState::Settings);
 
-        click(&mut app, MenuButton::Rebind(Action::PanForward));
-        assert_eq!(waiting_on(&app), Some(Action::PanForward));
+        click(&mut app, MenuButton::Rebind(Action::MoveForward));
+        assert_eq!(waiting_on(&app), Some(Action::MoveForward));
 
         type_key(&mut app, KeyCode::KeyJ, "j");
-        assert_eq!(bindings(&app).key(Action::PanForward), KeyCode::KeyJ);
+        assert_eq!(bindings(&app).key(Action::MoveForward), KeyCode::KeyJ);
         assert_eq!(waiting_on(&app), None, "the row is still waiting");
     }
 
@@ -1642,14 +1644,14 @@ mod tests {
     fn an_armed_row_says_it_is_waiting_and_then_shows_the_new_key() {
         let mut app = test_app(AppState::MainMenu);
         go_to(&mut app, AppState::Settings);
-        assert_eq!(row_text(&mut app, Action::PanLeft), "A");
+        assert_eq!(row_text(&mut app, Action::SteerLeft), "A");
 
-        click(&mut app, MenuButton::Rebind(Action::PanLeft));
-        assert_eq!(row_text(&mut app, Action::PanLeft), "press a key");
+        click(&mut app, MenuButton::Rebind(Action::SteerLeft));
+        assert_eq!(row_text(&mut app, Action::SteerLeft), "press a key");
 
         type_key(&mut app, KeyCode::KeyH, "h");
         app.update();
-        assert_eq!(row_text(&mut app, Action::PanLeft), "H");
+        assert_eq!(row_text(&mut app, Action::SteerLeft), "H");
     }
 
     #[test]
@@ -1657,7 +1659,7 @@ mod tests {
         let mut app = test_app(AppState::Settings);
         let before = bindings(&app).clone();
 
-        click(&mut app, MenuButton::Rebind(Action::PanBack));
+        click(&mut app, MenuButton::Rebind(Action::MoveBack));
         type_key(&mut app, KeyCode::Escape, "\u{1b}");
 
         assert_eq!(waiting_on(&app), None);
@@ -1670,29 +1672,29 @@ mod tests {
     fn a_reserved_key_is_refused_and_the_row_keeps_waiting() {
         let mut app = test_app(AppState::Settings);
 
-        click(&mut app, MenuButton::Rebind(Action::PanBack));
+        click(&mut app, MenuButton::Rebind(Action::MoveBack));
         type_key(&mut app, KeyCode::ArrowUp, "");
 
-        assert_eq!(bindings(&app).key(Action::PanBack), KeyCode::KeyS);
+        assert_eq!(bindings(&app).key(Action::MoveBack), KeyCode::KeyS);
         assert_eq!(
             waiting_on(&app),
-            Some(Action::PanBack),
+            Some(Action::MoveBack),
             "a refused key should leave the row armed"
         );
 
         // And a real key still lands afterwards.
         type_key(&mut app, KeyCode::KeyN, "n");
-        assert_eq!(bindings(&app).key(Action::PanBack), KeyCode::KeyN);
+        assert_eq!(bindings(&app).key(Action::MoveBack), KeyCode::KeyN);
     }
 
     #[test]
     fn taking_a_key_another_action_had_trades_the_two() {
         let mut app = test_app(AppState::Settings);
 
-        click(&mut app, MenuButton::Rebind(Action::PanForward));
+        click(&mut app, MenuButton::Rebind(Action::MoveForward));
         type_key(&mut app, KeyCode::KeyE, "e");
 
-        assert_eq!(bindings(&app).key(Action::PanForward), KeyCode::KeyE);
+        assert_eq!(bindings(&app).key(Action::MoveForward), KeyCode::KeyE);
         assert_eq!(
             bindings(&app).key(Action::TurnRight),
             KeyCode::KeyW,
@@ -1704,7 +1706,7 @@ mod tests {
     fn defaults_puts_every_key_back() {
         let mut app = test_app(AppState::Settings);
 
-        click(&mut app, MenuButton::Rebind(Action::PanLeft));
+        click(&mut app, MenuButton::Rebind(Action::SteerLeft));
         type_key(&mut app, KeyCode::KeyZ, "z");
         click(&mut app, MenuButton::ResetKeys);
 
@@ -1745,10 +1747,10 @@ mod tests {
         type_key(&mut app, KeyCode::KeyJ, "j");
 
         go_to(&mut app, AppState::Settings);
-        click(&mut app, MenuButton::Rebind(Action::PanForward));
+        click(&mut app, MenuButton::Rebind(Action::MoveForward));
 
-        assert_eq!(waiting_on(&app), Some(Action::PanForward));
-        assert_eq!(bindings(&app).key(Action::PanForward), KeyCode::KeyW);
+        assert_eq!(waiting_on(&app), Some(Action::MoveForward));
+        assert_eq!(bindings(&app).key(Action::MoveForward), KeyCode::KeyW);
     }
 
     #[test]

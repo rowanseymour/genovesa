@@ -12,13 +12,14 @@
 use bevy::input::keyboard::Key;
 use bevy::prelude::*;
 
-/// A camera control the player can put on a key of their choosing.
+/// A control the player can put on a key of their choosing: driving their
+/// boat — ahead, astern, helm over — or turning the view around it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
-    PanForward,
-    PanBack,
-    PanLeft,
-    PanRight,
+    MoveForward,
+    MoveBack,
+    SteerLeft,
+    SteerRight,
     TurnLeft,
     TurnRight,
 }
@@ -26,34 +27,37 @@ pub enum Action {
 impl Action {
     /// Every action, in the order the settings screen lists them.
     pub const ALL: [Action; 6] = [
-        Action::PanForward,
-        Action::PanBack,
-        Action::PanLeft,
-        Action::PanRight,
+        Action::MoveForward,
+        Action::MoveBack,
+        Action::SteerLeft,
+        Action::SteerRight,
         Action::TurnLeft,
         Action::TurnRight,
     ];
 
-    /// How the settings screen names the action.
+    /// How the settings screen names the action. The last two say "view"
+    /// because steering left and turning left are different keys doing
+    /// different things, and a list that read "Steer left … Turn left" would
+    /// leave the player to guess which is which.
     pub fn label(self) -> &'static str {
         match self {
-            Action::PanForward => "Pan forward",
-            Action::PanBack => "Pan back",
-            Action::PanLeft => "Pan left",
-            Action::PanRight => "Pan right",
-            Action::TurnLeft => "Turn left",
-            Action::TurnRight => "Turn right",
+            Action::MoveForward => "Forward",
+            Action::MoveBack => "Back",
+            Action::SteerLeft => "Steer left",
+            Action::SteerRight => "Steer right",
+            Action::TurnLeft => "Turn view left",
+            Action::TurnRight => "Turn view right",
         }
     }
 
-    /// Where the action starts out: WASD to move and Q/E to turn, which is what
-    /// the game had before any of this was configurable.
+    /// Where the action starts out: WASD to drive and Q/E to turn the view,
+    /// which is what the game had before any of this was configurable.
     pub fn default_key(self) -> KeyCode {
         match self {
-            Action::PanForward => KeyCode::KeyW,
-            Action::PanBack => KeyCode::KeyS,
-            Action::PanLeft => KeyCode::KeyA,
-            Action::PanRight => KeyCode::KeyD,
+            Action::MoveForward => KeyCode::KeyW,
+            Action::MoveBack => KeyCode::KeyS,
+            Action::SteerLeft => KeyCode::KeyA,
+            Action::SteerRight => KeyCode::KeyD,
             Action::TurnLeft => KeyCode::KeyQ,
             Action::TurnRight => KeyCode::KeyE,
         }
@@ -72,9 +76,9 @@ impl Action {
 }
 
 /// Keys the player may not take, because taking them would leave no way back.
-/// The arrows are a permanent second set of pan keys, so however thoroughly the
-/// rest is rebound the map can always be moved; Escape is what leaves a match
-/// and what backs out of setting a key.
+/// The arrows are a permanent second set of movement keys, so however
+/// thoroughly the rest is rebound the player can always get about; Escape is
+/// what leaves a match and what backs out of setting a key.
 pub const RESERVED: [KeyCode; 5] = [
     KeyCode::Escape,
     KeyCode::ArrowUp,
@@ -120,6 +124,14 @@ impl KeyBindings {
     /// The key that drives an action.
     pub fn key(&self, action: Action) -> KeyCode {
         self.bound[action.index()].key
+    }
+
+    /// True while an action's own key is down, or the arrow key that
+    /// permanently shadows it. The arrows aren't rebindable and aren't listed
+    /// in the settings screen: they're the floor under it, so that no set of
+    /// bindings, however muddled, can leave the player unable to move.
+    pub fn held(&self, keys: &ButtonInput<KeyCode>, action: Action, arrow: KeyCode) -> bool {
+        keys.any_pressed([self.key(action), arrow])
     }
 
     /// What to call that key on screen — what it typed if it was set by
@@ -214,10 +226,13 @@ mod tests {
     #[test]
     fn binding_a_free_key_leaves_every_other_action_alone() {
         let mut bindings = KeyBindings::default();
-        bindings.bind(Action::PanForward, KeyCode::KeyM, None);
+        bindings.bind(Action::MoveForward, KeyCode::KeyM, None);
 
-        assert_eq!(bindings.key(Action::PanForward), KeyCode::KeyM);
-        for action in Action::ALL.into_iter().filter(|a| *a != Action::PanForward) {
+        assert_eq!(bindings.key(Action::MoveForward), KeyCode::KeyM);
+        for action in Action::ALL
+            .into_iter()
+            .filter(|a| *a != Action::MoveForward)
+        {
             assert_eq!(bindings.key(action), action.default_key());
         }
     }
@@ -227,9 +242,9 @@ mod tests {
         let mut bindings = KeyBindings::default();
         // Pan forward takes the key that turns left, so turning left gets the
         // key panning forward gave up.
-        bindings.bind(Action::PanForward, KeyCode::KeyQ, None);
+        bindings.bind(Action::MoveForward, KeyCode::KeyQ, None);
 
-        assert_eq!(bindings.key(Action::PanForward), KeyCode::KeyQ);
+        assert_eq!(bindings.key(Action::MoveForward), KeyCode::KeyQ);
         assert_eq!(bindings.key(Action::TurnLeft), KeyCode::KeyW);
     }
 
@@ -241,7 +256,7 @@ mod tests {
         assert_eq!(bindings.key(Action::TurnLeft), KeyCode::KeyQ);
         assert_eq!(bindings.name(Action::TurnLeft), "'");
         // And nothing else moved to fill a gap that was never made.
-        assert_eq!(bindings.key(Action::PanForward), KeyCode::KeyW);
+        assert_eq!(bindings.key(Action::MoveForward), KeyCode::KeyW);
     }
 
     #[test]
@@ -266,16 +281,16 @@ mod tests {
     fn a_key_set_by_pressing_it_is_named_by_what_it_typed() {
         let mut bindings = KeyBindings::default();
         // What a Dvorak keyboard does: the key where W sits types a comma.
-        bindings.bind(Action::PanForward, KeyCode::KeyW, Some(",".to_string()));
+        bindings.bind(Action::MoveForward, KeyCode::KeyW, Some(",".to_string()));
 
-        assert_eq!(bindings.name(Action::PanForward), ",");
-        assert_eq!(bindings.key(Action::PanForward), KeyCode::KeyW);
+        assert_eq!(bindings.name(Action::MoveForward), ",");
+        assert_eq!(bindings.key(Action::MoveForward), KeyCode::KeyW);
     }
 
     #[test]
     fn a_key_never_pressed_is_named_by_its_position() {
         let bindings = KeyBindings::default();
-        assert_eq!(bindings.name(Action::PanForward), "W");
+        assert_eq!(bindings.name(Action::MoveForward), "W");
         assert_eq!(bindings.name(Action::TurnRight), "E");
     }
 
@@ -313,7 +328,7 @@ mod tests {
         let bindings = KeyBindings::default();
         assert_eq!(
             bindings.action_bound_to(KeyCode::KeyA),
-            Some(Action::PanLeft)
+            Some(Action::SteerLeft)
         );
         assert_eq!(bindings.action_bound_to(KeyCode::KeyM), None);
     }

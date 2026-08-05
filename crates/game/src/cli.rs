@@ -120,8 +120,8 @@ port {DEFAULT_PORT} for others to `--join` — the same session a dedicated
                     on the window; ignored when capturing, so shots stay clean
 
 View options, applied in the order given:
-  --focus <x,z>     world point to look at, in metres
-                    [default: the island nearest the origin]
+  --focus <x,z>     world point to put the player down at and centre the view
+                    on, in metres [default: the island nearest the origin]
   --zoom <m>        camera distance in metres, {MIN_DISTANCE} to {MAX_DISTANCE}
                     [default: {}]
   --yaw <deg>       bearing to look from [default: {}]

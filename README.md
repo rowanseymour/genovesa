@@ -126,8 +126,9 @@ tools/readme-collage.sh 7
 ## Development helpers
 
 The app takes options too — `--state` to open on a given screen, `--seed` to
-pick the world, and `--focus`, `--zoom` and `--yaw` to say where the camera
-starts. Run `cargo run -- --help` for the details. Without `--seed` the run
+pick the world, and `--focus`, `--zoom` and `--yaw` to say where the player
+is put down and how the view opens on them. Run `cargo run -- --help` for the
+details. Without `--seed` the run
 picks a world of its own and prints which, so a place worth going back to can
 be asked for by name.
 

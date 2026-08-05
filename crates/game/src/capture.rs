@@ -18,6 +18,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
+use crate::boat::Boat;
 use crate::camera::{MapCamera, View};
 use crate::cli::Shot;
 use crate::terrain::ChunkBuild;
@@ -146,7 +147,7 @@ fn render_off_screen(
 }
 
 /// Swallows every input for the duration of a capture run, so that a keypress
-/// landing while it is running cannot pan the camera or leave the match.
+/// landing while it is running cannot steer the boat or leave the match.
 /// Without it two runs of the same command can frame differently, which makes
 /// before-and-after screenshots useless for judging a change.
 ///
@@ -170,6 +171,7 @@ fn capture(
     mut commands: Commands,
     mut capture: ResMut<Capture>,
     mut cameras: Query<&mut MapCamera>,
+    mut boats: Query<&mut Transform, With<Boat>>,
     building: Query<(), With<ChunkBuild>>,
     mut view: ResMut<View>,
     mut exit: MessageWriter<AppExit>,
@@ -227,6 +229,16 @@ fn capture(
                     *view = wanted;
                     for mut camera in &mut cameras {
                         camera.snap_to(wanted);
+                    }
+                    // The camera is pinned to the boat, so a sweep moves the
+                    // boat and the view follows — teleported, there being
+                    // nobody to watch it sail there. The height is stale
+                    // until `float` sees the new ground, which the settling
+                    // frames absorb. A shot of a menu has no boat, and the
+                    // camera then stands wherever it was snapped.
+                    for mut boat in &mut boats {
+                        boat.translation.x = wanted.focus.x;
+                        boat.translation.z = wanted.focus.z;
                     }
                     capture.phase = Phase::Settling;
                 }
