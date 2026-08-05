@@ -6,6 +6,7 @@
 //! binary, so that the app's own parts — the camera, the menu, the command
 //! line — are reachable from tests rather than sealed inside a `main`.
 
+pub mod ambience;
 pub mod bindings;
 pub mod boat;
 pub mod camera;

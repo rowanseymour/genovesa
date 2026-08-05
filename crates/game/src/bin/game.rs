@@ -13,6 +13,7 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use bevy::window::ExitCondition;
 
+use game::ambience::AmbiencePlugin;
 use game::boat::BoatPlugin;
 use game::camera::MapCameraPlugin;
 use game::capture::CapturePlugin;
@@ -78,6 +79,12 @@ fn run(args: Args, online: Option<Connection>) {
     // readout would be baked into every shot.
     if args.debug && !args.is_capture() {
         app.add_plugins(DebugOverlayPlugin);
+    }
+
+    // Not while capturing either: a run that writes pictures and quits has no
+    // menu to sit behind, and would open an audio device for nobody.
+    if !args.is_capture() {
+        app.add_plugins(AmbiencePlugin);
     }
 
     if let Some(connection) = online {
