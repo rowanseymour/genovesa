@@ -1,4 +1,5 @@
-//! Playing in a served world: the game as a client.
+//! Playing in a served world: the game as a client, and — when this machine is
+//! the one hosting — as the server's landlord too.
 //!
 //! Terrain never arrives over the wire. The server's welcome names the seed,
 //! and the seed *is* the world — the `world` crate regenerates it here, bit
@@ -7,11 +8,18 @@
 //! capsules standing on the same ground every machine is generating for
 //! itself.
 //!
-//! [`Connection::join`] speaks the handshake synchronously, before the app is
-//! built, because what it learns is what the app gets built *from*. After
-//! that a reader thread turns the socket into a channel the schedule drains
-//! once a frame ([`receive`]), and the player's own movements trickle back
-//! the other way ([`report_position`]).
+//! A [`Connection`] is made either from the command line, before the app
+//! exists, or from a menu screen with the frame loop already running — the
+//! second of which is why dialling has [`Dialing`], a thread and a channel,
+//! rather than being a function the menu could simply call. Once made, a
+//! reader thread turns the socket into a channel the schedule drains once a
+//! frame ([`receive`]), and the player's own movements trickle back the other
+//! way ([`report_position`]).
+//!
+//! Hosting is the same picture with a server behind it: the `server` crate is
+//! headless and engine-free, so a game that shares a world runs one on a
+//! thread and then joins it over the loopback like anybody else. There is no
+//! second, quieter implementation of a session for the host to play against.
 
 use std::collections::HashMap;
 use std::net::{Shutdown, TcpStream};
@@ -23,9 +31,10 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use protocol::{PlayerId, ToClient, ToServer, DEFAULT_PORT, PROTOCOL_VERSION};
+use server::{Host, Server};
 
 use crate::camera::MapCamera;
-use crate::terrain::WorldTerrain;
+use crate::terrain::{WorldConfig, WorldTerrain};
 use crate::AppState;
 
 /// Seconds between position reports, at least. Ten a second reads as
@@ -79,11 +88,7 @@ impl Connection {
     /// [`DEFAULT_PORT`]. The errors are strings because they are for the
     /// player, not for matching on.
     pub fn join(addr: &str) -> Result<Self, String> {
-        let addr = if addr.contains(':') {
-            addr.to_string()
-        } else {
-            format!("{addr}:{DEFAULT_PORT}")
-        };
+        let addr = dialled_as(addr);
         let stream =
             TcpStream::connect(&addr).map_err(|error| format!("cannot reach `{addr}`: {error}"))?;
         // Position reports matter now or not at all — see the server's twin
@@ -184,8 +189,122 @@ impl Drop for Connection {
     }
 }
 
-/// The joined session. Present only when the run was started with `--join`;
-/// every system here conditions on it, so offline runs pay nothing.
+/// What a server named as `host` or `host:port` is dialled as: a bare name
+/// gets [`DEFAULT_PORT`], which is the whole of what a player has to be told
+/// to join somebody.
+fn dialled_as(address: &str) -> String {
+    if address.contains(':') {
+        address.to_string()
+    } else {
+        format!("{address}:{DEFAULT_PORT}")
+    }
+}
+
+/// A session in hand, and the world behind it when this machine is the one
+/// hosting.
+pub struct Session {
+    pub connection: Connection,
+    /// The server serving this session, when it is our own. Held for the life
+    /// of the match — see [`Hosting`].
+    pub hosting: Option<Host>,
+}
+
+/// A session being made, on a thread of its own.
+///
+/// Dialling blocks: a name to look up, a connection to make, a handshake to
+/// wait for, and — for a host that accepts and then says nothing — ten seconds
+/// of that. A run started with `--join` can afford to do it before the app
+/// exists, since what it learns is what the app is built from. A menu screen
+/// cannot: it has to go on drawing, and taking a button click means being able
+/// to take the one that gives up too. So the dialling happens on a thread and
+/// the screen asks after it once a frame.
+#[derive(Resource)]
+pub struct Dialing {
+    /// Behind a mutex only because a Bevy resource must be `Sync`; nothing but
+    /// [`Dialing::outcome`] locks it.
+    outcome: Mutex<Receiver<Result<Session, String>>>,
+    /// What is being dialled, for the screen to say while it waits.
+    pub what: String,
+}
+
+impl Dialing {
+    /// Starts dialling a server named as `host` or `host:port`.
+    pub fn to(address: &str) -> Self {
+        let address = address.to_string();
+        let what = address.clone();
+        Self::on(what, move || {
+            Connection::join(&address).map(|connection| Session {
+                connection,
+                hosting: None,
+            })
+        })
+    }
+
+    /// Starts hosting a world on this machine, and joins it.
+    ///
+    /// Bound on every interface, because sharing a world means being reachable
+    /// from another machine — the menu asks for [`DEFAULT_PORT`], which is
+    /// what the people being shared with have to be able to guess. Joined over
+    /// the loopback whatever address they use: the host is a player in their
+    /// own world and gets to it the short way.
+    pub fn hosting(config: WorldConfig, port: u16) -> Self {
+        Self::on(format!("a world of your own, port {port}"), move || {
+            let server = Server::bind(("0.0.0.0", port), config)
+                .map_err(|error| format!("cannot host on port {port}: {error}"))?;
+            let host = server
+                .spawn()
+                .map_err(|error| format!("cannot host: {error}"))?;
+            let connection = Connection::join(&format!("127.0.0.1:{}", host.addr().port()))?;
+            Ok(Session {
+                connection,
+                hosting: Some(host),
+            })
+        })
+    }
+
+    fn on(what: String, dial: impl FnOnce() -> Result<Session, String> + Send + 'static) -> Self {
+        let (outcome, waiting) = mpsc::channel();
+        thread::spawn(move || {
+            // A screen that has given up drops the receiver, and this send
+            // fails with the session still in it — which drops the connection,
+            // and the server behind it if this was a world being hosted. A
+            // world nobody waited for is a world nobody is in.
+            let _ = outcome.send(dial());
+        });
+        Self {
+            outcome: Mutex::new(waiting),
+            what,
+        }
+    }
+
+    /// What came of it, or `None` while it is still ringing. Answers once:
+    /// whoever takes the outcome owns the session, so a screen asks until it
+    /// gets something and then drops this resource.
+    pub fn outcome(&self) -> Option<Result<Session, String>> {
+        match self.outcome.lock().expect("no poisoned lock").try_recv() {
+            Ok(outcome) => Some(outcome),
+            Err(TryRecvError::Empty) => None,
+            // The thread sends whatever the dial came to, success or failure,
+            // so a channel that closed without one is a thread that died —
+            // this crate's bug, but a screen that says so can still be left.
+            Err(TryRecvError::Disconnected) => {
+                Some(Err(format!("dialling {} came to nothing", self.what)))
+            }
+        }
+    }
+}
+
+/// The world this machine is hosting, for as long as the player is in it.
+///
+/// Nothing reads it: holding it *is* what it does. Dropping the handle stops
+/// the server and hangs up on everyone in the world, so it lives exactly as
+/// long as the host's own visit — inserted when the world is entered, removed
+/// on the way out by [`disconnect`].
+#[derive(Resource)]
+pub struct Hosting(pub Host);
+
+/// The joined session. Present only in a run that is playing in a served
+/// world; every system here conditions on it, so a local world pays nothing.
 #[derive(Resource)]
 pub struct Online {
     connection: Connection,
@@ -234,19 +353,24 @@ impl Plugin for NetPlugin {
                 .chain()
                 .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Online>)),
         )
-        .add_systems(
-            OnExit(AppState::InWorld),
-            disconnect.run_if(resource_exists::<Online>),
-        );
+        .add_systems(OnExit(AppState::InWorld), disconnect);
     }
 }
 
-/// Leaving the world ends the session: dropping the connection shuts the
-/// socket down, which is how the server hears it. A fresh world entered from
-/// the menu is a local one, where the served players would be strangers. The
-/// markers go with the resource, being `DespawnOnExit` of the same state.
+/// Leaving the world ends the session, whichever end of it we were.
+///
+/// Dropping the connection shuts our socket down, which is how the server
+/// hears us go. Dropping the host — if the world was ours — then ends it for
+/// everyone else, in that order, so that the guests hear the departure before
+/// the world it was from stops existing. Neither may outlive the visit: the
+/// next world entered from the menu is a different one, where the players of
+/// this one would be strangers standing on ground that isn't theirs.
+///
+/// The markers need no clearing up here, being `DespawnOnExit` of the state
+/// this is the exit from.
 fn disconnect(mut commands: Commands) {
     commands.remove_resource::<Online>();
+    commands.remove_resource::<Hosting>();
 }
 
 /// A colour of their own for each player, spread around the wheel by the
@@ -375,6 +499,35 @@ fn place_markers(
     }
 }
 
+/// A pretend server on a loopback port: accepts one client, answers the
+/// handshake, and hands the test the socket to keep speaking with. Lives out
+/// here rather than in this module's tests because the menu's tests, which
+/// join servers by clicking on things, want one too.
+#[cfg(test)]
+pub(crate) fn fake_server(seed: u32, spawn: Vec2) -> (String, Receiver<TcpStream>) {
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    let (handover, socket) = mpsc::channel();
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        match ToServer::read(&mut &stream).expect("a first message") {
+            ToServer::Hello { version } => assert_eq!(version, PROTOCOL_VERSION),
+            other => panic!("expected a hello, got {other:?}"),
+        }
+        (ToClient::Welcome {
+            id: PlayerId(1),
+            seed,
+            spawn,
+        })
+        .write(&mut &stream)
+        .expect("welcome");
+        let _ = handover.send(stream);
+    });
+    (addr, socket)
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
@@ -384,30 +537,6 @@ mod tests {
     use bevy::time::TimePlugin;
 
     use super::*;
-
-    /// A pretend server on a loopback port: accepts one client, answers the
-    /// handshake, and hands the test the socket to keep speaking with.
-    fn fake_server(seed: u32, spawn: Vec2) -> (String, mpsc::Receiver<TcpStream>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr").to_string();
-        let (handover, socket) = mpsc::channel();
-        thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("accept");
-            match ToServer::read(&mut &stream).expect("a first message") {
-                ToServer::Hello { version } => assert_eq!(version, PROTOCOL_VERSION),
-                other => panic!("expected a hello, got {other:?}"),
-            }
-            (ToClient::Welcome {
-                id: PlayerId(1),
-                seed,
-                spawn,
-            })
-            .write(&mut &stream)
-            .expect("welcome");
-            let _ = handover.send(stream);
-        });
-        (addr, socket)
-    }
 
     /// A headless app with the net systems running in a match, and no
     /// terrain — markers then keep their height, which these tests ignore.
@@ -449,6 +578,72 @@ mod tests {
             .collect()
     }
 
+    /// Waits for a dial to land. It crosses real sockets and a thread, so a
+    /// moment of patience is legitimate — five seconds of it is a failure.
+    fn settle(dialing: &Dialing) -> Result<Session, String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(outcome) = dialing.outcome() {
+                return outcome;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("the dial never landed");
+    }
+
+    #[test]
+    fn hosting_a_world_is_a_session_like_any_other() {
+        // Sharing a world runs the very same server a dedicated one runs, and
+        // then joins it: what comes back is an ordinary welcome, and the seed
+        // in it is the world that was asked for. On a port of the machine's
+        // choosing, so that a test run cannot collide with a real server on
+        // this machine; the menu asks for the well-known one.
+        let dialing = Dialing::hosting(WorldConfig { seed: 77 }, 0);
+        let session = settle(&dialing).expect("the world should be hosted and joined");
+
+        assert_eq!(session.connection.seed, 77);
+        assert!(
+            session.hosting.is_some(),
+            "the world was joined without anything hosting it"
+        );
+    }
+
+    #[test]
+    fn a_hosted_world_is_one_other_people_can_join() {
+        // The point of sharing: the world the host is standing in is reachable
+        // from outside, and whoever arrives is somebody else in the same
+        // world rather than the host again.
+        let dialing = Dialing::hosting(WorldConfig { seed: 3 }, 0);
+        let session = settle(&dialing).expect("the world should be hosted and joined");
+        let port = session.hosting.as_ref().expect("hosting").addr().port();
+
+        let guest = Connection::join(&format!("127.0.0.1:{port}")).expect("a guest should get in");
+        assert_eq!(guest.seed, 3, "the guest was let into a different world");
+        assert_ne!(guest.id, session.connection.id, "two players, one id");
+    }
+
+    #[test]
+    fn a_dial_that_finds_nobody_reports_it() {
+        // Port 1, where nothing has ever listened. The failure has to come
+        // back as an outcome the screen can show, not as a hang.
+        let dialing = Dialing::to("127.0.0.1:1");
+        let error = settle(&dialing).err().expect("nobody home");
+        assert!(
+            error.contains("127.0.0.1:1"),
+            "the error does not name what was dialled: {error}"
+        );
+    }
+
+    #[test]
+    fn a_dial_answers_once() {
+        let dialing = Dialing::to("127.0.0.1:1");
+        settle(&dialing).err().expect("nobody home");
+        assert!(
+            dialing.outcome().is_some_and(|outcome| outcome.is_err()),
+            "a dial already given up should not report success"
+        );
+    }
+
     #[test]
     fn joining_learns_the_world_from_the_welcome() {
         let (addr, _socket) = fake_server(42, Vec2::new(100.0, -200.0));
@@ -460,13 +655,14 @@ mod tests {
 
     #[test]
     fn a_bare_host_gets_the_default_port() {
-        // Nothing is listening there, so all that can be checked is that the
-        // error names the port the dial actually used.
-        let error = Connection::join("127.0.0.1").err().expect("nobody home");
-        assert!(
-            error.contains(&format!(":{DEFAULT_PORT}")),
-            "the default port was not applied: {error}"
+        // Asked of the naming rather than of a dial: a dial could only show
+        // this by failing to reach the port, and the machine a test runs on is
+        // exactly the machine somebody might be hosting a world from.
+        assert_eq!(
+            dialled_as("example.com"),
+            format!("example.com:{DEFAULT_PORT}")
         );
+        assert_eq!(dialled_as("example.com:4000"), "example.com:4000");
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub mod cli;
 use std::collections::HashMap;
 use std::io;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -44,6 +44,20 @@ const OUTBOX_DEPTH: usize = 256;
 /// metres. A few strides: enough that two markers are plainly two markers,
 /// small enough that everyone still arrives on the same beach.
 const SPAWN_SCATTER: f32 = 12.0;
+
+/// How often a listening server looks up from its accept to see whether it
+/// has been asked to stop.
+///
+/// It is paid twice, and both times it is worth the wake-ups: an arriving
+/// connection waits up to this long to be picked up, and a game leaving a
+/// world it hosted spends up to this long inside the drop that ends it, which
+/// is a frame of a screen it is leaving anyway.
+///
+/// The alternative is a blocking accept woken by connecting to the listener
+/// from the stopping thread — free while idle, immediate when it works, and a
+/// deadlock in the drop on any machine where that connection is the one thing
+/// that doesn't work.
+const STOP_POLL: Duration = Duration::from_millis(10);
 
 /// How far from the origin a reported position may be, in metres. The world
 /// crate measures where `f32` ground stops being exactly the ground at about
@@ -131,15 +145,107 @@ impl Server {
         self.listener.local_addr()
     }
 
-    /// Serves forever: every connection gets a thread of its own, from
-    /// handshake to hang-up.
+    /// Serves forever on this thread: every connection gets a thread of its
+    /// own, from handshake to hang-up. What a dedicated server does, there
+    /// being nothing else for its process to be doing.
     pub fn run(self) {
-        for stream in self.listener.incoming() {
+        accept(&self.listener, &self.shared, &AtomicBool::new(false));
+    }
+
+    /// Serves on a thread of its own, and hands back the handle that ends it.
+    ///
+    /// What a game hosting a world for its own player does: the session has to
+    /// run alongside a frame loop rather than instead of it, and it has to
+    /// *stop* when the player leaves the world — a listener still holding the
+    /// port, and a roster still relaying the last positions of a world nobody
+    /// is in, would outlive the match that made them.
+    pub fn spawn(self) -> io::Result<Host> {
+        let addr = self.listener.local_addr()?;
+        let stopping = Arc::new(AtomicBool::new(false));
+        let shared = self.shared.clone();
+        let thread = {
+            let (listener, shared, stopping) = (self.listener, self.shared, stopping.clone());
+            thread::spawn(move || accept(&listener, &shared, &stopping))
+        };
+        Ok(Host {
+            addr,
+            shared,
+            stopping,
+            thread: Some(thread),
+        })
+    }
+}
+
+/// A world being hosted, for as long as the handle lives.
+///
+/// Dropping it is how a session ends: see the [`Drop`] implementation, which
+/// is the whole of the type's behaviour.
+pub struct Host {
+    addr: SocketAddr,
+    shared: Arc<Shared>,
+    stopping: Arc<AtomicBool>,
+    /// Taken by [`Drop`], which is the only place it is looked at. An `Option`
+    /// because joining a thread consumes its handle, and a value being dropped
+    /// can only be borrowed.
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Host {
+    /// The address being served on. Port 0 in, a real port out, as with
+    /// [`Server::local_addr`].
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Relaxed);
+
+        // Everyone still connected is blocked in a read that only their own
+        // client could end, and their threads each hold a share of the state
+        // this is trying to be the end of. Shutting their sockets down from
+        // here is, at their end of it, exactly what a server hanging up looks
+        // like — which it is — and at this end it is what lets their threads
+        // reach the departure they would otherwise never get to.
+        {
+            let players = self.shared.players.lock().expect("no poisoned lock");
+            for player in players.values() {
+                let _ = player.line.shutdown(Shutdown::Both);
+            }
+        }
+
+        // Waited for rather than left to wind down, so that a host dropped and
+        // another bound in its place — a player leaving a world they hosted
+        // and starting a second one — cannot find the old listener still
+        // holding the port.
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Takes connections until asked to stop, giving each a thread of its own.
+fn accept(listener: &TcpListener, shared: &Arc<Shared>, stopping: &AtomicBool) {
+    // Non-blocking, so that the stop above is noticed within [`STOP_POLL`]
+    // rather than whenever the next connection happens to arrive.
+    let _ = listener.set_nonblocking(true);
+
+    while !stopping.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // An accepted socket inherits the listener's mode on some
+                // platforms, and every read a session does is meant to block.
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
+                let shared = shared.clone();
+                thread::spawn(move || serve(stream, shared));
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(STOP_POLL),
             // A connection that failed to arrive is its problem, not the
             // session's.
-            let Ok(stream) = stream else { continue };
-            let shared = self.shared.clone();
-            thread::spawn(move || serve(stream, shared));
+            Err(_) => {}
         }
     }
 }

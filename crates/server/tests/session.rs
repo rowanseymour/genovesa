@@ -6,12 +6,12 @@ use std::time::Duration;
 
 use glam::Vec2;
 use protocol::{PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
-use server::Server;
+use server::{Host, Server};
 use world::archipelago::{Archipelago, WorldConfig};
 
-/// A hosted world on a loopback port of the machine's choosing. The serving
-/// thread runs until the test process ends — a listener has no way to be told
-/// the session is over, and doesn't need one here.
+/// A hosted world on a loopback port of the machine's choosing, running until
+/// the test process ends. Most of what is tested here is a conversation, not a
+/// lifetime — the tests that are about the lifetime host their own.
 fn host(seed: u32) -> SocketAddr {
     let server = Server::bind(("127.0.0.1", 0), WorldConfig { seed }).expect("bind");
     let addr = server
@@ -19,6 +19,15 @@ fn host(seed: u32) -> SocketAddr {
         .expect("a bound listener has an address");
     std::thread::spawn(move || server.run());
     addr
+}
+
+/// The same, on a thread the test can end — what a game hosting a world for
+/// its own player holds.
+fn spawn_host(seed: u32) -> Host {
+    Server::bind(("127.0.0.1", 0), WorldConfig { seed })
+        .expect("bind")
+        .spawn()
+        .expect("spawn")
 }
 
 /// A test client: a socket that speaks the protocol, with a read timeout so a
@@ -51,6 +60,18 @@ impl Client {
 
     fn hear(&self) -> ToClient {
         ToClient::read(&mut &self.0).expect("read")
+    }
+
+    /// Reads until the line gives out, and says how. Whatever the session had
+    /// already said is drained first: a client that has not been listening is
+    /// still owed its messages, and the question here is only how the
+    /// conversation ends.
+    fn until_hung_up(&self) -> std::io::Error {
+        loop {
+            if let Err(error) = ToClient::read(&mut &self.0) {
+                return error;
+            }
+        }
     }
 }
 
@@ -197,6 +218,64 @@ fn players_meet_move_and_part() {
     drop(bob);
     assert_eq!(alice.hear(), ToClient::Left { id: b });
     assert_eq!(carol.hear(), ToClient::Left { id: b });
+}
+
+#[test]
+fn a_spawned_host_serves_the_same_world() {
+    // Hosting on a thread is the same session, only reachable from a game that
+    // is drawing frames alongside it.
+    let host = spawn_host(7);
+    let (_client, _id, seed, _spawn) = Client::join(host.addr());
+    assert_eq!(seed, 7);
+}
+
+#[test]
+fn dropping_the_host_hangs_up_on_everybody() {
+    // A player leaving a world they hosted ends it for the guests too. They
+    // are each blocked in a read at the time, so nothing but the host reaching
+    // in and closing their sockets can tell them.
+    let host = spawn_host(1);
+    let (alice, _a, _, _) = Client::join(host.addr());
+    let (bob, _b, _, _) = Client::join(host.addr());
+
+    drop(host);
+
+    // End of file rather than a timeout, which is what the read timeout on a
+    // test client turns a session that was merely abandoned into.
+    for (who, client) in [("alice", &alice), ("bob", &bob)] {
+        let error = client.until_hung_up();
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "{who} was left holding a line to a world that has ended: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_port_can_be_hosted_again_once_the_host_is_dropped() {
+    // Hosting, leaving, and hosting again is an ordinary evening: a new seed
+    // from the menu is a new world on the same port. The listener has to be
+    // properly gone by the time the drop returns — and so must the connections
+    // it was serving, which is the harder half: a guest is still connected
+    // when the host leaves, so the host is the end that closes first, and a
+    // socket closed from this end is the one that lingers.
+    let server = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 1 }).expect("bind");
+    let addr = server.local_addr().expect("addr");
+    let host = server.spawn().expect("spawn");
+    let (guest, _id, _, _) = Client::join(addr);
+    drop(host);
+    assert_eq!(
+        guest.until_hung_up().kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+
+    let again = Server::bind(addr, WorldConfig { seed: 2 })
+        .expect("the port is still held")
+        .spawn()
+        .expect("spawn");
+    let (_client, _id, seed, _) = Client::join(again.addr());
+    assert_eq!(seed, 2, "the second world is not the one being served");
 }
 
 #[test]
