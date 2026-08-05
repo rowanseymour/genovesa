@@ -39,6 +39,26 @@ pub const HAZE_END: f32 = 900.0;
 /// sized by `--resolution` instead, having no window to take it from.
 pub const WINDOW: UVec2 = UVec2::new(1280, 720);
 
+/// A surface in `base_color` with nothing polished about it.
+///
+/// Everything the game draws is lit this way — ground, water, hulls, the
+/// markers other players stand as. A specular highlight is a gradient across
+/// a facet, and a gradient is the one thing a look built out of flat tones
+/// cannot have: it would read as the facet being curved, which is exactly
+/// what the shading says it is not.
+///
+/// A surface wanting one thing about it different spreads the rest of this
+/// over its own: `StandardMaterial { alpha_mode, ..matte(colour) }`.
+pub fn matte(base_color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color,
+        perceptual_roughness: 1.0,
+        metallic: 0.0,
+        reflectance: 0.0,
+        ..default()
+    }
+}
+
 /// Top-level screen the app is on.
 #[derive(States, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum AppState {

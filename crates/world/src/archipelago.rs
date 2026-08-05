@@ -162,6 +162,15 @@ const SPAWN_CLEARING: i32 = 2;
 /// [scatter]: Archipelago::spawn
 pub const SPAWN_OFFSHORE: f32 = 48.0;
 
+/// Coarse parcels a widening island search spans, doubling until one of them
+/// answers. One coarse parcel is five kilometres and half its parcels hold an
+/// island, so the first window nearly always does.
+///
+/// Widening past the last would be searching an ocean that, by the occupancy
+/// the layers are written to, cannot be that empty — so finding nothing by
+/// then means the layout is broken, not that the sea is wide.
+const SPANS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
+
 /// Metres between soundings when [`Archipelago::spawn`] walks in from the
 /// sea looking for the waterline. Fine enough not to step over a beach
 /// (coasts the generator draws are hundreds of metres long), coarse enough
@@ -589,7 +598,7 @@ impl Archipelago {
                     let Some(spec) = self.spec_at(layer, IVec2::new(px, pz)) else {
                         continue;
                     };
-                    let (lo, hi) = (spec.origin - SKIRT_CHUNKS, spec.end() + SKIRT_CHUNKS);
+                    let (lo, hi) = spec.covered();
                     if lo.cmple(max_chunk).all() && hi.cmpge(min_chunk).all() {
                         found.push(spec);
                     }
@@ -599,8 +608,46 @@ impl Archipelago {
         found
     }
 
+    /// The island nearest a world point, ranked by whichever of its points
+    /// `mark` names — layout only, generating nothing.
+    ///
+    /// Searched over windows that double until one answers, rather than over
+    /// a single wide one: the layout is cheap but not free, and the first
+    /// window nearly always answers, so the common case sweeps a couple of
+    /// parcels instead of a few hundred.
+    ///
+    /// A window's own minimum is not the answer until it stands *within* that
+    /// window's reach. The windows are squares and the ranking is a straight
+    /// line, so an island just outside a window's edge can be nearer than one
+    /// inside its corner — a minimum out past the reach therefore widens the
+    /// search instead of ending it. The last window answers regardless, there
+    /// being nothing wider to ask.
+    ///
+    /// `islands_within` sweeps its parcels in a fixed order and `min_by`
+    /// keeps the first of any tie, so the answer is the seed's and not the
+    /// machine's.
+    fn nearest_by(&self, near: Vec2, mark: impl Fn(&IslandSpec) -> Vec2) -> Option<IslandSpec> {
+        let parcel = LAYERS[0].parcel as f32 * CHUNK_METRES;
+        for (i, span) in SPANS.iter().enumerate() {
+            let reach = span * parcel;
+            let nearest = self
+                .islands_within(near - reach, near + reach)
+                .into_iter()
+                .min_by(|a, b| {
+                    let d = |s: &IslandSpec| mark(s).distance_squared(near);
+                    d(a).total_cmp(&d(b))
+                });
+            match nearest {
+                Some(island) if mark(&island).distance(near) <= reach => return Some(island),
+                Some(island) if i + 1 == SPANS.len() => return Some(island),
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// The island nearest a world point, by the distance between the point and
-    /// the island's centre — layout only, generating nothing.
+    /// the island's centre.
     ///
     /// Play enters a world by [`spawn`], which ranks coasts rather than
     /// centres — this is for anything that wants a picture of terrain rather
@@ -609,38 +656,8 @@ impl Archipelago {
     /// middle, not from the water off its nearest corner.
     ///
     /// [`spawn`]: Archipelago::spawn
-    ///
-    /// Searched over windows that double until one holds something, rather
-    /// than over a single wide one: the layout is cheap but not free, and the
-    /// first window nearly always answers, so the common case sweeps a couple
-    /// of parcels instead of a few hundred. Widening past the cap would be
-    /// searching an ocean that, by the occupancy the layers are written to,
-    /// cannot be that empty — so [`None`] here means the layout is broken, not
-    /// that the sea is wide.
     pub fn nearest_island(&self, near: Vec2) -> Option<IslandSpec> {
-        /// Coarse parcels the search window spans, doubling until it finds
-        /// land. One coarse parcel is five kilometres, and half its parcels
-        /// hold an island.
-        const SPANS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
-
-        let parcel = LAYERS[0].parcel as f32 * CHUNK_METRES;
-        for span in SPANS {
-            let reach = Vec2::splat(span * parcel);
-            // `islands_within` sweeps its parcels in a fixed order and
-            // `min_by` keeps the first of any tie, so the answer is the seed's
-            // and not the machine's.
-            let nearest = self
-                .islands_within(near - reach, near + reach)
-                .into_iter()
-                .min_by(|a, b| {
-                    let d = |s: &IslandSpec| s.centre().distance_squared(near);
-                    d(a).total_cmp(&d(b))
-                });
-            if nearest.is_some() {
-                return nearest;
-            }
-        }
-        None
+        self.nearest_by(near, IslandSpec::centre)
     }
 
     /// Where this world is entered, the same on every machine: a point of
@@ -657,7 +674,7 @@ impl Archipelago {
     /// alike; entry now opens in sight of the first island's coast, and
     /// finding land takes no search at all.
     ///
-    /// Nearest by frame rather than by centre, as [`nearest_island`] ranks,
+    /// Nearest by frame rather than by centre, as [`Archipelago::nearest_island`] ranks,
     /// because it is the coast entry cares about — a big island's coast can
     /// stand nearer than any small island's middle. And the waterline
     /// rather than the frame, because the frame is a rectangle of map, not
@@ -685,40 +702,14 @@ impl Archipelago {
     /// hundreds of metres — so a point on or beside the chosen island's
     /// frame is far outside everything else's ground.
     ///
-    /// [`None`] means the layout offered no island at all, which as
-    /// [`nearest_island`] explains is a broken layout rather than a wide
+    /// [`None`] means the layout offered no island at all out to the widest
+    /// window the search reaches, which is a broken layout rather than a wide
     /// sea; callers may fall back to the origin, which [`SPAWN_CLEARING`]
     /// keeps open.
-    ///
-    /// [`nearest_island`]: Archipelago::nearest_island
     pub fn spawn(&self) -> Option<Spawn> {
-        // The same widening search as `nearest_island`, with one more care:
-        // a minimum found beyond the window's own reach could still be
-        // undercut by a frame just outside the window, so it widens the
-        // search instead of answering it. Within reach, the minimum is
-        // global — any closer frame would have to reach into the window.
-        const SPANS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
-
-        let parcel = LAYERS[0].parcel as f32 * CHUNK_METRES;
-        let mut found = None;
-        for span in SPANS {
-            let reach = span * parcel;
-            let nearest = self
-                .islands_within(Vec2::splat(-reach), Vec2::splat(reach))
-                .into_iter()
-                .min_by(|a, b| {
-                    let d = |s: &IslandSpec| s.frame_point(Vec2::ZERO).length_squared();
-                    d(a).total_cmp(&d(b))
-                });
-            if let Some(island) = nearest {
-                let out = island.frame_point(Vec2::ZERO).length();
-                if out <= reach || span == SPANS[SPANS.len() - 1] {
-                    found = Some(island);
-                    break;
-                }
-            }
-        }
-        let island = found?;
+        // The same widening search `nearest_island` runs, ranking frames from
+        // the origin rather than centres.
+        let island = self.nearest_by(Vec2::ZERO, |spec| spec.frame_point(Vec2::ZERO))?;
 
         // The island's land nearest the origin, off a half-chunk lattice
         // over the frame — fine enough that even a single-chunk islet puts
