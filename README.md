@@ -87,8 +87,8 @@ what a dedicated server is:
 cargo run --bin server -- --seed 7
 ```
 
-Everyone joins on the same island, and other players appear as coloured
-markers standing on the ground. The wire itself is defined once, in the
+Everyone enters the world in the same place — afloat just off the coast of
+the same island — and other players appear as coloured markers. The wire itself is defined once, in the
 `protocol` crate, and shared by both sides.
 
 ## Looking at maps
