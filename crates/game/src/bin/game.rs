@@ -31,6 +31,15 @@ fn main() -> ExitCode {
         }
     };
 
+    // A run that named no seed is in a world picked off the clock, so say
+    // which: without it a shot worth keeping, or a landscape worth walking
+    // back into, could never be asked for a second time. A joined run is in
+    // the server's world and says nothing here — it has not been told which
+    // world that is yet.
+    if !args.seed_given && args.join.is_none() {
+        println!("world {}", args.config.seed);
+    }
+
     // Joining happens before the app exists: what the handshake learns — the
     // seed, and where the world is entered — is what the app is built from.
     let online = match &args.join {

@@ -127,7 +127,9 @@ tools/readme-collage.sh 7
 
 The app takes options too — `--state` to open on a given screen, `--seed` to
 pick the world, and `--focus`, `--zoom` and `--yaw` to say where the camera
-starts. Run `cargo run -- --help` for the details.
+starts. Run `cargo run -- --help` for the details. Without `--seed` the run
+picks a world of its own and prints which, so a place worth going back to can
+be asked for by name.
 
 `--shot` writes a PNG of the view instead of waiting to be looked at. It can be
 given as many times as you like: the view options are read left to right, so

@@ -22,7 +22,7 @@ use bevy::math::{UVec2, Vec2, Vec3};
 use protocol::DEFAULT_PORT;
 
 use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
-use crate::terrain::{Archipelago, WorldConfig};
+use crate::terrain::{random_seed, Archipelago, WorldConfig};
 use crate::AppState;
 
 /// Size of a captured picture, in pixels. Matches the shots already in
@@ -45,6 +45,10 @@ pub struct Args {
     /// Whether `--focus` was given — what lets [`Args::centre_on`] tell
     /// "nobody chose" from "somebody chose the origin".
     focus_given: bool,
+    /// Whether `--seed` was given. A run that did not name one is in a world
+    /// picked off the clock, which is worth saying out loud: otherwise a
+    /// picture worth keeping could never be taken twice.
+    pub seed_given: bool,
     /// Pictures to take, in order. Empty means play the game.
     pub shots: Vec<Shot>,
     /// Size of each captured picture. Ignored when there are no shots — a
@@ -91,7 +95,6 @@ impl Args {
 /// Built rather than written out so the defaults it quotes are read from the
 /// code itself and cannot drift.
 fn usage() -> String {
-    let world = WorldConfig::default();
     let view = View::default();
     format!(
         "\
@@ -103,7 +106,8 @@ Options:
   --state <screen>  start on `mainmenu`, `newworld`, `joinworld`, `settings`
                     or `inworld` [default: mainmenu, or inworld when shots or
                     a server are asked for]
-  --seed <n>        the world to generate [default: {}]
+  --seed <n>        the world to generate [default: a new one every run, and
+                    the run says which so it can be asked for again]
   --join <host[:port]>  play in a served world instead of a local one; the
                     server provides the seed and where the world is entered,
                     and the run starts in that world rather than on a screen
@@ -130,7 +134,6 @@ Capture options:
 Capturing needs no window: the shots are rendered off screen, so a run can
 take its pictures without stealing the display.
 ",
-        world.seed,
         view.distance,
         view.yaw.to_degrees(),
         DEFAULT_RESOLUTION.x,
@@ -146,18 +149,23 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         std::process::exit(0);
     }
 
+    // An unasked-for world is a new one rather than the same one every time:
+    // the ocean is endless and there is nothing special about any seed in it,
+    // so a run that says nothing is better off somewhere it has not been.
     let mut args = Args {
         state: AppState::MainMenu,
-        config: WorldConfig::default(),
+        config: WorldConfig {
+            seed: random_seed(),
+        },
         join: None,
         debug: false,
         view: View::default(),
         focus_given: false,
+        seed_given: false,
         shots: Vec::new(),
         resolution: DEFAULT_RESOLUTION,
     };
     let mut state_given = false;
-    let mut seed_given = false;
 
     // `--debug` is the one flag that stands on its own; every other option
     // takes a value, so past it an option in the last position is always a
@@ -180,7 +188,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                 args.config.seed = value
                     .parse()
                     .map_err(|_| format!("`{value}` is not a seed"))?;
-                seed_given = true;
+                args.seed_given = true;
             }
             "--join" => args.join = Some(value.clone()),
             "--focus" => {
@@ -204,7 +212,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // A joined world is the server's world, whole: a seed given alongside
     // would either be ignored or generate a different ocean, and both are
     // worse than saying so.
-    if args.join.is_some() && seed_given {
+    if args.join.is_some() && args.seed_given {
         return Err(
             "`--seed` picks a world to generate, but a joined world is the server's — \
              its seed arrives with the welcome"
@@ -332,8 +340,12 @@ mod tests {
     fn defaults_play_the_game_from_the_main_menu() {
         let args = ok("");
         assert_eq!(args.state, AppState::MainMenu);
-        assert_eq!(args.config.seed, WorldConfig::default().seed);
         assert!(!args.is_capture());
+
+        // And in a world nobody chose, which is a new one each run rather
+        // than one seed forever.
+        assert!(!args.seed_given);
+        assert_ne!(args.config.seed, ok("").config.seed);
     }
 
     #[test]

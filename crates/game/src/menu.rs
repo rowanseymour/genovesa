@@ -11,11 +11,12 @@ use protocol::DEFAULT_PORT;
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
 use crate::camera::View;
 use crate::net::{Dialing, Hosting, Online};
-use crate::terrain::{Archipelago, WorldConfig};
+use crate::terrain::{random_seed, Archipelago, WorldConfig, MAX_SEED};
 use crate::AppState;
 
-/// Longest seed the user can type. Keeps it inside a u32.
-const MAX_SEED_DIGITS: usize = 9;
+/// Longest seed the user can type — read off [`MAX_SEED`], so the field can
+/// always hold a seed the game itself picked.
+const MAX_SEED_DIGITS: usize = MAX_SEED.ilog10() as usize + 1;
 
 /// Longest address the join screen will take. Room for a fully qualified name
 /// and a port, well past anything anybody types.
@@ -137,7 +138,14 @@ struct NewWorldSettings {
 impl Default for NewWorldSettings {
     fn default() -> Self {
         Self {
-            seed: WorldConfig::default().seed.to_string(),
+            // A world nobody has been to, so that opening the dialog and
+            // pressing start is a new island rather than the one every other
+            // player who did the same thing got. Drawn once, when the game
+            // starts, rather than each time the dialog opens: a seed typed in
+            // and then navigated away from is one the player chose, and
+            // rolling over it would be the dialog forgetting. The dice button
+            // is there for another.
+            seed: random_seed().to_string(),
             share: false,
         }
     }
@@ -1196,17 +1204,6 @@ fn highlight_buttons(
     }
 }
 
-/// Seeds off the clock. Good enough for "give me a different map".
-fn random_seed() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
-        .unwrap_or(0);
-    nanos % 10u32.pow(MAX_SEED_DIGITS as u32)
-}
-
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
@@ -1805,8 +1802,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_the_world_config() {
+    fn the_dialog_opens_on_a_world_nobody_chose() {
         let settings = NewWorldSettings::default();
-        assert_eq!(settings.seed_value(), WorldConfig::default().seed);
+        assert!(settings.seed.len() <= MAX_SEED_DIGITS);
+        // And a different one each time the game is started, rather than one
+        // island every player who pressed start ever saw.
+        assert_ne!(settings.seed, NewWorldSettings::default().seed);
     }
 }

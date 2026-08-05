@@ -1,7 +1,7 @@
 //! The server binary's command line: a port to listen on and a world to host.
 
 use protocol::DEFAULT_PORT;
-use world::archipelago::WorldConfig;
+use world::archipelago::{random_seed, WorldConfig};
 
 /// What the command line asked for.
 pub struct Args {
@@ -20,12 +20,12 @@ Usage: server [options]
 
 Options:
   --port <n>   port to listen on [default: {DEFAULT_PORT}]
-  --seed <n>   the world to host [default: {}]
+  --seed <n>   the world to host [default: a new one every run, which the
+               server names as it starts]
 
 Terrain never crosses the wire: clients generate the same world from the
 seed, and the server only keeps track of who is in it and where.
-",
-        WorldConfig::default().seed,
+"
     )
 }
 
@@ -37,9 +37,14 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         std::process::exit(0);
     }
 
+    // A server told nothing about which world to host hosts a new one, rather
+    // than the same one every host that ever forgot to say. The line it prints
+    // as it starts is what makes that world askable for again.
     let mut args = Args {
         port: DEFAULT_PORT,
-        config: WorldConfig::default(),
+        config: WorldConfig {
+            seed: random_seed(),
+        },
     };
 
     let mut rest = argv.iter();
@@ -73,10 +78,14 @@ mod tests {
     }
 
     #[test]
-    fn defaults_host_the_default_world_on_the_default_port() {
+    fn defaults_host_a_new_world_on_the_default_port() {
         let args = parse_args("").expect("should parse");
         assert_eq!(args.port, DEFAULT_PORT);
-        assert_eq!(args.config.seed, WorldConfig::default().seed);
+
+        // Told nothing, two runs host different worlds rather than the same
+        // one forever.
+        let again = parse_args("").expect("should parse");
+        assert_ne!(args.config.seed, again.config.seed);
     }
 
     #[test]
