@@ -1029,15 +1029,11 @@ impl TerrainGenerator {
         // Lightly blurred afterwards — a windowed maximum is continuous but
         // carries gradient creases where the winning peak changes hands, and
         // anything the massif is divided by ends up printed on the mountains.
-        let mut ceiling = seat;
-        window_max(&mut ceiling, (px, pz), pad);
-        blur(&mut ceiling, (px, pz));
-        blur(&mut ceiling, (px, pz));
-        self.range_ceiling = GridField {
-            cells: ceiling,
-            dims: (px, pz),
-            origin: pad_origin,
-        };
+        let mut ceiling = GridField::new(seat, (px, pz), pad_origin);
+        ceiling.window_max(pad);
+        ceiling.blur();
+        ceiling.blur();
+        self.range_ceiling = ceiling;
 
         points
             .iter()
@@ -2219,9 +2215,9 @@ impl CoastDistance {
     /// Distance out from a set of seeds — zero at a cell that counts wholly as
     /// water, higher at one that counts partly, infinite at ground.
     fn measure(seeds: Vec<f32>, dims: (usize, usize), origin: Vec2) -> Self {
-        let mut cells = seeds;
+        let mut field = GridField::new(seeds, dims, origin);
 
-        chamfer(&mut cells, dims);
+        field.chamfer();
         // The transform is exact, and exact is the problem: everywhere two
         // wavefronts meet — down the middle of every neck and strait, and in
         // a fan of branches behind every scalloped stretch of coast — the
@@ -2234,15 +2230,9 @@ impl CoastDistance {
         // that the shore-character displacement sweeps across a crease instead
         // of leaping it.
         for _ in 0..4 {
-            blur(&mut cells, dims);
+            field.blur();
         }
-        Self {
-            field: GridField {
-                cells,
-                dims,
-                origin,
-            },
-        }
+        Self { field }
     }
 
     /// Distance to the waterline at a world-space point, in metres. Before
@@ -2257,63 +2247,13 @@ impl CoastDistance {
     }
 }
 
-/// Two-pass chamfer distance transform over a grid of zeroes (the sea) and
-/// infinities (everything else), leaving each cell holding its distance from
-/// the nearest zero, in cells.
-///
-/// Weighting a diagonal step by √2 keeps the result close enough to a true
-/// Euclidean distance for something only ever used to shape and fade a coast,
-/// at two linear passes rather than a search.
-fn chamfer(cells: &mut [f32], dims: (usize, usize)) {
-    const DIAGONAL: f32 = std::f32::consts::SQRT_2;
-    let (nx, nz) = dims;
-
-    let mut pass = |x: usize, z: usize, neighbours: [(isize, isize, f32); 4]| {
-        let mut best = cells[z * nx + x];
-        for (dx, dz, cost) in neighbours {
-            let (cx, cz) = (x as isize + dx, z as isize + dz);
-            if (0..nx as isize).contains(&cx) && (0..nz as isize).contains(&cz) {
-                best = best.min(cells[cz as usize * nx + cx as usize] + cost);
-            }
-        }
-        cells[z * nx + x] = best;
-    };
-
-    // Forward, reaching back at the cells already settled this pass...
-    for z in 0..nz {
-        for x in 0..nx {
-            pass(
-                x,
-                z,
-                [
-                    (-1, -1, DIAGONAL),
-                    (0, -1, 1.0),
-                    (1, -1, DIAGONAL),
-                    (-1, 0, 1.0),
-                ],
-            );
-        }
-    }
-    // ...then backward over the mirror image of the same neighbourhood, which
-    // is what lets distance travel in every direction.
-    for z in (0..nz).rev() {
-        for x in (0..nx).rev() {
-            pass(
-                x,
-                z,
-                [
-                    (1, 1, DIAGONAL),
-                    (0, 1, 1.0),
-                    (-1, 1, DIAGONAL),
-                    (1, 0, 1.0),
-                ],
-            );
-        }
-    }
-}
-
 /// A grid of values over the map at [`COAST_GRID`] spacing, read back with
 /// bilinear interpolation, clamped to its edges outside it.
+///
+/// The shaping passes below are methods rather than free functions over a
+/// slice and a `(width, height)` pair: every one of them is an operation on
+/// exactly this — cells plus the dimensions to read them by — and threading
+/// the two separately only gave them a chance to disagree.
 #[derive(Default)]
 struct GridField {
     cells: Vec<f32>,
@@ -2323,6 +2263,14 @@ struct GridField {
 }
 
 impl GridField {
+    fn new(cells: Vec<f32>, dims: (usize, usize), origin: Vec2) -> Self {
+        Self {
+            cells,
+            dims,
+            origin,
+        }
+    }
+
     fn at(&self, wx: f32, wz: f32) -> f32 {
         let (nx, nz) = self.dims;
         if nx == 0 {
@@ -2340,50 +2288,129 @@ impl GridField {
         let far = at(x0, z1) + (at(x1, z1) - at(x0, z1)) * tx;
         near + (far - near) * tz
     }
-}
 
-/// Replaces every cell with the largest value within `radius` cells of it —
-/// a square sliding-window maximum, done as two 1D passes with a monotonic
-/// deque, so the whole thing is linear in the grid size.
-fn window_max(cells: &mut [f32], dims: (usize, usize), radius: usize) {
-    let (nx, nz) = dims;
-    let window = |line: &mut Vec<f32>, out: &mut Vec<f32>| {
-        // Deque of indices whose values are decreasing; the front is always
-        // the maximum of the window around `i`.
-        let mut deque: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
-        out.clear();
-        for i in 0..line.len() + radius {
-            if i < line.len() {
-                while deque.back().is_some_and(|&b| line[b] <= line[i]) {
-                    deque.pop_back();
+    /// Two-pass chamfer distance transform over a grid of zeroes (the sea) and
+    /// infinities (everything else), leaving each cell holding its distance
+    /// from the nearest zero, in cells.
+    ///
+    /// Weighting a diagonal step by √2 keeps the result close enough to a true
+    /// Euclidean distance for something only ever used to shape and fade a
+    /// coast, at two linear passes rather than a search.
+    fn chamfer(&mut self) {
+        const DIAGONAL: f32 = std::f32::consts::SQRT_2;
+        let (nx, nz) = self.dims;
+        let cells = &mut self.cells;
+
+        let mut pass = |x: usize, z: usize, neighbours: [(isize, isize, f32); 4]| {
+            let mut best = cells[z * nx + x];
+            for (dx, dz, cost) in neighbours {
+                let (cx, cz) = (x as isize + dx, z as isize + dz);
+                if (0..nx as isize).contains(&cx) && (0..nz as isize).contains(&cz) {
+                    best = best.min(cells[cz as usize * nx + cx as usize] + cost);
                 }
-                deque.push_back(i);
             }
-            if i >= radius {
-                let centre = i - radius;
-                while deque.front().is_some_and(|&f| f + radius < centre) {
-                    deque.pop_front();
-                }
-                out.push(line[deque[0]]);
+            cells[z * nx + x] = best;
+        };
+
+        // Forward, reaching back at the cells already settled this pass...
+        for z in 0..nz {
+            for x in 0..nx {
+                pass(
+                    x,
+                    z,
+                    [
+                        (-1, -1, DIAGONAL),
+                        (0, -1, 1.0),
+                        (1, -1, DIAGONAL),
+                        (-1, 0, 1.0),
+                    ],
+                );
             }
         }
-    };
-
-    let mut line = Vec::with_capacity(nx.max(nz));
-    let mut out = Vec::with_capacity(nx.max(nz));
-    for row in 0..nz {
-        line.clear();
-        line.extend_from_slice(&cells[row * nx..(row + 1) * nx]);
-        window(&mut line, &mut out);
-        cells[row * nx..(row + 1) * nx].copy_from_slice(&out);
+        // ...then backward over the mirror image of the same neighbourhood,
+        // which is what lets distance travel in every direction.
+        for z in (0..nz).rev() {
+            for x in (0..nx).rev() {
+                pass(
+                    x,
+                    z,
+                    [
+                        (1, 1, DIAGONAL),
+                        (0, 1, 1.0),
+                        (-1, 1, DIAGONAL),
+                        (1, 0, 1.0),
+                    ],
+                );
+            }
+        }
     }
-    for col in 0..nx {
-        line.clear();
-        line.extend((0..nz).map(|row| cells[row * nx + col]));
-        window(&mut line, &mut out);
-        for (row, v) in out.iter().enumerate() {
-            cells[row * nx + col] = *v;
+
+    /// Replaces every cell with the largest value within `radius` cells of it
+    /// — a square sliding-window maximum, done as two 1D passes with a
+    /// monotonic deque, so the whole thing is linear in the grid size.
+    fn window_max(&mut self, radius: usize) {
+        let (nx, nz) = self.dims;
+        let cells = &mut self.cells;
+        let window = |line: &mut Vec<f32>, out: &mut Vec<f32>| {
+            // Deque of indices whose values are decreasing; the front is
+            // always the maximum of the window around `i`.
+            let mut deque: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+            out.clear();
+            for i in 0..line.len() + radius {
+                if i < line.len() {
+                    while deque.back().is_some_and(|&b| line[b] <= line[i]) {
+                        deque.pop_back();
+                    }
+                    deque.push_back(i);
+                }
+                if i >= radius {
+                    let centre = i - radius;
+                    while deque.front().is_some_and(|&f| f + radius < centre) {
+                        deque.pop_front();
+                    }
+                    out.push(line[deque[0]]);
+                }
+            }
+        };
+
+        let mut line = Vec::with_capacity(nx.max(nz));
+        let mut out = Vec::with_capacity(nx.max(nz));
+        for row in 0..nz {
+            line.clear();
+            line.extend_from_slice(&cells[row * nx..(row + 1) * nx]);
+            window(&mut line, &mut out);
+            cells[row * nx..(row + 1) * nx].copy_from_slice(&out);
         }
+        for col in 0..nx {
+            line.clear();
+            line.extend((0..nz).map(|row| cells[row * nx + col]));
+            window(&mut line, &mut out);
+            for (row, v) in out.iter().enumerate() {
+                cells[row * nx + col] = *v;
+            }
+        }
+    }
+
+    /// One pass of 3×3 box blur, in place. Used to take the creases off the
+    /// distance field; run twice it approximates a small tent kernel.
+    fn blur(&mut self) {
+        let (nx, nz) = self.dims;
+        let cells = &mut self.cells;
+        let mut pass = |stride: usize, len: usize, lanes: usize, lane_stride: usize| {
+            for lane in 0..lanes {
+                let base = lane * lane_stride;
+                let mut previous = cells[base];
+                for i in 0..len {
+                    let here = cells[base + i * stride];
+                    let next = cells[base + (i + 1).min(len - 1) * stride];
+                    cells[base + i * stride] = (previous + here + next) / 3.0;
+                    previous = here;
+                }
+            }
+        };
+        // Rows, then columns — a box blur is separable.
+        pass(1, nx, nz, nx);
+        pass(nx, nz, nx, 1);
     }
 }
 
@@ -2440,27 +2467,6 @@ fn water_fraction(wet: &[f32], dims: (usize, usize), radius: usize) -> Vec<f32> 
         }
     }
     out
-}
-
-/// One pass of 3×3 box blur over a grid, in place. Used to take the creases
-/// off the distance field; run twice it approximates a small tent kernel.
-fn blur(cells: &mut [f32], dims: (usize, usize)) {
-    let (nx, nz) = dims;
-    let mut pass = |stride: usize, len: usize, lanes: usize, lane_stride: usize| {
-        for lane in 0..lanes {
-            let base = lane * lane_stride;
-            let mut previous = cells[base];
-            for i in 0..len {
-                let here = cells[base + i * stride];
-                let next = cells[base + (i + 1).min(len - 1) * stride];
-                cells[base + i * stride] = (previous + here + next) / 3.0;
-                previous = here;
-            }
-        }
-    };
-    // Rows, then columns — a box blur is separable.
-    pass(1, nx, nz, nx);
-    pass(nx, nz, nx, 1);
 }
 
 /// The three kinds of coast, in the order the character field runs through

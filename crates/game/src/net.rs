@@ -35,7 +35,7 @@ use server::{Host, Server};
 
 use crate::boat::Boat;
 use crate::terrain::{WorldConfig, WorldTerrain};
-use crate::{matte, AppState};
+use crate::{eased, matte, AppState};
 
 /// Seconds between position reports, at least. Ten a second reads as
 /// continuous once markers ease between them, and keeps an idle wire quiet.
@@ -53,9 +53,9 @@ const REPORT_THRESHOLD: f32 = 0.25;
 /// one supersedes it a tenth of a second later.
 const REPORT_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// How quickly a marker eases towards where the server last put its player.
-/// Positions arrive a few times a second, so the easing is what turns the
-/// steps back into movement.
+/// How quickly a marker eases towards where the server last put its player,
+/// in e-foldings per second — see [`eased`]. Positions arrive a few times a
+/// second, so the easing is what turns the steps back into movement.
 const MARKER_SMOOTHING: f32 = 8.0;
 
 /// Radius of the capsule another player appears as.
@@ -476,8 +476,7 @@ fn place_markers(
     terrain: Option<Res<WorldTerrain>>,
     mut markers: Query<(&RemotePlayer, &mut Transform)>,
 ) {
-    // The same frame-rate-independent easing as the camera's.
-    let t = 1.0 - (-MARKER_SMOOTHING * time.delta_secs()).exp();
+    let t = eased(MARKER_SMOOTHING, time.delta_secs());
 
     for (player, mut transform) in &mut markers {
         let at = Vec2::new(transform.translation.x, transform.translation.z);
