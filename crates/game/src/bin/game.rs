@@ -13,6 +13,7 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use bevy::window::ExitCondition;
 
+use game::boat::BoatPlugin;
 use game::camera::MapCameraPlugin;
 use game::capture::CapturePlugin;
 use game::cli::{self, Args};
@@ -96,6 +97,7 @@ fn run(args: Args, online: Option<Connection>) {
         .insert_resource(args.starting_view())
         .add_plugins((
             TerrainPlugin,
+            BoatPlugin,
             MapCameraPlugin,
             MenuPlugin,
             // Harmless offline: its systems condition on the joined session.

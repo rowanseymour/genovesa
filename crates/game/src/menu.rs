@@ -1320,6 +1320,32 @@ mod tests {
     }
 
     #[test]
+    fn start_launches_the_boat_where_the_view_opens() {
+        // The path a player actually takes into a world, as against the command
+        // line's: the dialog moves the view onto land *and then* enters, so the
+        // boat has to be put down at where the view ended up rather than at
+        // wherever it was pointing when the dialog opened. Out by that much and
+        // the boat is a kilometre of ocean away from the only place anyone
+        // looks for it.
+        let mut app = test_app(AppState::NewWorld);
+        app.add_plugins(crate::boat::BoatPlugin)
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>();
+
+        app.world_mut().resource_mut::<NewWorldSettings>().seed = "77".to_string();
+        click(&mut app, MenuButton::Start);
+
+        let focus = app.world().resource::<View>().focus;
+        let at = app
+            .world_mut()
+            .query_filtered::<&Transform, With<crate::boat::Boat>>()
+            .single(app.world())
+            .expect("starting a world should launch a boat")
+            .translation;
+        assert_eq!(Vec2::new(at.x, at.z), Vec2::new(focus.x, focus.z));
+    }
+
+    #[test]
     fn start_puts_the_view_on_land() {
         // The origin is open ocean on essentially every seed, so entering a
         // world from the dialog has to move the view onto the nearest island —
