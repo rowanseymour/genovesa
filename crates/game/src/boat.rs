@@ -42,12 +42,14 @@ const DRAFT: f32 = 0.8;
 const FOREFOOT_STATION: f32 = -LENGTH * 0.5 * 0.7;
 const HEEL_STATION: f32 = LENGTH * 0.5;
 
-/// How far the keel has to reach into the bottom before the hull is held. Less
-/// than [`DRAFT`] on purpose: stopping the boat the instant the ground rises to
-/// meet the keel is an invisible wall a boat's length offshore, whereas a fifth
-/// of a metre of bite is a boat *beaching* — the keel is seen to touch, and
-/// then it stops. Well clear of the two centimetres the heights are quantised
-/// to, so the threshold cannot chatter.
+/// How little water the hull is held in: ground standing higher than this far
+/// below the waterline stops it. Shallower than [`DRAFT`] on purpose, and the
+/// difference between the two is the bite the keel is allowed to take first —
+/// stopping the boat the instant the ground rises to meet the keel is an
+/// invisible wall a boat's length offshore, whereas a fifth of a metre of bite
+/// is a boat *beaching*: the keel is seen to touch, and then it stops. Well
+/// clear of the two centimetres the heights are quantised to, so the threshold
+/// cannot chatter.
 ///
 /// On the coasts the generator draws this puts the hull within a metre or two
 /// of the waterline; where it holds a boat further off, it is off a shelf too
@@ -58,8 +60,24 @@ const GROUNDING_DRAFT: f32 = 0.6;
 
 /// How many points along the keel are asked about the bottom. Spread from the
 /// forefoot to the heel inclusive, so the gap between them comes out just under
-/// the two metres the ground is sampled at — the height field is linear between
-/// its corners, so nothing it can describe fits between two probes unnoticed.
+/// the two metres the ground is sampled at: no facet of the height field can
+/// lie wholly between two probes, so ground that rises across a facet is read
+/// on the way up rather than stepped over.
+///
+/// That is what the spacing buys, and it is worth being plain that it is less
+/// than "nothing gets past". A crest only one lattice line wide is *not* seen:
+/// the field is linear between its corners, so two probes either side of such a
+/// crest read its flanks, and the hull sails through a rock standing at the
+/// waterline. Coasts are safe from it by being coasts — the bottom shelves, so
+/// the ground under the keel is near enough monotone, and the innermost probe
+/// is reading the shallowest water and reading it honestly. What is exposed is
+/// the isolated skerry, which the generator draws on purpose and draws about a
+/// facet across. Seeing one reliably would mean probing at a fraction of a
+/// metre rather than at two, on every frame and at both poses, to buy a rock in
+/// open water — while the coasts, which are what a boat is actually stopped by,
+/// need none of it. Sailing through a skerry is the smaller wrong, and the one
+/// that can be paid off from the other end, by giving the skerries some width.
+///
 /// The sides are not probed: the hull is a shallow V, drawing only [`DRAFT`] on
 /// the centreline and nothing at all at the beam, so a probe out there would
 /// have to carry a draught of its own to say anything the keel has not said.
@@ -203,8 +221,13 @@ fn float(ground: Option<Res<Ground>>, mut boats: Query<&mut Transform, With<Boat
     }
 }
 
-/// How far the worst-placed point of the keel stands into the bottom at a
-/// pose, in metres — negative for as long as there is water under all of it.
+/// How far the bottom stands above the depth the hull is held at, in metres,
+/// taken at the worst-placed point of the keel — negative for as long as there
+/// is water enough under all of it, zero where the hull is about to be stopped.
+/// Not the keel's own penetration, which is this plus the gap between [`DRAFT`]
+/// and [`GROUNDING_DRAFT`]: the rule wants one number that rises as the ground
+/// does, and nothing ever reads it but its sign and its ordering against
+/// itself, both of which the offset leaves alone.
 ///
 /// This is the whole of collision. The ground the client has is a height field
 /// on a two-metre lattice, and the boat is a keel line above it, so "is there
@@ -260,14 +283,27 @@ fn grounding(ground: Option<&Ground>, transform: &Transform) -> f32 {
 /// would reach floats — or, failing that, if it is aground no *deeper* than
 /// the pose already held. That second half is not an escape hatch for a boat
 /// that has got itself ashore; it is the only rule that both frees one and
-/// can't be played. Every way out of the ground is downhill, so backing off a
-/// beach, crawling along the bottom and a `--focus` that puts the boat inland
-/// all work by it; and every way further in is uphill, so nosing the bow over
-/// a beach to unlock the island — which "aground already, let it through"
-/// would hand a player on the first frame — is refused like any other climb.
-/// Which is also why the comparison carries no tolerance: a hair of slack is a
-/// hair of climb every frame, and a hair a frame is a metre a second up a
-/// hillside.
+/// can't be played. It is also narrower than it reads. A hull that is floating
+/// can only ever be allowed a pose that floats — `here` at or under zero makes
+/// the second clause imply the first — so a boat under way never reaches dry
+/// ground at all: it halts still afloat, with at most the fifth of a metre
+/// between [`DRAFT`] and [`GROUNDING_DRAFT`] in the mud, and backing off from
+/// there is the *first* clause doing the work, the water astern being water.
+/// What the second clause is for is the pose the boat did not sail into — a
+/// `--focus` that puts it inland, and ground arriving under a hull already
+/// sitting there. Out of those every way down to the sea is downhill, so it
+/// goes; and every way further in is uphill, so nosing the bow over a beach to
+/// unlock the island — which "aground already, let it through" would hand a
+/// player on the first frame — is refused like any other climb. Which is also
+/// why the comparison carries no tolerance: a hair of slack is a hair of climb
+/// every frame, and a hair a frame is a metre a second up a hillside.
+///
+/// Only the pose at the end of the advance is judged; the path swept getting
+/// there is covered by the probes of the frame before, which holds for as long
+/// as a frame's advance stays under the probe spacing. At [`SPEED`] that is
+/// seventeen centimetres at sixty frames a second, and two and a half metres
+/// at the quarter second Bevy clamps a stalled frame to — so the sweep is only
+/// ever missed on a frame that was already a visible break in the picture.
 ///
 /// Both poses are judged with the rotation the helm has just applied, so a
 /// turn only ever changes where the advance goes, never whether it is allowed.
@@ -747,8 +783,7 @@ mod tests {
 
     #[test]
     fn the_boat_rides_the_surface_it_is_over() {
-        let mut app = test_app();
-        app.insert_resource(test_ground());
+        let mut app = island_app();
 
         /// Where the boat comes to rest when it is put down at a spot.
         fn put_down(app: &mut App, spot: Vec2) -> f32 {
@@ -806,9 +841,9 @@ mod tests {
     }
 
     /// The same app with a hand of ground already delivered — the island the
-    /// collision tests run aground on. Everything above it runs without a
-    /// [`Ground`] at all, which is the other case worth having: a client that
-    /// has been sent nothing must still be able to move.
+    /// collision tests run aground on, and the surface the float test rides.
+    /// The tests that take a bare [`test_app`] instead are the other case worth
+    /// having: a client that has been sent nothing must still be able to move.
     fn island_app() -> App {
         let mut app = test_app();
         app.insert_resource(test_ground());
@@ -833,7 +868,9 @@ mod tests {
         Vec2::new(at.x, at.z).length()
     }
 
-    /// How far into the bottom the boat's keel is standing where it lies.
+    /// What [`grounding`] makes of the pose the boat is lying in: how far the
+    /// bottom there stands above the depth the hull is held at, so positive is
+    /// aground and more positive is further in.
     fn bite(app: &mut App) -> f32 {
         let transform = boat(app);
         grounding(Some(app.world().resource::<Ground>()), &transform)
@@ -841,9 +878,12 @@ mod tests {
 
     #[test]
     fn the_keel_is_probed_as_closely_as_the_ground_is_sampled() {
-        // What makes a handful of points along the keel as good as the hull
-        // itself: the height field is linear between corners this far apart,
-        // so there is no rock it can describe that fits between two probes.
+        // What a handful of points along the keel does buy: no facet of the
+        // height field fits between two probes, so ground rising across a facet
+        // is read on the way up. Not the same as seeing everything the field can
+        // draw — a crest narrower than a facet is read off its flanks and
+        // missed, which no spacing at this scale fixes; [`KEEL_PROBES`] carries
+        // the argument for wearing that rather than probing the keel to death.
         let spacing = (HEEL_STATION - FOREFOOT_STATION) / (KEEL_PROBES - 1) as f32;
         assert!(
             spacing <= FACET_METRES,
@@ -897,6 +937,14 @@ mod tests {
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
         let aground = from_the_island(&mut app);
+        // Phase one has to have been *stopped* for phase two to say anything:
+        // a run that sailed clean over the island would back off it exactly as
+        // far, and the test would pass with no collision in the build at all.
+        // So the same check the coast test makes, made again here.
+        assert!(
+            aground > TEST_ISLAND_REACH && aground < TEST_ISLAND_REACH + 10.0,
+            "the boat is {aground} m out, which is not held at a coast at {TEST_ISLAND_REACH} m"
+        );
 
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -971,8 +1019,16 @@ mod tests {
     fn a_grounded_boat_is_never_driven_further_aground() {
         // The pose a rule of "aground already, let it through" would hand the
         // whole island to: bow over the beach, and then whatever the player
-        // likes. Held for a good while with the helm hard over as well, so the
-        // hull sweeps its way round every heading there is.
+        // likes. Driven straight at it, and with no helm — the helm was held
+        // here once, on the thought that a hull swept round every heading
+        // tries the rule from more angles than one heading does. It tries
+        // nothing at all. The turning circle at full way is five metres, so
+        // the bow comes round and the boat sails off the shore under any rule
+        // whatever, including both of the ones this test exists to catch; what
+        // it was watching was a boat that had floated away. A heading held is
+        // also what makes the two bites comparable, `grounding` being a
+        // reading of the ground under a particular pose and not a property of
+        // the spot. Coming round while aground has a test of its own.
         let mut app = island_app();
         place(
             &mut app,
@@ -980,10 +1036,10 @@ mod tests {
             Vec2::new(-1.0, 0.0),
         );
         let before = bite(&mut app);
+        let out = from_the_island(&mut app);
         assert!(before > 0.0, "the boat was meant to start aground");
 
         hold(&mut app, KeyCode::ArrowUp);
-        hold(&mut app, KeyCode::ArrowLeft);
         run_frames(&mut app, SETTLED);
 
         let after = bite(&mut app);
@@ -991,6 +1047,15 @@ mod tests {
             after <= before,
             "the boat worked its way {} m further into the ground",
             after - before
+        );
+        // And the same thing said in the terms a player sees it in: bow at the
+        // island, key down for eight hundred frames, and not a metre of the
+        // island gained.
+        let ended = from_the_island(&mut app);
+        assert!(
+            ended >= out,
+            "the boat made {} m towards the middle of the island",
+            out - ended
         );
     }
 
