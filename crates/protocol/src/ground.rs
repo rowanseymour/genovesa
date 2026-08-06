@@ -331,10 +331,13 @@ pub struct ChunkPayload {
     ///
     /// A stored [`NO_WATER`] means dry. Everywhere else the corner has a lake
     /// level over it, and water stands wherever that level is above the
-    /// height at the same corner. The grid deliberately reaches a corner or
-    /// two past the water's edge, so a client has a level on both sides of
-    /// every shoreline and can put the waterline where the two fields cross
-    /// rather than on the last wet corner.
+    /// height at the same corner. The grid deliberately reaches well past the
+    /// water's edge and up the bank behind it, so a client has a level on
+    /// both sides of every shoreline and can put the waterline where the two
+    /// fields cross rather than on the last wet corner. A generator owes it
+    /// that reach: where the levels stop, the ground has to have climbed out
+    /// of the water already, or the client draws a straight edge on the grid
+    /// in place of a shore.
     ///
     /// Sent per corner rather than as one level and a mask because a chunk
     /// may hold more than one lake, and two basins a hillside apart stand at
