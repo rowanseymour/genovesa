@@ -42,10 +42,23 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
-  # Clippy and the tests share a job, and therefore a target directory: `cargo
-  # clippy` only puts workspace crates through clippy-driver and builds the
-  # dependencies with plain rustc, so the several minutes of Bevy underneath
-  # are compiled once here rather than once per job.
+  # Clippy and the tests share a job, and therefore a target directory — but
+  # not, as this comment used to claim, the work of building Bevy. Clippy is a
+  # *check* build: it stops at metadata, so the dependencies come out as
+  # `.rmeta` and there is not an `.rlib` among them for a test build to link
+  # against. `cargo test` therefore compiles the whole of Bevy again, properly,
+  # and on a cold cache this job pays for it twice — a few minutes to check and
+  # the better part of an hour to compile. That is not a hang, however much it
+  # looks like one; the step is compiling `bevy_ui_render` and will get there.
+  #
+  # Sharing the job is still right, for the reasons that survive: one restore
+  # and one save of a target directory this size rather than two, and a clippy
+  # failure that skips the test build rather than racing it. Splitting them
+  # would run the two builds in parallel and cost a second cache of the same
+  # several gigabytes to do it.
+  #
+  # Only the first run after a dependency change pays any of this. Every run
+  # that restores a warm cache is a few minutes end to end.
   lint-and-test:
     name: Lint and test
     runs-on: ubuntu-latest
