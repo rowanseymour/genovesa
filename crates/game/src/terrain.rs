@@ -485,8 +485,8 @@ fn chunk_mesh(chunk: IVec2, heights: &[f32], surfaces: &[Surface]) -> Mesh {
 /// only where a chunk holds more than one lake.
 ///
 /// **Where the water stops is not decided here.** A quad is drawn wherever
-/// any of its corners has a level at all — which the server sends a corner or
-/// two past the water's edge — so the sheet runs on *into* the bank and the
+/// any of its corners has a level at all — which the server sends well past
+/// the water's edge — so the sheet runs on *into* the bank and the
 /// ground mesh, being opaque and higher, hides the part that has gone
 /// underground. The waterline the player sees is therefore the true
 /// intersection of the two surfaces, meandering at whatever precision the
