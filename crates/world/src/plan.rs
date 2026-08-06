@@ -55,12 +55,14 @@ impl Image {
     }
 }
 
-/// One pixel of any plan render: the map's own colour, tinted for the sea
-/// below the waterline, hill-shaded by a sun over the -x/-z corner so relief
-/// reads in plan.
-fn shade(color: Vec3, height: f32, normal: Vec3) -> [u8; 3] {
+/// One pixel of any plan render: the map's own colour, tinted for the bed
+/// below whatever water stands there — the sea's or a lake's — and
+/// hill-shaded by a sun over the -x/-z corner so relief reads in plan.
+/// `awash` is the height relative to the local water surface, negative under
+/// it; over the sea that is simply the height.
+fn shade(color: Vec3, awash: f32, normal: Vec3) -> [u8; 3] {
     let mut c = color;
-    if height < 0.0 {
+    if awash < 0.0 {
         // Stand in for the translucent sea plane.
         c = c * 0.45 + Vec3::new(0.10, 0.42, 0.62) * 0.55;
     }
@@ -87,7 +89,8 @@ pub fn render(config: &MapConfig, width: u32, height: u32) -> Image {
             let normal = gen.normal(wx, wz);
             let height = gen.height(wx, wz);
             let surface = gen.surface(wx, wz, height, normal);
-            pixels.extend_from_slice(&shade(surface.color(), height, normal));
+            let water = gen.lake_level(wx, wz).unwrap_or(0.0);
+            pixels.extend_from_slice(&shade(surface.color(), height - water, normal));
         }
     }
     Image {
@@ -153,7 +156,8 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
                     let normal = island.normal(wx, wz);
                     let height = island.height(wx, wz);
                     let surface = island.surface(wx, wz, height, normal);
-                    shade(surface.color(), height, normal)
+                    let water = island.lake_level(wx, wz).unwrap_or(0.0);
+                    shade(surface.color(), height - water, normal)
                 }
             };
             pixels.extend_from_slice(&pixel);

@@ -131,6 +131,9 @@ pub fn test_ground() -> Ground {
                 .then(|| ChunkPayload {
                     heights,
                     surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
+                    // The test island is a smooth dome with nothing to
+                    // enclose a basin, so there is no lake on it to draw.
+                    water: None,
                 });
             ground.deliver(chunk, payload);
         }

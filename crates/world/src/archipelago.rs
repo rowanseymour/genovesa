@@ -50,8 +50,8 @@ use protocol::ground::{quantize, ChunkPayload, Surface};
 
 use crate::noise::smoothstep;
 use crate::terrain::{
-    facet_heights, facet_surfaces, normal_at, MapConfig, TerrainGenerator, CHUNK_TILES, MAX_DEPTH,
-    TILE_SIZE,
+    facet_heights, facet_surfaces, facet_water, normal_at, MapConfig, TerrainGenerator,
+    CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
 };
 
 pub use protocol::ground::{chunk_at, CHUNK_METRES};
@@ -440,6 +440,16 @@ impl Island {
     /// Surface normal at a world point, from central differences one tile out.
     pub fn normal(&self, wx: f32, wz: f32) -> Vec3 {
         normal_at(wx, wz, |x, z| self.height(x, z))
+    }
+
+    /// The surface level of the lake standing at or beside a world point —
+    /// [`TerrainGenerator::lake_level`], in world coordinates. Lakes are the
+    /// island's own: past the frame there is only the sea, and the answer out
+    /// there is `None` without needing a guard, since the lake grid's edge
+    /// cells are the map's guaranteed sea margin.
+    pub fn lake_level(&self, wx: f32, wz: f32) -> Option<f32> {
+        let local = Vec2::new(wx, wz) - self.spec.centre();
+        self.generator.lake_level(local.x, local.y)
     }
 }
 
@@ -838,6 +848,7 @@ impl Archipelago {
                 island.surface(wx, wz, height, normal)
             }),
             heights: heights.iter().copied().map(quantize).collect(),
+            water: facet_water(base, &heights, |wx, wz| island.lake_level(wx, wz)),
         })
     }
 
@@ -1252,13 +1263,14 @@ mod tests {
             let middle = chunk_at(entry);
 
             let start = Instant::now();
-            let (mut ground, mut water, mut bytes) = (0, 0, 0usize);
+            let (mut ground, mut water, mut lakes, mut bytes) = (0, 0, 0, 0usize);
             for dz in -reach..=reach {
                 for dx in -reach..=reach {
                     match world.chunk_payload(middle + IVec2::new(dx, dz)) {
                         Some(payload) => {
                             ground += 1;
-                            bytes += protocol::ground::PAYLOAD_BYTES;
+                            lakes += payload.water.is_some() as u32;
+                            bytes += protocol::ground::payload_bytes(payload.water.is_some());
                             std::hint::black_box(&payload);
                         }
                         None => water += 1,
@@ -1267,8 +1279,11 @@ mod tests {
             }
             let elapsed = start.elapsed();
 
+            // The lake count is the interesting one for the wire: a watered
+            // chunk is half as much again as a dry one, so what it costs to
+            // send lakes at all is that share and not the ground's.
             println!(
-                "seed {seed:>9}  {ground:>4} ground  {water:>4} water  \
+                "seed {seed:>9}  {ground:>4} ground ({lakes:>3} with lakes)  {water:>4} water  \
                  {:>6.1} MB  {elapsed:>8.0?}",
                 bytes as f32 / (1024.0 * 1024.0)
             );
@@ -1324,16 +1339,26 @@ mod tests {
         // The chunk is the island's middle, which is the part most likely to
         // hold land; a payload of pure ocean floor would be a digest of the
         // same number eight thousand times over and would notice nothing.
+        //
+        // The water grid goes in too, and contributes nothing at all where
+        // there is no lake — which is what makes its absence part of what is
+        // pinned: a chunk that gained or lost standing water changes this
+        // digest by the whole length of a grid.
         let middle = chunk_at(centre);
         let payload = world
             .chunk_payload(middle)
             .expect("an island's middle chunk should be ground");
-        let sent = digest(payload.heights.iter().flat_map(|h| h.to_le_bytes()).chain(
-            payload.surfaces.iter().map(|s| {
-                // Tone and shade in one byte, as the wire packs them.
-                ((s.tone as u8) << 2) | s.shade as u8
-            }),
-        ));
+        let sent = digest(
+            payload
+                .heights
+                .iter()
+                .flat_map(|h| h.to_le_bytes())
+                .chain(payload.surfaces.iter().map(|s| {
+                    // Tone and shade in one byte, as the wire packs them.
+                    ((s.tone as u8) << 2) | s.shade as u8
+                }))
+                .chain(payload.water.iter().flatten().flat_map(|w| w.to_le_bytes())),
+        );
 
         println!(
             "layout digests to {layout:#018X}, ground to {ground:#018X}, sent to {sent:#018X}"

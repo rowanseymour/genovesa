@@ -43,7 +43,9 @@ much land, how much mountain, how tall the peaks — so islands vary in
 character without any of them coming out drowned or absurd. Coasts divide
 into beaches, rocky shores and cliffs, with the landform and the colours
 reading the same field so that a beach is always flat and sandy and a cliff
-steep and grey.
+steep and grey. Where the ground encloses a hollow above the sea it holds a
+lake, standing at the height of the lowest saddle on its rim — so the water
+sits where water would gather, at the level it would gather to.
 
 The look is flat-shaded facets in a small fixed palette — no textures and no
 gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
@@ -71,7 +73,9 @@ a chunk at a time; a client asks for the chunks near its camera and draws what
 comes back, and is told nothing else — not the seed, not the layout, not which
 chunks are worth asking for. An answer is either open water, which carries no
 data at all, or ground, which arrives as corner heights and one palette entry
-per triangle.
+per triangle — and, on the minority of chunks holding a lake, the level its
+water stands at, since that is the one thing about a chunk no client could
+work out from the ground it was sent.
 
 That leaves the client small enough to be worth rewriting in another language
 against the protocol's documentation alone, which is the point of the

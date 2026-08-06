@@ -6,7 +6,8 @@
 //! not which chunks are worth asking for. An answer is either open water,
 //! which carries no data because the sea and its floor are two flat planes
 //! anyone can draw, or ground, which arrives as a [`ground::ChunkPayload`]:
-//! corner heights on a fixed grid and one palette entry per triangle.
+//! corner heights on a fixed grid, one palette entry per triangle, and — on
+//! the minority of chunks that hold a lake — the level its water stands at.
 //!
 //! That is a deliberate inversion of how this started. A seed used to be a
 //! world — every machine regenerated the same ocean, bit for bit, and terrain
@@ -37,7 +38,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// The port a server listens on, and a client joins on, unless told
 /// otherwise. Nothing else claims it, and it is easily remembered as the
@@ -52,12 +53,13 @@ const MAX_CLIENT_FRAME: u16 = 64;
 
 /// The longest frame a client will accept from a server, which is exactly one
 /// chunk of ground and not a byte more: its tag, its coordinates, the flag
-/// that says ground rather than water, and the payload.
+/// that says what kind of answer this is, and the payload — the largest kind,
+/// which is ground with standing water on it.
 ///
 /// Derived rather than picked, so that a message which outgrew it fails to
 /// send here instead of arriving as garbage — and so that "how much can one
 /// answer cost" has one answer, written down.
-const MAX_SERVER_FRAME: u16 = (1 + 8 + 1 + ground::PAYLOAD_BYTES) as u16;
+const MAX_SERVER_FRAME: u16 = (1 + 8 + 1 + ground::payload_bytes(true)) as u16;
 
 /// A player, as the server counts them: dealt out in joining order, never
 /// reused within a session, meaningless across sessions.
@@ -134,6 +136,9 @@ pub enum ToClient {
     /// Most answers are `None`. An island is laid out as a rectangle with a
     /// skirt of open water round it, and between islands there is nothing at
     /// all, so a camera's neighbourhood is mostly sea.
+    ///
+    /// Ground that carries a lake costs half as much again — see
+    /// [`ChunkPayload::water`] — and is a small minority of the ground.
     Chunk {
         chunk: IVec2,
         ground: Option<ChunkPayload>,
@@ -215,13 +220,16 @@ impl ToClient {
                 payload.push(5);
                 put_ivec2(&mut payload, *chunk);
                 match ground {
-                    // A flag byte rather than two tags, so that "is there
-                    // ground here" is one thing a reader tests and the
-                    // coordinates are in the same place either way.
+                    // A flag byte rather than three tags, so that what kind of
+                    // answer this is is one thing a reader tests and the
+                    // coordinates are in the same place whichever it is. It
+                    // says how long the rest of the message is, which is why
+                    // ground with water on it is a kind of answer here rather
+                    // than a detail inside the payload.
                     None => payload.push(0),
-                    Some(payload_bytes) => {
-                        payload.push(1);
-                        payload_bytes.put(&mut payload);
+                    Some(ground) => {
+                        payload.push(if ground.water.is_some() { 2 } else { 1 });
+                        ground.put(&mut payload);
                     }
                 }
             }
@@ -257,7 +265,8 @@ impl ToClient {
                 let chunk = payload.ivec2()?;
                 let ground = match payload.u8()? {
                     0 => None,
-                    1 => Some(payload.chunk_payload()?),
+                    1 => Some(payload.chunk_payload(false)?),
+                    2 => Some(payload.chunk_payload(true)?),
                     flag => return Err(corrupt(format!("chunk {chunk} flagged {flag}"))),
                 };
                 Self::Chunk { chunk, ground }
@@ -391,9 +400,9 @@ impl<'a> Payload<'a> {
         Ok(IVec2::new(self.i32()?, self.i32()?))
     }
 
-    fn chunk_payload(&mut self) -> io::Result<ChunkPayload> {
-        let bytes = self.take(ground::PAYLOAD_BYTES)?;
-        ChunkPayload::take(bytes).ok_or_else(|| {
+    fn chunk_payload(&mut self, water: bool) -> io::Result<ChunkPayload> {
+        let bytes = self.take(ground::payload_bytes(water))?;
+        ChunkPayload::take(bytes, water).ok_or_else(|| {
             corrupt("a chunk painted in colours this build has never heard of".into())
         })
     }
@@ -448,6 +457,22 @@ mod tests {
                     )
                 })
                 .collect(),
+            water: None,
+        }
+    }
+
+    /// The same chunk with a lake on it, its levels a different function of
+    /// position from the heights — so a payload that sent one grid twice, or
+    /// read the water out of the heights, fails rather than agreeing with
+    /// itself.
+    fn a_chunk_with_a_lake() -> ChunkPayload {
+        ChunkPayload {
+            water: Some(
+                (0..FACET_VERTS * FACET_VERTS)
+                    .map(|i| (i * 907 % 65_519) as u16)
+                    .collect(),
+            ),
+            ..a_chunk()
         }
     }
 
@@ -491,6 +516,10 @@ mod tests {
                 chunk: IVec2::new(-2, 7),
                 ground: Some(a_chunk()),
             },
+            ToClient::Chunk {
+                chunk: IVec2::new(6, -1),
+                ground: Some(a_chunk_with_a_lake()),
+            },
         ] {
             let bytes = bytes_of_server(&message);
             assert_eq!(ToClient::read(&mut bytes.as_slice()).unwrap(), message);
@@ -513,8 +542,8 @@ mod tests {
         // both halves are exact in binary, and the two differ in every byte
         // that matters, so a pair of axes that swapped places would show.
         assert_eq!(
-            bytes_of_client(ToServer::Hello { version: 2 }),
-            [3, 0, 0, 2, 0],
+            bytes_of_client(ToServer::Hello { version: 3 }),
+            [3, 0, 0, 3, 0],
             "hello: length 3, tag 0, version LE"
         );
         assert_eq!(
@@ -638,7 +667,7 @@ mod tests {
             ],
             "the head of a ground answer"
         );
-        assert_eq!(ground[11], 1, "the flag says there is ground");
+        assert_eq!(ground[11], 1, "the flag says there is dry ground");
 
         // Heights start at 12. Corner 0 is 0, corner 1 is 601, corner 2 is
         // 1202 — little-endian pairs.
@@ -653,6 +682,40 @@ mod tests {
             [0b0000_0000, 0b0000_1001, 0b0001_0010],
             "seabed/dark, sand/plain, forest/light"
         );
+
+        // And the same chunk with a lake on it. The heights and the surfaces
+        // must land at exactly the offsets they land at above — water is
+        // something a chunk carries in addition, not a rearrangement of what
+        // it carried already — so the two answers agree byte for byte up to
+        // the end of the surfaces and differ only in the flag and the tail.
+        let lake = bytes_of_server(&ToClient::Chunk {
+            chunk: IVec2::new(5, -3),
+            ground: Some(a_chunk_with_a_lake()),
+        });
+        let wet = 1 + 8 + 1 + ground::payload_bytes(true);
+        assert_eq!(lake.len(), 2 + wet);
+        assert_eq!(
+            lake[..2],
+            [(wet & 0xFF) as u8, (wet >> 8) as u8],
+            "a watered chunk is longer by exactly its water grid"
+        );
+        assert_eq!(
+            lake[2..11],
+            ground[2..11],
+            "the head is the same either way"
+        );
+        assert_eq!(lake[11], 2, "the flag says there is water on this ground");
+        assert_eq!(
+            lake[12..surfaces + FACET_TRIS],
+            ground[12..surfaces + FACET_TRIS],
+            "the water moved the heights or the surfaces"
+        );
+
+        // The water grid starts once the surfaces are done, little-endian
+        // pairs like the heights: level 0 is 0, level 1 is 907, level 2 is
+        // 1814.
+        let water = surfaces + FACET_TRIS;
+        assert_eq!(lake[water..water + 6], [0, 0, 0x8B, 0x03, 0x16, 0x07]);
     }
 
     #[test]
@@ -671,17 +734,23 @@ mod tests {
         .is_err());
         assert!(wire.is_empty(), "half a frame reached the wire");
 
-        // And the server's ceiling is exactly one chunk of ground, so a
-        // ground answer fits it with nothing to spare.
+        // And the server's ceiling is exactly the largest chunk there is —
+        // ground with water on it — so that answer fits with nothing to
+        // spare, and dry ground fits with its water grid's worth to spare.
+        let lake = bytes_of_server(&ToClient::Chunk {
+            chunk: IVec2::ZERO,
+            ground: Some(a_chunk_with_a_lake()),
+        });
+        assert_eq!(
+            lake.len() - 2,
+            MAX_SERVER_FRAME as usize,
+            "a chunk of watered ground is what the server's ceiling is for"
+        );
         let ground = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
             ground: Some(a_chunk()),
         });
-        assert_eq!(
-            ground.len() - 2,
-            MAX_SERVER_FRAME as usize,
-            "a chunk of ground is what the server's ceiling is for"
-        );
+        assert_eq!(lake.len() - ground.len(), ground::WATER_BYTES);
     }
 
     #[test]
@@ -734,9 +803,11 @@ mod tests {
             }
         }
 
+        // The watered chunk, being the largest answer there is and so the
+        // most split.
         let message = ToClient::Chunk {
             chunk: IVec2::new(-2, 7),
-            ground: Some(a_chunk()),
+            ground: Some(a_chunk_with_a_lake()),
         };
         let wire = bytes_of_server(&message);
         let mut dribble = Dribble { bytes: &wire };
@@ -760,11 +831,23 @@ mod tests {
         let long = [4, 0, 0, 1, 0, 99];
         assert!(ToServer::read(&mut long.as_slice()).is_err());
 
-        // A chunk whose flag byte is neither water nor ground.
+        // A chunk whose flag byte is none of the three kinds of answer.
         let mut bad_flag = vec![10, 0, 5];
         bad_flag.extend([0; 8]);
-        bad_flag.push(2);
+        bad_flag.push(3);
         assert!(ToClient::read(&mut bad_flag.as_slice()).is_err());
+
+        // And one that claims water and then ends where dry ground would
+        // have: the flag is what says how long the payload is, so a frame
+        // that disagrees with its own flag is corrupt rather than a chunk
+        // with a short lake.
+        let mut short_lake = Vec::new();
+        put_u16(&mut short_lake, (1 + 8 + 1 + ground::PAYLOAD_BYTES) as u16);
+        short_lake.push(5);
+        short_lake.extend([0; 8]);
+        short_lake.push(2);
+        short_lake.extend(std::iter::repeat_n(0, ground::PAYLOAD_BYTES));
+        assert!(ToClient::read(&mut short_lake.as_slice()).is_err());
 
         // And a wire that simply ends is an ordinary end-of-file error.
         assert!(ToServer::read(&mut [].as_slice()).is_err());

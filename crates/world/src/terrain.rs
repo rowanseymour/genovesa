@@ -539,6 +539,14 @@ const SKERRY_HEIGHT: f32 = 2.5;
 /// band of colour up the rocky shores and the cliffs as well.
 const SHORE_TOP: f32 = 0.6;
 
+/// Depths, in metres below the local water surface, at which the bed turns
+/// from shore colours to the bright shelf, and from the shelf to the deep bed.
+/// Written as depths below *the surface standing there* rather than as
+/// heights, because a lake reads its bed off the same two lines the sea does
+/// — only measured from its own waterline instead of the world's.
+const SHALLOW_DEPTH: f32 = 1.8;
+const SEABED_DEPTH: f32 = 4.5;
+
 /// Slope, as `1.0 - normal.y`, at which ground shows bare rock however high it
 /// is and whatever else is growing on it — roughly 47°, and 63° for the darker
 /// face. Without these, cliffs look like grass painted onto a wall.
@@ -717,6 +725,11 @@ pub struct TerrainGenerator {
     /// are ground rather than a coast a range has to climb from. See
     /// [`CoastDistance::from_open_water`].
     inland: CoastDistance,
+    /// Standing water above sea level — the basins the landform encloses,
+    /// flooded once there is a finished landform to flood. Empty until then,
+    /// which reads as a world whose only water is the sea's; nothing asks
+    /// before the fit is done.
+    lakes: Lakes,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
     coast_scale: f32,
@@ -839,6 +852,7 @@ impl TerrainGenerator {
             calibration: Calibration::default(),
             coast: CoastDistance::default(),
             inland: CoastDistance::default(),
+            lakes: Lakes::default(),
             coast_scale: 1.0,
             half_extent: config.half_extent(),
             drift_excess: Vec2::ZERO,
@@ -876,8 +890,36 @@ impl TerrainGenerator {
         // against the ceiling rather than before it exists.
         let raw = generator.fit(config, &targets);
         generator.inland = CoastDistance::from_open_water(&raw, &generator.calibration);
+        // The flood reads the ceiling, and the ceiling reads `inland`, so the
+        // lakes can only be found once the line above has run: the landform
+        // is not finished until the ceiling can bind, and a basin flooded
+        // before its rim was held down would carry the wrong level ever
+        // after.
+        generator.lakes = generator.find_lakes(&raw);
         generator.fit_coast_scale(&raw);
         generator
+    }
+
+    /// Floods the finished landform and keeps what stands — see [`Lakes`].
+    ///
+    /// The metres grid is rebuilt from the raw samples rather than from
+    /// [`TerrainGenerator::landform`], which would resample every octave of
+    /// noise for values the fitting grid already holds; cell for cell this is
+    /// the same arithmetic that function performs, on the same inputs.
+    fn find_lakes(&self, raw: &GridField) -> Lakes {
+        let (nx, nz) = raw.dims;
+        let mut metres = Vec::with_capacity(nx * nz);
+        for iz in 0..nz {
+            let wz = raw.origin.y + iz as f32 * COAST_GRID;
+            for ix in 0..nx {
+                let wx = raw.origin.x + ix as f32 * COAST_GRID;
+                metres.push(under_ceiling(
+                    self.calibration.metres(raw.cells[iz * nx + ix]),
+                    self.ceiling(wx, wz),
+                ));
+            }
+        }
+        Lakes::from_ground(&GridField::new(metres, raw.dims, raw.origin))
     }
 
     /// One round of fitting: where the ranges sit, how tall they stand, what
@@ -1498,6 +1540,18 @@ impl TerrainGenerator {
         h.max(-MAX_DEPTH)
     }
 
+    /// The surface level of the lake standing at or beside this world point,
+    /// in metres above sea level — `None` where the only water is the sea's.
+    ///
+    /// "Beside" reaches one fitting-grid cell past the lake's detected shore,
+    /// so a caller with a height in hand draws the waterline itself: water
+    /// stands wherever `height < level`, and the answer being `Some` on the
+    /// dry bank just above it costs nothing. The ground is untouched — a lake
+    /// is water standing over the same landform the height field always had.
+    pub fn lake_level(&self, wx: f32, wz: f32) -> Option<f32> {
+        self.lakes.level(wx, wz)
+    }
+
     /// What kind of coast this stretch is, as a continuous value: `-1.0` for
     /// ground that shelves gently away into sand, `+1.0` for ground that stands
     /// straight up out of the water, and the rocky shores in between.
@@ -1597,15 +1651,40 @@ impl TerrainGenerator {
         // 0 on flat ground, approaching 1 on a cliff face.
         let slope = 1.0 - normal.y;
 
-        // Water first. Two tones of sea bed, both read through translucent
+        // A lake first, its bed read against its own surface exactly as the
+        // sea's is read against zero. The shore character field takes no part:
+        // that is a property of stretches of *sea* coast, sampled at the
+        // nearest sea waterline, and means nothing on a shore halfway up a
+        // hillside — so a lake's margin is sand where it lies flat and bare
+        // rock where it stands steep, which is what tarns and lowland pools
+        // do. Above its own little shore band the lake has no say, and the
+        // hillside is painted as the height says.
+        if let Some(level) = self.lakes.level(wx, wz) {
+            let awash = height - level;
+            if awash < -SEABED_DEPTH {
+                return Surface::plain(Tone::Seabed);
+            }
+            if awash < -SHALLOW_DEPTH {
+                return Surface::plain(Tone::Shallow);
+            }
+            if awash < SHORE_TOP {
+                return Surface::plain(if slope > ROCK_SLOPE {
+                    Tone::RockDark
+                } else {
+                    Tone::Sand
+                });
+            }
+        }
+
+        // The sea. Two tones of sea bed, both read through translucent
         // water: a dark bottom, then a bright shelf that gives a coast its
         // turquoise ring. How wide that ring is comes from the landform rather
         // than from anything here — [`shape_coast`] gives a beach a long
         // shallow apron and drops a cliff straight past it.
-        if height < -4.5 {
+        if height < -SEABED_DEPTH {
             return Surface::plain(Tone::Seabed);
         }
-        if height < -1.8 {
+        if height < -SHALLOW_DEPTH {
             return Surface::plain(Tone::Shallow);
         }
 
@@ -1718,6 +1797,47 @@ pub(crate) fn facet_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec
         }
     }
     heights
+}
+
+/// The standing water one chunk carries, on the same grid and in the same
+/// order as [`facet_heights`] — or `None` where the chunk has no lake water
+/// on it, which is most of them.
+///
+/// Sampled at the corners rather than derived from the heights, because a
+/// lake's level is not a property of the ground under it: it comes from a rim
+/// saddle that may be nowhere near the chunk. A corner the lakes have no
+/// answer for stores [`protocol::ground::NO_WATER`].
+///
+/// The grid is kept only where some corner is actually *under* its level, and
+/// that is the difference between a lake's water and a lake's mere presence.
+/// [`TerrainGenerator::lake_level`] deliberately answers a little way past
+/// the water's edge, so that a chunk holding a shoreline carries a level on
+/// the dry side of it too and a client can put the waterline where the two
+/// fields cross. But a chunk that catches *only* that overhang — a lake in
+/// the next chunk along, reaching over the boundary — has no water in it to
+/// draw, and would otherwise pay a full grid to say so.
+pub(crate) fn facet_water(
+    base: Vec2,
+    heights: &[f32],
+    level: impl Fn(f32, f32) -> Option<f32>,
+) -> Option<Vec<u16>> {
+    debug_assert_eq!(
+        heights.len(),
+        FACET_VERTS * FACET_VERTS,
+        "not a chunk's corner grid"
+    );
+    let mut levels = vec![protocol::ground::NO_WATER; FACET_VERTS * FACET_VERTS];
+    let mut awash = false;
+    for iz in 0..FACET_VERTS {
+        let wz = base.y + iz as f32 * FACET_METRES;
+        for ix in 0..FACET_VERTS {
+            let wx = base.x + ix as f32 * FACET_METRES;
+            let Some(level) = level(wx, wz) else { continue };
+            levels[iz * FACET_VERTS + ix] = protocol::ground::quantize(level);
+            awash |= heights[iz * FACET_VERTS + ix] < level;
+        }
+    }
+    awash.then_some(levels)
 }
 
 /// What every triangle of one chunk is painted, in the order
@@ -2086,6 +2206,195 @@ impl CoastDistance {
         }
         self.field.at(wx, wz) * COAST_GRID
     }
+}
+
+// --- Lakes -------------------------------------------------------------------
+//
+// Sea level is one height for the whole world, and the calibration sets it
+// high enough that hollows below it flood — the sounds and lagoons these maps
+// are riddled with. But noise digs hollows at every altitude, and a hollow
+// whose floor stands *above* sea level was, until here, a dry green bowl:
+// ground enclosing a depression with nothing in it, which is a thing rain
+// does not permit. Anywhere the terrain encloses, water stands.
+//
+// Where that water's surface sits cannot be read off any point of the ground:
+// it is set by the lowest saddle on the whole rim of the basin, which may be
+// half a kilometre from the shore it decides. So lakes are found the way the
+// coast fields are made — one pass over the whole fitting grid at
+// construction — here a priority flood, the standard tool of drainage
+// analysis: walk out from the sea always taking the lowest frontier cell
+// first, and each cell is first reached along the route whose highest point
+// is lowest, which is exactly the level water must rise to before that cell
+// drains. Cells the answer leaves at their own ground drain freely and are
+// dry; cells it leaves under water are lake, and a connected lake's cells all
+// agree on their level, that being the one rim saddle they share. Terraced
+// and nested basins fall out of the same walk without being special cases.
+//
+// The flood runs on the landform, not the finished height. The detail layers
+// lay metres of texture over it, and flooding the drawn field would find a
+// thousand puddle-sized dimples; detecting on the smooth field and letting
+// the drawn ground wander around the answer is exactly how the sea's own
+// waterline is treated, and it earns the same reward — a lake's drawn
+// shoreline meanders, and detail standing proud inside one becomes an islet.
+
+/// Metres a lake's surface stands below the saddle it would otherwise spill
+/// over.
+///
+/// Real lakes sit below their outlets, but the margin's real job is keeping
+/// the feature continuous in the map-size control. A basin's depth moves
+/// smoothly as the size sweeps, so a lake whose saddle is silting up drains
+/// gradually through the freeboard and slips off the shallow end, where a
+/// keep-or-drop test on depth or area would pop whole lakes in and out
+/// between neighbouring sizes. It also keeps the surface clear of its own
+/// rim, where water at exactly the saddle's height would shave along the
+/// ground.
+const LAKE_FREEBOARD: f32 = 0.5;
+
+/// Standing water above sea level: which cells of the fitting grid lie under
+/// a lake, and how high each lake's surface stands.
+///
+/// One value per cell — the surface level in metres of the lake covering it,
+/// or negative infinity where no lake does. Levels rather than a yes-or-no,
+/// because the level is the whole of what a lake adds: the ground beneath is
+/// untouched, and everything downstream — the painting, the plan tint, one
+/// day the wire — is a comparison of some height against this surface.
+#[derive(Default)]
+struct Lakes {
+    field: GridField,
+}
+
+impl Lakes {
+    /// Finds every lake on a grid of landform metres: floods from the sea,
+    /// keeps whatever the flood leaves under water, less the freeboard.
+    fn from_ground(ground: &GridField) -> Self {
+        let fill = priority_flood(ground);
+        let cells = ground
+            .cells
+            .iter()
+            .zip(&fill)
+            .map(|(ground, fill)| {
+                let level = fill - LAKE_FREEBOARD;
+                if level > *ground {
+                    level
+                } else {
+                    f32::NEG_INFINITY
+                }
+            })
+            .collect();
+        Self {
+            field: GridField::new(cells, ground.dims, ground.origin),
+        }
+    }
+
+    /// The surface level of the lake at or beside a world point, in metres
+    /// above sea level, or `None` where the only water is the sea's.
+    ///
+    /// The four cells around the point are read at their maximum rather than
+    /// blended: a lake's surface is dead level, so there is nothing to
+    /// interpolate, and blending across the shore would tilt the rim of every
+    /// lake down into its own banks. Reaching a whole neighbourhood rather
+    /// than one cell carries the answer one cell past the detected shore,
+    /// where the ground stands above the level anyway — which is what lets
+    /// the drawn waterline find its own crossing instead of stopping on the
+    /// grid.
+    fn level(&self, wx: f32, wz: f32) -> Option<f32> {
+        let (nx, nz) = self.field.dims;
+        if nx == 0 {
+            return None;
+        }
+        let fx = ((wx - self.field.origin.x) / COAST_GRID).clamp(0.0, (nx - 1) as f32);
+        let fz = ((wz - self.field.origin.y) / COAST_GRID).clamp(0.0, (nz - 1) as f32);
+        let (x0, z0) = (fx.floor() as usize, fz.floor() as usize);
+        let (x1, z1) = ((x0 + 1).min(nx - 1), (z0 + 1).min(nz - 1));
+
+        let at = |x: usize, z: usize| self.field.cells[z * nx + x];
+        let level = at(x0, z0).max(at(x1, z0)).max(at(x0, z1)).max(at(x1, z1));
+        (level > f32::NEG_INFINITY).then_some(level)
+    }
+}
+
+/// The level water must rise to before each cell of a landform grid drains,
+/// in metres: the cell's own ground where it drains freely, and the height of
+/// its basin's lowest rim saddle where it does not.
+///
+/// Every cell at or below sea level seeds the frontier, not just the map's
+/// border — a deliberate answer about the lagoons. A hollow the calibration
+/// already flooded is the sea's, however landlocked: its water stands at zero
+/// with the rest of the world's, so it is an outlet here, and no lake is ever
+/// raised over it. (The border alone would have turned every enclosed lagoon
+/// into a lake at its saddle's height, redrawing coasts the whole coastal
+/// machinery — beaches, distance fields, painting — had already been fitted
+/// to.)
+///
+/// Neighbours are the four edge-adjacent cells: water leaves a cell across an
+/// edge, and letting it slip diagonally between two corner-touching cells
+/// would drain any lake with a pinch in it.
+///
+/// The result is exact whatever order ties are popped in — every value is a
+/// max of ground heights along a route, never an accumulation — so the
+/// deterministic tie-break on the cell index is belt and braces for the walk
+/// itself, not a thing the digests depend on.
+fn priority_flood(ground: &GridField) -> Vec<f32> {
+    /// A frontier cell, ordered so the heap surfaces the *lowest* level
+    /// first, ties broken by cell index.
+    struct Frontier {
+        level: f32,
+        cell: usize,
+    }
+    impl Ord for Frontier {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            other
+                .level
+                .total_cmp(&self.level)
+                .then(other.cell.cmp(&self.cell))
+        }
+    }
+    impl PartialOrd for Frontier {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl PartialEq for Frontier {
+        fn eq(&self, other: &Self) -> bool {
+            self.cmp(other) == std::cmp::Ordering::Equal
+        }
+    }
+    impl Eq for Frontier {}
+
+    let (nx, nz) = ground.dims;
+    let mut fill = vec![f32::INFINITY; nx * nz];
+    let mut frontier = std::collections::BinaryHeap::new();
+    for (cell, g) in ground.cells.iter().enumerate() {
+        if *g <= 0.0 {
+            fill[cell] = *g;
+            frontier.push(Frontier { level: *g, cell });
+        }
+    }
+
+    while let Some(Frontier { level, cell }) = frontier.pop() {
+        // A stale entry: the cell was reached again by a lower route after
+        // this one was queued.
+        if level > fill[cell] {
+            continue;
+        }
+        let (x, z) = (cell % nx, cell / nx);
+        for (dx, dz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let (cx, cz) = (x as i32 + dx, z as i32 + dz);
+            if !(0..nx as i32).contains(&cx) || !(0..nz as i32).contains(&cz) {
+                continue;
+            }
+            let next = cz as usize * nx + cx as usize;
+            let reach = ground.cells[next].max(level);
+            if reach < fill[next] {
+                fill[next] = reach;
+                frontier.push(Frontier {
+                    level: reach,
+                    cell: next,
+                });
+            }
+        }
+    }
+    fill
 }
 
 /// A grid of values over the map at [`COAST_GRID`] spacing, read back with
@@ -2806,8 +3115,8 @@ mod tests {
         // the machine that recorded it; a bumped `libm` would show up here the
         // same way a new platform would.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0xDE15_2FC2_B042_C207u64),
-            (99, UVec2::new(3, 2), 0x9086_7443_C334_B66Fu64),
+            (20_040_112u32, UVec2::new(4, 4), 0xE90E_782F_914B_81CBu64),
+            (99, UVec2::new(3, 2), 0xE1EA_3004_BC1E_CC8Fu64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -2816,9 +3125,16 @@ mod tests {
             let half = config.half_extent();
 
             // Every reader of the map, over the whole of it: the height field
-            // and its normals on a 4 m grid, and the palette entry each of
-            // those points is painted — the surface as a byte, since that is
-            // now the form it leaves this machine in.
+            // and its normals on a 4 m grid, the palette entry each of those
+            // points is painted — the surface as a byte, since that is now the
+            // form it leaves this machine in — and the level of any standing
+            // water over it, quantised the way the wire quantises it.
+            //
+            // The water is pinned on its own rather than left to the colours
+            // it produces. A lake moving a few centimetres repaints almost
+            // nothing — the bands it is painted in are metres apart — but it
+            // is a different surface for a client to float a boat on, and the
+            // level is what crosses the wire.
             let mut values = Vec::new();
             let mut painted = Vec::new();
             for iz in (0..=config.tiles().y).step_by(4) {
@@ -2830,6 +3146,11 @@ mod tests {
                     values.extend([height, normal.x, normal.y, normal.z]);
                     painted.push(surface.tone as i64);
                     painted.push(surface.shade as i64);
+                    painted.push(
+                        gen.lake_level(wx, wz)
+                            .map_or(protocol::ground::NO_WATER, protocol::ground::quantize)
+                            as i64,
+                    );
                 }
             }
 
@@ -3251,6 +3572,153 @@ mod tests {
         }
         assert!(shaded > 0, "a whole map with no mottle at all is not a map");
     }
+
+    /// A three-row grid whose rows all read the same, so the flood behaves
+    /// one-dimensionally and a test can say what it expects column by column.
+    fn strip(columns: &[f32]) -> GridField {
+        GridField::new(columns.repeat(3), (columns.len(), 3), Vec2::ZERO)
+    }
+
+    #[test]
+    fn a_basin_fills_to_its_lowest_saddle_and_open_slopes_shed() {
+        // Sea, a 5 m wall, a 1 m floor, a 3 m saddle, sea: the floor's escape
+        // is over the saddle, whatever stands on its other side.
+        let bowl = strip(&[-8.0, 5.0, 1.0, 3.0, -8.0]);
+        let fill = priority_flood(&bowl);
+        assert_eq!(fill[2], 3.0, "the floor fills to the saddle, not the wall");
+        assert_eq!(fill[1], 5.0, "ground that drains freely fills to itself");
+        assert_eq!(fill[3], 3.0);
+
+        // The lake the fill leaves: a freeboard below the saddle, over the
+        // floor alone — the saddle's own feet stay dry.
+        let lakes = Lakes::from_ground(&bowl);
+        assert_eq!(lakes.field.cells[2], 3.0 - LAKE_FREEBOARD);
+        assert_eq!(lakes.field.cells[1], f32::NEG_INFINITY);
+        assert_eq!(lakes.field.cells[3], f32::NEG_INFINITY);
+
+        // And a slope with nothing enclosing it holds nothing anywhere.
+        let slope = strip(&[-8.0, -2.0, 1.0, 3.0, 6.0]);
+        let lakes = Lakes::from_ground(&slope);
+        assert!(lakes.field.cells.iter().all(|c| *c == f32::NEG_INFINITY));
+    }
+
+    #[test]
+    fn terraced_basins_each_hold_their_own_level() {
+        // Two basins in a staircase: the upper spills over an 8 m saddle into
+        // the lower, which spills over a 4 m one into the sea. Each takes its
+        // own saddle's level — the walk needs no special case for one lake
+        // draining through another.
+        let steps = strip(&[-8.0, 4.0, 2.0, 8.0, 6.0, 12.0, -8.0]);
+        let lakes = Lakes::from_ground(&steps);
+        assert_eq!(lakes.field.cells[2], 4.0 - LAKE_FREEBOARD);
+        assert_eq!(lakes.field.cells[4], 8.0 - LAKE_FREEBOARD);
+        // The saddle between them keeps its feet dry, so they are two lakes
+        // and not one.
+        assert_eq!(lakes.field.cells[3], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn a_landlocked_lagoon_is_the_seas_and_never_a_lake() {
+        // A hollow below sea level, entirely ringed by land. The calibration
+        // already flooded it — its water stands at zero with the rest of the
+        // world's — so the flood seeds there and raises nothing over it: a
+        // lake at the rim's height would redraw a coast that the beaches, the
+        // distance fields and the painting were all fitted to.
+        let lagoon = strip(&[-8.0, 6.0, -2.0, 6.0, -8.0]);
+        let lakes = Lakes::from_ground(&lagoon);
+        assert!(lakes.field.cells.iter().all(|c| *c == f32::NEG_INFINITY));
+        assert_eq!(lakes.level(8.0, 4.0), None);
+    }
+
+    #[test]
+    fn a_lake_answers_at_its_shore_and_not_across_the_map() {
+        let bowl = strip(&[-8.0, 5.0, 1.0, 3.0, -8.0]);
+        let lakes = Lakes::from_ground(&bowl);
+
+        // Over the flooded cell itself, and from the dry cell beside it —
+        // the reach that lets a drawn waterline find its own crossing.
+        assert_eq!(lakes.level(8.0, 4.0), Some(3.0 - LAKE_FREEBOARD));
+        assert_eq!(lakes.level(5.0, 4.0), Some(3.0 - LAKE_FREEBOARD));
+        // But not from the far side of the map.
+        assert_eq!(lakes.level(0.5, 4.0), None);
+    }
+
+    #[test]
+    fn lakes_stand_on_land_and_hold_water_over_it() {
+        // Every flooded cell of every seed, checked against the landform
+        // proper: the level is above the sea, the ground under it is land,
+        // and the ground is under the surface. The last two matter because
+        // [`TerrainGenerator::find_lakes`] rebuilds its metres from the raw
+        // grid as a shortcut — these assertions are what hold that shortcut
+        // to the same arithmetic as [`TerrainGenerator::landform`].
+        let mut wet = 0usize;
+        for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
+            let (_, gen) = generator(8, 8, seed);
+            let (nx, _) = gen.lakes.field.dims;
+            let origin = gen.lakes.field.origin;
+            for (i, level) in gen.lakes.field.cells.iter().enumerate() {
+                if *level == f32::NEG_INFINITY {
+                    continue;
+                }
+                wet += 1;
+                let wx = origin.x + (i % nx) as f32 * COAST_GRID;
+                let wz = origin.y + (i / nx) as f32 * COAST_GRID;
+                let ground = gen.landform(wx, wz);
+                assert!(
+                    *level > 0.0,
+                    "seed {seed} holds a lake at {level} m, below the sea"
+                );
+                assert!(
+                    ground > 0.0,
+                    "seed {seed} raised a lake over the sea at ({wx}, {wz})"
+                );
+                assert!(
+                    ground < *level,
+                    "seed {seed} flooded ground standing above its own lake at ({wx}, {wz})"
+                );
+            }
+        }
+        assert!(
+            wet > 100,
+            "only {wet} flooded cells across eight seeds — the maps have lost their lakes"
+        );
+    }
+
+    #[test]
+    fn a_chunk_carries_water_only_where_there_is_water_in_it() {
+        let base = Vec2::new(-64.0, 32.0);
+        let corner = |i: usize| {
+            base + Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32) * FACET_METRES
+        };
+
+        // Ground at 10 m with a lake at 12 m over the near half of it: water
+        // to draw, so the grid travels — on the same grid as the heights, and
+        // carrying the level at every corner the lakes answered for.
+        let heights = vec![10.0f32; FACET_VERTS * FACET_VERTS];
+        let water = facet_water(base, &heights, |_, wz| (wz < base.y + 60.0).then_some(12.0))
+            .expect("a chunk with a lake on it");
+        assert_eq!(water.len(), FACET_VERTS * FACET_VERTS);
+        for (i, level) in water.iter().enumerate() {
+            let want = if corner(i).y < base.y + 60.0 {
+                protocol::ground::quantize(12.0)
+            } else {
+                protocol::ground::NO_WATER
+            };
+            assert_eq!(*level, want, "corner {i} at {}", corner(i));
+        }
+
+        // The same lake, but the ground stands above it everywhere in this
+        // chunk — the overhang past a neighbouring lake's edge. Nothing to
+        // draw, so nothing is sent.
+        let dry = vec![20.0f32; FACET_VERTS * FACET_VERTS];
+        assert_eq!(
+            facet_water(base, &dry, |_, wz| (wz < base.y + 60.0).then_some(12.0)),
+            None
+        );
+
+        // And ground with no lake anywhere near it.
+        assert_eq!(facet_water(base, &heights, |_, _| None), None);
+    }
 }
 
 #[cfg(test)]
@@ -3278,13 +3746,17 @@ mod bench {
             let half = config.half_extent();
             let at = |ix: i32, iz: i32| gen.height(ix as f32 - half.x, iz as f32 - half.y);
 
-            let (mut land, mut mountain, mut edges) = (0u32, 0u32, 0u32);
+            let (mut land, mut mountain, mut edges, mut lake) = (0u32, 0u32, 0u32, 0u32);
             let mut peak = 0.0f32;
             let mut heights = Vec::new();
             for iz in (0..size as i32).step_by(2) {
                 for ix in (0..size as i32).step_by(2) {
                     let h = at(ix, iz);
                     peak = peak.max(h);
+                    let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
+                    if gen.lake_level(wx, wz).is_some_and(|level| h < level) {
+                        lake += 1;
+                    }
                     if h <= 0.0 {
                         continue;
                     }
@@ -3323,10 +3795,11 @@ mod bench {
             let decile = |p: usize| heights[heights.len() * p / 100] as u32;
             println!(
                 "seed {seed:>9}  land {:4.1}%  mountain {:4.1}% of land  peak {peak:5.0} m  \
-                 shoreline index {:.2}  slope p50/p90/p99 {:>2}/{:>2}/{:>2} deg  \
+                 lakes {:4.1}%  shoreline index {:.2}  slope p50/p90/p99 {:>2}/{:>2}/{:>2} deg  \
                  land height p50/p90 {:>3}/{:>3} m",
                 land as f32 / cells as f32 * 100.0,
                 mountain as f32 / land.max(1) as f32 * 100.0,
+                lake as f32 / cells as f32 * 100.0,
                 coast / (2.0 * (std::f32::consts::PI * area).sqrt()),
                 slope(50),
                 slope(90),

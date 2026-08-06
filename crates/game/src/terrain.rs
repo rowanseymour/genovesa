@@ -19,6 +19,11 @@
 //! travel with the camera, because away from any island the world is exactly
 //! those two surfaces — which is also why a chunk of open water is answered
 //! with nothing rather than with eight thousand identical triangles.
+//!
+//! Lakes are the exception that proves it. A lake stands above sea level at a
+//! height nothing local decides, so it cannot be a plane anyone draws
+//! unprompted — it arrives with its chunk, as a second grid of levels, and
+//! gets a second mesh in the same water as the sea.
 
 use std::sync::Arc;
 
@@ -31,7 +36,7 @@ use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
     chunk_at, dequantize, facets, ChunkPayload, Surface, Tone, CHUNK_METRES, FACET_METRES,
-    FACET_QUADS, FACET_TRIS, FACET_VERTS, OCEAN_DEPTH,
+    FACET_QUADS, FACET_TRIS, FACET_VERTS, NO_WATER, OCEAN_DEPTH,
 };
 
 use crate::camera::MapCamera;
@@ -139,7 +144,20 @@ pub struct Ground {
     /// connection, which is what keeps this module free of the session.
     to_ask: Vec<IVec2>,
     /// Answered as ground, and not yet given an entity to be drawn by.
-    arrived: Vec<(IVec2, Arc<[f32]>, Vec<Surface>)>,
+    arrived: Vec<Arrival>,
+}
+
+/// One chunk of ground that has come back and not yet been drawn — everything
+/// [`chunk_meshes`] is about to be handed, and nothing that is kept afterwards.
+struct Arrival {
+    chunk: IVec2,
+    heights: Arc<[f32]>,
+    surfaces: Vec<Surface>,
+    /// The chunk's standing water, still quantised: it is only ever compared
+    /// against [`NO_WATER`] and turned into a height once per quad drawn, so
+    /// there is nothing to be gained by dequantising a whole grid of it the
+    /// way the corner heights are.
+    water: Option<Vec<u16>>,
 }
 
 /// A count of what this machine has of the world, and what it is still
@@ -208,7 +226,12 @@ impl Ground {
                         mesh: None,
                     },
                 );
-                self.arrived.push((chunk, heights, payload.surfaces));
+                self.arrived.push(Arrival {
+                    chunk,
+                    heights,
+                    surfaces: payload.surfaces,
+                    water: payload.water,
+                });
             }
         }
     }
@@ -327,15 +350,21 @@ pub struct TerrainChunk {
     pub coords: IVec2,
 }
 
-/// A chunk whose mesh is still being built off the main thread. Only the
+/// A chunk whose meshes are still being built off the main thread. Only the
 /// assembly — the ground itself has already arrived.
 #[derive(Component)]
-pub(crate) struct ChunkBuild(Task<Mesh>);
+pub(crate) struct ChunkBuild(Task<ChunkMeshes>);
 
 /// The one material every chunk shares, so they still batch into a single draw
 /// call each.
 #[derive(Resource)]
 struct GroundMaterial(Handle<StandardMaterial>);
+
+/// The one material every stretch of water shares — the sea plane and every
+/// lake alike, so that water is one substance in this world rather than two
+/// that happen to have been given similar numbers.
+#[derive(Resource)]
+struct WaterMaterial(Handle<StandardMaterial>);
 
 /// Marks the sea plane, which travels with the camera.
 #[derive(Component)]
@@ -409,6 +438,93 @@ fn chunk_mesh(chunk: IVec2, heights: &[f32], surfaces: &[Surface]) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
 }
 
+/// Builds the surface of one chunk's standing water, or `None` where the
+/// chunk carries none — see [`ChunkPayload::water`].
+///
+/// One flat quad per facet quad, at the level the payload gives it. No
+/// colour, because water is one colour and the material carries it, and no
+/// slope, because a lake is level: what varies from quad to quad is only how
+/// high the sheet sits, and that changes at all only where a chunk holds more
+/// than one lake.
+///
+/// **Where the water stops is not decided here.** A quad is drawn wherever
+/// any of its corners has a level at all — which the server sends a corner or
+/// two past the water's edge — so the sheet runs on *into* the bank and the
+/// ground mesh, being opaque and higher, hides the part that has gone
+/// underground. The waterline the player sees is therefore the true
+/// intersection of the two surfaces, meandering at whatever precision the
+/// depth buffer has, rather than the outline of the last quad that happened
+/// to be under water. It is exactly how the sea already meets every coast,
+/// which is the point: a lake shore should not read as a different kind of
+/// edge from a sea shore.
+fn water_mesh(chunk: IVec2, water: &[u16]) -> Option<Mesh> {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let base = chunk.as_vec2() * CHUNK_METRES;
+
+    for iz in 0..FACET_QUADS {
+        for ix in 0..FACET_QUADS {
+            let (tl, tr) = ((ix, iz), (ix + 1, iz));
+            let (bl, br) = ((ix, iz + 1), (ix + 1, iz + 1));
+
+            // The tallest level any corner claims. A quad spanning two lakes
+            // at once would need one of them to lose, and the higher is the
+            // right winner: the lower sheet is the one the ground between
+            // them is entitled to hide.
+            let Some(level) = [tl, tr, bl, br]
+                .iter()
+                .map(|(cx, cz)| water[cz * FACET_VERTS + cx])
+                .filter(|level| *level != NO_WATER)
+                .max()
+            else {
+                continue;
+            };
+            let y = dequantize(level);
+
+            for (cx, cz) in [tl, bl, tr, tr, bl, br] {
+                positions.push([cx as f32 * FACET_METRES, y, cz as f32 * FACET_METRES]);
+                // Dead flat, so every normal is the same one and there is
+                // nothing for the light to pick out — which is what makes a
+                // lake read as a sheet of water rather than as ground.
+                normals.push([0.0, 1.0, 0.0]);
+                uvs.push([
+                    (base.x + cx as f32 * FACET_METRES) / CHUNK_METRES,
+                    (base.y + cz as f32 * FACET_METRES) / CHUNK_METRES,
+                ]);
+            }
+        }
+    }
+
+    (!positions.is_empty()).then(|| {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    })
+}
+
+/// What one chunk is drawn out of: its ground, and the standing water on top
+/// of it where there is any. Built together off the main thread, because they
+/// come from one answer and are wanted in one frame.
+struct ChunkMeshes {
+    ground: Mesh,
+    water: Option<Mesh>,
+}
+
+fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
+    ChunkMeshes {
+        ground: chunk_mesh(arrival.chunk, &arrival.heights, &arrival.surfaces),
+        water: arrival
+            .water
+            .as_ref()
+            .and_then(|water| water_mesh(arrival.chunk, water)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entering and leaving the world
 // ---------------------------------------------------------------------------
@@ -467,6 +583,22 @@ fn enter_world(
         Transform::from_xyz(0.0, -OCEAN_DEPTH - SEA_FLOOR_CLEARANCE, 0.0),
     ));
 
+    // What water is made of, wherever it stands. The sea plane below and
+    // every lake that streams in share this one handle, so a lake cannot
+    // drift into looking like a different liquid from the sea.
+    //
+    // Flat and bright rather than glassy — matte like everything else, give
+    // or take the barest reflectance. Still partly transparent, so the sand
+    // band running under the waterline shows through as a turquoise ring
+    // around every coast and every lake shore: two flat tones of water, which
+    // is the whole effect.
+    let water = materials.add(StandardMaterial {
+        reflectance: 0.02,
+        alpha_mode: AlphaMode::Blend,
+        ..matte(Color::srgba(0.10, 0.42, 0.62, 0.84))
+    });
+    commands.insert_resource(WaterMaterial(water.clone()));
+
     // Sea. Sized past the camera's far plane and moved along with it, so the
     // horizon is water fading into haze whichever way the view goes.
     commands.spawn((
@@ -481,16 +613,7 @@ fn enter_world(
         // cliff's shadow out across the water at its foot.
         NotShadowCaster,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
-        // Flat and bright rather than glassy — matte like everything else,
-        // give or take the barest reflectance. Still partly transparent, so
-        // the sand band running under the waterline shows through as a
-        // turquoise ring around every coast: two flat tones of water, which
-        // is the whole effect.
-        MeshMaterial3d(materials.add(StandardMaterial {
-            reflectance: 0.02,
-            alpha_mode: AlphaMode::Blend,
-            ..matte(Color::srgba(0.10, 0.42, 0.62, 0.84))
-        })),
+        MeshMaterial3d(water),
         // Nudged above y = 0 so it doesn't z-fight with terrain sitting exactly
         // at sea level.
         Transform::from_xyz(0.0, 0.08, 0.0),
@@ -536,6 +659,7 @@ fn enter_world(
 fn leave_world(mut commands: Commands) {
     commands.remove_resource::<Ground>();
     commands.remove_resource::<GroundMaterial>();
+    commands.remove_resource::<WaterMaterial>();
 }
 
 // ---------------------------------------------------------------------------
@@ -595,14 +719,15 @@ fn spawn_arrivals(
     material: Res<GroundMaterial>,
 ) {
     let pool = AsyncComputeTaskPool::get();
-    for (chunk, heights, surfaces) in std::mem::take(&mut ground.arrived) {
+    for arrival in std::mem::take(&mut ground.arrived) {
+        let chunk = arrival.chunk;
         // Dropped rather than drawn if the camera has already left it behind
         // — an answer can outlive the reason it was asked for.
         let Some(Chunk::Land { mesh, .. }) = ground.chunks.get_mut(&chunk) else {
             continue;
         };
 
-        let task = pool.spawn(async move { chunk_mesh(chunk, &heights, &surfaces) });
+        let task = pool.spawn(async move { chunk_meshes(&arrival) });
         *mesh = Some(
             commands
                 .spawn((
@@ -630,6 +755,7 @@ fn spawn_arrivals(
 fn receive_chunks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    water: Res<WaterMaterial>,
     mut building: Query<(Entity, &mut ChunkBuild)>,
 ) {
     let mut meshed = 0;
@@ -637,13 +763,30 @@ fn receive_chunks(
         if meshed >= MESHES_PER_FRAME {
             break;
         }
-        let Some(mesh) = block_on(future::poll_once(&mut build.0)) else {
+        let Some(built) = block_on(future::poll_once(&mut build.0)) else {
             continue;
         };
         commands
             .entity(entity)
             .remove::<ChunkBuild>()
-            .insert(Mesh3d(meshes.add(mesh)));
+            .insert(Mesh3d(meshes.add(built.ground)));
+
+        // A lake rides on its chunk rather than standing as an entity of its
+        // own, so that streaming has one thing to forget: despawning a chunk
+        // takes its water with it, and nothing has to remember that a chunk
+        // had any.
+        if let Some(surface) = built.water {
+            commands.entity(entity).with_child((
+                Name::new("Lake"),
+                // Water casts no shadow — Bevy shadows a transparent surface
+                // as though it were solid, so a lake would otherwise throw its
+                // own shadow down onto its own bed. The sea plane is kept out
+                // of the shadow pass for exactly this reason.
+                NotShadowCaster,
+                Mesh3d(meshes.add(surface)),
+                MeshMaterial3d(water.0.clone()),
+            ));
+        }
         meshed += 1;
     }
 }
@@ -723,6 +866,7 @@ mod tests {
                 })
                 .collect(),
             surfaces: vec![Surface::new(Tone::Grass, Shade::Plain); FACET_TRIS],
+            water: None,
         }
     }
 
@@ -864,6 +1008,120 @@ mod tests {
             ground.take_requests().is_empty(),
             "asked again after hearing"
         );
+    }
+
+    /// A water grid with a lake at `level` metres over the square of corners
+    /// below `edge`, and nothing anywhere else.
+    fn a_lake(level: f32, edge: usize) -> Vec<u16> {
+        let mut water = vec![NO_WATER; FACET_VERTS * FACET_VERTS];
+        for iz in 0..edge {
+            for ix in 0..edge {
+                water[iz * FACET_VERTS + ix] = quantize(level);
+            }
+        }
+        water
+    }
+
+    #[test]
+    fn a_lake_is_a_flat_sheet_at_the_level_it_was_sent() {
+        let mesh = water_mesh(IVec2::ZERO, &a_lake(12.0, 8)).expect("a lake");
+
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("three floats each");
+        let normals = mesh
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .expect("normals")
+            .as_float3()
+            .expect("three floats each");
+
+        assert!(!positions.is_empty());
+        assert_eq!(positions.len() % 3, 0, "not whole triangles");
+        for (point, normal) in positions.iter().zip(normals) {
+            // Dead level, at the height the payload named — a lake that
+            // sloped, or that sat at the height of its bed, would show here.
+            assert!(
+                (point[1] - 12.0).abs() < 1.0e-3,
+                "{point:?} is not on the lake's surface"
+            );
+            assert_eq!(*normal, [0.0, 1.0, 0.0]);
+        }
+        // No colours: water is one colour and the material carries it.
+        assert!(mesh.attribute(Mesh::ATTRIBUTE_COLOR).is_none());
+    }
+
+    #[test]
+    fn a_lake_runs_on_under_its_own_bank() {
+        // The quads drawn are every quad with a level on *any* corner, not
+        // only those with water over all four — which is what lets the ground
+        // mesh cut the waterline instead of the quad grid cutting it. A lake
+        // over the corners below 8 therefore reaches the quad from 7 to 8,
+        // whose far corners are dry.
+        let mesh = water_mesh(IVec2::ZERO, &a_lake(12.0, 8)).expect("a lake");
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("three floats each");
+
+        let reach = positions
+            .iter()
+            .map(|point| point[0].max(point[2]))
+            .fold(0.0f32, f32::max);
+        assert_eq!(
+            reach,
+            8.0 * FACET_METRES,
+            "the sheet stops at the last wet corner instead of running past it"
+        );
+    }
+
+    #[test]
+    fn ground_with_no_lake_on_it_draws_no_water() {
+        assert!(water_mesh(IVec2::ZERO, &vec![NO_WATER; FACET_VERTS * FACET_VERTS]).is_none());
+
+        // And a payload that carries no grid at all never gets as far as
+        // asking — the common case, and the one that has to cost nothing.
+        let dry = Arrival {
+            chunk: IVec2::ZERO,
+            heights: a_slope().heights.iter().copied().map(dequantize).collect(),
+            surfaces: a_slope().surfaces,
+            water: None,
+        };
+        assert!(chunk_meshes(&dry).water.is_none());
+    }
+
+    #[test]
+    fn two_lakes_in_one_chunk_each_keep_their_own_level() {
+        // A chunk can straddle two basins a hillside apart, which is the
+        // whole reason the level travels per corner rather than per chunk.
+        let mut water = vec![NO_WATER; FACET_VERTS * FACET_VERTS];
+        for iz in 0..4 {
+            for ix in 0..4 {
+                water[iz * FACET_VERTS + ix] = quantize(6.0);
+                water[iz * FACET_VERTS + ix + 20] = quantize(31.0);
+            }
+        }
+
+        let mesh = water_mesh(IVec2::ZERO, &water).expect("two lakes");
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("three floats each");
+
+        for point in positions {
+            let want = if point[0] < 10.0 * FACET_METRES {
+                6.0
+            } else {
+                31.0
+            };
+            assert!(
+                (point[1] - want).abs() < 1.0e-3,
+                "{point:?} should stand at {want} m"
+            );
+        }
     }
 
     #[test]

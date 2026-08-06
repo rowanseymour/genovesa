@@ -21,6 +21,14 @@
 //! a chunk under twenty kilobytes instead of carrying three floats per
 //! triangle, and it keeps the two ends unable to disagree about what sand
 //! looks like — there is one table, and this is it.
+//!
+//! The same goes for **standing water**. The sea is a plane at zero that a
+//! client draws whether or not it has been told anything, but a lake is not:
+//! it stands at a height decided by a rim saddle that may be half a
+//! kilometre away, on ground that says nothing about it. So where a chunk
+//! carries water, its surface crosses the wire as a second grid — see
+//! [`ChunkPayload::water`] — because there is no arithmetic a client could do
+//! on the heights it already has that would find the level.
 
 use glam::{IVec2, Vec2, Vec3};
 
@@ -316,46 +324,115 @@ pub struct ChunkPayload {
     pub heights: Vec<u16>,
     /// [`FACET_TRIS`] surfaces, one per triangle.
     pub surfaces: Vec<Surface>,
+    /// Where standing water above sea level covers this chunk, and how high
+    /// it stands: one quantised level per corner on the same grid as
+    /// [`ChunkPayload::heights`], or `None` for a chunk with no lake on or
+    /// beside it — which is most of them.
+    ///
+    /// A stored [`NO_WATER`] means dry. Everywhere else the corner has a lake
+    /// level over it, and water stands wherever that level is above the
+    /// height at the same corner. The grid deliberately reaches a corner or
+    /// two past the water's edge, so a client has a level on both sides of
+    /// every shoreline and can put the waterline where the two fields cross
+    /// rather than on the last wet corner.
+    ///
+    /// Sent per corner rather than as one level and a mask because a chunk
+    /// may hold more than one lake, and two basins a hillside apart stand at
+    /// different heights; a single level per chunk would drain one of them or
+    /// flood the other. Sent only where there is water because lakes are
+    /// occasional — most ground carries none, and a grid of "dry" on every
+    /// chunk in the world would be half as much again on the wire for
+    /// nothing.
+    pub water: Option<Vec<u16>>,
 }
 
-/// Bytes one payload occupies on the wire: two per corner height, one per
-/// triangle. Nothing is compressed — see the module docs on the grid being the
-/// format, and note that delta-coding the heights and run-coding the surfaces
-/// would take most of this back if the wire ever needs it to.
+/// The stored water level that means no water — the bottom of the quantised
+/// range, [`HEIGHT_FLOOR`], which is metres below the sea a lake cannot be
+/// under. Standing water above sea level is the only kind that travels, so
+/// every real level is far above this and there is no honest value to
+/// collide with.
+pub const NO_WATER: u16 = 0;
+
+/// Bytes a chunk's heights and surfaces occupy on the wire: two per corner
+/// height, one per triangle. Nothing is compressed — see the module docs on
+/// the grid being the format, and note that delta-coding the heights and
+/// run-coding the surfaces would take most of this back if the wire ever
+/// needs it to.
 pub const PAYLOAD_BYTES: usize = FACET_VERTS * FACET_VERTS * 2 + FACET_TRIS;
+
+/// Bytes a chunk's water grid adds when it carries one — two per corner,
+/// like the heights it is compared against.
+pub const WATER_BYTES: usize = FACET_VERTS * FACET_VERTS * 2;
+
+/// What one payload occupies on the wire, which depends on the one thing
+/// about a chunk that is not fixed: whether it carries standing water. The
+/// flag in [`crate::ToClient::Chunk`] is what says which, and so how many
+/// bytes a reader is about to be handed.
+pub const fn payload_bytes(water: bool) -> usize {
+    PAYLOAD_BYTES + if water { WATER_BYTES } else { 0 }
+}
 
 impl ChunkPayload {
     /// Whether this is a payload of the shape the grid says it should be.
     /// What a reader checks before believing a frame, and what a builder can
     /// assert against.
     pub fn well_formed(&self) -> bool {
-        self.heights.len() == FACET_VERTS * FACET_VERTS && self.surfaces.len() == FACET_TRIS
+        let corners = FACET_VERTS * FACET_VERTS;
+        self.heights.len() == corners
+            && self.surfaces.len() == FACET_TRIS
+            && self
+                .water
+                .as_ref()
+                .is_none_or(|water| water.len() == corners)
     }
 
     /// Appends this payload's bytes: every height little-endian, then every
-    /// surface.
+    /// surface, then the water grid where there is one.
+    ///
+    /// The water goes last so that a reader of either kind of chunk finds the
+    /// heights and the surfaces at the same offsets — a lake is something a
+    /// chunk carries in addition, never a rearrangement of what it already
+    /// carried.
     pub(crate) fn put(&self, out: &mut Vec<u8>) {
         debug_assert!(self.well_formed(), "not a chunk's worth of ground");
         for height in &self.heights {
             out.extend_from_slice(&height.to_le_bytes());
         }
         out.extend(self.surfaces.iter().map(|s| s.to_byte()));
+        for level in self.water.iter().flatten() {
+            out.extend_from_slice(&level.to_le_bytes());
+        }
     }
 
-    /// Reads a payload from exactly [`PAYLOAD_BYTES`] of them, or `None` if
-    /// any surface byte names nothing this build knows.
-    pub(crate) fn take(bytes: &[u8]) -> Option<Self> {
-        debug_assert_eq!(bytes.len(), PAYLOAD_BYTES);
-        let (heights, surfaces) = bytes.split_at(FACET_VERTS * FACET_VERTS * 2);
-        Some(Self {
-            heights: heights
+    /// Reads a payload from exactly [`payload_bytes`] of them — `water` says
+    /// which length, and comes from the flag the caller has already read.
+    /// `None` if the bytes are not that many, or if any surface byte names
+    /// nothing this build knows.
+    ///
+    /// The length is checked rather than asserted because it is the one thing
+    /// here a *frame* can be wrong about: the flag and the length are written
+    /// separately, so a build that disagreed with this one about how long a
+    /// watered chunk is would otherwise be read as a chunk whose lake
+    /// silently vanished.
+    pub(crate) fn take(bytes: &[u8], water: bool) -> Option<Self> {
+        if bytes.len() != payload_bytes(water) {
+            return None;
+        }
+        let levels = |bytes: &[u8]| {
+            bytes
                 .chunks_exact(2)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect(),
+                .collect::<Vec<u16>>()
+        };
+        let (heights, rest) = bytes.split_at(FACET_VERTS * FACET_VERTS * 2);
+        let (surfaces, water) = rest.split_at(FACET_TRIS);
+        Some(Self {
+            heights: levels(heights),
             surfaces: surfaces
                 .iter()
                 .map(|byte| Surface::from_byte(*byte))
                 .collect::<Option<_>>()?,
+            water: (!water.is_empty()).then(|| levels(water)),
         })
     }
 }
@@ -409,6 +486,19 @@ mod tests {
         assert_eq!(FACET_VERTS, 65);
         assert_eq!(FACET_TRIS, 8192);
         assert_eq!(PAYLOAD_BYTES, 65 * 65 * 2 + 8192);
+        assert_eq!(WATER_BYTES, 65 * 65 * 2);
+        assert_eq!(payload_bytes(false), PAYLOAD_BYTES);
+        assert_eq!(payload_bytes(true), PAYLOAD_BYTES + WATER_BYTES);
+    }
+
+    #[test]
+    fn no_water_is_a_depth_no_lake_could_stand_at() {
+        // The sentinel has to be a value no honest level can take, and what
+        // makes it one is that lakes stand *above* the sea while this is the
+        // bottom of the quantised range, far below it.
+        assert_eq!(dequantize(NO_WATER), HEIGHT_FLOOR);
+        assert!(dequantize(NO_WATER) < 0.0);
+        assert_ne!(quantize(0.0), NO_WATER, "sea level would read as dry");
     }
 
     #[test]
@@ -503,11 +593,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_payload_survives_its_bytes() {
-        // Heights and surfaces that differ everywhere they could, so anything
-        // that transposed or truncated either would show.
-        let payload = ChunkPayload {
+    /// A payload whose every value differs from every other, so anything that
+    /// transposed or truncated one of its grids would show.
+    fn a_payload(water: bool) -> ChunkPayload {
+        ChunkPayload {
             heights: (0..FACET_VERTS * FACET_VERTS)
                 .map(|i| (i * 7 % 65_535) as u16)
                 .collect(),
@@ -519,19 +608,83 @@ mod tests {
                     )
                 })
                 .collect(),
-        };
-        assert!(payload.well_formed());
+            water: water.then(|| {
+                (0..FACET_VERTS * FACET_VERTS)
+                    .map(|i| (i * 11 % 65_533) as u16)
+                    .collect()
+            }),
+        }
+    }
 
-        let mut bytes = Vec::new();
-        payload.put(&mut bytes);
-        assert_eq!(bytes.len(), PAYLOAD_BYTES);
-        assert_eq!(ChunkPayload::take(&bytes), Some(payload));
+    #[test]
+    fn a_payload_survives_its_bytes() {
+        for water in [false, true] {
+            let payload = a_payload(water);
+            assert!(payload.well_formed());
+
+            let mut bytes = Vec::new();
+            payload.put(&mut bytes);
+            assert_eq!(bytes.len(), payload_bytes(water));
+            assert_eq!(ChunkPayload::take(&bytes, water), Some(payload));
+        }
+    }
+
+    #[test]
+    fn the_water_grid_is_the_only_thing_a_lake_adds() {
+        // A watered payload is a dry one with a grid on the end: the heights
+        // and the surfaces encode to exactly the same bytes in the same
+        // places, so a reader of either finds them without knowing which it
+        // has until it reaches the tail.
+        let (mut dry, mut wet) = (Vec::new(), Vec::new());
+        a_payload(false).put(&mut dry);
+        a_payload(true).put(&mut wet);
+        assert_eq!(wet[..PAYLOAD_BYTES], dry[..], "the water moved the ground");
+        assert_eq!(wet.len() - dry.len(), WATER_BYTES);
     }
 
     #[test]
     fn a_payload_with_a_surface_from_the_future_is_refused() {
-        let mut bytes = vec![0u8; PAYLOAD_BYTES];
-        *bytes.last_mut().expect("a byte") = 0xFF;
-        assert_eq!(ChunkPayload::take(&bytes), None);
+        // The last surface byte, which is the last byte of a dry payload and
+        // sits in the middle of a watered one — so this also catches a reader
+        // that stopped checking surfaces once it knew there was water to come.
+        for water in [false, true] {
+            let mut bytes = Vec::new();
+            a_payload(water).put(&mut bytes);
+            bytes[PAYLOAD_BYTES - 1] = 0xFF;
+            assert_eq!(ChunkPayload::take(&bytes, water), None);
+        }
+    }
+
+    #[test]
+    fn a_payload_is_malformed_if_its_grids_are_the_wrong_size() {
+        // What a builder is held to. A short water grid is the one worth
+        // naming: heights and surfaces have been fixed-size since there was a
+        // wire, but the water is built per chunk from whatever ground has a
+        // lake on it, and a payload carrying half a grid would encode to a
+        // frame no reader could believe.
+        let mut short = a_payload(true);
+        short.water.as_mut().expect("a lake").truncate(4);
+        assert!(!short.well_formed());
+
+        let mut empty = a_payload(true);
+        empty.water = Some(Vec::new());
+        assert!(!empty.well_formed());
+
+        // And no water at all is well formed — most chunks have none.
+        assert!(a_payload(false).well_formed());
+    }
+
+    #[test]
+    fn a_payload_whose_length_belies_its_flag_is_refused() {
+        // Dry bytes read as watered, and watered bytes read as dry. Either
+        // way the answer is `None` rather than a payload that quietly gained
+        // or lost a lake.
+        let mut dry = Vec::new();
+        a_payload(false).put(&mut dry);
+        assert_eq!(ChunkPayload::take(&dry, true), None);
+
+        let mut wet = Vec::new();
+        a_payload(true).put(&mut wet);
+        assert_eq!(ChunkPayload::take(&wet, false), None);
     }
 }
