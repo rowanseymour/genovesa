@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::camera::{MapCamera, View};
-use crate::terrain::{ChunkBuild, TerrainChunk};
+use crate::terrain::{Ground, Tally};
 
 const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
 const BACKDROP: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
@@ -68,7 +68,7 @@ fn refresh_overlay(
     diagnostics: Res<DiagnosticsStore>,
     meshes: Res<Assets<Mesh>>,
     drawn: Query<&Mesh3d>,
-    chunks: Query<Has<ChunkBuild>, With<TerrainChunk>>,
+    ground: Option<Res<Ground>>,
     cameras: Query<&MapCamera>,
     mut texts: Query<&mut Text, With<DebugText>>,
 ) {
@@ -88,11 +88,9 @@ fn refresh_overlay(
         count += 1;
     }
 
-    // Every chunk the streamer holds, whether meshed, acknowledged empty, or
-    // still building in a task — the building count is the streaming backlog,
-    // nonzero exactly while ground is on its way in.
-    let total = chunks.iter().count();
-    let building = chunks.iter().filter(|building| *building).count();
+    // What this machine has of the world, and what it is still waiting for.
+    // Absent outside a match, where the readout has no world to count.
+    let tally = ground.map(|ground| ground.tally());
 
     let view = cameras.single().ok().map(|camera| View {
         focus: camera.focus,
@@ -101,7 +99,7 @@ fn refresh_overlay(
     });
 
     for mut text in &mut texts {
-        text.0 = overlay_text(fps, triangles, count, total, building, view);
+        text.0 = overlay_text(fps, triangles, count, tally.as_ref(), view);
     }
 }
 
@@ -118,19 +116,46 @@ fn triangles_in(mesh: &Mesh) -> usize {
 
 /// What the readout says. The frame rate has no value at all for the first
 /// frames, before the diagnostic has anything to average.
+///
+/// The chunk line is three numbers about two different things:
+///
+/// - the **total** is every chunk this machine has an answer about, ground and
+///   water together, of which **ocean** is the share that was answered with
+///   nothing — sea costs nothing to hold, so the rest is where the memory
+///   went;
+/// - **requested** is ground asked for and not answered. It is deliberately
+///   outside the total, nothing being known about it yet, and it is the only
+///   number here about the *server* rather than about this machine.
+///
+/// There is no count of meshes still being assembled, though there is a stage
+/// for it. Before the world crossed the wire that number was the whole of the
+/// streaming backlog, because building a chunk was generating it; now it is
+/// the moment between a payload landing and its vertex buffers being filled,
+/// which an arrival's worth of chunks passes through in about six frames. A
+/// number that reads zero but for a tenth of a second, once, is not worth the
+/// line — and the failure it would have caught, meshes not landing, shows up
+/// as the count above this one standing still while the chunks climb.
 fn overlay_text(
     fps: Option<f64>,
     triangles: usize,
     meshes: usize,
-    chunks: usize,
-    building: usize,
+    tally: Option<&Tally>,
     view: Option<View>,
 ) -> String {
     let fps = fps.map_or_else(|| "--".to_string(), |fps| format!("{fps:.0}"));
     let mut text = format!(
-        "{fps} fps\n{} triangles\n{meshes} meshes\n{chunks} chunks ({building} building)",
+        "{fps} fps\n{} triangles\n{meshes} meshes",
         thousands(triangles)
     );
+    if let Some(tally) = tally {
+        text.push('\n');
+        text.push_str(&format!(
+            "{} chunks ({} ocean, {} requested)",
+            tally.ground + tally.ocean,
+            tally.ocean,
+            tally.requested
+        ));
+    }
     if let Some(view) = view {
         text.push('\n');
         text.push_str(&view_line(view));
@@ -170,6 +195,16 @@ mod tests {
     use bevy::asset::RenderAssetUsages;
     use bevy::mesh::{Indices, PrimitiveTopology};
 
+    /// A chunk of flat ground, which is all this needs of one: the readout
+    /// counts chunks, it does not look at them.
+    fn a_chunk() -> protocol::ChunkPayload {
+        use protocol::ground::{quantize, Surface, Tone, FACET_TRIS, FACET_VERTS};
+        protocol::ChunkPayload {
+            heights: vec![quantize(1.0); FACET_VERTS * FACET_VERTS],
+            surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
+        }
+    }
+
     /// A mesh of `vertices` positions and no index buffer.
     fn unindexed(vertices: usize) -> Mesh {
         Mesh::new(
@@ -198,18 +233,28 @@ mod tests {
             distance: 42.4,
             yaw: 45f32.to_radians(),
         };
+        // 173 of ground and 58 of water make the 231; the 12 requested are
+        // not in it, having been answered with nothing yet.
+        let tally = Tally {
+            ground: 173,
+            ocean: 58,
+            requested: 12,
+        };
         assert_eq!(
-            overlay_text(Some(59.6), 1_234_567, 214, 231, 17, Some(view)),
-            "60 fps\n1,234,567 triangles\n214 meshes\n231 chunks (17 building)\n\
+            overlay_text(Some(59.6), 1_234_567, 214, Some(&tally), Some(view)),
+            "60 fps\n1,234,567 triangles\n214 meshes\n\
+             231 chunks (58 ocean, 12 requested)\n\
              focus 98,-317  zoom 42  yaw 45"
         );
     }
 
     #[test]
-    fn the_readout_survives_having_no_frame_rate_yet_and_no_camera() {
+    fn the_readout_survives_having_no_frame_rate_yet_and_no_world() {
+        // On a menu screen there is no world to count and no camera to
+        // describe, so the readout is the three lines that are always true.
         assert_eq!(
-            overlay_text(None, 0, 0, 0, 0, None),
-            "-- fps\n0 triangles\n0 meshes\n0 chunks (0 building)"
+            overlay_text(None, 0, 0, None, None),
+            "-- fps\n0 triangles\n0 meshes"
         );
     }
 
@@ -239,17 +284,19 @@ mod tests {
         ))
         .insert_resource(Assets::<Mesh>::default());
 
-        // Two triangles' worth of scene, on an entity that is also a chunk.
+        // Two triangles' worth of scene, and a world holding one chunk of
+        // ground and one of open water — a mesh and a fact, which is the
+        // distinction the chunk line exists to draw.
         let handle = app
             .world_mut()
             .resource_mut::<Assets<Mesh>>()
             .add(unindexed(6));
-        app.world_mut().spawn((
-            Mesh3d(handle),
-            TerrainChunk {
-                coords: IVec2::ZERO,
-            },
-        ));
+        app.world_mut().spawn(Mesh3d(handle));
+
+        let mut ground = Ground::default();
+        ground.deliver(IVec2::ZERO, Some(a_chunk()));
+        ground.deliver(IVec2::new(1, 0), None);
+        app.insert_resource(ground);
 
         // And a camera, for the view line.
         app.world_mut().spawn(MapCamera::looking(View {
@@ -276,7 +323,9 @@ mod tests {
             .clone();
         assert!(
             text.ends_with(
-                "2 triangles\n1 meshes\n1 chunks (0 building)\nfocus 10,-20  zoom 150  yaw 0"
+                "2 triangles\n1 meshes\n\
+                 2 chunks (1 ocean, 0 requested)\n\
+                 focus 10,-20  zoom 150  yaw 0"
             ),
             "overlay reads: {text}"
         );

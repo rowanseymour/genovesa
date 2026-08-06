@@ -142,6 +142,26 @@ pub struct Ground {
     arrived: Vec<(IVec2, Arc<[f32]>, Vec<Surface>)>,
 }
 
+/// A count of what this machine has of the world, and what it is still
+/// waiting on.
+pub struct Tally {
+    /// Chunks that came back with ground on them — the ones that cost memory
+    /// and draw calls.
+    pub ground: usize,
+    /// Chunks known to be open water. They hold nothing and draw nothing: the
+    /// sea and floor planes already cover them, and all that is kept is the
+    /// fact of having asked. Usually most of the total, since most of any
+    /// neighbourhood is sea.
+    pub ocean: usize,
+    /// Chunks asked for, or about to be, and not yet answered — so *not* part
+    /// of either count above, which are answers.
+    ///
+    /// The number to watch, and the only part of the readout that reflects the
+    /// far end: it rises when a client has outrun what the world can generate
+    /// for it, and sits at zero in a quiet corner of a warm one.
+    pub requested: usize,
+}
+
 /// What one chunk turned out to be.
 enum Chunk {
     /// Open water. The sea and floor planes already draw it, so there is
@@ -203,6 +223,25 @@ impl Ground {
     /// picture is not of the world until the world has turned up.
     pub fn settled(&self) -> bool {
         self.outstanding.is_empty() && self.to_ask.is_empty() && self.arrived.is_empty()
+    }
+
+    /// How much of the world is being held, and how much is still on its way.
+    /// For the debug overlay, which is the only thing that wants the world
+    /// counted rather than asked about.
+    pub fn tally(&self) -> Tally {
+        Tally {
+            ground: self
+                .chunks
+                .values()
+                .filter(|chunk| matches!(chunk, Chunk::Land { .. }))
+                .count(),
+            ocean: self
+                .chunks
+                .values()
+                .filter(|chunk| matches!(chunk, Chunk::Ocean))
+                .count(),
+            requested: self.outstanding.len() + self.to_ask.len(),
+        }
     }
 
     /// The height of the surface at a world point: the ground where it stands
