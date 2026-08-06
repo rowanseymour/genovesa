@@ -34,6 +34,37 @@ const FREEBOARD: f32 = 0.9;
 /// through the water as a darker shape under the deck.
 const DRAFT: f32 = 0.8;
 
+/// Where the keel begins and ends, in metres from amidships — negative
+/// forward, the same axis the hull is drawn on. The forefoot stops short of
+/// the bow, which is what gives the stem its rake; the heel runs right aft to
+/// the transom. [`hull_faces`] cuts the hull to these and [`grounding`] probes
+/// along them, so what runs aground is the line that is drawn.
+const FOREFOOT_STATION: f32 = -LENGTH * 0.5 * 0.7;
+const HEEL_STATION: f32 = LENGTH * 0.5;
+
+/// How far the keel has to reach into the bottom before the hull is held. Less
+/// than [`DRAFT`] on purpose: stopping the boat the instant the ground rises to
+/// meet the keel is an invisible wall a boat's length offshore, whereas a fifth
+/// of a metre of bite is a boat *beaching* — the keel is seen to touch, and
+/// then it stops. Well clear of the two centimetres the heights are quantised
+/// to, so the threshold cannot chatter.
+///
+/// On the coasts the generator draws this puts the hull within a metre or two
+/// of the waterline; where it holds a boat further off, it is off a shelf too
+/// thin to float one, and the shallows are painted as shallows long before
+/// they are this thin — so a boat held out is held out of water it can be
+/// seen to be held out of.
+const GROUNDING_DRAFT: f32 = 0.6;
+
+/// How many points along the keel are asked about the bottom. Spread from the
+/// forefoot to the heel inclusive, so the gap between them comes out just under
+/// the two metres the ground is sampled at — the height field is linear between
+/// its corners, so nothing it can describe fits between two probes unnoticed.
+/// The sides are not probed: the hull is a shallow V, drawing only [`DRAFT`] on
+/// the centreline and nothing at all at the beam, so a probe out there would
+/// have to carry a draught of its own to say anything the keel has not said.
+const KEEL_PROBES: usize = 4;
+
 /// Height of the mast above the deck. Tall out of proportion to the hull,
 /// deliberately: from a camera looking down at 50° a mast is most of what says
 /// which way the boat is leaning and where it is against the ground behind it,
@@ -172,6 +203,36 @@ fn float(ground: Option<Res<Ground>>, mut boats: Query<&mut Transform, With<Boat
     }
 }
 
+/// How far the worst-placed point of the keel stands into the bottom at a
+/// pose, in metres — negative for as long as there is water under all of it.
+///
+/// This is the whole of collision. The ground the client has is a height field
+/// on a two-metre lattice, and the boat is a keel line above it, so "is there
+/// water enough here" is a handful of lookups rather than anything to do with
+/// intersecting the hull's triangles: [`Ground::height`] answers on exactly the
+/// facets the mesh was built from, which is what makes the ground the boat is
+/// stopped by the ground the player can see.
+///
+/// A probe over a chunk that has not arrived says nothing rather than
+/// objecting, the same choice [`float`] makes: ground the client has not been
+/// sent is not ground it may invent. Outrunning the stream would take a stalled
+/// server, and if land does turn up under the hull, backing off still works —
+/// see [`steer`] for why.
+fn grounding(ground: Option<&Ground>, transform: &Transform) -> f32 {
+    let Some(ground) = ground else {
+        return f32::NEG_INFINITY;
+    };
+
+    let keel = HEEL_STATION - FOREFOOT_STATION;
+    (0..KEEL_PROBES)
+        .filter_map(|i| {
+            let station = FOREFOOT_STATION + keel * i as f32 / (KEEL_PROBES - 1) as f32;
+            let at = transform.transform_point(Vec3::new(0.0, 0.0, station));
+            Some(ground.height(at.x, at.z)? + GROUNDING_DRAFT)
+        })
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
 /// Drives the boat in its own frame, the way a boat is driven: forward and
 /// back run the hull along its heading, and the steering keys are the helm,
 /// bringing the bow round for as long as they're held. The view plays no part
@@ -189,14 +250,37 @@ fn float(ground: Option<Res<Ground>>, mut boats: Query<&mut Transform, With<Boat
 ///
 /// The helm answers even with no way on, which no rudder would; a boat that
 /// can't point where it's told while stationary is annoying before it is
-/// realistic. Nothing here knows about land either: a hull driven onto a
-/// hillside ploughs through it, half-buried by [`float`]. Collision is
-/// deferred, deliberately — steering that *feels* right comes before running
-/// aground having consequences.
+/// realistic. It answers aground as well, and for a better reason than that:
+/// a turn refused alongside an advance is a hull wedged bow-first against a
+/// shore with nothing left that would free it, so the bow may always come
+/// round even where the hull may not go.
+///
+/// Land is what the hull may not go through, and the frame's advance is
+/// offered to [`grounding`] before it is taken. It is allowed if the pose it
+/// would reach floats — or, failing that, if it is aground no *deeper* than
+/// the pose already held. That second half is not an escape hatch for a boat
+/// that has got itself ashore; it is the only rule that both frees one and
+/// can't be played. Every way out of the ground is downhill, so backing off a
+/// beach, crawling along the bottom and a `--focus` that puts the boat inland
+/// all work by it; and every way further in is uphill, so nosing the bow over
+/// a beach to unlock the island — which "aground already, let it through"
+/// would hand a player on the first frame — is refused like any other climb.
+/// Which is also why the comparison carries no tolerance: a hair of slack is a
+/// hair of climb every frame, and a hair a frame is a metre a second up a
+/// hillside.
+///
+/// Both poses are judged with the rotation the helm has just applied, so a
+/// turn only ever changes where the advance goes, never whether it is allowed.
+/// Being stopped takes the way off, which is what running aground does; the
+/// ease then makes coming off again the few seconds it should be. What the
+/// hull is stopped *by* is the keel line and nothing else — the stem rakes out
+/// over the forefoot, so a bow can overhang a cliff face by half a metre
+/// before anything objects, which from a camera forty metres up is nothing.
 fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     time: Res<Time>,
+    ground: Option<Res<Ground>>,
     mut boats: Query<(&mut Transform, &mut Boat)>,
 ) {
     // Direction first, speed second, so opposed keys cancel outright rather
@@ -223,6 +307,7 @@ fn steer(
     let target = drive * speed;
     // A response named in seconds is a rate of its reciprocal.
     let t = eased(1.0 / WAY_RESPONSE, time.delta_secs());
+    let ground = ground.as_deref();
 
     for (mut transform, mut boat) in &mut boats {
         if helm != 0.0 {
@@ -232,13 +317,28 @@ fn steer(
         // still without being marked changed every frame.
         if target != 0.0 || boat.way != 0.0 {
             let way = boat.way + (target - boat.way) * t;
-            boat.way = if target == 0.0 && way.abs() < WAY_STOPPED {
+            let way = if target == 0.0 && way.abs() < WAY_STOPPED {
                 0.0
             } else {
                 way
             };
-            let advance = transform.forward() * boat.way * time.delta_secs();
-            transform.translation += advance;
+
+            let advance = transform.forward() * way * time.delta_secs();
+            let here = grounding(ground, &transform);
+            let there = grounding(
+                ground,
+                &Transform {
+                    translation: transform.translation + advance,
+                    ..*transform
+                },
+            );
+
+            if there <= 0.0 || there <= here {
+                boat.way = way;
+                transform.translation += advance;
+            } else {
+                boat.way = 0.0;
+            }
         }
     }
 }
@@ -261,9 +361,9 @@ fn hull_faces() -> [[Vec3; 3]; 10] {
     let starboard_quarter = Vec3::new(half_beam * 0.8, FREEBOARD, half_length);
     let starboard_shoulder = Vec3::new(half_beam, FREEBOARD, shoulder);
 
-    // Keel. It starts short of the bow, which is what gives the stem its rake.
-    let forefoot = Vec3::new(0.0, -DRAFT, -half_length * 0.7);
-    let heel = Vec3::new(0.0, -DRAFT, half_length);
+    // Keel, along the stations the bottom is probed at.
+    let forefoot = Vec3::new(0.0, -DRAFT, FOREFOOT_STATION);
+    let heel = Vec3::new(0.0, -DRAFT, HEEL_STATION);
 
     [
         // Deck, fanned from the bow.
@@ -317,6 +417,7 @@ mod tests {
 
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
+    use protocol::ground::FACET_METRES;
 
     use super::*;
     use crate::testing::{elapsed, hold, rebind, run_frames, test_ground, TEST_ISLAND_REACH};
@@ -701,6 +802,218 @@ mod tests {
             put_down(&mut app, offshore),
             0.0,
             "the boat is not floating at the waterline"
+        );
+    }
+
+    /// The same app with a hand of ground already delivered — the island the
+    /// collision tests run aground on. Everything above it runs without a
+    /// [`Ground`] at all, which is the other case worth having: a client that
+    /// has been sent nothing must still be able to move.
+    fn island_app() -> App {
+        let mut app = test_app();
+        app.insert_resource(test_ground());
+        app
+    }
+
+    /// Puts the boat down at a spot, pointing a way — a `--focus` in little.
+    fn place(app: &mut App, at: Vec2, facing: Vec2) {
+        let mut transform = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<Boat>>()
+            .single_mut(app.world_mut())
+            .expect("a match should have a boat in it");
+        transform.translation = Vec3::new(at.x, 0.0, at.y);
+        transform.rotation = Quat::from_rotation_y(f32::atan2(-facing.x, -facing.y));
+    }
+
+    /// How far the boat is from the middle of the test island, which is round:
+    /// this is its distance off the coast plus [`TEST_ISLAND_REACH`].
+    fn from_the_island(app: &mut App) -> f32 {
+        let at = boat(app).translation;
+        Vec2::new(at.x, at.z).length()
+    }
+
+    /// How far into the bottom the boat's keel is standing where it lies.
+    fn bite(app: &mut App) -> f32 {
+        let transform = boat(app);
+        grounding(Some(app.world().resource::<Ground>()), &transform)
+    }
+
+    #[test]
+    fn the_keel_is_probed_as_closely_as_the_ground_is_sampled() {
+        // What makes a handful of points along the keel as good as the hull
+        // itself: the height field is linear between corners this far apart,
+        // so there is no rock it can describe that fits between two probes.
+        let spacing = (HEEL_STATION - FOREFOOT_STATION) / (KEEL_PROBES - 1) as f32;
+        assert!(
+            spacing <= FACET_METRES,
+            "{spacing} m between probes leaves room for a {FACET_METRES} m facet to hide in"
+        );
+    }
+
+    #[test]
+    fn a_boat_driven_at_a_coast_grounds_short_of_it() {
+        let mut app = island_app();
+        place(
+            &mut app,
+            Vec2::new(TEST_ISLAND_REACH + 60.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+        );
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+
+        // Held off the island rather than stopped out in the open: the test
+        // island's rim is near vertical, so its coast is where its reach says.
+        let reached = from_the_island(&mut app);
+        assert!(
+            reached > TEST_ISLAND_REACH,
+            "the boat is {reached} m out, which is inside a coast at {TEST_ISLAND_REACH} m"
+        );
+        assert!(
+            reached < TEST_ISLAND_REACH + 10.0,
+            "the boat stopped {reached} m out, nowhere near the coast it was driven at"
+        );
+
+        // And stopped is stopped, not grinding: the way came off, so the hull
+        // holds exactly the same spot with the key still down.
+        let aground = boat(&mut app).translation;
+        run_frames(&mut app, 10);
+        assert_eq!(
+            boat(&mut app).translation,
+            aground,
+            "the boat is still creeping ashore"
+        );
+    }
+
+    #[test]
+    fn astern_backs_a_grounded_boat_off() {
+        let mut app = island_app();
+        place(
+            &mut app,
+            Vec2::new(TEST_ISLAND_REACH + 60.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+        );
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+        let aground = from_the_island(&mut app);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release_all();
+        hold(&mut app, KeyCode::ArrowDown);
+        run_frames(&mut app, SETTLED);
+
+        // Backing off a beach is what astern is for, and it needs no rule of
+        // its own: away from the ground is the deeper water the hull came in
+        // over, and deeper is always allowed.
+        let backed = from_the_island(&mut app);
+        assert!(
+            backed > aground + LENGTH,
+            "the boat came off {} m, less than its own length",
+            backed - aground
+        );
+    }
+
+    #[test]
+    fn open_water_is_sailed_at_full_speed() {
+        // Nothing under the keel, nothing in the way: the ground the boat has
+        // been sent must cost it no speed at all where there is water enough.
+        let mut app = island_app();
+        place(
+            &mut app,
+            Vec2::new(TEST_ISLAND_REACH + 100.0, 0.0),
+            Vec2::new(1.0, 0.0),
+        );
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+
+        let before = boat(&mut app).translation;
+        let start = elapsed(&app);
+        run_frames(&mut app, 60);
+        let seconds = elapsed(&app) - start;
+
+        let made = (boat(&mut app).translation - before).length() / seconds;
+        assert!(
+            (made - SPEED).abs() < SPEED * 0.01,
+            "the boat made {made} m/s over open water, not {SPEED}"
+        );
+    }
+
+    #[test]
+    fn a_boat_put_down_inland_drives_back_to_the_sea() {
+        // What `--focus` on an island leaves behind, and the case that says
+        // the ground holds a boat without ever trapping one.
+        let mut app = island_app();
+        let ashore = Vec2::new(TEST_ISLAND_REACH * 0.5, 0.0);
+        place(&mut app, ashore, Vec2::new(1.0, 0.0));
+        assert!(
+            bite(&mut app) > 0.0,
+            "the spot picked to be dry land has water over it"
+        );
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+
+        assert_eq!(
+            boat(&mut app).translation.y,
+            0.0,
+            "the boat never made it back to the waterline"
+        );
+        let afloat = from_the_island(&mut app);
+        assert!(
+            afloat > TEST_ISLAND_REACH,
+            "the boat is still {afloat} m from the middle, inside the coast"
+        );
+    }
+
+    #[test]
+    fn a_grounded_boat_is_never_driven_further_aground() {
+        // The pose a rule of "aground already, let it through" would hand the
+        // whole island to: bow over the beach, and then whatever the player
+        // likes. Held for a good while with the helm hard over as well, so the
+        // hull sweeps its way round every heading there is.
+        let mut app = island_app();
+        place(
+            &mut app,
+            Vec2::new(TEST_ISLAND_REACH - 1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+        );
+        let before = bite(&mut app);
+        assert!(before > 0.0, "the boat was meant to start aground");
+
+        hold(&mut app, KeyCode::ArrowUp);
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, SETTLED);
+
+        let after = bite(&mut app);
+        assert!(
+            after <= before,
+            "the boat worked its way {} m further into the ground",
+            after - before
+        );
+    }
+
+    #[test]
+    fn the_helm_answers_while_aground() {
+        // A refused turn on top of a refused advance is a hull wedged against
+        // a shore for good, so the bow comes round whatever is under it.
+        let mut app = island_app();
+        place(
+            &mut app,
+            Vec2::new(TEST_ISLAND_REACH - 1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+        );
+        let before = boat(&mut app).rotation;
+
+        hold(&mut app, KeyCode::ArrowUp);
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, 20);
+
+        assert_ne!(
+            boat(&mut app).rotation,
+            before,
+            "a boat the ground has stopped cannot come round"
         );
     }
 }
