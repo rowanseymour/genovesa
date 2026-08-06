@@ -476,6 +476,12 @@ impl Archipelago {
         }
     }
 
+    /// The seed this world is, for whoever has to name it: a world that
+    /// cannot say which one it is cannot be opened a second time.
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
     /// What a parcel of one layer holds, before the layers are played off
     /// against each other. Everything about the island — whether it exists,
     /// its shape, where in the parcel it stands, its seed — comes from the

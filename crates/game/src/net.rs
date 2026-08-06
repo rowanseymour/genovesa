@@ -362,10 +362,11 @@ impl Dialing {
 
 /// The world this machine is hosting, for as long as the player is in it.
 ///
-/// Nothing reads it: holding it *is* what it does. Dropping the handle stops
-/// the server and hangs up on everyone in the world, so it lives exactly as
-/// long as the host's own visit — inserted when the world is entered, removed
-/// on the way out by [`disconnect`].
+/// Mostly, holding it *is* what it does: dropping the handle stops the server
+/// and hangs up on everyone in the world, so it lives exactly as long as the
+/// host's own visit — inserted when the world is entered, removed on the way
+/// out by [`disconnect`]. It is also the one thing in a match that knows which
+/// world this is, which is why the debug readout asks it for the seed.
 #[derive(Resource)]
 pub struct Hosting(pub Host);
 
@@ -682,12 +683,16 @@ mod tests {
 
     #[test]
     fn the_seed_asked_for_is_the_world_that_opens() {
-        // The seed never reaches a client, so the only way to see that the one
-        // chosen actually got through is that two of them are two places.
         let first = settle(&Dialing::opening(WorldConfig { seed: 77 }, Reach::Alone))
             .expect("a world should open");
         let second = settle(&Dialing::opening(WorldConfig { seed: 78 }, Reach::Alone))
             .expect("a world should open");
+        // A host can ask its own server which world it made — that is where
+        // the debug readout's seed comes from.
+        assert_eq!(first.hosting.as_ref().expect("hosting").seed(), 77);
+        // But the seed never reaches a *client*, so that the chosen one
+        // actually reached the generator shows only in two of them being two
+        // places.
         assert_ne!(
             first.connection.spawn, second.connection.spawn,
             "two seeds opened onto the same patch of water"

@@ -7,15 +7,17 @@
 //! on the menu, where nothing 3D exists at all. The chunk line shows the
 //! streamer's own bookkeeping: how many chunks it holds, and how many of
 //! those are still building off the main thread. The last line reads the
-//! view back in the terms the command line takes it — `--focus`, `--zoom`,
-//! `--yaw` — so a view worth keeping can be pasted straight into a `--shot`
-//! run.
+//! world and the view back in the terms the command line takes them —
+//! `--seed`, `--focus`, `--yaw`, `--zoom` — so a screenshot of the overlay is
+//! the whole of what it takes to stand here again, in a `--shot` run or
+//! otherwise.
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::camera::{MapCamera, View};
+use crate::net::Hosting;
 use crate::terrain::{Ground, Tally};
 
 const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
@@ -69,6 +71,7 @@ fn refresh_overlay(
     meshes: Res<Assets<Mesh>>,
     drawn: Query<&Mesh3d>,
     ground: Option<Res<Ground>>,
+    hosting: Option<Res<Hosting>>,
     cameras: Query<&MapCamera>,
     mut texts: Query<&mut Text, With<DebugText>>,
 ) {
@@ -98,8 +101,12 @@ fn refresh_overlay(
         yaw: camera.yaw,
     });
 
+    // Only a world made on this machine can be named. A guest is sent ground
+    // and never the recipe, so there is no seed here to print.
+    let seed = hosting.map(|hosting| hosting.0.seed());
+
     for mut text in &mut texts {
-        text.0 = overlay_text(fps, triangles, count, tally.as_ref(), view);
+        text.0 = overlay_text(fps, triangles, count, tally.as_ref(), seed, view);
     }
 }
 
@@ -140,6 +147,7 @@ fn overlay_text(
     triangles: usize,
     meshes: usize,
     tally: Option<&Tally>,
+    seed: Option<u32>,
     view: Option<View>,
 ) -> String {
     let fps = fps.map_or_else(|| "--".to_string(), |fps| format!("{fps:.0}"));
@@ -158,22 +166,33 @@ fn overlay_text(
     }
     if let Some(view) = view {
         text.push('\n');
-        text.push_str(&view_line(view));
+        text.push_str(&view_line(seed, view));
     }
     text
 }
 
-/// The view in the terms `--focus`, `--zoom` and `--yaw` take it back in:
-/// metres, metres and degrees. The yaw runs unbounded on the camera — easing
-/// never wants to wrap — so it is folded to a bearing here.
-fn view_line(view: View) -> String {
-    format!(
-        "focus {:.0},{:.0}  zoom {:.0}  yaw {:.0}",
+/// The world and the view in the terms `--seed`, `--focus`, `--yaw` and
+/// `--zoom` take them back in: a seed, then metres, degrees and metres. The
+/// yaw runs unbounded on the camera — easing never wants to wrap — so it is
+/// folded to a bearing here.
+///
+/// The seed leads because it is the part that cannot be guessed from the
+/// picture, and it is absent in somebody else's world: a guest can say where
+/// it stood but not which world it stood in, that never having crossed the
+/// wire.
+fn view_line(seed: Option<u32>, view: View) -> String {
+    let mut line = match seed {
+        Some(seed) => format!("seed {seed}  "),
+        None => String::new(),
+    };
+    line.push_str(&format!(
+        "focus {:.0},{:.0}  yaw {:.0}  zoom {:.0}",
         view.focus.x,
         view.focus.z,
-        view.distance,
-        view.yaw.to_degrees().rem_euclid(360.0)
-    )
+        view.yaw.to_degrees().rem_euclid(360.0),
+        view.distance
+    ));
+    line
 }
 
 /// `1234567` -> `1,234,567`, since triangle counts run to seven digits.
@@ -242,10 +261,17 @@ mod tests {
             requested: 12,
         };
         assert_eq!(
-            overlay_text(Some(59.6), 1_234_567, 214, Some(&tally), Some(view)),
+            overlay_text(
+                Some(59.6),
+                1_234_567,
+                214,
+                Some(&tally),
+                Some(20_040_112),
+                Some(view)
+            ),
             "60 fps\n1,234,567 triangles\n214 meshes\n\
              231 chunks (58 ocean, 12 requested)\n\
-             focus 98,-317  zoom 42  yaw 45"
+             seed 20040112  focus 98,-317  yaw 45  zoom 42"
         );
     }
 
@@ -254,7 +280,7 @@ mod tests {
         // On a menu screen there is no world to count and no camera to
         // describe, so the readout is the three lines that are always true.
         assert_eq!(
-            overlay_text(None, 0, 0, None, None),
+            overlay_text(None, 0, 0, None, None, None),
             "-- fps\n0 triangles\n0 meshes"
         );
     }
@@ -268,8 +294,32 @@ mod tests {
             distance: 100.0,
             yaw: yaw.to_radians(),
         };
-        assert_eq!(view_line(at(-90.0)), "focus 0,0  zoom 100  yaw 270");
-        assert_eq!(view_line(at(450.0)), "focus 0,0  zoom 100  yaw 90");
+        assert_eq!(
+            view_line(Some(7), at(-90.0)),
+            "seed 7  focus 0,0  yaw 270  zoom 100"
+        );
+        assert_eq!(
+            view_line(Some(7), at(450.0)),
+            "seed 7  focus 0,0  yaw 90  zoom 100"
+        );
+    }
+
+    #[test]
+    fn a_guests_view_line_names_no_world() {
+        // In somebody else's world there is no seed to give: the wire carries
+        // ground, not the recipe. Where the player stands is still worth
+        // saying.
+        assert_eq!(
+            view_line(
+                None,
+                View {
+                    focus: Vec3::new(98.4, 3.0, -316.7),
+                    distance: 150.0,
+                    yaw: 0.0,
+                }
+            ),
+            "focus 98,-317  yaw 0  zoom 150"
+        );
     }
 
     #[test]
@@ -299,6 +349,15 @@ mod tests {
         ground.deliver(IVec2::new(1, 0), None);
         app.insert_resource(ground);
 
+        // And a world of this machine's own behind it, which is what the seed
+        // is read off. Bound and never accepted from: the readout asks the
+        // handle which world it is, and nothing here has to join it.
+        let host = server::Server::bind(("127.0.0.1", 0), server::WorldConfig { seed: 4242 })
+            .expect("a server should bind")
+            .spawn()
+            .expect("a server should serve");
+        app.insert_resource(Hosting(host));
+
         // And a camera, for the view line.
         app.world_mut().spawn(MapCamera::looking(View {
             focus: Vec3::new(10.0, 0.0, -20.0),
@@ -326,7 +385,7 @@ mod tests {
             text.ends_with(
                 "2 triangles\n1 meshes\n\
                  2 chunks (1 ocean, 0 requested)\n\
-                 focus 10,-20  zoom 150  yaw 0"
+                 seed 4242  focus 10,-20  yaw 0  zoom 150"
             ),
             "overlay reads: {text}"
         );

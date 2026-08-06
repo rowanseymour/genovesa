@@ -293,6 +293,13 @@ impl Host {
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
+
+    /// The seed of the world being served. Nothing on the wire carries it —
+    /// a client is sent ground and never the recipe — so this is for the
+    /// process hosting, which is entitled to say which world it made.
+    pub fn seed(&self) -> u32 {
+        self.shared.world.seed()
+    }
 }
 
 impl Drop for Host {
