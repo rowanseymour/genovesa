@@ -133,6 +133,30 @@ const WAY_STOPPED: f32 = 0.02;
 /// coming about reads as a turn rather than a spin.
 const TURN_RATE: f32 = 2.0;
 
+/// How far the hull heels in a full-helm turn at full speed, in radians —
+/// enough to swing the masthead more than a metre, which is what makes a turn
+/// visible from forty metres up, and shy of anything that reads as capsizing.
+/// It heels *outwards*, the way a keeled hull does: the water grips the keel
+/// below the waterline while the turn flings the mass above it, so the boat
+/// leans out of the corner, not into it like a bicycle.
+const HEEL_AT_FULL_TURN: f32 = 0.22;
+
+/// Seconds of lag between the heel a turn asks for and the heel the hull
+/// shows, the same exponential shape as [`WAY_RESPONSE`] and much quicker:
+/// rolling is the lightest thing seven metres of timber does. Quick enough
+/// that the lean arrives while the turn is still news, slow enough that the
+/// hull rolls rather than snaps — and the same curve is the straightening,
+/// run back down to level when the helm comes off.
+const HEEL_RESPONSE: f32 = 0.4;
+
+/// Within this of the heel the turn is asking for, the hull snaps to it
+/// exactly — the same tail-closing that [`WAY_STOPPED`] does for the way,
+/// and for the same reason: the ease only ever halves the remainder, and a
+/// hull done straightening should be *level*, holding one rotation frame
+/// after frame rather than forever creeping towards it. A third of a degree,
+/// invisible at any zoom.
+const HEEL_SETTLED: f32 = 0.005;
+
 /// Timber. Nothing on an island or in the sea is anywhere near this hue, so the
 /// boat is findable in a landscape of greens and blues without being lit any
 /// differently from them.
@@ -145,9 +169,16 @@ const SPAR_COLOR: Color = Color::srgb(0.86, 0.80, 0.68);
 /// `way` is the speed the hull is actually making along its heading, in
 /// metres per second, ahead positive — the state the eased throttle lives
 /// in. The keys name a speed; [`steer`] brings `way` towards it.
+///
+/// `heel` is the roll the hull is showing, in radians about its own forward,
+/// positive with the masthead to port. Kept here rather than read back off
+/// the transform because the transform holds heel and heading multiplied
+/// together, and unpicking a quaternion every frame to learn a number this
+/// system wrote itself is work for nothing.
 #[derive(Component, Default)]
 pub struct Boat {
     way: f32,
+    heel: f32,
 }
 
 pub struct BoatPlugin;
@@ -305,6 +336,17 @@ fn grounding(ground: Option<&Ground>, transform: &Transform) -> f32 {
 /// at the quarter second Bevy clamps a stalled frame to — so the sweep is only
 /// ever missed on a frame that was already a visible break in the picture.
 ///
+/// Turning at speed also heels the hull: the target lean is helm times way —
+/// sharpness times speed, so a hard turn at full way carries the whole of
+/// [`HEEL_AT_FULL_TURN`], a gentle one at half way a quarter of it, and a bow
+/// swung round at rest none at all — and the shown heel relaxes towards it on
+/// the [`HEEL_RESPONSE`] curve, which is both the roll into the turn and the
+/// straightening out of it. Signed way keeps the geometry honest going
+/// astern: the same helm turns about a centre on the other side, so the heel
+/// flips with it. The roll is applied about the boat's own forward axis, and
+/// the keel lies along that axis, so heeling moves nothing [`grounding`]
+/// probes or [`steer`] advances along — it is wholly a thing the eye gets.
+///
 /// Both poses are judged with the rotation the helm has just applied, so a
 /// turn only ever changes where the advance goes, never whether it is allowed.
 /// Being stopped takes the way off, which is what running aground does; the
@@ -343,6 +385,7 @@ fn steer(
     let target = drive * speed;
     // A response named in seconds is a rate of its reciprocal.
     let t = eased(1.0 / WAY_RESPONSE, time.delta_secs());
+    let heel_t = eased(1.0 / HEEL_RESPONSE, time.delta_secs());
     let ground = ground.as_deref();
 
     for (mut transform, mut boat) in &mut boats {
@@ -375,6 +418,26 @@ fn steer(
             } else {
                 boat.way = 0.0;
             }
+        }
+
+        // Heel last, against the way this frame settled on, so running
+        // aground starts the straightening the same frame it takes the way
+        // off. Port helm is a positive turn and an outward lean is to
+        // starboard, which about the forward axis is a negative roll — hence
+        // the sign. The transform holds heading-then-heel, and the helm above
+        // multiplies heading on from the left, so rolling on from the right
+        // reaches the heel factor alone and the guard keeps an idle boat's
+        // rotation unwritten.
+        let target_heel = -HEEL_AT_FULL_TURN * helm * boat.way / SPEED;
+        if boat.heel != target_heel {
+            let heel = boat.heel + (target_heel - boat.heel) * heel_t;
+            let heel = if (target_heel - heel).abs() < HEEL_SETTLED {
+                target_heel
+            } else {
+                heel
+            };
+            transform.rotation *= Quat::from_rotation_z(heel - boat.heel);
+            boat.heel = heel;
         }
     }
 }
@@ -692,6 +755,101 @@ mod tests {
 
         assert_eq!(after.translation, before.translation);
         assert_ne!(after.rotation, before.rotation, "the bow never swung");
+    }
+
+    /// The hull's heel, in radians, positive with the masthead to port — what
+    /// is left of the pose once the heading's yaw is taken back off it. Read
+    /// from the transform rather than the component, because the lean the
+    /// player sees is the one the transform holds.
+    fn heel_shown(app: &mut App) -> f32 {
+        let transform = boat(app);
+        let forward = transform.forward();
+        let yaw = f32::atan2(-forward.x, -forward.z);
+        let roll = Quat::from_rotation_y(yaw).inverse() * transform.rotation;
+        let (axis, angle) = roll.to_axis_angle();
+        angle * axis.z
+    }
+
+    #[test]
+    fn a_turn_at_speed_heels_the_hull_outwards() {
+        let mut app = test_app();
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+
+        // Port helm at full way: the whole of the heel, and to starboard —
+        // a keeled hull leans out of a corner, not into it like a bicycle.
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, SETTLED);
+        let heel = heel_shown(&mut app);
+        assert!(
+            (heel + HEEL_AT_FULL_TURN).abs() < HEEL_AT_FULL_TURN * 0.05,
+            "a full-speed port turn heels {heel} rad, not -{HEEL_AT_FULL_TURN}"
+        );
+
+        // The lean is the eye's alone: the bow still points along the
+        // surface, so nothing the movement is built on has tilted with it.
+        assert!(boat(&mut app).forward().y.abs() < 1e-6);
+
+        // Starboard is the mirror.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowLeft);
+        hold(&mut app, KeyCode::ArrowRight);
+        run_frames(&mut app, SETTLED);
+        let heel = heel_shown(&mut app);
+        assert!(
+            (heel - HEEL_AT_FULL_TURN).abs() < HEEL_AT_FULL_TURN * 0.05,
+            "a full-speed starboard turn heels {heel} rad, not {HEEL_AT_FULL_TURN}"
+        );
+    }
+
+    #[test]
+    fn the_heel_rolls_on_rather_than_snapping() {
+        // A few frames into a full-speed turn: leaning already, but nowhere
+        // near the whole heel — the roll is eased the way the way is.
+        let mut app = test_app();
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, 6);
+
+        let heel = heel_shown(&mut app).abs();
+        assert!(heel > 0.0, "the hull never began to lean");
+        assert!(
+            heel < HEEL_AT_FULL_TURN * 0.5,
+            "{heel} rad inside the first tenth of a second is a snap, not a roll"
+        );
+    }
+
+    #[test]
+    fn the_helm_alone_heels_nothing() {
+        // The lean is sharpness times speed, and a bow swung round at rest
+        // has no speed: the boat pivots bolt upright.
+        let mut app = test_app();
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, SETTLED);
+        assert_eq!(heel_shown(&mut app), 0.0);
+    }
+
+    #[test]
+    fn the_hull_comes_level_when_the_turn_ends() {
+        let mut app = test_app();
+        hold(&mut app, KeyCode::ArrowUp);
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, SETTLED);
+        assert_ne!(heel_shown(&mut app), 0.0, "the turn never heeled the hull");
+
+        // Helm amidships, way still on: the heel runs back down its own
+        // curve and *ends* — exactly level, not forever creeping towards it.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowLeft);
+        run_frames(&mut app, SETTLED);
+        let level = heel_shown(&mut app);
+        assert!(
+            level.abs() < 1e-6,
+            "the hull is still heeled {level} rad with the helm amidships"
+        );
     }
 
     #[test]
