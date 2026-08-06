@@ -20,9 +20,9 @@ use game::capture::CapturePlugin;
 use game::cli::{self, Args};
 use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
-use game::net::{Connection, NetPlugin, Online};
-use game::terrain::{Archipelago, TerrainPlugin};
-use game::{SKY, WINDOW};
+use game::net::{Hosting, NetPlugin, Online, Reach, Session};
+use game::terrain::TerrainPlugin;
+use game::{AppState, SKY, WINDOW};
 
 fn main() -> ExitCode {
     let mut args = match cli::parse(std::env::args().skip(1).collect()) {
@@ -36,38 +36,40 @@ fn main() -> ExitCode {
     // A run that named no seed is in a world picked off the clock, so say
     // which: without it a shot worth keeping, or a landscape worth walking
     // back into, could never be asked for a second time. A joined run is in
-    // the server's world and says nothing here — it has not been told which
-    // world that is yet.
+    // somebody else's world and has no seed of its own to name.
     if !args.seed_given && args.join.is_none() {
         println!("world {}", args.config.seed);
     }
 
-    // Joining happens before the app exists: what the handshake learns — the
-    // seed, and where the world is entered — is what the app is built from.
-    let online = match &args.join {
-        None => None,
-        Some(addr) => match Connection::join(addr) {
-            Ok(connection) => {
-                args.config.seed = connection.seed;
-                // The server says where its world puts this player down; the
-                // island that entry stands off follows from the seed, so the
-                // view can face it without being told.
-                let world = Archipelago::new(&args.config);
-                args.enter(&world, Some(connection.spawn));
-                Some(connection)
-            }
-            Err(message) => {
-                eprintln!("game: {message}");
-                return ExitCode::FAILURE;
-            }
-        },
+    // A run that starts in a world gets one before the app exists, because
+    // what the handshake learns — where this player stands, and what to look
+    // at — is what the view is built from. Either somebody else's world or one
+    // opened here; a run that starts on a menu screen has neither yet, and
+    // waits for a button.
+    let session = match (&args.join, args.state) {
+        (Some(addr), _) => Some(Session::joining(addr)),
+        // Alone, because a run that asked for a world on the command line
+        // asked for one to look at rather than one to be joined: sharing is
+        // the menu's switch, and a dedicated `server` is the other binary.
+        (None, AppState::InWorld) => Some(Session::open(args.config, Reach::Alone)),
+        (None, _) => None,
     };
+    let session = match session.transpose() {
+        Ok(session) => session,
+        Err(message) => {
+            eprintln!("game: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(session) = &session {
+        args.opened_on(session.connection.spawn, session.connection.facing);
+    }
 
-    run(args, online);
+    run(args, session);
     ExitCode::SUCCESS
 }
 
-fn run(args: Args, online: Option<Connection>) {
+fn run(args: Args, session: Option<Session>) {
     let mut app = App::new();
 
     app.add_plugins(DefaultPlugins.set(window_plugin(&args)));
@@ -91,8 +93,11 @@ fn run(args: Args, online: Option<Connection>) {
         app.add_plugins(AmbiencePlugin);
     }
 
-    if let Some(connection) = online {
-        app.insert_resource(Online::new(connection));
+    if let Some(session) = session {
+        if let Some(host) = session.hosting {
+            app.insert_resource(Hosting(host));
+        }
+        app.insert_resource(Online::new(session.connection));
     }
 
     app.insert_state(args.state)
@@ -104,7 +109,6 @@ fn run(args: Args, online: Option<Connection>) {
             brightness: 1_400.0,
             ..default()
         })
-        .insert_resource(args.config)
         .insert_resource(args.starting_view())
         .add_plugins((
             TerrainPlugin,

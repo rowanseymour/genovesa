@@ -10,9 +10,9 @@ use protocol::DEFAULT_PORT;
 
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
 use crate::camera::View;
-use crate::net::{Dialing, Hosting, Online};
-use crate::terrain::{random_seed, Archipelago, WorldConfig, MAX_SEED};
+use crate::net::{Dialing, Hosting, Online, Reach};
 use crate::AppState;
+use server::{random_seed, WorldConfig, MAX_SEED};
 
 /// Longest seed the user can type — read off [`MAX_SEED`], so the field can
 /// always hold a seed the game itself picked.
@@ -96,7 +96,7 @@ impl Plugin for MenuPlugin {
                     highlight_buttons,
                     settle_dialing.run_if(resource_exists::<Dialing>),
                     main_menu_actions.run_if(in_state(AppState::MainMenu)),
-                    (dialog_actions, share_world, refresh_dialog)
+                    (dialog_actions, open_world, refresh_dialog)
                         .run_if(in_state(AppState::NewWorld)),
                     // `type_seed` carries no run condition of its own, for
                     // the reason `join_keys` and `settings_keys` carry none.
@@ -488,15 +488,12 @@ fn share_label(share: bool) -> &'static str {
     }
 }
 
-/// The dialog's buttons, and starting a world of one's own. Starting a shared
-/// one is [`share_world`], which is a different enough thing to be a different
-/// system: a world nobody else can reach is entered here and now, and a shared
-/// one is not entered until a server has answered for it.
+/// The dialog's buttons that only touch the settings. Starting a world is
+/// [`open_world`], which has to wait for a server and so cannot be a button
+/// handler that decides anything on the spot.
 fn dialog_actions(
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
     mut settings: ResMut<NewWorldSettings>,
-    mut config: ResMut<WorldConfig>,
-    mut view: ResMut<View>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     for (interaction, button) in &buttons {
@@ -507,50 +504,45 @@ fn dialog_actions(
             MenuButton::RandomSeed => settings.seed = random_seed().to_string(),
             MenuButton::ToggleShare => settings.share = !settings.share,
             MenuButton::Back => next.set(AppState::MainMenu),
-            MenuButton::Start if settings.share => {}
-            MenuButton::Start => {
-                *config = WorldConfig {
-                    seed: settings.seed_value(),
-                };
-                // Every world is entered on its own spawn, so the view is
-                // brought there rather than trusted: it carries over from
-                // wherever it last was, which on a new world chosen from
-                // within a match is a point in a world that no longer exists.
-                view.enter(&Archipelago::new(&config), None);
-                next.set(AppState::InWorld);
-            }
             _ => {}
         }
     }
 }
 
-/// Starting a world with the sharing switch on, which means hosting it.
+/// Starting a world, kept or shared.
 ///
-/// The way in is then the way into anybody else's: dial it and wait.
-/// [`settle_dialing`] takes the seed and the spawn point from the welcome,
-/// exactly as a run started with `--join` does, so nothing about the world is
-/// settled here — not even the seed this very machine is about to serve.
-fn share_world(
+/// One system for both, because there is only one thing to do. The ground
+/// comes from a server, so a world of one's own is a server too — see
+/// [`Reach`], which is the whole of what the sharing switch decides. The way
+/// in is then the way into anybody else's: dial it and wait, and
+/// [`settle_dialing`] takes the spawn from the welcome exactly as a run
+/// started with `--join` does. Nothing about the world is settled here, not
+/// even by the machine that is about to serve it.
+fn open_world(
     mut commands: Commands,
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
     dialing: Option<Res<Dialing>>,
     settings: Res<NewWorldSettings>,
     mut status: ResMut<Status>,
 ) {
-    // A server already being started. Asking for a second would only fail on
+    // A world already being opened. Asking for a second would only fail on
     // the port the first one is holding.
-    if !settings.share || dialing.is_some() {
+    if dialing.is_some() {
         return;
     }
 
     for (interaction, button) in &buttons {
         if *interaction == Interaction::Pressed && *button == MenuButton::Start {
             status.0 = "opening the world...".to_string();
-            commands.insert_resource(Dialing::hosting(
+            commands.insert_resource(Dialing::opening(
                 WorldConfig {
                     seed: settings.seed_value(),
                 },
-                DEFAULT_PORT,
+                if settings.share {
+                    Reach::Shared
+                } else {
+                    Reach::Alone
+                },
             ));
             return;
         }
@@ -777,15 +769,14 @@ fn refresh_join(settings: Res<JoinSettings>, mut address: Query<&mut Text, With<
 
 /// Watches the dial the screen started, and enters the world when it lands.
 ///
-/// This is the whole of what hosting and joining have in common, which is
-/// nearly all of it: by the time a welcome has arrived, a world of one's own
-/// and somebody else's are the same thing — a seed to generate and a point to
-/// stand at, both of them the server's to say.
+/// This is the whole of what opening and joining have in common, which is all
+/// of it: by the time a welcome has arrived, a world of one's own and somebody
+/// else's are the same thing — a point to stand at and something to look at,
+/// both of them the server's to say.
 fn settle_dialing(
     mut commands: Commands,
     dialing: Res<Dialing>,
     mut status: ResMut<Status>,
-    mut config: ResMut<WorldConfig>,
     mut view: ResMut<View>,
     mut next: ResMut<NextState<AppState>>,
 ) {
@@ -806,12 +797,11 @@ fn settle_dialing(
         Ok(session) => session,
     };
 
-    *config = WorldConfig {
-        seed: session.connection.seed,
-    };
-    // On the spawn the server named, facing the island the local layout says
-    // it stands off.
-    view.enter(&Archipelago::new(&config), Some(session.connection.spawn));
+    // On the spawn the server named, facing what it said to face. The view is
+    // brought there rather than trusted: it carries over from wherever it last
+    // was, which for a world chosen from within a match is a point in a world
+    // that no longer exists.
+    view.enter(session.connection.spawn, session.connection.facing);
 
     if let Some(host) = session.hosting {
         commands.insert_resource(Hosting(host));
@@ -1205,9 +1195,8 @@ mod tests {
         app.add_plugins((StatesPlugin, MenuPlugin))
             .insert_state(state)
             .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<WorldConfig>()
-            // Normally the camera plugin's, but the new-world dialog moves the
-            // focus onto land when a world starts — see `dialog_actions`.
+            // Normally the camera plugin's, but entering a world moves the
+            // view onto the served spawn — see `settle_dialing`.
             .init_resource::<View>()
             .add_message::<AppExit>()
             .add_message::<KeyboardInput>();
@@ -1311,70 +1300,34 @@ mod tests {
     }
 
     #[test]
-    fn start_applies_the_chosen_seed() {
-        let mut app = test_app(AppState::NewWorld);
-
-        app.world_mut().resource_mut::<NewWorldSettings>().seed = "77".to_string();
-        click(&mut app, MenuButton::Start);
-
-        let config = app.world().resource::<WorldConfig>();
-        assert_eq!(config.seed, 77);
-        assert_eq!(state(&app), AppState::InWorld);
-    }
-
-    #[test]
     fn start_launches_the_boat_where_the_view_opens() {
-        // The path a player actually takes into a world, as against the command
-        // line's: the dialog moves the view onto land *and then* enters, so the
-        // boat has to be put down at where the view ended up rather than at
-        // wherever it was pointing when the dialog opened. Out by that much and
-        // the boat is a kilometre of ocean away from the only place anyone
-        // looks for it.
-        let mut app = test_app(AppState::NewWorld);
+        // The path a player actually takes into a world: the welcome moves the
+        // view onto the served spawn *and then* enters, so the boat has to be
+        // put down where the view ended up rather than wherever it was
+        // pointing when the menu was on screen. Out by that much and the boat
+        // is a kilometre of ocean away from the only place anyone looks.
+        let (address, _socket) = fake_server(Vec2::new(100.0, -200.0), Vec2::new(100.0, -400.0));
+        let mut app = test_app(AppState::JoinWorld);
         // Time for the steering the boat plugin brings with it; the menu's own
         // systems never ask what o'clock it is.
         app.add_plugins((bevy::time::TimePlugin, crate::boat::BoatPlugin))
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>();
 
-        app.world_mut().resource_mut::<NewWorldSettings>().seed = "77".to_string();
-        click(&mut app, MenuButton::Start);
+        app.world_mut().resource_mut::<JoinSettings>().address = address;
+        click(&mut app, MenuButton::Connect);
+        run_until(&mut app, "the world is entered", |app| {
+            *app.world().resource::<State<AppState>>().get() == AppState::InWorld
+        });
 
         let focus = app.world().resource::<View>().focus;
         let at = app
             .world_mut()
             .query_filtered::<&Transform, With<crate::boat::Boat>>()
             .single(app.world())
-            .expect("starting a world should launch a boat")
+            .expect("entering a world should launch a boat")
             .translation;
         assert_eq!(Vec2::new(at.x, at.z), Vec2::new(focus.x, focus.z));
-    }
-
-    #[test]
-    fn start_puts_the_view_on_the_spawn() {
-        // Every world is entered on its own spawn, so starting from the
-        // dialog must bring the view there — the menu's own sea may have
-        // drifted it anywhere, and a match must not open wherever the menu
-        // was looking. Facing the island, too: the view opens with the
-        // first land dead ahead, not wherever the menu left the bearing.
-        let mut app = test_app(AppState::NewWorld);
-
-        app.world_mut().resource_mut::<View>().focus = Vec3::new(4_000.0, 0.0, -2_500.0);
-        app.world_mut().resource_mut::<NewWorldSettings>().seed = "77".to_string();
-        click(&mut app, MenuButton::Start);
-
-        let spawn = Archipelago::new(&WorldConfig { seed: 77 })
-            .spawn()
-            .expect("seed 77 should offer somewhere to enter");
-        let view = *app.world().resource::<View>();
-        assert_eq!(view.focus, Vec3::new(spawn.point.x, 0.0, spawn.point.y));
-
-        let ahead = Vec2::new(-view.yaw.sin(), -view.yaw.cos());
-        let towards = (spawn.island.centre() - spawn.point).normalize();
-        assert!(
-            ahead.dot(towards) > 0.999,
-            "the match opens looking {ahead}, not at the island {towards}"
-        );
     }
 
     #[test]
@@ -1396,23 +1349,30 @@ mod tests {
     }
 
     #[test]
-    fn an_unshared_world_needs_no_server_at_all() {
-        // The point of the switch: a world of one's own is entered outright,
-        // with nothing dialled and nothing listening.
+    fn even_a_world_of_ones_own_is_served() {
+        // The ground comes from a server, so there is no such thing here as a
+        // world without one — the sharing switch decides who can reach it and
+        // nothing else. Keeping a world therefore starts a server and waits
+        // for it, exactly as sharing one does.
         let mut app = test_app(AppState::NewWorld);
-        click(&mut app, MenuButton::Start);
+        assert!(
+            !app.world().resource::<NewWorldSettings>().share,
+            "this test is about the switch being off"
+        );
+        click_once(&mut app, MenuButton::Start);
 
-        assert_eq!(state(&app), AppState::InWorld);
-        assert!(!app.world().contains_resource::<Dialing>());
-        assert!(!app.world().contains_resource::<Online>());
+        assert_eq!(state(&app), AppState::NewWorld, "entered without a world");
+        assert!(
+            app.world().contains_resource::<Dialing>(),
+            "keeping a world started no server"
+        );
     }
 
     #[test]
     fn a_shared_world_waits_on_the_server_it_starts() {
-        // Started, not entered: a shared world is a served one, so the player
-        // stays on the dialog until the welcome comes back — which is where
-        // `settle_dialing` takes over, tested below against a server this test
-        // file can name.
+        // Started, not entered: the player stays on the dialog until the
+        // welcome comes back — which is where `settle_dialing` takes over,
+        // tested below against a server this test file can name.
         //
         // Looked at after a single frame, before anything can have come of the
         // dial. What the well-known port does when it is asked for is not this
@@ -1427,17 +1387,16 @@ mod tests {
             app.world().contains_resource::<Dialing>(),
             "sharing a world started no server"
         );
-        // And the world is left entirely to the welcome, seed included.
-        assert_eq!(
-            app.world().resource::<WorldConfig>().seed,
-            WorldConfig::default().seed
-        );
     }
 
     #[test]
     fn a_dial_that_lands_enters_the_served_world() {
-        let (address, _socket) = fake_server(77, Vec2::new(100.0, -200.0));
+        let (address, _socket) = fake_server(Vec2::new(100.0, -200.0), Vec2::new(100.0, -400.0));
         let mut app = test_app(AppState::JoinWorld);
+        // Somewhere the menu's own drifting sea might have left the view. A
+        // match must open where the server said, not where the menu was
+        // looking.
+        app.world_mut().resource_mut::<View>().focus = Vec3::new(4_000.0, 0.0, -2_500.0);
         app.world_mut().resource_mut::<JoinSettings>().address = address;
         click(&mut app, MenuButton::Connect);
 
@@ -1445,12 +1404,15 @@ mod tests {
             *app.world().resource::<State<AppState>>().get() == AppState::InWorld
         });
 
-        // The world is the server's, whole: its seed, and its idea of where we
-        // are standing in it.
-        assert_eq!(app.world().resource::<WorldConfig>().seed, 77);
-        assert_eq!(
-            app.world().resource::<View>().focus,
-            Vec3::new(100.0, 0.0, -200.0)
+        // Where we are standing in the world is the server's to say, and so is
+        // which way to look: the view opens with the first land dead ahead
+        // rather than wherever the bearing happened to be.
+        let view = *app.world().resource::<View>();
+        assert_eq!(view.focus, Vec3::new(100.0, 0.0, -200.0));
+        let ahead = Vec2::new(-view.yaw.sin(), -view.yaw.cos());
+        assert!(
+            ahead.dot(Vec2::new(0.0, -1.0)) > 0.999,
+            "the match opens looking {ahead}, not at the land it was pointed at"
         );
         assert!(app.world().contains_resource::<Online>());
         assert!(

@@ -2,12 +2,16 @@
 //! renderer that judges it from above.
 //!
 //! Everything here is deterministic — a seed is a map, whoever generates it,
-//! on whatever machine — and free of Bevy, so it can be built for a headless
-//! server or for wasm without a renderer coming along. The game's own crate
-//! holds everything that draws: meshes, materials, cameras and menus.
+//! on whatever machine — and free of Bevy, because it is a *server's* crate.
+//! In a session exactly one process runs this, and hands out what it makes a
+//! chunk at a time; the clients drawing that never see any of it. Determinism
+//! still matters for the same reason it always did, one step further out: a
+//! seed handed to another machine to host has to raise the same islands.
+//!
+//! The game's own crate holds everything that draws — meshes, materials,
+//! cameras and menus — and depends on none of this.
 
 pub mod archipelago;
-pub mod args;
 pub mod noise;
 pub mod plan;
 pub mod terrain;

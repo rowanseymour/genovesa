@@ -8,9 +8,11 @@
 //! option that rejects `98` on one binary and quietly takes it on the other
 //! is worse than either behaviour on its own.
 //!
-//! It lives in this crate rather than in the game's because `mapgen` ships
-//! here, and the game's command line already depends on this crate rather
-//! than the other way about.
+//! It is a crate of its own because the two binaries have nothing else in
+//! common: `mapgen` ships with the world and must build without an engine,
+//! the game ships with one and knows nothing about how the world is made. A
+//! shared crate with one job is cheaper than either of them depending on the
+//! other for a string parser.
 
 /// Reads a two-part option as both halves parsed the same way, or one error
 /// naming what it should have looked like. The separator is required.

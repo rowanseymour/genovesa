@@ -1,0 +1,12 @@
+# Reading the two-part command-line options both binaries in this workspace
+# take. Nothing else — no world, no wire, no engine — so both can have it
+# without either dragging the other in.
+[package]
+name = "args"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+# Reached only by path, as the other crates here are.
+publish = false
+
+[dependencies]

@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
-use crate::terrain::WorldTerrain;
+use crate::terrain::Ground;
 use crate::{eased, matte, AppState};
 
 /// Length overall, in metres. A small sailing boat: at the default zoom the
@@ -156,16 +156,16 @@ fn launch(
     info!("boat launched at {}, {}", view.focus.x, view.focus.z);
 }
 
-/// Keeps the boat on the surface it is over — [`WorldTerrain::surface`], the
-/// same rule the other players' markers ride.
+/// Keeps the boat on the surface it is over — [`Ground::surface`], the same
+/// rule the other players' markers ride.
 ///
 /// The waterline is the hull's origin, so a boat that has run aground is
 /// half-buried in the hillside; that is what aground looks like, and steering
 /// is what will keep it off.
-fn float(terrain: Option<Res<WorldTerrain>>, mut boats: Query<&mut Transform, With<Boat>>) {
+fn float(ground: Option<Res<Ground>>, mut boats: Query<&mut Transform, With<Boat>>) {
     for mut transform in &mut boats {
         let at = transform.translation;
-        let Some(surface) = terrain.as_ref().and_then(|t| t.surface(at.x, at.z)) else {
+        let Some(surface) = ground.as_ref().and_then(|g| g.surface(at.x, at.z)) else {
             continue;
         };
         transform.translation.y = surface;
@@ -319,7 +319,7 @@ mod tests {
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
     use super::*;
-    use crate::testing::{elapsed, hold, rebind, run_frames, test_world};
+    use crate::testing::{elapsed, hold, rebind, run_frames, test_ground, TEST_ISLAND_REACH};
 
     /// How long every test frame lasts. Headless frames take next to no real
     /// time, which the old instant throttle never noticed — but the eased one
@@ -646,11 +646,8 @@ mod tests {
 
     #[test]
     fn the_boat_rides_the_surface_it_is_over() {
-        use crate::terrain::CHUNK_METRES;
-
-        let (world, spec) = test_world();
         let mut app = test_app();
-        app.insert_resource(WorldTerrain(world.clone()));
+        app.insert_resource(test_ground());
 
         /// Where the boat comes to rest when it is put down at a spot.
         fn put_down(app: &mut App, spot: Vec2) -> f32 {
@@ -665,19 +662,22 @@ mod tests {
             boat(app).translation.y
         }
 
+        /// What the ground the boat is riding says about a spot.
+        fn ground(app: &App, spot: Vec2) -> f32 {
+            app.world()
+                .resource::<Ground>()
+                .height(spot.x, spot.y)
+                .expect("the test ground has arrived")
+        }
+
         // Dry land: the highest ground on the island, where the answer is
         // furthest from the waterline.
-        let centre = spec.centre();
-        let mut peak = (centre, 0.0);
-        let half = spec.extent() * 0.5;
+        let mut peak = (Vec2::ZERO, f32::MIN);
         for iz in 0..24 {
             for ix in 0..24 {
-                let spot = centre
-                    + Vec2::new(
-                        (ix as f32 / 23.0 * 2.0 - 1.0) * half.x,
-                        (iz as f32 / 23.0 * 2.0 - 1.0) * half.y,
-                    );
-                let height = world.height(spot.x, spot.y);
+                let spot = Vec2::new(ix as f32 / 23.0 * 2.0 - 1.0, iz as f32 / 23.0 * 2.0 - 1.0)
+                    * TEST_ISLAND_REACH;
+                let height = ground(&app, spot);
                 if height > peak.1 {
                     peak = (spot, height);
                 }
@@ -690,11 +690,11 @@ mod tests {
             "the boat is not sitting on the ground it is over"
         );
 
-        // And the skirt, which is open water: the waterline exactly, however
-        // deep the seabed under it.
-        let offshore = centre + Vec2::new(half.x + CHUNK_METRES * 0.5, 0.0);
+        // And open water past the coast: the waterline exactly, however deep
+        // the seabed under it.
+        let offshore = Vec2::new(TEST_ISLAND_REACH * 1.5, 0.0);
         assert!(
-            world.height(offshore.x, offshore.y) < 0.0,
+            ground(&app, offshore) < 0.0,
             "the point picked to be open water is dry land"
         );
         assert_eq!(

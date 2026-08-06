@@ -8,17 +8,20 @@ license = "GPL-3.0-only"
 default-run = "game"
 
 [dependencies]
-# The world itself — terrain and the plan renderer — engine-free in its own
-# crate; its `bevy` feature is only the derives that let the game hold its types
-# as ECS resources.
-world = { path = "../world", features = ["bevy"] }
-# The words of a served session — shared with the server crate, so the two
-# sides of the wire cannot drift.
+# The words of a served session, and with them everything the game knows about
+# the ground: a chunk arrives as heights and palette entries, and this is what
+# says how to read them. There is deliberately no dependency on `world` — the
+# game generates nothing, and could be rewritten in another language against
+# this crate's documentation alone.
 protocol = { path = "../protocol" }
 # A world the game hosts for itself. The server is engine-free and headless, so
-# a game that starts one runs the very same session a dedicated `server` does —
-# there is no second, lesser implementation for playing alone.
+# a game that opens a world runs the very same session a dedicated `server`
+# does — there is no second, lesser implementation for playing alone. It is
+# also the only way `world` reaches this build, which is the point: the world
+# is behind the server, not beside the client.
 server = { path = "../server" }
+# The two-part options the command line takes, shared with `mapgen`.
+args = { path = "../args" }
 # `system_font_discovery` puts the machine's own fonts in reach of a
 # `FontSource::Family` or a generic one like `FontSource::Serif`, which is what
 # the menu's title is set in. Without it Bevy has only the face compiled into

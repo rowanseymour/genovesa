@@ -7,7 +7,7 @@ use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
-use crate::terrain::{Archipelago, WorldTerrain};
+use crate::terrain::Ground;
 use crate::{eased, AppState};
 
 /// Downward tilt of the camera, from horizontal.
@@ -79,23 +79,16 @@ impl View {
     /// turned to face the island the entry stands off — so a match opens
     /// with its first land dead ahead of a bow already pointing at it.
     ///
-    /// `point` is where this player is actually put down, which in a served
-    /// world is the server's call — the world's own spawn, scattered a few
-    /// boat-lengths, and not for a client to recompute. `None` takes the
-    /// world's spawn itself, which is what a world of one's own enters on.
-    /// The *facing* always asks the local layout, that being the same layout
-    /// on every machine.
-    ///
-    /// A world whose layout offers nowhere to enter — broken rather than
-    /// empty, see [`Archipelago::spawn`] — leaves the bearing alone and falls
-    /// back to the origin, which every world keeps clear.
-    pub fn enter(&mut self, world: &Archipelago, point: Option<Vec2>) {
-        let spawn = world.spawn();
-        let at = point.or(spawn.map(|s| s.point)).unwrap_or(Vec2::ZERO);
-        self.focus = Vec3::new(at.x, 0.0, at.y);
-        if let Some(spawn) = spawn {
-            self.face(spawn.island.centre());
-        }
+    /// Both are the server's to say, and neither is a client's to recompute:
+    /// `spawn` is where this player was put down — the world's own entry
+    /// point, scattered a few boat-lengths — and `facing` is a ground point to
+    /// turn towards, which is how a client with no layout to consult knows
+    /// which way the land is. A server with nothing in particular to look at
+    /// sends a `facing` equal to the spawn, which names no direction and
+    /// leaves the bearing where it was.
+    pub fn enter(&mut self, spawn: Vec2, facing: Vec2) {
+        self.focus = Vec3::new(spawn.x, 0.0, spawn.y);
+        self.face(facing);
     }
 
     /// Turns the view to look from its focus towards a ground point. The
@@ -245,7 +238,7 @@ fn eye(camera: &MapCamera) -> Vec3 {
 /// it is over, so following its whole translation is also what raises the
 /// camera onto a hillside and keeps it at the waterline over open sea.
 fn follow_player(
-    terrain: Option<Res<WorldTerrain>>,
+    ground: Option<Res<Ground>>,
     boats: Query<&Transform, With<Boat>>,
     mut cameras: Query<&mut MapCamera>,
 ) {
@@ -263,12 +256,12 @@ fn follow_player(
         }
         // Put down outright the first time the ground under the player can be
         // answered, rather than easing there from sea level. Asked of the
-        // terrain rather than read off the boat because the boat's own height
-        // is a leftover until that same ground arrives — the same surface,
+        // ground rather than read off the boat because the boat's own height
+        // is a leftover until that same chunk arrives — the same surface,
         // one frame earlier.
-        let Some(surface) = terrain
+        let Some(surface) = ground
             .as_ref()
-            .and_then(|t| t.surface(boat.translation.x, boat.translation.z))
+            .and_then(|g| g.surface(boat.translation.x, boat.translation.z))
         else {
             continue;
         };
@@ -327,7 +320,7 @@ fn rotate(
 
 fn apply_transform(
     time: Res<Time>,
-    terrain: Option<Res<WorldTerrain>>,
+    ground: Option<Res<Ground>>,
     mut cameras: Query<(&mut MapCamera, &mut Transform)>,
 ) {
     let t = eased(SMOOTHING, time.delta_secs());
@@ -343,12 +336,9 @@ fn apply_transform(
         // slope, the eye sits well downhill of what it's looking at and can end
         // up inside the hillside behind it. Lifting it straight up steepens the
         // angle a little, which is a far better failure than being underground.
-        // Ground still generating reads as absent, like the focus's own — see
-        // `follow_player`.
-        if let Some(floor) = terrain
-            .as_ref()
-            .and_then(|t| t.0.ready_height(eye.x, eye.z))
-        {
+        // Ground that has not arrived reads as absent, like the focus's own
+        // — see `follow_player`.
+        if let Some(floor) = ground.as_ref().and_then(|g| g.height(eye.x, eye.z)) {
             eye.y = eye.y.max(floor + MIN_CLEARANCE);
         }
 
@@ -360,7 +350,7 @@ fn apply_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{elapsed, hold, rebind, run_frames, test_world};
+    use crate::testing::{elapsed, hold, rebind, run_frames, test_ground, TEST_ISLAND_REACH};
     use bevy::state::app::StatesPlugin;
     use bevy::time::TimePlugin;
 
@@ -381,17 +371,23 @@ mod tests {
         app
     }
 
-    /// The same app with real ground under it, and the middle of the island
-    /// that ground belongs to — somewhere to point the camera.
-    fn test_app_on_terrain() -> (App, std::sync::Arc<Archipelago>, Vec3) {
-        let (world, spec) = test_world();
-        let centre = spec.centre();
-
+    /// The same app with ground already delivered under it. The island is at
+    /// the origin and reaches [`TEST_ISLAND_REACH`], so that is where the
+    /// camera gets pointed.
+    fn test_app_on_terrain() -> App {
         let mut app = test_app();
-        app.insert_resource(WorldTerrain(world.clone()));
+        app.insert_resource(test_ground());
         spawn_boat(&mut app, Vec3::ZERO);
         app.update();
-        (app, world, Vec3::new(centre.x, 0.0, centre.y))
+        app
+    }
+
+    /// What the ground the camera is riding says about a spot.
+    fn ground(app: &App, x: f32, z: f32) -> f32 {
+        app.world()
+            .resource::<Ground>()
+            .height(x, z)
+            .expect("the test ground has arrived")
     }
 
     /// Drops a bare boat entity into the world — enough for the camera to
@@ -537,17 +533,17 @@ mod tests {
 
     #[test]
     fn the_focus_snaps_onto_the_ground_the_player_is_dropped_on() {
-        let (mut app, world, centre) = test_app_on_terrain();
+        let mut app = test_app_on_terrain();
 
-        // Dropped onto the island, the first frame that can see the terrain
+        // Dropped onto the island, the first frame that can see the ground
         // puts the camera down on it rather than easing from sea level. The
         // boat placed by `place_player` still carries a stale height, which is
         // exactly the situation at the start of a match — the snap has to ask
         // the ground, not the boat.
-        place_player(&mut app, centre, DEFAULT_DISTANCE, YAW);
+        place_player(&mut app, Vec3::ZERO, DEFAULT_DISTANCE, YAW);
         let start = read(&mut app, |c| c.focus);
         assert!(
-            (start.y - world.height(start.x, start.z)).abs() < 1e-3,
+            (start.y - ground(&app, start.x, start.z)).abs() < 1e-3,
             "camera started at {} rather than on the ground",
             start.y
         );
@@ -560,11 +556,8 @@ mod tests {
         // no ground. The closest zoom is the dangerous one — that's where the
         // eye sits lowest — and a handful of yaws puts it on a different side
         // of whatever it's looking at.
-        let (mut app, world, centre) = test_app_on_terrain();
-        let spec = world
-            .island_at(centre.x, centre.z)
-            .expect("the camera is on an island");
-        let half = spec.extent() * 0.5 - 32.0;
+        let mut app = test_app_on_terrain();
+        let half = Vec2::splat(TEST_ISLAND_REACH - 32.0);
         let mut clamped = 0;
 
         // Yaws that aren't the four diagonals islands are laid out on, since
@@ -572,12 +565,11 @@ mod tests {
         for turn in 0..5 {
             for iz in 0..12 {
                 for ix in 0..12 {
-                    let spot = centre
-                        + Vec3::new(
-                            (ix as f32 / 11.0 * 2.0 - 1.0) * half.x,
-                            0.0,
-                            (iz as f32 / 11.0 * 2.0 - 1.0) * half.y,
-                        );
+                    let spot = Vec3::new(
+                        (ix as f32 / 11.0 * 2.0 - 1.0) * half.x,
+                        0.0,
+                        (iz as f32 / 11.0 * 2.0 - 1.0) * half.y,
+                    );
                     place_player(
                         &mut app,
                         spot,
@@ -592,7 +584,7 @@ mod tests {
                         .expect("camera should exist")
                         .translation;
 
-                    let clearance = eye.y - world.height(eye.x, eye.z);
+                    let clearance = eye.y - ground(&app, eye.x, eye.z);
                     assert!(
                         clearance >= MIN_CLEARANCE - 1e-3,
                         "eye was {clearance} m above the ground at {eye:?}"

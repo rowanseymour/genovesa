@@ -1,12 +1,24 @@
 //! The wire between a server and its clients.
 //!
-//! The world itself never crosses it. A seed is a world — the `world` crate
-//! generates the same ocean, bit for bit, on every machine — so a server has
-//! nothing to say about terrain beyond the seed, and what remains is the
-//! small talk of a session: who is in the world, and where they are. Both
-//! sides of the conversation are defined here, engine-free, so the headless
-//! server and any client — the Bevy game today, another renderer some day —
-//! speak from one definition.
+//! The world crosses it. A server generates the ocean and hands it out a
+//! chunk at a time; a client asks for chunks by coordinate and draws what
+//! comes back, and it is told nothing else — not the seed, not the layout,
+//! not which chunks are worth asking for. An answer is either open water,
+//! which carries no data because the sea and its floor are two flat planes
+//! anyone can draw, or ground, which arrives as a [`ground::ChunkPayload`]:
+//! corner heights on a fixed grid and one palette entry per triangle.
+//!
+//! That is a deliberate inversion of how this started. A seed used to be a
+//! world — every machine regenerated the same ocean, bit for bit, and terrain
+//! never travelled — which made the client the second half of the generator
+//! and made porting it to another language a promise to reproduce every noise
+//! octave and every rounding. Sending the ground instead costs bandwidth and
+//! buys a client that can be written by anyone who can read this file.
+//!
+//! Determinism did not stop mattering, it moved: a seed must still mean the
+//! same world wherever it is *hosted*, or re-hosting one would land everybody
+//! somewhere else. That promise now lives entirely in the `world` crate and
+//! its digests, on one machine at a time.
 //!
 //! Like the world's layout, the wire is a *format*: the bytes each message
 //! encodes to are pinned by tests, because a server must understand clients
@@ -14,24 +26,38 @@
 //! [`PROTOCOL_VERSION`], which is the first thing a client says and the one
 //! thing a server may refuse.
 
+pub mod ground;
+
 use std::io::{self, Read, Write};
 
-use glam::Vec2;
+use glam::{IVec2, Vec2};
+
+pub use ground::{ChunkPayload, Shade, Surface, Tone};
 
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// The port a server listens on, and a client joins on, unless told
 /// otherwise. Nothing else claims it, and it is easily remembered as the
 /// powers of two run together.
 pub const DEFAULT_PORT: u16 = 24816;
 
-/// The longest frame either side will accept. Every message today fits in a
-/// couple of dozen bytes; the ceiling exists so that a corrupt length prefix
-/// reads as corruption instead of as a request to buffer megabytes.
-const MAX_FRAME: u16 = 64;
+/// The longest frame a server will accept from a client. Everything a client
+/// says is a couple of dozen bytes — where it is, or which chunk it wants —
+/// and the ceiling exists so that a corrupt length prefix reads as corruption
+/// instead of as a request to buffer megabytes.
+const MAX_CLIENT_FRAME: u16 = 64;
+
+/// The longest frame a client will accept from a server, which is exactly one
+/// chunk of ground and not a byte more: its tag, its coordinates, the flag
+/// that says ground rather than water, and the payload.
+///
+/// Derived rather than picked, so that a message which outgrew it fails to
+/// send here instead of arriving as garbage — and so that "how much can one
+/// answer cost" has one answer, written down.
+const MAX_SERVER_FRAME: u16 = (1 + 8 + 1 + ground::PAYLOAD_BYTES) as u16;
 
 /// A player, as the server counts them: dealt out in joining order, never
 /// reused within a session, meaningless across sessions.
@@ -47,25 +73,40 @@ impl std::fmt::Display for PlayerId {
 /// What a client may say.
 ///
 /// Positions are metres on the world's ground plane, as everywhere else in
-/// the workspace. Height is never sent: the ground is deterministic, so every
-/// machine puts a player down on it locally.
+/// the workspace. Height is never sent: a player stands on the ground the
+/// server sent them, so the server can put them back on it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ToServer {
     /// The first message on any connection, and never sent again.
     Hello { version: u16 },
     /// Where the player now is.
     Move { position: Vec2 },
+    /// Ground, please — one chunk of it, named by its coordinate on the world
+    /// grid of [`ground::CHUNK_METRES`] squares.
+    ///
+    /// A client asks for every chunk near its camera without knowing, or
+    /// being able to know, which of them hold land. Answers come back as
+    /// [`ToClient::Chunk`] and may arrive in any order: an island takes real
+    /// time to generate and open water takes none, so a request for water
+    /// posted after one for land will often be answered first.
+    WantChunk { chunk: IVec2 },
 }
 
 /// What a server may say.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ToClient {
-    /// The session, granted: which world this is, who the client is in it,
-    /// and where the world is entered.
+    /// The session, granted: who the client is, where the world is entered,
+    /// and which way to look when it opens.
+    ///
+    /// The seed is not here, and that is the point — a client has no use for
+    /// one, having nothing to generate. `facing` is a ground point the view
+    /// opens towards, so that a player arrives looking at the island they
+    /// were put down beside rather than out to sea; a server with nothing in
+    /// particular to look at sends the spawn itself, which names no direction.
     Welcome {
         id: PlayerId,
-        seed: u32,
         spawn: Vec2,
+        facing: Vec2,
     },
     /// The version the server speaks, sent instead of a welcome when the
     /// client's is not it. The connection closes after.
@@ -86,6 +127,17 @@ pub enum ToClient {
     Left {
         id: PlayerId,
     },
+    /// The ground a client asked for, or the absence of it: `None` is open
+    /// water, which needs no data — the sea and the ocean floor are flat
+    /// planes, and a client draws them whether or not anything is on top.
+    ///
+    /// Most answers are `None`. An island is laid out as a rectangle with a
+    /// skirt of open water round it, and between islands there is nothing at
+    /// all, so a camera's neighbourhood is mostly sea.
+    Chunk {
+        chunk: IVec2,
+        ground: Option<ChunkPayload>,
+    },
 }
 
 impl ToServer {
@@ -101,13 +153,17 @@ impl ToServer {
                 payload.push(1);
                 put_vec2(&mut payload, *position);
             }
+            Self::WantChunk { chunk } => {
+                payload.push(2);
+                put_ivec2(&mut payload, *chunk);
+            }
         }
-        write_frame(to, &payload)
+        write_frame(to, &payload, MAX_CLIENT_FRAME)
     }
 
     /// Reads the next message, blocking until a whole frame has arrived.
     pub fn read(from: &mut impl Read) -> io::Result<Self> {
-        let frame = read_frame(from)?;
+        let frame = read_frame(from, MAX_CLIENT_FRAME)?;
         let mut payload = Payload::over(&frame);
         let message = match payload.u8()? {
             0 => Self::Hello {
@@ -115,6 +171,9 @@ impl ToServer {
             },
             1 => Self::Move {
                 position: payload.vec2()?,
+            },
+            2 => Self::WantChunk {
+                chunk: payload.ivec2()?,
             },
             tag => return Err(corrupt(format!("unknown client message tag {tag}"))),
         };
@@ -128,11 +187,11 @@ impl ToClient {
     pub fn write(&self, to: &mut impl Write) -> io::Result<()> {
         let mut payload = Vec::new();
         match self {
-            Self::Welcome { id, seed, spawn } => {
+            Self::Welcome { id, spawn, facing } => {
                 payload.push(0);
                 put_u32(&mut payload, id.0);
-                put_u32(&mut payload, *seed);
                 put_vec2(&mut payload, *spawn);
+                put_vec2(&mut payload, *facing);
             }
             Self::Refused { version } => {
                 payload.push(1);
@@ -152,19 +211,33 @@ impl ToClient {
                 payload.push(4);
                 put_u32(&mut payload, id.0);
             }
+            Self::Chunk { chunk, ground } => {
+                payload.push(5);
+                put_ivec2(&mut payload, *chunk);
+                match ground {
+                    // A flag byte rather than two tags, so that "is there
+                    // ground here" is one thing a reader tests and the
+                    // coordinates are in the same place either way.
+                    None => payload.push(0),
+                    Some(payload_bytes) => {
+                        payload.push(1);
+                        payload_bytes.put(&mut payload);
+                    }
+                }
+            }
         }
-        write_frame(to, &payload)
+        write_frame(to, &payload, MAX_SERVER_FRAME)
     }
 
     /// Reads the next message, blocking until a whole frame has arrived.
     pub fn read(from: &mut impl Read) -> io::Result<Self> {
-        let frame = read_frame(from)?;
+        let frame = read_frame(from, MAX_SERVER_FRAME)?;
         let mut payload = Payload::over(&frame);
         let message = match payload.u8()? {
             0 => Self::Welcome {
                 id: PlayerId(payload.u32()?),
-                seed: payload.u32()?,
                 spawn: payload.vec2()?,
+                facing: payload.vec2()?,
             },
             1 => Self::Refused {
                 version: payload.u16()?,
@@ -180,6 +253,15 @@ impl ToClient {
             4 => Self::Left {
                 id: PlayerId(payload.u32()?),
             },
+            5 => {
+                let chunk = payload.ivec2()?;
+                let ground = match payload.u8()? {
+                    0 => None,
+                    1 => Some(payload.chunk_payload()?),
+                    flag => return Err(corrupt(format!("chunk {chunk} flagged {flag}"))),
+                };
+                Self::Chunk { chunk, ground }
+            }
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
         payload.finish()?;
@@ -196,16 +278,16 @@ impl ToClient {
 
 /// Frames a payload and writes it in one call, so a frame reaches the socket
 /// whole and small messages travel as single packets.
-fn write_frame(to: &mut impl Write, payload: &[u8]) -> io::Result<()> {
+fn write_frame(to: &mut impl Write, payload: &[u8], limit: u16) -> io::Result<()> {
     // Unreachable for the messages defined above, whose fields were counted
-    // against the ceiling; the check is for the message added after this line
-    // was last read. Refusing to send beats a length prefix that quietly
-    // wrapped in the `as u16` below, which would frame the whole rest of the
-    // session as garbage — and only in release builds, where an assertion is
-    // not there to say so.
-    if payload.len() > MAX_FRAME as usize {
+    // against their direction's ceiling; the check is for the message added
+    // after this line was last read. Refusing to send beats a length prefix
+    // that quietly wrapped in the `as u16` below, which would frame the whole
+    // rest of the session as garbage — and only in release builds, where an
+    // assertion is not there to say so.
+    if payload.len() > limit as usize {
         return Err(corrupt(format!(
-            "a {}-byte message does not fit a {MAX_FRAME}-byte frame",
+            "a {}-byte message does not fit a {limit}-byte frame",
             payload.len()
         )));
     }
@@ -216,11 +298,11 @@ fn write_frame(to: &mut impl Write, payload: &[u8]) -> io::Result<()> {
 }
 
 /// Reads one frame's payload, blocking until all of it has arrived.
-fn read_frame(from: &mut impl Read) -> io::Result<Vec<u8>> {
+fn read_frame(from: &mut impl Read, limit: u16) -> io::Result<Vec<u8>> {
     let mut length = [0u8; 2];
     from.read_exact(&mut length)?;
     let length = u16::from_le_bytes(length);
-    if length > MAX_FRAME {
+    if length > limit {
         return Err(corrupt(format!(
             "a {length}-byte frame can only be garbage"
         )));
@@ -239,6 +321,11 @@ fn put_u32(out: &mut Vec<u8>, value: u32) {
 }
 
 fn put_vec2(out: &mut Vec<u8>, value: Vec2) {
+    out.extend_from_slice(&value.x.to_le_bytes());
+    out.extend_from_slice(&value.y.to_le_bytes());
+}
+
+fn put_ivec2(out: &mut Vec<u8>, value: IVec2) {
     out.extend_from_slice(&value.x.to_le_bytes());
     out.extend_from_slice(&value.y.to_le_bytes());
 }
@@ -284,6 +371,12 @@ impl<'a> Payload<'a> {
         ))
     }
 
+    fn i32(&mut self) -> io::Result<i32> {
+        Ok(i32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+
     fn f32(&mut self) -> io::Result<f32> {
         Ok(f32::from_le_bytes(
             self.take(4)?.try_into().expect("4 bytes"),
@@ -292,6 +385,17 @@ impl<'a> Payload<'a> {
 
     fn vec2(&mut self) -> io::Result<Vec2> {
         Ok(Vec2::new(self.f32()?, self.f32()?))
+    }
+
+    fn ivec2(&mut self) -> io::Result<IVec2> {
+        Ok(IVec2::new(self.i32()?, self.i32()?))
+    }
+
+    fn chunk_payload(&mut self) -> io::Result<ChunkPayload> {
+        let bytes = self.take(ground::PAYLOAD_BYTES)?;
+        ChunkPayload::take(bytes).ok_or_else(|| {
+            corrupt("a chunk painted in colours this build has never heard of".into())
+        })
     }
 
     fn finish(self) -> io::Result<()> {
@@ -307,6 +411,7 @@ impl<'a> Payload<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::ground::{Shade, Surface, Tone, FACET_TRIS, FACET_VERTS};
     use super::*;
 
     fn bytes_of_client(message: ToServer) -> Vec<u8> {
@@ -315,10 +420,35 @@ mod tests {
         out
     }
 
-    fn bytes_of_server(message: ToClient) -> Vec<u8> {
+    fn bytes_of_server(message: &ToClient) -> Vec<u8> {
         let mut out = Vec::new();
         message.write(&mut out).expect("a Vec never fails to grow");
         out
+    }
+
+    /// A chunk of ground whose every byte is a function of where it is, so
+    /// that anything which transposed, truncated or reordered the payload
+    /// shows up rather than round-tripping perfectly.
+    fn a_chunk() -> ChunkPayload {
+        ChunkPayload {
+            heights: (0..FACET_VERTS * FACET_VERTS)
+                .map(|i| (i * 601 % 65_521) as u16)
+                .collect(),
+            surfaces: (0..FACET_TRIS)
+                .map(|i| {
+                    Surface::new(
+                        [
+                            Tone::Seabed,
+                            Tone::Sand,
+                            Tone::Forest,
+                            Tone::Fell,
+                            Tone::Snow,
+                        ][i % 5],
+                        [Shade::Dark, Shade::Plain, Shade::Light][i % 3],
+                    )
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -329,6 +459,9 @@ mod tests {
                 version: PROTOCOL_VERSION,
             },
             ToServer::Move { position: at },
+            ToServer::WantChunk {
+                chunk: IVec2::new(-9, 4),
+            },
         ] {
             let bytes = bytes_of_client(message);
             assert_eq!(ToServer::read(&mut bytes.as_slice()).unwrap(), message);
@@ -337,8 +470,8 @@ mod tests {
         for message in [
             ToClient::Welcome {
                 id: PlayerId(3),
-                seed: 20_040_112,
                 spawn: at,
+                facing: Vec2::new(-1.0, 2.0),
             },
             ToClient::Refused { version: 9 },
             ToClient::Joined {
@@ -350,8 +483,16 @@ mod tests {
                 position: at,
             },
             ToClient::Left { id: PlayerId(4) },
+            ToClient::Chunk {
+                chunk: IVec2::new(3, -8),
+                ground: None,
+            },
+            ToClient::Chunk {
+                chunk: IVec2::new(-2, 7),
+                ground: Some(a_chunk()),
+            },
         ] {
-            let bytes = bytes_of_server(message);
+            let bytes = bytes_of_server(&message);
             assert_eq!(ToClient::read(&mut bytes.as_slice()).unwrap(), message);
         }
     }
@@ -372,8 +513,8 @@ mod tests {
         // both halves are exact in binary, and the two differ in every byte
         // that matters, so a pair of axes that swapped places would show.
         assert_eq!(
-            bytes_of_client(ToServer::Hello { version: 1 }),
-            [3, 0, 0, 1, 0],
+            bytes_of_client(ToServer::Hello { version: 2 }),
+            [3, 0, 0, 2, 0],
             "hello: length 3, tag 0, version LE"
         );
         assert_eq!(
@@ -387,29 +528,41 @@ mod tests {
                 0, 0, 0, 0xC0, // y = -2.0
             ],
         );
-
         assert_eq!(
-            bytes_of_server(ToClient::Welcome {
-                id: PlayerId(7),
-                seed: 20_040_112,
-                spawn: Vec2::new(1.5, -2.0),
+            bytes_of_client(ToServer::WantChunk {
+                chunk: IVec2::new(5, -3),
             }),
             [
-                17, 0, // length
+                9, 0, // length
+                2, // tag
+                5, 0, 0, 0, // x = 5
+                0xFD, 0xFF, 0xFF, 0xFF, // z = -3, two's complement LE
+            ],
+        );
+
+        assert_eq!(
+            bytes_of_server(&ToClient::Welcome {
+                id: PlayerId(7),
+                spawn: Vec2::new(1.5, -2.0),
+                facing: Vec2::new(-2.0, 1.5),
+            }),
+            [
+                21, 0, // length
                 0, // tag
                 7, 0, 0, 0, // id
-                0xB0, 0xC9, 0x31, 0x01, // seed 20 040 112
-                0, 0, 0xC0, 0x3F, // x = 1.5
-                0, 0, 0, 0xC0, // y = -2.0
+                0, 0, 0xC0, 0x3F, // spawn x = 1.5
+                0, 0, 0, 0xC0, // spawn z = -2.0
+                0, 0, 0, 0xC0, // facing x = -2.0 — the spawn's axes swapped,
+                0, 0, 0xC0, 0x3F, // facing z = 1.5, so a confused pair shows
             ],
         );
         assert_eq!(
-            bytes_of_server(ToClient::Refused { version: 9 }),
+            bytes_of_server(&ToClient::Refused { version: 9 }),
             [3, 0, 1, 9, 0],
             "refused: length 3, tag 1, version LE"
         );
         assert_eq!(
-            bytes_of_server(ToClient::Joined {
+            bytes_of_server(&ToClient::Joined {
                 id: PlayerId(7),
                 position: Vec2::new(1.5, -2.0),
             }),
@@ -422,7 +575,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            bytes_of_server(ToClient::Moved {
+            bytes_of_server(&ToClient::Moved {
                 id: PlayerId(7),
                 position: Vec2::new(1.5, -2.0),
             }),
@@ -435,40 +588,159 @@ mod tests {
             ],
         );
         assert_eq!(
-            bytes_of_server(ToClient::Left { id: PlayerId(7) }),
+            bytes_of_server(&ToClient::Left { id: PlayerId(7) }),
             [
                 5, 0, // length
                 4, // tag
                 7, 0, 0, 0, // id
             ],
         );
+
+        // Open water: the whole message, since there is nothing in it.
+        assert_eq!(
+            bytes_of_server(&ToClient::Chunk {
+                chunk: IVec2::new(5, -3),
+                ground: None,
+            }),
+            [
+                10, 0, // length
+                5, // tag
+                5, 0, 0, 0, // x = 5
+                0xFD, 0xFF, 0xFF, 0xFF, // z = -3
+                0,    // no ground here
+            ],
+        );
+
+        // Ground: too long to write out, so the head, the length and a
+        // handful of interior bytes at known offsets. Between them they pin
+        // the layout — where the heights start, that they are little-endian
+        // pairs, where the surfaces start, and how a surface packs.
+        let ground = bytes_of_server(&ToClient::Chunk {
+            chunk: IVec2::new(5, -3),
+            ground: Some(a_chunk()),
+        });
+        let framed = 1 + 8 + 1 + ground::PAYLOAD_BYTES;
+        assert_eq!(ground.len(), 2 + framed);
+        assert_eq!(
+            ground[..11],
+            [
+                (framed & 0xFF) as u8,
+                (framed >> 8) as u8, // length
+                5,                   // tag
+                5,
+                0,
+                0,
+                0, // x = 5
+                0xFD,
+                0xFF,
+                0xFF,
+                0xFF, // z = -3
+            ],
+            "the head of a ground answer"
+        );
+        assert_eq!(ground[11], 1, "the flag says there is ground");
+
+        // Heights start at 12. Corner 0 is 0, corner 1 is 601, corner 2 is
+        // 1202 — little-endian pairs.
+        assert_eq!(ground[12..18], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
+
+        // Surfaces start once the heights are done. The first is Seabed dark
+        // — tone 0 in the high bits, shade 0 in the low two — and the second
+        // Sand plain: tone 2, shade 1.
+        let surfaces = 12 + FACET_VERTS * FACET_VERTS * 2;
+        assert_eq!(
+            ground[surfaces..surfaces + 3],
+            [0b0000_0000, 0b0000_1001, 0b0001_0010],
+            "seabed/dark, sand/plain, forest/light"
+        );
     }
 
     #[test]
     fn a_message_too_big_to_frame_is_refused() {
-        // No message defined here can reach the ceiling, so this asks the
-        // framing directly. The length prefix is a u16 and the ceiling is far
-        // below one, so an oversized payload written anyway would arrive as a
-        // plausible short frame followed by the rest of it read as messages.
+        // The client's ceiling is far below any message defined here, so this
+        // asks the framing directly. The length prefix is a u16 and the
+        // ceiling is far below one, so an oversized payload written anyway
+        // would arrive as a plausible short frame followed by the rest of it
+        // read as messages.
         let mut wire = Vec::new();
-        assert!(write_frame(&mut wire, &vec![0u8; MAX_FRAME as usize + 1]).is_err());
+        assert!(write_frame(
+            &mut wire,
+            &vec![0u8; MAX_CLIENT_FRAME as usize + 1],
+            MAX_CLIENT_FRAME
+        )
+        .is_err());
         assert!(wire.is_empty(), "half a frame reached the wire");
+
+        // And the server's ceiling is exactly one chunk of ground, so a
+        // ground answer fits it with nothing to spare.
+        let ground = bytes_of_server(&ToClient::Chunk {
+            chunk: IVec2::ZERO,
+            ground: Some(a_chunk()),
+        });
+        assert_eq!(
+            ground.len() - 2,
+            MAX_SERVER_FRAME as usize,
+            "a chunk of ground is what the server's ceiling is for"
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_be_asked_to_buffer_a_chunk() {
+        // The two directions have different ceilings, and the small one is
+        // what protects a server from a client claiming to have a great deal
+        // to say. A length that would be perfectly legal coming the other way
+        // is corruption coming this way.
+        let mut wire = Vec::new();
+        put_u16(&mut wire, MAX_CLIENT_FRAME + 1);
+        wire.extend(std::iter::repeat_n(0, MAX_CLIENT_FRAME as usize + 1));
+        assert!(ToServer::read(&mut wire.as_slice()).is_err());
     }
 
     #[test]
     fn messages_stream_back_to_back() {
         let mut wire = Vec::new();
-        let first = ToServer::Hello { version: 1 };
+        let first = ToServer::Hello { version: 2 };
         let second = ToServer::Move {
             position: Vec2::new(8.0, -4.0),
         };
+        let third = ToServer::WantChunk {
+            chunk: IVec2::new(1, 1),
+        };
         first.write(&mut wire).unwrap();
         second.write(&mut wire).unwrap();
+        third.write(&mut wire).unwrap();
 
         let mut reading = wire.as_slice();
         assert_eq!(ToServer::read(&mut reading).unwrap(), first);
         assert_eq!(ToServer::read(&mut reading).unwrap(), second);
+        assert_eq!(ToServer::read(&mut reading).unwrap(), third);
         assert!(reading.is_empty());
+    }
+
+    /// Ground answers are the one thing on this wire big enough to be split
+    /// across packets, so a reader that assumed a frame arrives whole would
+    /// pass every test above and fail on a real socket.
+    #[test]
+    fn a_chunk_split_across_reads_still_arrives() {
+        struct Dribble<'a> {
+            bytes: &'a [u8],
+        }
+        impl Read for Dribble<'_> {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                let n = out.len().min(self.bytes.len()).min(1000);
+                out[..n].copy_from_slice(&self.bytes[..n]);
+                self.bytes = &self.bytes[n..];
+                Ok(n)
+            }
+        }
+
+        let message = ToClient::Chunk {
+            chunk: IVec2::new(-2, 7),
+            ground: Some(a_chunk()),
+        };
+        let wire = bytes_of_server(&message);
+        let mut dribble = Dribble { bytes: &wire };
+        assert_eq!(ToClient::read(&mut dribble).unwrap(), message);
     }
 
     #[test]
@@ -487,6 +759,12 @@ mod tests {
         assert!(ToServer::read(&mut short.as_slice()).is_err());
         let long = [4, 0, 0, 1, 0, 99];
         assert!(ToServer::read(&mut long.as_slice()).is_err());
+
+        // A chunk whose flag byte is neither water nor ground.
+        let mut bad_flag = vec![10, 0, 5];
+        bad_flag.extend([0; 8]);
+        bad_flag.push(2);
+        assert!(ToClient::read(&mut bad_flag.as_slice()).is_err());
 
         // And a wire that simply ends is an ordinary end-of-file error.
         assert!(ToServer::read(&mut [].as_slice()).is_err());

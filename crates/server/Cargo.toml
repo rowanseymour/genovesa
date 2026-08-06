@@ -1,6 +1,6 @@
-# The headless side of a shared world. Terrain never crosses the wire — the
-# world crate regenerates it, bit for bit, on every machine — so this stays a
-# thin roster around a seed: who is in the world, and where they are.
+# The headless side of a shared world, and the only process in a session that
+# generates anything: a roster of who is where, and a workshop that hands out
+# the ground a chunk at a time.
 [package]
 name = "server"
 version = "0.1.0"
@@ -11,8 +11,8 @@ publish = false
 
 [dependencies]
 glam.workspace = true
-# The one thing hosting a world needs the world for: choosing where players
-# enter it. Everything else about the terrain stays on the clients.
+# The world itself. A server is where it is generated, cached and sampled —
+# clients are shown the results and never see this crate.
 world = { path = "../world" }
 # The words of the session, shared with every client so the two sides of the
 # wire cannot drift.

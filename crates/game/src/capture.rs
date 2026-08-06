@@ -21,12 +21,14 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use crate::boat::Boat;
 use crate::camera::{MapCamera, View};
 use crate::cli::Shot;
-use crate::terrain::ChunkBuild;
+use bevy::ecs::system::SystemParam;
+
+use crate::terrain::{ChunkBuild, Ground};
 
 /// Frames to render before the first shot, so terrain meshes have reached the
-/// GPU and the shadow cascades have settled. Counted only while no chunk is
-/// still streaming in — the world builds itself in background tasks, so the
-/// clock starts once the ground being photographed has actually arrived.
+/// GPU and the shadow cascades have settled. Counted only while ground is
+/// still on its way — the world arrives from a server a chunk at a time, so
+/// the clock starts once what is being photographed has actually turned up.
 const WARMUP_FRAMES: u32 = 120;
 /// Frames between pointing the camera somewhere and capturing it. The camera
 /// snaps rather than eases, so this only has to cover dropping the focus back
@@ -166,20 +168,38 @@ fn ignore_input(
     *scroll = AccumulatedMouseScroll::default();
 }
 
+/// Whether any of the ground being photographed has yet to reach the screen.
+///
+/// Both halves matter, and neither can see the other's: a chunk that has been
+/// asked for and not answered has no entity for the query to find, and one
+/// that has been answered and not meshed has nothing on screen for the
+/// resource to know about.
+#[derive(SystemParam)]
+struct GroundArriving<'w, 's> {
+    ground: Option<Res<'w, Ground>>,
+    building: Query<'w, 's, (), With<ChunkBuild>>,
+}
+
+impl GroundArriving<'_, '_> {
+    fn still_coming(&self) -> bool {
+        !self.building.is_empty() || self.ground.as_ref().is_some_and(|it| !it.settled())
+    }
+}
+
 /// Walks the list: settle, take the picture, point the camera at the next one.
 fn capture(
     mut commands: Commands,
     mut capture: ResMut<Capture>,
     mut cameras: Query<&mut MapCamera>,
     mut boats: Query<&mut Transform, With<Boat>>,
-    building: Query<(), With<ChunkBuild>>,
+    arriving: GroundArriving,
     mut view: ResMut<View>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    // Ground still streaming in means the picture is not of the world yet —
-    // hold the phase clock at zero until the last build lands, so the wait
-    // that follows is all settling and none of it generation.
-    if matches!(capture.phase, Phase::WarmUp | Phase::Settling) && !building.is_empty() {
+    // Ground still on its way means the picture is not of the world yet —
+    // hold the phase clock at zero until it has all landed, so the wait that
+    // follows is all settling and none of it waiting on a server.
+    if matches!(capture.phase, Phase::WarmUp | Phase::Settling) && arriving.still_coming() {
         capture.waited = 0;
         return;
     }

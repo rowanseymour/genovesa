@@ -18,13 +18,13 @@
 //!
 //! One process, one world, three pictures.
 
+use args::{metres, pair};
 use bevy::math::{UVec2, Vec2, Vec3};
 use protocol::DEFAULT_PORT;
-use world::args::{metres, pair};
 
 use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
-use crate::terrain::{random_seed, Archipelago, WorldConfig};
 use crate::AppState;
+use server::{random_seed, WorldConfig};
 
 /// Size of a captured picture, in pixels. Matches the shots already in
 /// `screenshots/`, which came off a 1280x720 window on a doubled display.
@@ -35,8 +35,8 @@ pub struct Args {
     pub state: AppState,
     pub config: WorldConfig,
     /// Server to join, as `host` or `host:port`. A joined run takes the
-    /// world's seed — and, unless `--focus` says otherwise, where to look —
-    /// from the server's welcome rather than from this command line.
+    /// world — and, unless `--focus` says otherwise, where to look — from the
+    /// server's welcome rather than from this command line.
     pub join: Option<String>,
     /// Overlay frame rate and geometry counts on the window.
     pub debug: bool,
@@ -94,27 +94,34 @@ impl Args {
         }
     }
 
-    /// Opens the run on where a world is entered — what [`View::enter`] does
-    /// to one view, done to the starting view and every shot alike, and read
-    /// the same way: `point` is the spawn a server already named, and `None`
-    /// takes the world's own.
+    /// Points the whole run at the world a server has just described: where
+    /// it put this player down, and the land it said to look at.
+    ///
+    /// A run that said nothing about where to look opens where the world is
+    /// entered — the spawn point just off the first island, facing it. A
+    /// *capture* run is different: a shot nearly always means a shot of
+    /// terrain, and photographing an island means centring on its middle
+    /// rather than floating off its coast, which is exactly what the served
+    /// facing point is.
+    ///
+    /// Once, and for the whole command line, rather than per shot: the shots
+    /// are a sweep over one world, and moving each of them somewhere of its
+    /// own would break a sequence that says "here, then a bit further" into an
+    /// unrelated set of pictures.
     ///
     /// Each half yields to the command line: a `--focus` keeps the whole view
     /// where it was put, and a `--yaw` keeps its own bearing.
-    pub fn enter(&mut self, world: &Archipelago, point: Option<Vec2>) {
+    pub fn opened_on(&mut self, spawn: Vec2, facing: Vec2) {
         if self.focus_given {
             return;
         }
-        let spawn = world.spawn();
-        self.centre_on(point.or(spawn.map(|s| s.point)).unwrap_or(Vec2::ZERO));
+        self.centre_on(if self.is_capture() { facing } else { spawn });
         if self.yaw_given {
             return;
         }
-        if let Some(island) = spawn.map(|s| s.island.centre()) {
-            self.view.face(island);
-            for shot in &mut self.shots {
-                shot.view.face(island);
-            }
+        self.view.face(facing);
+        for shot in &mut self.shots {
+            shot.view.face(facing);
         }
     }
 }
@@ -133,24 +140,25 @@ Options:
   --state <screen>  start on `mainmenu`, `newworld`, `joinworld`, `settings`
                     or `inworld` [default: mainmenu, or inworld when shots or
                     a server are asked for]
-  --seed <n>        the world to generate [default: a new one every run, and
-                    the run says which so it can be asked for again]
-  --join <host[:port]>  play in a served world instead of a local one; the
-                    server provides the seed and where the world is entered,
-                    and the run starts in that world rather than on a screen
+  --seed <n>        the world to open [default: a new one every run, and the
+                    run says which so it can be asked for again]
+  --join <host[:port]>  play in somebody else's world instead of opening one;
+                    the server says where the world is entered, and the run
+                    starts in that world rather than on a screen
                     [port: {DEFAULT_PORT}]
 
-A world started from the menu can be shared instead of kept, which hosts it on
-port {DEFAULT_PORT} for others to `--join` — the same session a dedicated
-`server` serves, run alongside the game that started it.
+Every world is served. A run that opens one runs a server for itself, reachable
+from this machine only; a world started from the menu can be shared instead,
+which hosts it on port {DEFAULT_PORT} for others to `--join`. Either way it is
+the same session a dedicated `server` serves.
   --debug           overlay frame rate, geometry counts and the current view
                     on the window; ignored when capturing, so shots stay clean
 
 View options, applied in the order given:
   --focus <x,z>     world point to put the player down at and centre the view
-                    on, in metres [default: where the world is entered — open
-                    water just off its first island; shots default to the
-                    island nearest the origin]
+                    on, in metres [default: where the server says the world is
+                    entered — open water just off its first island; shots
+                    default to that island itself]
   --zoom <m>        camera distance in metres, {MIN_DISTANCE} to {MAX_DISTANCE}
                     [default: {}]
   --yaw <deg>       bearing to look from [default: facing the island the
@@ -243,22 +251,21 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         }
     }
 
-    // A joined world is the server's world, whole: a seed given alongside
-    // would either be ignored or generate a different ocean, and both are
-    // worse than saying so.
+    // A joined world is somebody else's, whole: a seed given alongside would
+    // have nothing to open, since this run is not the one making a world.
     if args.join.is_some() && args.seed_given {
         return Err(
-            "`--seed` picks a world to generate, but a joined world is the server's — \
-             its seed arrives with the welcome"
+            "`--seed` picks a world to open, but joining plays in one somebody \
+             else has already opened"
                 .into(),
         );
     }
 
     // And a joined session is only a session in the served world. Starting on
-    // any other screen leaves it running behind a menu whose "new world"
-    // builds a *local* one — the run would go on reporting its position into
-    // an ocean it is no longer standing in, and draw the other players' markers
-    // on ground that isn't theirs.
+    // any other screen leaves it running behind a menu whose "new world" opens
+    // a second one — the run would go on reporting its position into an ocean
+    // it is no longer standing in, and draw the other players' markers on
+    // ground that isn't theirs.
     if args.join.is_some() && state_given && args.state != AppState::InWorld {
         return Err(
             "`--join` plays in the served world, so a joined run cannot start on another screen"
@@ -273,33 +280,10 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         args.state = AppState::InWorld;
     }
 
-    // A run that said nothing about where to look opens where its world is
-    // entered: the spawn point just off the first island, facing it. A
-    // *capture* run is different — a shot nearly always means a shot of
-    // terrain, and photographing an island means centring on its middle
-    // rather than floating off its coast — so shots go to the nearest land.
-    //
-    // Once, and for the whole command line, rather than per shot: the shots
-    // are a sweep over one world, and moving each of them to its own nearest
-    // island would break a sequence that says "here, then a bit further" into
-    // an unrelated set of pictures. The world built here is thrown away and
-    // the match builds its own — cheap for a capture run, which only asks
-    // the layout; a played run's spawn generates its entry island, a one-off
-    // cost the match was about to pay for the same island anyway.
-    //
-    // A joined run skips this entirely: its world is the server's, so a
-    // focus from a locally laid-out ocean would point at the wrong one. The
-    // game binary calls `enter` with the served spawn point instead.
-    if args.join.is_none() {
-        let world = Archipelago::new(&args.config);
-        if args.is_capture() {
-            if let Some(centre) = world.nearest_island(Vec2::ZERO).map(|spec| spec.centre()) {
-                args.centre_on(centre);
-            }
-        } else {
-            args.enter(&world, None);
-        }
-    }
+    // Where to look is not settled here, because nothing on this side knows
+    // where anything is any more: the world comes from a server, and the
+    // server is the one that can say where it is entered. See
+    // [`Args::opened_on`], which the binary calls once a welcome has arrived.
     Ok(args)
 }
 
@@ -397,25 +381,25 @@ mod tests {
         assert_eq!(ok("--state inworld").state, AppState::InWorld);
     }
 
+    /// A spawn and a facing as a server would have named them: afloat, with
+    /// land off to one side.
+    const SPAWN: Vec2 = Vec2::new(100.0, -200.0);
+    const LAND: Vec2 = Vec2::new(100.0, -400.0);
+
     #[test]
     fn with_no_focus_given_a_played_run_opens_on_the_spawn() {
         // A run that said nothing about where to look starts the view, and
-        // with it the boat, exactly where the world is entered — the spawn
-        // point off the first island — with the bow aimed at the island, so
-        // holding forward is the whole of the first sail.
-        let args = ok("--seed 777 --state inworld");
-        let spawn = Archipelago::new(&args.config)
-            .spawn()
-            .expect("seed 777 should offer somewhere to enter");
+        // with it the boat, exactly where the server said the world is
+        // entered — the spawn point off the first island — with the bow aimed
+        // at the island, so holding forward is the whole of the first sail.
+        let mut args = ok("--seed 777 --state inworld");
+        args.opened_on(SPAWN, LAND);
 
-        assert_eq!(
-            args.view.focus,
-            Vec3::new(spawn.point.x, 0.0, spawn.point.y)
-        );
+        assert_eq!(args.view.focus, Vec3::new(SPAWN.x, 0.0, SPAWN.y));
 
         // The yaw convention the boat pins: forward is (-sin, -cos).
         let ahead = Vec2::new(-args.view.yaw.sin(), -args.view.yaw.cos());
-        let towards = (spawn.island.centre() - spawn.point).normalize();
+        let towards = (LAND - SPAWN).normalize();
         assert!(
             ahead.dot(towards) > 0.999,
             "the view opens looking {ahead}, not at the island {towards}"
@@ -424,28 +408,25 @@ mod tests {
 
     #[test]
     fn an_explicit_yaw_keeps_its_bearing_over_the_spawn_facing() {
-        let args = ok("--seed 777 --state inworld --yaw 90");
+        let mut args = ok("--seed 777 --state inworld --yaw 90");
+        args.opened_on(SPAWN, LAND);
         assert_eq!(args.view.yaw, std::f32::consts::FRAC_PI_2);
     }
 
     #[test]
-    fn with_no_focus_given_shots_are_taken_of_the_nearest_island() {
-        // The origin is guaranteed open water, so a capture run that said
-        // nothing about where to look has to be moved onto land — both the
-        // starting view and every shot, so a sweep stays a sweep.
-        let args = ok("--seed 777 --shot a.png --zoom 300 --shot b.png");
-        let world = Archipelago::new(&args.config);
-        let island = world
-            .nearest_island(Vec2::ZERO)
-            .expect("seed 777 should have an island near the origin");
+    fn with_no_focus_given_shots_are_taken_of_the_land() {
+        // A world is entered on open water, so a capture run that said nothing
+        // about where to look has to be moved onto the land the server pointed
+        // at — both the starting view and every shot, so a sweep stays a
+        // sweep.
+        let mut args = ok("--seed 777 --shot a.png --zoom 300 --shot b.png");
+        args.opened_on(SPAWN, LAND);
 
-        assert_ne!(args.view.focus, Vec3::ZERO, "the view still opens on water");
         for view in [args.view, args.shots[0].view, args.shots[1].view] {
-            let focus = Vec2::new(view.focus.x, view.focus.z);
-            let out = (focus - island.centre()).abs() - island.extent() * 0.5;
-            assert!(
-                out.max_element() <= 0.0,
-                "{focus} is outside the nearest island's frame"
+            assert_eq!(
+                view.focus,
+                Vec3::new(LAND.x, 0.0, LAND.y),
+                "a shot was framed on the water rather than on the island"
             );
         }
         // And only the focus moved — the shots keep their own zooms.
@@ -536,8 +517,7 @@ mod tests {
         // from a spot the player chose would be facing it from the wrong
         // place.
         let mut args = ok("--join x --focus 5,6");
-        let world = Archipelago::new(&args.config);
-        args.enter(&world, Some(Vec2::new(10.0, 20.0)));
+        args.opened_on(Vec2::new(10.0, 20.0), Vec2::new(30.0, 40.0));
         assert_eq!(args.view.focus, Vec3::new(5.0, 0.0, 6.0));
         assert_eq!(args.view.yaw, View::default().yaw);
     }
