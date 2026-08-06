@@ -123,12 +123,21 @@ type Report = Box<dyn Fn(&str) + Send + Sync>;
 pub struct Server {
     listener: TcpListener,
     shared: Arc<Shared>,
-    /// The other end of [`Shared::wanted`], waiting for the workers that will
-    /// drain it. Held here rather than handed out at [`Server::bind`] because
-    /// starting the workers would clone the shared state, and
-    /// [`Server::reporting_to`] needs to be the only owner of it — so the pool
-    /// starts when the server starts *serving*.
-    requests: mpsc::Receiver<ChunkRequest>,
+    /// Both ends of the chunk queue, held until there is something to serve.
+    ///
+    /// Deliberately not in [`Shared`], and that is the whole of how the
+    /// workers ever die. They hold the shared state, so a sender kept in there
+    /// would be a sender they were keeping alive themselves: the channel could
+    /// never close, `recv` could never fail, and every server would leave its
+    /// pool running — and its whole world, islands and all, reachable through
+    /// their copies of the state — for the life of the process. Out here the
+    /// senders belong to the things that serve, and when the last of those has
+    /// gone the workers are told so.
+    ///
+    /// It is also why the pool starts at [`Server::run`] rather than at
+    /// [`Server::bind`]: starting it clones the shared state, and
+    /// [`Server::reporting_to`] has to be the only owner of it.
+    queue: (mpsc::SyncSender<ChunkRequest>, mpsc::Receiver<ChunkRequest>),
 }
 
 /// What every connection's thread shares.
@@ -147,14 +156,6 @@ struct Shared {
     /// its view looking at land rather than out to sea. Equal to the spawn
     /// itself when the layout offered nothing, which names no direction.
     facing: Vec2,
-    /// Where chunk requests wait for a worker.
-    ///
-    /// Behind a mutex only because an `mpsc` sender is `Send` but not `Sync`.
-    /// A connection takes its own clone as it starts and never touches this
-    /// again — which matters, because posting into a full queue *blocks*, and
-    /// a connection blocked while holding a shared lock would be one client's
-    /// impatience stalling everybody else's.
-    wanted: Mutex<mpsc::SyncSender<ChunkRequest>>,
     /// Dealt in joining order, and never reused within a session.
     next_id: AtomicU32,
     players: Mutex<HashMap<PlayerId, Player>>,
@@ -203,17 +204,15 @@ impl Server {
         let entry = world.spawn();
         let spawn = entry.map_or(Vec2::ZERO, |entry| entry.point);
 
-        let (wanted, requests) = mpsc::sync_channel(CHUNK_QUEUE_DEPTH);
         Ok(Self {
             listener,
-            requests,
+            queue: mpsc::sync_channel(CHUNK_QUEUE_DEPTH),
             shared: Arc::new(Shared {
                 world,
                 spawn,
                 // A world with no island to look at leaves the bearing to the
                 // client, which is what a facing equal to the spawn means.
                 facing: entry.map_or(spawn, |entry| entry.island.centre()),
-                wanted: Mutex::new(wanted),
                 next_id: AtomicU32::new(1),
                 players: Mutex::new(HashMap::new()),
                 stopping: AtomicBool::new(false),
@@ -246,8 +245,9 @@ impl Server {
     /// own, from handshake to hang-up. What a dedicated server does, there
     /// being nothing else for its process to be doing.
     pub fn run(self) {
-        make_ground(&self.shared, self.requests);
-        accept(&self.listener, &self.shared);
+        let (wanted, requests) = self.queue;
+        make_ground(&self.shared, requests);
+        accept(&self.listener, &self.shared, &wanted);
     }
 
     /// Serves on a thread of its own, and hands back the handle that ends it.
@@ -259,11 +259,12 @@ impl Server {
     /// is in, would outlive the match that made them.
     pub fn spawn(self) -> io::Result<Host> {
         let addr = self.listener.local_addr()?;
-        make_ground(&self.shared, self.requests);
+        let (wanted, requests) = self.queue;
+        make_ground(&self.shared, requests);
         let shared = self.shared.clone();
         let thread = {
             let (listener, shared) = (self.listener, self.shared);
-            thread::spawn(move || accept(&listener, &shared))
+            thread::spawn(move || accept(&listener, &shared, &wanted))
         };
         Ok(Host {
             addr,
@@ -336,7 +337,7 @@ impl Drop for Host {
 /// connections. It has to happen *somewhere* — a world that only ever grew
 /// would hold every island anybody had sailed past for the life of the
 /// process.
-fn accept(listener: &TcpListener, shared: &Arc<Shared>) {
+fn accept(listener: &TcpListener, shared: &Arc<Shared>, wanted: &mpsc::SyncSender<ChunkRequest>) {
     // Non-blocking, so that the stop above is noticed within [`STOP_POLL`]
     // rather than whenever the next connection happens to arrive.
     let _ = listener.set_nonblocking(true);
@@ -350,8 +351,8 @@ fn accept(listener: &TcpListener, shared: &Arc<Shared>) {
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
-                let shared = shared.clone();
-                thread::spawn(move || serve(stream, shared));
+                let (shared, wanted) = (shared.clone(), wanted.clone());
+                thread::spawn(move || serve(stream, shared, wanted));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(STOP_POLL),
             // A connection that failed to arrive is its problem, not the
@@ -396,12 +397,21 @@ fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
         let shared = shared.clone();
         let requests = requests.clone();
         thread::spawn(move || loop {
-            // The lock is held only long enough to take the next request:
-            // generation is the slow part and must not be serialised.
+            // Waiting for work holds the lock, since a blocking `recv` needs
+            // the receiver borrowed for the length of it — so only one worker
+            // is ever the one listening, and the rest are queued behind it.
+            // That serialises the *handing out*, which is a mutex handoff
+            // against a hundred milliseconds of generating an island, and the
+            // guard is dropped before any of that happens. What matters is
+            // that the work itself runs on all of them at once, and it does.
             let request = {
                 let queue = requests.lock().expect("no poisoned lock");
                 queue.recv()
             };
+            // The channel has closed, which means every sender has gone: the
+            // listener has stopped and the last connection has ended, so
+            // there is nobody left to want ground. This is the pool's death,
+            // and with it the last hold on the world it was generating.
             let Ok(request) = request else {
                 return;
             };
@@ -447,7 +457,7 @@ impl Shared {
 
 /// One connection, cradle to grave: handshake, introductions, relay,
 /// departure.
-fn serve(stream: TcpStream, shared: Arc<Shared>) {
+fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkRequest>) {
     // Position reports are a dozen bytes that matter now or not at all;
     // batching them behind Nagle's algorithm would only add lag.
     let _ = stream.set_nodelay(true);
@@ -473,10 +483,6 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) {
     }
     let _ = reader.set_read_timeout(None);
     let id = PlayerId(shared.next_id.fetch_add(1, Ordering::Relaxed));
-
-    // This connection's own way into the chunk queue — see [`Shared::wanted`]
-    // for why it is taken once here rather than reached for per request.
-    let wanted = shared.wanted.lock().expect("no poisoned lock").clone();
 
     // The player's writer: everything the session wants them to hear goes
     // down the channel, and this thread puts it on the socket. It ends when
