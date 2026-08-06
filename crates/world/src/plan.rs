@@ -9,8 +9,10 @@ use std::sync::Arc;
 
 use glam::{UVec2, Vec2, Vec3};
 
+use protocol::ground::Tone;
+
 use crate::archipelago::{chunk_at, Archipelago, Island, IslandSpec};
-use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES, SEABED};
+use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES};
 
 /// An RGB8 image, as wide and tall as it says, ready to write out.
 pub struct Image {
@@ -67,8 +69,8 @@ fn shade(color: Vec3, height: f32, normal: Vec3) -> [u8; 3] {
     [c.x as u8, c.y as u8, c.z as u8]
 }
 
-/// Renders one map in plan, hill-shaded, using the same colour function the
-/// mesh does, into a `width`-by-`height` image.
+/// Renders one map in plan, hill-shaded, out of the same palette entries a
+/// client would be sent, into a `width`-by-`height` image.
 ///
 /// Shared by every layout below, so that a map looks the same whether it is
 /// being examined on its own or compared with eight others.
@@ -84,7 +86,8 @@ pub fn render(config: &MapConfig, width: u32, height: u32) -> Image {
             let wz = iz as f32 * step.y - half.y;
             let normal = gen.normal(wx, wz);
             let height = gen.height(wx, wz);
-            pixels.extend_from_slice(&shade(gen.color(wx, wz, height, normal), height, normal));
+            let surface = gen.surface(wx, wz, height, normal);
+            pixels.extend_from_slice(&shade(surface.color(), height, normal));
         }
     }
     Image {
@@ -138,11 +141,19 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
             };
 
             let pixel = match island {
-                None => shade(SEABED, -crate::archipelago::OCEAN_DEPTH, Vec3::Y),
+                // Exactly the palette's deep sea bed, which is what an
+                // island's own skirt reaches: any difference between the two
+                // would print every island's frame onto the water.
+                None => shade(
+                    Tone::Seabed.color(),
+                    -crate::archipelago::OCEAN_DEPTH,
+                    Vec3::Y,
+                ),
                 Some(island) => {
                     let normal = island.normal(wx, wz);
                     let height = island.height(wx, wz);
-                    shade(island.color(wx, wz, height, normal), height, normal)
+                    let surface = island.surface(wx, wz, height, normal);
+                    shade(surface.color(), height, normal)
                 }
             };
             pixels.extend_from_slice(&pixel);

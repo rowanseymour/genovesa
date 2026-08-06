@@ -1,27 +1,26 @@
-//! Procedural terrain: the height field, its colours, and the chunk geometry.
-//! Turning that geometry into engine meshes — and spawning it, with the sea
-//! and the sun — is the game crate's `terrain` module.
+//! Procedural terrain: the height field and what grows on it. Sampling that
+//! into chunks a client can be sent is the `archipelago` module; turning what
+//! arrives into meshes is the game's business and happens nowhere near here.
 //!
 //! # Scale
 //!
-//! One world unit is one metre, matching Bevy's own convention (its lighting is
-//! in real lux). One terrain tile is one metre square, and a map is a whole
-//! number of [`CHUNK_TILES`]-tile chunks along each axis — any number on each,
-//! from a single chunk up, square or not.
+//! One world unit is one metre. One terrain tile is one metre square, and a map
+//! is a whole number of [`CHUNK_TILES`]-tile chunks along each axis — any
+//! number on each, from a single chunk up, square or not.
 //!
-//! The tile is the map's unit of ground, not the mesh's: the height field is
-//! continuous, and it is drawn every [`MESH_STEP`] metres. See [`MESH_STEP`] and
-//! [`TerrainGenerator::color`] for why — the ground is flat shaded in a fixed
-//! palette, and both the facets and the colour bands want to be large enough to
-//! read as deliberate shapes.
+//! The tile is the map's unit of ground, not the picture's: the height field is
+//! continuous, and it is drawn every [`protocol::ground::FACET_METRES`]. See
+//! [`TerrainGenerator::surface`] for why the palette is what it is — the ground
+//! is flat shaded in a fixed set of colours, and both the facets and the colour
+//! bands want to be large enough to read as deliberate shapes.
 //!
-//! The mesh is split into [`CHUNK_TILES`]-metre chunks rather than built as one
-//! object. That keeps each chunk's bounding box tight enough for frustum culling
-//! to do real work — with the camera pitched down at a fixed angle, only a
-//! handful of chunks are ever on screen — and it bounds how much has to be
-//! rebuilt if terrain is ever deformed.
+//! The colours themselves are not here. A surface is *named* — see
+//! [`protocol::ground::Tone`] — because what a facet is painted has to cross
+//! the wire, and a name is a byte where three floats are twelve. This module
+//! decides which name; the protocol says what each one looks like.
 
 use glam::{UVec2, Vec2, Vec3};
+use protocol::ground::{Shade, Surface, Tone, CHUNK_METRES, FACET_METRES, FACET_VERTS};
 
 use crate::noise::{smoothstep, Noise};
 
@@ -32,10 +31,13 @@ use crate::noise::{smoothstep, Noise};
 /// returns the same bits — but powers are not, and `f32::powf` is whatever
 /// libm the platform happened to link: Apple's, glibc's, Microsoft's. Those
 /// three do not agree to the last bit, and this crate's promise is that a seed
-/// is a world *whoever generates it*. A server sends a seed and nothing else,
-/// so a client whose `powf` rounds differently doesn't render the world a
-/// shade differently — it walks different ground, in a session everyone else
-/// thinks is one place.
+/// is a world *whoever generates it*.
+///
+/// Only servers generate now, which narrows what is at stake without removing
+/// it: a seed is written down, shared, saved with a position, and handed to
+/// another machine to host. If `powf` decided what the ground was, the same
+/// seed served from a Mac and from a Linux box would be two different oceans
+/// wearing one name.
 ///
 /// That was not a theory. The first CI run to put these tests on three
 /// operating systems came back with three different maps for seed 20040112,
@@ -56,16 +58,15 @@ pub(crate) fn pow(x: f32, y: f32) -> f32 {
 /// height field is sampled at for ground queries.
 pub const TILE_SIZE: f32 = 1.0;
 
-/// Metres between mesh vertices. The height field is continuous, so this is
-/// only how finely it gets *drawn*, and it is deliberately much coarser than a
-/// tile: the ground is flat-shaded, and a facet has to be big enough to read as
-/// a facet. At 2 m one covers roughly 50 px at the default zoom, which is about
-/// where facets read as deliberate rather than as a low-resolution mesh.
-pub const MESH_STEP: u32 = 2;
-
 /// Tiles (so, metres) along the edge of one terrain chunk — a sensible unit of
-/// both culling and rebuilding.
-pub const CHUNK_TILES: u32 = 128;
+/// both culling and rebuilding, and the unit ground is asked for in.
+///
+/// Read from the protocol rather than declared here, because the chunk is the
+/// *client's* unit before it is the generator's: a client asks for ground by
+/// chunk coordinate and is told nothing else about how the world is put
+/// together, so how big a chunk is belongs with the words for asking. A tile is
+/// a metre, so this is that number in this module's vocabulary.
+pub const CHUNK_TILES: u32 = (CHUNK_METRES / TILE_SIZE) as u32;
 
 // --- What every map is aiming for ---------------------------------------
 //
@@ -417,9 +418,14 @@ const PATCH_SCALE: f32 = 30.0;
 /// Wavelength of the shade variation within a parcel, in metres.
 const MOTTLE_SCALE: f32 = 18.0;
 
-/// Deepest the sea bed is allowed to go, in metres below sea level. Public
-/// because the game hangs its ocean-floor backdrop just beneath it.
-pub const MAX_DEPTH: f32 = 8.0;
+/// Deepest the sea bed is allowed to go, in metres below sea level.
+///
+/// The same number a chunk of open water *means* — see
+/// [`protocol::ground::OCEAN_DEPTH`], and taken from there so the two cannot
+/// drift. An island's bed reaching a different floor from the ocean around it
+/// would leave a step at every coast, on a client that has no way to know
+/// which of the two was wrong.
+pub const MAX_DEPTH: f32 = protocol::ground::OCEAN_DEPTH;
 
 // --- Coast ------------------------------------------------------------------
 //
@@ -514,9 +520,9 @@ const BEACH_STEEP_TARGET: f32 = 0.01;
 /// enough to see; a seed still failing here keeps its few sand ribbons.
 const COAST_SCALE_LIMIT: f32 = 2.0;
 
-/// Spacing of the distance-to-water field, in metres. Finer than the mesh step
-/// would buy nothing — the field is only ever read to shape and fade a coast
-/// that is drawn every [`MESH_STEP`] metres.
+/// Spacing of the distance-to-water field, in metres. Finer than the facet
+/// grid would buy nothing — the field is only ever read to shape and fade a
+/// coast that is drawn every [`FACET_METRES`].
 const COAST_GRID: f32 = 4.0;
 
 /// Wavelength of the skerries — the rock heads left standing offshore of a
@@ -575,39 +581,6 @@ const BAND_WANDER: f32 = 9.0;
 /// would not move the edge by even one facet.
 const SNOW_WANDER: f32 = 26.0;
 
-/// The ground palette. Small and flat on purpose — every facet gets exactly one
-/// of these, so the whole map is drawn in fifteen colours plus three shade
-/// steps. Saturated well past anything natural, because flat shading has no
-/// texture or gradient to carry the picture; the colour has to do that work on
-/// its own.
-pub(crate) const SEABED: Vec3 = Vec3::new(0.16, 0.34, 0.38);
-const SHALLOW: Vec3 = Vec3::new(0.46, 0.68, 0.62);
-const SAND: Vec3 = Vec3::new(0.90, 0.83, 0.58);
-/// Pebble and boulder foreshore. Warmer and lighter than [`ROCK`], so a shingle
-/// beach reads as its own thing next to the cliffs rather than as more of them.
-const SHINGLE: Vec3 = Vec3::new(0.70, 0.65, 0.55);
-const FOREST: Vec3 = Vec3::new(0.21, 0.42, 0.22);
-const GRASS_DARK: Vec3 = Vec3::new(0.33, 0.55, 0.23);
-const GRASS: Vec3 = Vec3::new(0.44, 0.66, 0.26);
-const GRASS_LIGHT: Vec3 = Vec3::new(0.56, 0.75, 0.31);
-const MEADOW: Vec3 = Vec3::new(0.66, 0.73, 0.34);
-/// Moorland, above the trees and below the bare rock. [`HEATH`] and [`FELL`]
-/// are what the darkest and lightest lowland parcels turn into as they climb —
-/// the one still half green, the other already most of the way to stone — so
-/// that the upland reads as the same country drained of colour rather than as
-/// a different map laid over the top.
-const HEATH: Vec3 = Vec3::new(0.38, 0.45, 0.27);
-const UPLAND: Vec3 = Vec3::new(0.50, 0.50, 0.31);
-const FELL: Vec3 = Vec3::new(0.63, 0.60, 0.42);
-const ROCK: Vec3 = Vec3::new(0.55, 0.53, 0.50);
-const ROCK_DARK: Vec3 = Vec3::new(0.40, 0.38, 0.37);
-/// Bare stone bleached by the weather, the last step before the snow.
-const SCREE: Vec3 = Vec3::new(0.68, 0.65, 0.60);
-/// Snow on the summits. Off-white and slightly blue: a pure white would be the
-/// only fully saturated thing on the map and would pull the eye off everything
-/// else, and it has to stay clearly apart from [`ROCK`] in shadow.
-const SNOW: Vec3 = Vec3::new(0.90, 0.92, 0.95);
-
 /// What each parcel of the patchwork is drawn as, at each height it can reach.
 ///
 /// One row per band and one column per parcel, indexed by the *same* bucket of
@@ -620,18 +593,25 @@ const SNOW: Vec3 = Vec3::new(0.90, 0.92, 0.95);
 /// moor, two of rock — so the patchwork thins out with the vegetation without
 /// ever stopping dead. By the summits it is nearly gone, which is the point:
 /// bare rock has nothing growing on it to make parcels out of, and the relief
-/// up there is drawn by the slope tests above instead. [`ROCK_DARK`] is left to
-/// them, so that a dark facet on a mountain always means a crag.
-const LOWLAND_PARCELS: [Vec3; 5] = [FOREST, GRASS_DARK, GRASS, GRASS_LIGHT, MEADOW];
-const MOOR_PARCELS: [Vec3; 5] = [HEATH, HEATH, UPLAND, FELL, FELL];
-const MOUNTAIN_PARCELS: [Vec3; 5] = [ROCK, ROCK, ROCK, SCREE, SCREE];
+/// up there is drawn by the slope tests above instead. [`Tone::RockDark`] is
+/// left to them, so that a dark facet on a mountain always means a crag.
+const LOWLAND_PARCELS: [Tone; 5] = [
+    Tone::Forest,
+    Tone::GrassDark,
+    Tone::Grass,
+    Tone::GrassLight,
+    Tone::Meadow,
+];
+const MOOR_PARCELS: [Tone; 5] = [
+    Tone::Heath,
+    Tone::Heath,
+    Tone::Upland,
+    Tone::Fell,
+    Tone::Fell,
+];
+const MOUNTAIN_PARCELS: [Tone; 5] = [Tone::Rock, Tone::Rock, Tone::Rock, Tone::Scree, Tone::Scree];
 
 /// Parameters the map is generated from.
-///
-/// The `bevy` feature is only these derives: the game holds one of these as an
-/// ECS resource, and a server or wasm build has no ECS to hold it in — the
-/// derive rides behind the feature so those builds stay engine-free.
-#[cfg_attr(feature = "bevy", derive(bevy_ecs::prelude::Resource))]
 #[derive(Clone, Copy, Debug)]
 pub struct MapConfig {
     /// Chunks along X and Z. A chunk is [`CHUNK_TILES`] tiles and a tile is a
@@ -696,12 +676,11 @@ impl MapConfig {
 // Generation
 // ---------------------------------------------------------------------------
 
-/// Samples terrain height and surface colour for a given seed.
+/// Samples terrain height and surface for a given seed.
 ///
-/// The game keeps one around after the mesh is built, because the height field
-/// is what anything wanting to sit on the ground has to ask — the camera
-/// already does.
-#[cfg_attr(feature = "bevy", derive(bevy_ecs::prelude::Resource))]
+/// One of these is what an island *is*, behind the layout: everything a server
+/// answers about a patch of ground — how high it stands, what grows on it —
+/// comes from here.
 pub struct TerrainGenerator {
     continent: Noise,
     hills: Noise,
@@ -1601,18 +1580,20 @@ impl TerrainGenerator {
         normal_at(wx, wz, |x, z| self.height(x, z))
     }
 
-    /// Surface colour for one facet, picked from a fixed palette.
+    /// What one facet is painted, picked from a fixed palette.
     ///
     /// Nothing here blends. Every choice is a hard threshold, so a facet gets
     /// exactly one palette entry — that is what makes the ground read as flat
-    /// coloured shapes rather than as a wash of gradient.
+    /// coloured shapes rather than as a wash of gradient. Naming the entry
+    /// rather than mixing a colour is also what lets a facet cross the wire in
+    /// a byte.
     ///
     /// Which means the work of getting from one band to the next is done by the
     /// *shape* of the boundary rather than by mixing the colours across it. Two
     /// things do it: the edges wander off the level by [`BAND_WANDER`], and the
     /// patchwork either side of them is cut from one field, so the parcels line
     /// up through the join. See [`LOWLAND_PARCELS`].
-    pub fn color(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Vec3 {
+    pub fn surface(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Surface {
         // 0 on flat ground, approaching 1 on a cliff face.
         let slope = 1.0 - normal.y;
 
@@ -1622,10 +1603,10 @@ impl TerrainGenerator {
         // than from anything here — [`shape_coast`] gives a beach a long
         // shallow apron and drops a cliff straight past it.
         if height < -4.5 {
-            return SEABED;
+            return Surface::plain(Tone::Seabed);
         }
         if height < -1.8 {
-            return SHALLOW;
+            return Surface::plain(Tone::Shallow);
         }
 
         // The shore itself, from the low-water mark to the back of the beach.
@@ -1634,23 +1615,23 @@ impl TerrainGenerator {
         // never fires and the sand stays clean.
         if height < SHORE_TOP {
             if slope > ROCK_SLOPE {
-                return ROCK_DARK;
+                return Surface::plain(Tone::RockDark);
             }
-            return match self.shore(wx, wz) {
-                Shore::Beach => SAND,
-                Shore::Rocky => SHINGLE,
-                Shore::Cliff => ROCK_DARK,
-            };
+            return Surface::plain(match self.shore(wx, wz) {
+                Shore::Beach => Tone::Sand,
+                Shore::Rocky => Tone::Shingle,
+                Shore::Cliff => Tone::RockDark,
+            });
         }
 
         // Steep ground is bare rock whatever height it's at. Above the shore
         // this is what paints the cliff faces, and inland it picks out crags on
         // the hills the same way.
         if slope > CLIFF_SLOPE {
-            return ROCK_DARK;
+            return Surface::plain(Tone::RockDark);
         }
         if slope > ROCK_SLOPE {
-            return ROCK;
+            return Surface::plain(Tone::Rock);
         }
 
         // How far this spot's band edges have strayed from the level.
@@ -1662,7 +1643,7 @@ impl TerrainGenerator {
         // to be squeezed, so it gets its own swing and takes no part in the
         // patchwork below.
         if height + SNOW_WANDER * wander > SNOW_LINE {
-            return SNOW;
+            return Surface::plain(Tone::Snow);
         }
 
         // The height everything below reads its band off.
@@ -1701,221 +1682,81 @@ impl TerrainGenerator {
 
         // A finer band takes a lighter or darker cut of the same colour, so a
         // big parcel still breaks into facets rather than reading as one slab.
-        // Three steps, not a multiplier curve — a gradient here would undo the
-        // whole point of the quantising above.
         // Most facets take the parcel colour untouched; only the tails of the
         // field get shifted, so this reads as occasional patches rather than as
-        // constant speckle.
-        let shade = self.detail.fbm(wx / MOTTLE_SCALE, wz / MOTTLE_SCALE, 2);
-        let tint = if shade > 0.26 {
-            1.09
-        } else if shade < -0.26 {
-            0.92
+        // constant speckle. What the three steps *are* is the palette's
+        // business — see [`Shade`].
+        let mottle = self.detail.fbm(wx / MOTTLE_SCALE, wz / MOTTLE_SCALE, 2);
+        let shade = if mottle > 0.26 {
+            Shade::Light
+        } else if mottle < -0.26 {
+            Shade::Dark
         } else {
-            1.0
+            Shade::Plain
         };
 
-        (parcel * tint).clamp(Vec3::ZERO, Vec3::ONE)
-    }
-
-    /// Builds the geometry for one chunk. `origin` is the chunk's lower-corner
-    /// tile index into the map, whose full extent in tiles is `map_tiles` —
-    /// every chunk is full-sized, since a map is a whole number of chunks.
-    ///
-    /// Vertex positions are relative to the chunk's own origin, so whatever
-    /// places the chunk carries the world offset and the bounding box stays
-    /// tight.
-    pub fn build_chunk(&self, origin: UVec2, map_tiles: UVec2) -> ChunkGeometry {
-        let half = map_tiles.as_vec2() * TILE_SIZE * 0.5;
-        let base = Vec2::new(origin.x as f32 - half.x, origin.y as f32 - half.y);
-
-        facet_geometry(
-            base,
-            |wx, wz| self.height(wx, wz),
-            |wx, wz, height, normal| self.color(wx, wz, height, normal),
-            // UVs span the whole map, so a future overlay lines up across
-            // chunk boundaries.
-            |wx, wz| {
-                [
-                    (wx + half.x) / map_tiles.x as f32,
-                    (wz + half.y) / map_tiles.y as f32,
-                ]
-            },
-        )
+        Surface::new(parcel, shade)
     }
 }
 
-/// Vertices along one edge of a chunk's facet grid — one more than the quads,
-/// since the corners at both ends are shared.
-pub(crate) const FACET_VERTS: usize = (CHUNK_TILES / MESH_STEP) as usize + 1;
-
-/// The corner heights one chunk's geometry is built from: a
+/// The corner heights one chunk of ground is built from: a
 /// [`FACET_VERTS`]-square grid, row-major, sampled from `base` outwards at
-/// [`MESH_STEP`] spacing.
+/// [`FACET_METRES`] spacing.
 ///
-/// Split out from [`facet_geometry`] because a caller may want to *look* at
-/// the heights before deciding whether the chunk is worth meshing at all —
-/// the open world skips chunks whose every corner sits on the ocean floor,
-/// since the backdrop plane already draws that. The loop order is the format:
-/// [`facet_geometry`] samples through here, so a chunk built either way comes
-/// out bit for bit the same.
+/// The loop order is the format — a payload's heights are in exactly this
+/// order — so a caller may also *look* at the grid before deciding whether the
+/// chunk is worth sending at all: the open world skips chunks whose every
+/// corner sits on the ocean floor, since a client's backdrop plane already
+/// draws that.
 pub(crate) fn facet_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec<f32> {
-    let verts = FACET_VERTS;
-    let mut heights = vec![0.0f32; verts * verts];
-    for iz in 0..verts {
-        let wz = base.y + (iz as u32 * MESH_STEP) as f32;
-        for ix in 0..verts {
-            let wx = base.x + (ix as u32 * MESH_STEP) as f32;
-            heights[iz * verts + ix] = height(wx, wz);
+    let mut heights = vec![0.0f32; FACET_VERTS * FACET_VERTS];
+    for iz in 0..FACET_VERTS {
+        let wz = base.y + iz as f32 * FACET_METRES;
+        for ix in 0..FACET_VERTS {
+            let wx = base.x + ix as f32 * FACET_METRES;
+            heights[iz * FACET_VERTS + ix] = height(wx, wz);
         }
     }
     heights
 }
 
-/// Builds one chunk's worth of flat-shaded geometry over any height and colour
-/// field: `base` is the world coordinate of the chunk's lower corner, and the
-/// closures are sampled in that same world space. A lone island map and the
-/// open world build their chunks through here alike, so the two can never
-/// disagree about what a chunk of ground looks like.
+/// What every triangle of one chunk is painted, in the order
+/// [`protocol::ground::facets`] walks them — which is the order a payload
+/// carries them in, and the order a renderer builds its triangles in, so
+/// neither end has to be told twice.
 ///
-/// The geometry is flat shaded: every triangle carries its own normal and its
-/// own single colour, so no vertex is shared between two triangles. That costs
-/// three vertices per triangle instead of roughly one, and buys it back many
-/// times over from drawing at [`MESH_STEP`] rather than per tile. It also
-/// means chunks need no border samples to meet cleanly — there are no shared
-/// normals to disagree about.
-pub(crate) fn facet_geometry(
-    base: Vec2,
-    height: impl Fn(f32, f32) -> f32,
-    color: impl Fn(f32, f32, f32, Vec3) -> Vec3,
-    uv: impl Fn(f32, f32) -> [f32; 2],
-) -> ChunkGeometry {
-    facet_geometry_from_heights(base, &facet_heights(base, height), color, uv)
-}
-
-/// The half of [`facet_geometry`] that turns corner heights into triangles,
-/// for callers that have already sampled the grid themselves.
-///
-/// `heights` must be exactly what [`facet_heights`] returns for the same
-/// `base` — a [`FACET_VERTS`]-square grid, row-major.
-pub(crate) fn facet_geometry_from_heights(
+/// `heights` is what [`facet_heights`] returned for the same `base`. The
+/// ground is flat shaded, so one sample at a triangle's centre decides the
+/// whole of it: there is nothing to interpolate between its corners, and the
+/// normal it is lit and classified by is the triangle's own rather than the
+/// field's.
+pub(crate) fn facet_surfaces(
     base: Vec2,
     heights: &[f32],
-    color: impl Fn(f32, f32, f32, Vec3) -> Vec3,
-    uv: impl Fn(f32, f32) -> [f32; 2],
-) -> ChunkGeometry {
-    let step = MESH_STEP as f32;
-    let quads = (CHUNK_TILES / MESH_STEP) as usize;
-    let verts = FACET_VERTS;
-    debug_assert_eq!(heights.len(), verts * verts, "not a chunk's corner grid");
+    surface: impl Fn(f32, f32, f32, Vec3) -> Surface,
+) -> Vec<Surface> {
+    debug_assert_eq!(
+        heights.len(),
+        FACET_VERTS * FACET_VERTS,
+        "not a chunk's corner grid"
+    );
+    let corner = |(ix, iz): (usize, usize)| {
+        Vec3::new(
+            ix as f32 * FACET_METRES,
+            heights[iz * FACET_VERTS + ix],
+            iz as f32 * FACET_METRES,
+        )
+    };
 
-    let count = quads * quads * 6;
-    let mut positions = Vec::with_capacity(count);
-    let mut normals = Vec::with_capacity(count);
-    let mut uvs = Vec::with_capacity(count);
-    let mut colors = Vec::with_capacity(count);
-
-    for iz in 0..quads {
-        for ix in 0..quads {
-            let (x0, z0) = (ix as f32 * step, iz as f32 * step);
-            let (x1, z1) = (x0 + step, z0 + step);
-            let h = |cx: usize, cz: usize| heights[cz * verts + cx];
-
-            let tl = Vec3::new(x0, h(ix, iz), z0);
-            let tr = Vec3::new(x1, h(ix + 1, iz), z0);
-            let bl = Vec3::new(x0, h(ix, iz + 1), z1);
-            let br = Vec3::new(x1, h(ix + 1, iz + 1), z1);
-
-            // Which way the quad is split alternates like a checkerboard.
-            // Splitting every quad the same way lines the facets up into an
-            // obvious herringbone across open ground; alternating breaks
-            // that up without costing anything.
-            //
-            // Both windings are counter-clockwise seen from above (+Y),
-            // which is what puts the face normals upwards.
-            let split = if (ix + iz) % 2 == 0 {
-                [[tl, bl, tr], [tr, bl, br]]
-            } else {
-                [[tl, bl, br], [tl, br, tr]]
-            };
-
-            for tri in split {
-                let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
-
-                // One sample at the centre decides the whole facet — the
-                // point of flat shading is that there is nothing to
-                // interpolate between its corners.
-                let mid = (tri[0] + tri[1] + tri[2]) / 3.0;
-                let (wx, wz) = (base.x + mid.x, base.y + mid.z);
-                let c = color(wx, wz, mid.y, normal);
-                // Vertex colours are consumed in linear space by the PBR
-                // shader.
-                let c = [
-                    srgb_to_linear(c.x),
-                    srgb_to_linear(c.y),
-                    srgb_to_linear(c.z),
-                    1.0,
-                ];
-                let uv = uv(wx, wz);
-
-                for corner in tri {
-                    positions.push([corner.x, corner.y, corner.z]);
-                    normals.push([normal.x, normal.y, normal.z]);
-                    uvs.push(uv);
-                    colors.push(c);
-                }
-            }
-        }
-    }
-
-    ChunkGeometry {
-        positions,
-        normals,
-        uvs,
-        colors,
-    }
-}
-
-/// One chunk's vertex buffers, as any renderer wants them: a triangle list,
-/// three vertices per triangle in order.
-///
-/// Deliberately un-indexed: with no vertex shared between triangles an index
-/// buffer would be 0, 1, 2, 3, … and save nothing.
-pub struct ChunkGeometry {
-    pub positions: Vec<[f32; 3]>,
-    pub normals: Vec<[f32; 3]>,
-    /// Spanning the whole map rather than the chunk, so a future overlay lines
-    /// up across chunk boundaries.
-    pub uvs: Vec<[f32; 2]>,
-    /// RGBA, already in linear space — see [`srgb_to_linear`].
-    pub colors: Vec<[f32; 4]>,
-}
-
-/// One sRGB channel decoded to linear, the standard piecewise transfer
-/// function. The palette is authored in sRGB and shaders blend in linear, so
-/// the conversion happens here, once, as the geometry is built — every
-/// renderer this feeds has to agree on it, and the game's tests hold it to
-/// what Bevy's own colour types compute.
-///
-/// Takes a channel in [0, 1], which is all the palette ever holds. Below zero
-/// this would carry the linear leg on down where a renderer hands the value
-/// back untouched, so the agreement the tests check is over that range and no
-/// wider — nothing here has any business asking for more.
-///
-/// Uses this crate's [`pow`] rather than the platform's, which costs the exact
-/// bit-for-bit equality with Bevy that test once held: Bevy calls `powf` and
-/// this no longer does, so the two now part company in the last ULP or so. The
-/// swap is still the right way round. Colours reach the digests through
-/// [`ChunkGeometry::colors`], so a platform-dependent decode would leave the
-/// map digest unable to mean what it says on any machine but the one that
-/// recorded it — and being one ULP from Bevy in a colour nobody can see is a
-/// far smaller thing than being unable to check that a seed is a map at all.
-pub fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        pow((c + 0.055) / 1.055, 2.4)
-    }
+    protocol::ground::facets()
+        .map(|facet| {
+            let tri = facet.corners.map(corner);
+            // Counter-clockwise seen from above, so this points upwards.
+            let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
+            let mid = (tri[0] + tri[1] + tri[2]) / 3.0;
+            surface(base.x + mid.x, base.y + mid.z, mid.y, normal)
+        })
+        .collect()
 }
 
 /// Dimensions of a [`COAST_GRID`]-spaced grid covering a map of `tiles`,
@@ -2640,7 +2481,7 @@ pub(crate) fn normal_at(wx: f32, wz: f32, height: impl Fn(f32, f32) -> f32) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{digest, floats};
+    use crate::testing::{digest, floats, ints};
 
     fn generator(chunks_x: u32, chunks_z: u32, seed: u32) -> (MapConfig, TerrainGenerator) {
         let config = MapConfig {
@@ -2942,13 +2783,17 @@ mod tests {
     #[test]
     fn a_seed_is_the_same_map_down_to_the_bit() {
         // `same_seed_gives_same_map` says two generators in one process agree.
-        // This pins the map itself: golden digests of the height field, the
-        // colours and a chunk's geometry, recorded once and held to ever
+        // This pins the map itself: golden digests of the height field and the
+        // palette entry every point is painted, recorded once and held to ever
         // after. It is what makes "a seed is a map" a tested property rather
-        // than a habit — anything that regenerates a map elsewhere instead of
-        // shipping it, a server sending nothing but the seed or a wasm build
-        // generating in the browser, is betting that every machine, target
-        // and compiler agrees on every bit.
+        // than a habit.
+        //
+        // Maps are no longer regenerated by everyone — a server generates and
+        // sends, so no client is betting on its own arithmetic. What is still
+        // being bet is that a *world* survives being re-hosted: a seed handed
+        // to a machine with a different libm has to raise the same islands, or
+        // a saved position, a shared seed and a server moved between hosts all
+        // quietly mean somewhere else.
         //
         // When this fails because the generator was *meant* to change,
         // re-record the digests (run with `--nocapture` and they are printed)
@@ -2961,8 +2806,8 @@ mod tests {
         // the machine that recorded it; a bumped `libm` would show up here the
         // same way a new platform would.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x69CE_AB02_11E1_998Bu64),
-            (99, UVec2::new(3, 2), 0x45EE_68F7_2739_ADD9u64),
+            (20_040_112u32, UVec2::new(4, 4), 0xDE15_2FC2_B042_C207u64),
+            (99, UVec2::new(3, 2), 0x9086_7443_C334_B66Fu64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -2971,28 +2816,24 @@ mod tests {
             let half = config.half_extent();
 
             // Every reader of the map, over the whole of it: the height field
-            // and the palette on a 4 m grid, then one chunk's finished
-            // geometry — which folds in the mesh layout and the sRGB
-            // decoding on top of the fields themselves.
+            // and its normals on a 4 m grid, and the palette entry each of
+            // those points is painted — the surface as a byte, since that is
+            // now the form it leaves this machine in.
             let mut values = Vec::new();
+            let mut painted = Vec::new();
             for iz in (0..=config.tiles().y).step_by(4) {
                 for ix in (0..=config.tiles().x).step_by(4) {
                     let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                     let height = gen.height(wx, wz);
                     let normal = gen.normal(wx, wz);
-                    let color = gen.color(wx, wz, height, normal);
+                    let surface = gen.surface(wx, wz, height, normal);
                     values.extend([height, normal.x, normal.y, normal.z]);
-                    values.extend([color.x, color.y, color.z]);
+                    painted.push(surface.tone as i64);
+                    painted.push(surface.shade as i64);
                 }
             }
 
-            let geometry = gen.build_chunk(UVec2::ZERO, config.tiles());
-            values.extend(geometry.positions.iter().flatten());
-            values.extend(geometry.normals.iter().flatten());
-            values.extend(geometry.uvs.iter().flatten());
-            values.extend(geometry.colors.iter().flatten());
-
-            let got = digest(floats(values));
+            let got = digest(floats(values).chain(ints(painted)));
             println!("seed {seed} digests to {got:#018X}");
             assert_eq!(
                 got, expected,
@@ -3284,8 +3125,8 @@ mod tests {
 
         let mut climbed = 0;
         for step in 0..12 {
-            let distance = step as f32 * MESH_STEP as f32;
-            let rise = shape_coast(0.0, distance + MESH_STEP as f32, 1.0, 1.0)
+            let distance = step as f32 * FACET_METRES;
+            let rise = shape_coast(0.0, distance + FACET_METRES, 1.0, 1.0)
                 - shape_coast(0.0, distance, 1.0, 1.0);
             if rise > 0.1 {
                 climbed += 1;
@@ -3327,134 +3168,88 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_is_two_flat_triangles_per_quad() {
-        let (config, gen) = generator(2, 2, 1);
-        let geometry = gen.build_chunk(UVec2::ZERO, config.tiles());
+    fn the_facet_grid_is_the_chunk_at_the_drawing_step() {
+        // Sampled from the base outwards, row-major, both edges included —
+        // which is the order a payload's heights are in and therefore the
+        // order a client rebuilds the ground from.
+        let (_, gen) = generator(2, 2, 1);
+        let base = Vec2::new(-64.0, 32.0);
+        let heights = facet_heights(base, |wx, wz| gen.height(wx, wz));
 
-        // Six vertices per quad: two triangles, sharing nothing.
-        let quads = (CHUNK_TILES / MESH_STEP) as usize;
-        assert_eq!(geometry.positions.len(), quads * quads * 6);
-        for length in [
-            geometry.normals.len(),
-            geometry.uvs.len(),
-            geometry.colors.len(),
-        ] {
-            assert_eq!(length, geometry.positions.len());
-        }
-    }
-
-    #[test]
-    fn every_triangle_is_one_flat_facet() {
-        let (config, gen) = generator(2, 2, 1);
-        let geometry = gen.build_chunk(UVec2::ZERO, config.tiles());
-
-        let (normals, colors) = (geometry.normals, geometry.colors);
-
-        for tri in 0..normals.len() / 3 {
-            let i = tri * 3;
-            for corner in 1..3 {
-                assert_eq!(
-                    normals[i],
-                    normals[i + corner],
-                    "triangle {tri} has a varying normal"
-                );
-                assert_eq!(
-                    colors[i],
-                    colors[i + corner],
-                    "triangle {tri} has a varying colour"
-                );
-            }
-            // A heightfield can never overhang, so every facet faces upwards.
-            assert!(normals[i][1] > 0.0, "triangle {tri} faces downwards");
-        }
-    }
-
-    #[test]
-    fn the_palette_is_small_and_the_colours_are_never_blended() {
-        // The whole point of the styling: no gradients anywhere on the ground.
-        // Every facet on a whole map has to land on one of the palette entries,
-        // times one of three shade steps.
-        let (config, gen) = generator(4, 4, 77);
-        let mut seen = std::collections::HashSet::new();
-
-        for cz in 0..config.chunks.y {
-            for cx in 0..config.chunks.x {
-                let geometry = gen.build_chunk(UVec2::new(cx, cz) * CHUNK_TILES, config.tiles());
-                for c in geometry.colors {
-                    seen.insert(c.map(|v| v.to_bits()));
-                }
-            }
-        }
-
-        let palette = [
-            SEABED,
-            SHALLOW,
-            SAND,
-            SHINGLE,
-            FOREST,
-            GRASS_DARK,
-            GRASS,
-            GRASS_LIGHT,
-            MEADOW,
-            HEATH,
-            UPLAND,
-            FELL,
-            ROCK,
-            ROCK_DARK,
-            SCREE,
-        ];
-        assert!(
-            seen.len() <= palette.len() * 3,
-            "{} distinct colours is more than the palette allows",
-            seen.len()
+        assert_eq!(heights.len(), FACET_VERTS * FACET_VERTS);
+        assert_eq!(heights[0], gen.height(base.x, base.y), "the near corner");
+        assert_eq!(
+            heights[1],
+            gen.height(base.x + FACET_METRES, base.y),
+            "the second sample is one facet along x, not along z"
         );
-    }
-
-    #[test]
-    fn chunk_positions_are_local_and_offset_by_the_placement() {
-        let (config, gen) = generator(2, 2, 1);
-        let origin = UVec2::splat(CHUNK_TILES);
-        let positions = gen.build_chunk(origin, config.tiles()).positions;
-
-        // First vertex sits at the chunk's own origin, not the map's.
-        assert_eq!(positions[0][0], 0.0);
-        assert_eq!(positions[0][2], 0.0);
-
-        // And its height matches the world position placing the chunk puts it at.
-        let half = config.half_extent();
-        let expected = gen.height(
-            origin.x as f32 * TILE_SIZE - half.x,
-            origin.y as f32 * TILE_SIZE - half.y,
+        assert_eq!(
+            heights[FACET_VERTS],
+            gen.height(base.x, base.y + FACET_METRES),
+            "the second row is one facet along z"
         );
-        assert_eq!(positions[0][1], expected);
+        assert_eq!(
+            heights[FACET_VERTS * FACET_VERTS - 1],
+            gen.height(base.x + CHUNK_METRES, base.y + CHUNK_METRES),
+            "the far corner is the chunk's far corner, not one facet short of it"
+        );
     }
 
     #[test]
     fn neighbouring_chunks_agree_along_their_shared_edge() {
-        // On a rectangular map, whose two chunks sit side by side.
-        let (config, gen) = generator(2, 1, 5);
+        // Two chunks side by side sample the same world points along the plane
+        // between them — the far column of one and the near column of the
+        // other — so the ground has no seam to show wherever a client puts the
+        // two meshes next to each other.
+        let (_, gen) = generator(2, 1, 5);
+        let left = facet_heights(Vec2::ZERO, |wx, wz| gen.height(wx, wz));
+        let right = facet_heights(Vec2::new(CHUNK_METRES, 0.0), |wx, wz| gen.height(wx, wz));
 
-        let left = gen.build_chunk(UVec2::ZERO, config.tiles());
-        let right = gen.build_chunk(UVec2::new(CHUNK_TILES, 0), config.tiles());
-
-        // Every vertex sitting on the shared plane, as (z, height) pairs. Flat
-        // shading repeats each corner across the triangles that touch it, so
-        // these need deduplicating before the two sides can be compared.
-        let edge = |geometry: &ChunkGeometry, local_x: f32| {
-            let mut points: Vec<(f32, f32)> = geometry
-                .positions
-                .iter()
-                .filter(|p| p[0] == local_x)
-                .map(|p| (p[2], p[1]))
-                .collect();
-            points.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a heightfield"));
-            points.dedup();
-            points
+        let column = |grid: &[f32], ix: usize| -> Vec<f32> {
+            (0..FACET_VERTS)
+                .map(|iz| grid[iz * FACET_VERTS + ix])
+                .collect()
         };
+        assert_eq!(
+            column(&left, FACET_VERTS - 1),
+            column(&right, 0),
+            "chunks disagree along their seam"
+        );
+    }
 
-        let seam = edge(&left, CHUNK_TILES as f32);
-        assert_eq!(seam.len(), (CHUNK_TILES / MESH_STEP + 1) as usize);
-        assert_eq!(seam, edge(&right, 0.0), "chunks disagree along their seam");
+    #[test]
+    fn only_the_patchwork_is_ever_shaded() {
+        // The shade steps exist to break a big parcel of one colour into
+        // facets, so they belong to the parcels and nowhere else. A shaded
+        // shore or a shaded snow cap would be the mottle field reaching
+        // somewhere it has no business being — and the snow in particular has
+        // no room above it, so a lightened one would come out clamped.
+        let (config, gen) = generator(4, 4, 77);
+        let half = config.half_extent();
+        let parcels: std::collections::HashSet<u8> = LOWLAND_PARCELS
+            .iter()
+            .chain(&MOOR_PARCELS)
+            .chain(&MOUNTAIN_PARCELS)
+            .map(|tone| *tone as u8)
+            .collect();
+
+        let mut shaded = 0;
+        for iz in (0..config.tiles().y).step_by(4) {
+            for ix in (0..config.tiles().x).step_by(4) {
+                let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
+                let height = gen.height(wx, wz);
+                let surface = gen.surface(wx, wz, height, gen.normal(wx, wz));
+                if surface.shade != Shade::Plain {
+                    shaded += 1;
+                    assert!(
+                        parcels.contains(&(surface.tone as u8)),
+                        "{:?} was shaded, and only the patchwork may be",
+                        surface.tone
+                    );
+                }
+            }
+        }
+        assert!(shaded > 0, "a whole map with no mottle at all is not a map");
     }
 }
 
@@ -3664,41 +3459,6 @@ mod bench {
             println!(
                 "{metres:5} m  {elapsed:>8.0?}  range_gain {:.2}",
                 std::hint::black_box(&generator).range_gain
-            );
-        }
-    }
-
-    /// Single-threaded cost of generating a whole map, chunk by chunk. The app
-    /// itself spreads these across the task pool.
-    #[test]
-    #[ignore]
-    fn mesh_build_cost() {
-        for chunks in [
-            UVec2::new(4, 4),
-            UVec2::new(8, 8),
-            UVec2::new(12, 8),
-            UVec2::new(16, 16),
-            UVec2::new(32, 32),
-        ] {
-            let config = MapConfig { chunks, seed: 1 };
-            let generator = TerrainGenerator::new(&config);
-
-            let start = Instant::now();
-            let mut tris = 0;
-            for cz in 0..config.chunks.y {
-                for cx in 0..config.chunks.x {
-                    let geometry =
-                        generator.build_chunk(UVec2::new(cx, cz) * CHUNK_TILES, config.tiles());
-                    tris += geometry.positions.len() / 3;
-                }
-            }
-            let elapsed = start.elapsed();
-
-            println!(
-                "{:5}x{} m  {:>4} chunks  {tris:>11} tris  {elapsed:>8.0?}",
-                config.tiles().x,
-                config.tiles().y,
-                config.chunks.x * config.chunks.y
             );
         }
     }

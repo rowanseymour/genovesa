@@ -1,13 +1,26 @@
 //! A server and its clients talking over real sockets: the handshake, the
-//! introductions, the relay, and leaving.
+//! introductions, the relay, the ground, and leaving.
 
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-use glam::Vec2;
+use glam::{IVec2, Vec2};
+use protocol::ground::{dequantize, CHUNK_METRES};
 use protocol::{PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
-use server::{Host, Server};
-use world::archipelago::{Archipelago, WorldConfig};
+use server::{Host, Server, WorldConfig};
+use world::archipelago::Archipelago;
+
+/// What a seed's world is, to a test that is allowed to know. A client never
+/// gets one of these — that is the whole point of the arrangement — so these
+/// are here to say what the server's answers *should* have been.
+fn behind_the_curtain(seed: u32) -> Archipelago {
+    Archipelago::new(&WorldConfig { seed })
+}
+
+/// The chunk a world point stands in.
+fn chunk_at(point: Vec2) -> IVec2 {
+    (point / CHUNK_METRES).floor().as_ivec2()
+}
 
 /// A hosted world on a loopback port of the machine's choosing, running until
 /// the test process ends. Most of what is tested here is a conversation, not a
@@ -43,14 +56,30 @@ impl Client {
         Self(stream)
     }
 
-    fn join(addr: SocketAddr) -> (Self, PlayerId, u32, Vec2) {
+    fn join(addr: SocketAddr) -> (Self, PlayerId, Vec2, Vec2) {
         let client = Self::connect(addr);
         client.say(ToServer::Hello {
             version: PROTOCOL_VERSION,
         });
         match client.hear() {
-            ToClient::Welcome { id, seed, spawn } => (client, id, seed, spawn),
+            ToClient::Welcome { id, spawn, facing } => (client, id, spawn, facing),
             other => panic!("expected a welcome, heard {other:?}"),
+        }
+    }
+
+    /// Asks for one chunk and takes the answer to it. Nothing else is in
+    /// flight in the tests that use this, so the next message is the answer.
+    fn ask_for(&self, chunk: IVec2) -> Option<protocol::ChunkPayload> {
+        self.say(ToServer::WantChunk { chunk });
+        match self.hear() {
+            ToClient::Chunk {
+                chunk: answered,
+                ground,
+            } => {
+                assert_eq!(answered, chunk, "an answer about the wrong chunk");
+                ground
+            }
+            other => panic!("expected ground, heard {other:?}"),
         }
     }
 
@@ -76,24 +105,124 @@ impl Client {
 }
 
 #[test]
-fn a_client_is_welcomed_with_the_world() {
+fn a_client_is_welcomed_with_somewhere_to_stand_and_something_to_look_at() {
     let addr = host(7);
-    let (_client, _id, seed, spawn) = Client::join(addr);
+    let (_client, _id, spawn, facing) = Client::join(addr);
 
-    assert_eq!(seed, 7, "the welcome names a different world");
-    // Players enter on the world's own spawn point — the open water off the
-    // first island that a lone run of the seed opens on — scattered a few
-    // boat-lengths so arrivals don't stack. What is pinned is that the
-    // served spawn stays inside that scatter, and so on the same patch of
-    // water every other machine computes for this seed.
-    let entry = Archipelago::new(&WorldConfig { seed: 7 })
+    // The welcome no longer names a seed — a client has nothing to generate,
+    // so the world it is in is a place rather than a number. What identifies
+    // it is where the player was put down: players enter on the world's own
+    // spawn point, the open water off its first island, scattered a few
+    // boat-lengths so arrivals don't stack.
+    let entry = behind_the_curtain(7)
         .spawn()
-        .expect("the seed offers somewhere to enter")
-        .point;
+        .expect("the seed offers somewhere to enter");
     assert!(
-        spawn.distance(entry) <= server::SPAWN_SCATTER,
+        spawn.distance(entry.point) <= server::SPAWN_SCATTER,
         "{spawn} is not the patch of water players enter on"
     );
+
+    // And the view opens on the island that water stands off, which the
+    // client could not have worked out for itself.
+    assert_eq!(facing, entry.island.centre());
+}
+
+#[test]
+fn ground_is_asked_for_by_chunk_and_answered_either_way() {
+    let addr = host(7);
+    let (client, _id, spawn, facing) = Client::join(addr);
+
+    // The middle of the island the player was put down beside is ground, and
+    // it arrives as heights and surfaces rather than as anything about how it
+    // was made.
+    let land = client
+        .ask_for(chunk_at(facing))
+        .expect("the middle of an island should be ground");
+    assert!(land.well_formed());
+    let highest = land
+        .heights
+        .iter()
+        .map(|h| dequantize(*h))
+        .fold(f32::MIN, f32::max);
+    assert!(
+        highest > 0.0,
+        "an island's middle came back entirely under water, at {highest} m"
+    );
+
+    // Open water carries nothing. Walked out from the spawn until the test's
+    // own copy of the world says there is no island answerable for a chunk —
+    // which is exactly what the server will find when it looks.
+    let world = behind_the_curtain(7);
+    let ocean = (1..200)
+        .map(|i| chunk_at(spawn) + IVec2::splat(i))
+        .find(|chunk| {
+            let middle = (chunk.as_vec2() + 0.5) * CHUNK_METRES;
+            world.island_at(middle.x, middle.y).is_none()
+        })
+        .expect("some open ocean within a few kilometres");
+    assert_eq!(client.ask_for(ocean), None, "open water carried a payload");
+}
+
+#[test]
+fn ground_can_be_asked_for_out_of_order_and_comes_back_labelled() {
+    // Answers are labelled with the chunk they are about because they need
+    // not arrive in the order they were asked for: open water costs nothing
+    // and an island costs hundreds of milliseconds, so a later request is
+    // often the first one answered. A client keys everything by coordinate,
+    // and this is what lets it.
+    let addr = host(3);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let asked: Vec<IVec2> = (0..8)
+        .map(|i| chunk_at(spawn) + IVec2::new(i, -i))
+        .collect();
+
+    for chunk in &asked {
+        client.say(ToServer::WantChunk { chunk: *chunk });
+    }
+
+    let mut answered = Vec::new();
+    for _ in 0..asked.len() {
+        match client.hear() {
+            ToClient::Chunk { chunk, .. } => answered.push(chunk),
+            other => panic!("expected ground, heard {other:?}"),
+        }
+    }
+    answered.sort_by_key(|chunk| (chunk.x, chunk.y));
+    let mut expected = asked.clone();
+    expected.sort_by_key(|chunk| (chunk.x, chunk.y));
+    assert_eq!(answered, expected, "every request is answered exactly once");
+}
+
+#[test]
+fn two_clients_asking_for_one_chunk_get_the_same_ground() {
+    // One world behind both of them, not two generations of it that merely
+    // ought to agree — which is what makes a session one place.
+    let addr = host(7);
+    let (alice, _a, _spawn, facing) = Client::join(addr);
+    let (bob, _b, _spawn, _facing) = Client::join(addr);
+    // The introductions each is owed, out of the way, so that the next thing
+    // either hears is the ground it asked for.
+    let _ = alice.hear();
+    let _ = bob.hear();
+
+    let chunk = chunk_at(facing);
+    assert_eq!(alice.ask_for(chunk), bob.ask_for(chunk));
+}
+
+#[test]
+fn a_chunk_no_player_could_stand_in_ends_the_session() {
+    // The twin of the position check below: coordinates past where the world
+    // resolves are a broken or hostile client, and answering would put a
+    // worker to work on ground made of arithmetic that has run out.
+    let addr = host(1);
+    let (alice, _a, _, _) = Client::join(addr);
+    let (bob, b, _, _) = Client::join(addr);
+    let _ = alice.hear(); // Bob's arrival
+
+    bob.say(ToServer::WantChunk {
+        chunk: IVec2::new(i32::MAX, 0),
+    });
+    assert_eq!(alice.hear(), ToClient::Left { id: b });
 }
 
 #[test]
@@ -101,8 +230,8 @@ fn two_players_are_never_put_down_in_the_same_spot() {
     // Otherwise the first thing a joined session shows is one marker where
     // there are two players.
     let addr = host(1);
-    let (_alice, _a, _, first) = Client::join(addr);
-    let (_bob, _b, _, second) = Client::join(addr);
+    let (_alice, _a, first, _) = Client::join(addr);
+    let (_bob, _b, second, _) = Client::join(addr);
     assert_ne!(first, second, "two players' markers would stack");
 }
 
@@ -143,8 +272,8 @@ fn the_wrong_dialect_is_refused() {
 #[test]
 fn players_meet_move_and_part() {
     let addr = host(1);
-    let (alice, a, _, alices_spawn) = Client::join(addr);
-    let (bob, b, _, bobs_spawn) = Client::join(addr);
+    let (alice, a, alices_spawn, _) = Client::join(addr);
+    let (bob, b, bobs_spawn, _) = Client::join(addr);
     assert_ne!(a, b, "two players were dealt one id");
 
     // Introductions both ways: the newcomer hears who was already here, and
@@ -181,7 +310,7 @@ fn players_meet_move_and_part() {
     // Alice having heard the move is what guarantees the server had processed
     // it before Carol connected. The roster iterates in no particular order,
     // so sort what she hears before pinning it.
-    let (carol, c, _, carols_spawn) = Client::join(addr);
+    let (carol, c, carols_spawn, _) = Client::join(addr);
     assert_eq!(
         alice.hear(),
         ToClient::Joined {
@@ -226,8 +355,9 @@ fn a_spawned_host_serves_the_same_world() {
     // Hosting on a thread is the same session, only reachable from a game that
     // is drawing frames alongside it.
     let host = spawn_host(7);
-    let (_client, _id, seed, _spawn) = Client::join(host.addr());
-    assert_eq!(seed, 7);
+    let (_client, _id, spawn, _facing) = Client::join(host.addr());
+    let entry = behind_the_curtain(7).spawn().expect("somewhere to enter");
+    assert!(spawn.distance(entry.point) <= server::SPAWN_SCATTER);
 }
 
 #[test]
@@ -275,8 +405,12 @@ fn a_port_can_be_hosted_again_once_the_host_is_dropped() {
         .expect("the port is still held")
         .spawn()
         .expect("spawn");
-    let (_client, _id, seed, _) = Client::join(again.addr());
-    assert_eq!(seed, 2, "the second world is not the one being served");
+    let (_client, _id, spawn, _) = Client::join(again.addr());
+    let entry = behind_the_curtain(2).spawn().expect("somewhere to enter");
+    assert!(
+        spawn.distance(entry.point) <= server::SPAWN_SCATTER,
+        "the second world is not the one being served"
+    );
 }
 
 #[test]

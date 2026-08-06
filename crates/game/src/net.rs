@@ -1,12 +1,12 @@
 //! Playing in a served world: the game as a client, and — when this machine is
 //! the one hosting — as the server's landlord too.
 //!
-//! Terrain never arrives over the wire. The server's welcome names the seed,
-//! and the seed *is* the world — the `world` crate regenerates it here, bit
-//! for bit, exactly as a local run would have. What the connection carries is
-//! the session: who else is in the world and where they are, drawn as marker
-//! capsules standing on the same ground every machine is generating for
-//! itself.
+//! Every world is a served world. The connection carries the session — who
+//! else is in the world and where they are, drawn as marker capsules — and it
+//! carries the world itself, a chunk of ground at a time: this module puts the
+//! requests [`crate::terrain::Ground`] wants onto the wire and the answers
+//! back into it. The welcome names no seed, because a client has nothing to
+//! generate; what it names is where this player stands and which way to look.
 //!
 //! A [`Connection`] is made either from the command line, before the app
 //! exists, or from a menu screen with the frame loop already running — the
@@ -17,12 +17,14 @@
 //! way ([`report_position`]).
 //!
 //! Hosting is the same picture with a server behind it: the `server` crate is
-//! headless and engine-free, so a game that shares a world runs one on a
-//! thread and then joins it over the loopback like anybody else. There is no
-//! second, quieter implementation of a session for the host to play against.
+//! headless and engine-free, so a game opening a world runs one on a thread
+//! and then joins it over the loopback like anybody else. That is true of
+//! *every* world started from this machine, shared or not — see [`Reach`].
+//! There is no second, quieter implementation of a session to play alone
+//! against, and no way at all to be in a world without a server making it.
 
 use std::collections::HashMap;
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Mutex;
 use std::thread;
@@ -31,10 +33,10 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use protocol::{PlayerId, ToClient, ToServer, DEFAULT_PORT, PROTOCOL_VERSION};
-use server::{Host, Server};
+use server::{Host, Server, WorldConfig};
 
 use crate::boat::Boat;
-use crate::terrain::{WorldConfig, WorldTerrain};
+use crate::terrain::Ground;
 use crate::{eased, matte, AppState};
 
 /// Seconds between position reports, at least. Ten a second reads as
@@ -76,10 +78,13 @@ pub struct Connection {
     /// Who the server says we are. Nothing uses it yet, but a session where
     /// the client doesn't know its own name would be a strange one.
     pub id: PlayerId,
-    /// The world being served — the whole of it, this being Genovesa.
-    pub seed: u32,
     /// Where the server puts arriving players down.
     pub spawn: Vec2,
+    /// A ground point the opening view is turned towards — the island the
+    /// spawn stands off. Equal to the spawn when the server had nothing in
+    /// particular to offer, which names no direction and leaves the bearing
+    /// alone.
+    pub facing: Vec2,
 }
 
 impl Connection {
@@ -107,7 +112,7 @@ impl Connection {
         .map_err(|error| format!("`{addr}` hung up mid-greeting: {error}"))?;
 
         match ToClient::read(&mut &stream) {
-            Ok(ToClient::Welcome { id, seed, spawn }) => {
+            Ok(ToClient::Welcome { id, spawn, facing }) => {
                 let _ = stream.set_read_timeout(None);
                 let _ = stream.set_write_timeout(Some(REPORT_TIMEOUT));
                 // From here the socket splits: this thread reads it forever,
@@ -129,8 +134,8 @@ impl Connection {
                     stream,
                     incoming: Mutex::new(incoming),
                     id,
-                    seed,
                     spawn,
+                    facing,
                 })
             }
             Ok(ToClient::Refused { version }) => Err(format!(
@@ -151,10 +156,20 @@ impl Connection {
     ///
     /// [`drain`]: Connection::drain
     fn report(&self, position: Vec2) {
-        if (ToServer::Move { position })
-            .write(&mut &self.stream)
-            .is_err()
-        {
+        self.say(ToServer::Move { position });
+    }
+
+    /// Asks for one chunk of ground.
+    ///
+    /// Fire and forget, like a position report: the answer arrives through the
+    /// reader thread whenever the server gets to it, and a request that never
+    /// reached the wire is a connection that has ended.
+    fn ask_for(&self, chunk: IVec2) {
+        self.say(ToServer::WantChunk { chunk });
+    }
+
+    fn say(&self, message: ToServer) {
+        if message.write(&mut &self.stream).is_err() {
             let _ = self.stream.shutdown(Shutdown::Both);
         }
     }
@@ -209,6 +224,76 @@ pub struct Session {
     pub hosting: Option<Host>,
 }
 
+impl Session {
+    /// Joins somebody else's world, blocking until the welcome arrives.
+    pub fn joining(address: &str) -> Result<Self, String> {
+        Ok(Self {
+            connection: Connection::join(address)?,
+            hosting: None,
+        })
+    }
+
+    /// Opens a world on this machine and joins it, blocking likewise.
+    ///
+    /// Every world started here goes through this, whether anyone else is
+    /// invited or not: the ground comes from a server, so playing alone means
+    /// running one and talking to it over the loopback. [`Reach`] is the only
+    /// difference between the two, and it is a question about the network
+    /// rather than about the session — a world of one's own is served exactly
+    /// as a shared one is, and the player is a client in it exactly as a guest
+    /// would be.
+    ///
+    /// Joined over the loopback whatever it is bound to: whoever opened the
+    /// world is a player in it and gets there the short way.
+    pub fn open(config: WorldConfig, reach: Reach) -> Result<Self, String> {
+        let server = Server::bind(reach.bound_to(), config)
+            .map_err(|error| format!("cannot open a world: {error}"))?;
+        let host = server
+            .spawn()
+            .map_err(|error| format!("cannot open a world: {error}"))?;
+        Ok(Self {
+            connection: Connection::join(&format!("127.0.0.1:{}", host.addr().port()))?,
+            hosting: Some(host),
+        })
+    }
+}
+
+/// Who can reach a world this machine opens.
+///
+/// The whole of the difference between keeping a world and sharing it. A world
+/// is served either way — there is no such thing here as a world without a
+/// server — so this is a question about the network and not about the session:
+/// whether the listener is reachable from other machines, and on a port they
+/// could be told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// This machine only, on whatever port happens to be free. Nothing outside
+    /// can connect, and nothing outside needs to know a port was used.
+    Alone,
+    /// Every interface, on [`DEFAULT_PORT`] — which is what the people being
+    /// shared with have to be able to guess.
+    Shared,
+}
+
+impl Reach {
+    fn bound_to(self) -> SocketAddr {
+        match self {
+            Self::Alone => ([127, 0, 0, 1], 0).into(),
+            Self::Shared => ([0, 0, 0, 0], DEFAULT_PORT).into(),
+        }
+    }
+
+    /// What to call this dial if it dies without saying anything — see
+    /// [`Dialing::what`]. Player-facing, so it describes the place rather than
+    /// the socket.
+    fn described(self) -> String {
+        match self {
+            Self::Alone => "a world of your own".into(),
+            Self::Shared => format!("a world for others to join, port {DEFAULT_PORT}"),
+        }
+    }
+}
+
 /// A session being made, on a thread of its own.
 ///
 /// Dialling blocks: a name to look up, a connection to make, a handshake to
@@ -234,35 +319,13 @@ impl Dialing {
     /// Starts dialling a server named as `host` or `host:port`.
     pub fn to(address: &str) -> Self {
         let address = address.to_string();
-        let what = address.clone();
-        Self::on(what, move || {
-            Connection::join(&address).map(|connection| Session {
-                connection,
-                hosting: None,
-            })
-        })
+        Self::on(address.clone(), move || Session::joining(&address))
     }
 
-    /// Starts hosting a world on this machine, and joins it.
-    ///
-    /// Bound on every interface, because sharing a world means being reachable
-    /// from another machine — the menu asks for [`DEFAULT_PORT`], which is
-    /// what the people being shared with have to be able to guess. Joined over
-    /// the loopback whatever address they use: the host is a player in their
-    /// own world and gets to it the short way.
-    pub fn hosting(config: WorldConfig, port: u16) -> Self {
-        Self::on(format!("a world of your own, port {port}"), move || {
-            let server = Server::bind(("0.0.0.0", port), config)
-                .map_err(|error| format!("cannot host on port {port}: {error}"))?;
-            let host = server
-                .spawn()
-                .map_err(|error| format!("cannot host: {error}"))?;
-            let connection = Connection::join(&format!("127.0.0.1:{}", host.addr().port()))?;
-            Ok(Session {
-                connection,
-                hosting: Some(host),
-            })
-        })
+    /// Starts opening a world on this machine — see [`Session::open`], which
+    /// this is the off-the-frame-loop way to reach.
+    pub fn opening(config: WorldConfig, reach: Reach) -> Self {
+        Self::on(reach.described(), move || Session::open(config, reach))
     }
 
     fn on(what: String, dial: impl FnOnce() -> Result<Session, String> + Send + 'static) -> Self {
@@ -352,7 +415,7 @@ impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (receive, report_position, place_markers)
+            (receive, ask_for_ground, report_position, place_markers)
                 .chain()
                 .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Online>)),
         )
@@ -388,6 +451,7 @@ fn marker_color(id: PlayerId) -> Color {
 fn receive(
     mut commands: Commands,
     mut online: ResMut<Online>,
+    mut ground: Option<ResMut<Ground>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut lost: Local<bool>,
@@ -439,10 +503,35 @@ fn receive(
                     commands.entity(marker).despawn();
                 }
             }
+            ToClient::Chunk {
+                chunk,
+                ground: sent,
+            } => {
+                // Only while a world is open. A chunk answered after leaving
+                // one is about a world that no longer exists here, and there
+                // is nothing left for it to be part of.
+                if let Some(ground) = ground.as_mut() {
+                    ground.deliver(chunk, sent);
+                }
+            }
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } => {}
         }
+    }
+}
+
+/// Puts the chunk requests the ground is waiting on onto the wire.
+///
+/// The streaming policy lives in [`crate::terrain`] and knows nothing about
+/// connections; this knows nothing about which chunks are worth wanting. All
+/// that passes between them is a list of coordinates.
+fn ask_for_ground(online: Res<Online>, ground: Option<ResMut<Ground>>) {
+    let Some(mut ground) = ground else {
+        return;
+    };
+    for chunk in ground.take_requests() {
+        online.connection.ask_for(chunk);
     }
 }
 
@@ -473,7 +562,7 @@ fn report_position(
 /// stands it on the ground there.
 fn place_markers(
     time: Res<Time>,
-    terrain: Option<Res<WorldTerrain>>,
+    ground: Option<Res<Ground>>,
     mut markers: Query<(&RemotePlayer, &mut Transform)>,
 ) {
     let t = eased(MARKER_SMOOTHING, time.delta_secs());
@@ -487,7 +576,7 @@ fn place_markers(
         // Ground still generating keeps the last height, exactly as the boat
         // and the camera's own focus do.
         let mut height = transform.translation.y;
-        if let Some(surface) = terrain.as_ref().and_then(|t| t.surface(at.x, at.y)) {
+        if let Some(surface) = ground.as_ref().and_then(|g| g.surface(at.x, at.y)) {
             height = surface + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
         }
         transform.translation = Vec3::new(at.x, height, at.y);
@@ -499,7 +588,7 @@ fn place_markers(
 /// here rather than in this module's tests because the menu's tests, which
 /// join servers by clicking on things, want one too.
 #[cfg(test)]
-pub(crate) fn fake_server(seed: u32, spawn: Vec2) -> (String, Receiver<TcpStream>) {
+pub(crate) fn fake_server(spawn: Vec2, facing: Vec2) -> (String, Receiver<TcpStream>) {
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -513,8 +602,8 @@ pub(crate) fn fake_server(seed: u32, spawn: Vec2) -> (String, Receiver<TcpStream
         }
         (ToClient::Welcome {
             id: PlayerId(1),
-            seed,
             spawn,
+            facing,
         })
         .write(&mut &stream)
         .expect("welcome");
@@ -573,19 +662,35 @@ mod tests {
     }
 
     #[test]
-    fn hosting_a_world_is_a_session_like_any_other() {
-        // Sharing a world runs the very same server a dedicated one runs, and
-        // then joins it: what comes back is an ordinary welcome, and the seed
-        // in it is the world that was asked for. On a port of the machine's
-        // choosing, so that a test run cannot collide with a real server on
-        // this machine; the menu asks for the well-known one.
-        let dialing = Dialing::hosting(WorldConfig { seed: 77 }, 0);
-        let session = settle(&dialing).expect("the world should be hosted and joined");
+    fn opening_a_world_is_a_session_like_any_other() {
+        // A world of one's own runs the very same server a dedicated one runs,
+        // and then joins it: what comes back is an ordinary welcome. Bound to
+        // the loopback on a port of the machine's choosing, which is what
+        // `Reach::Alone` is — a test run cannot collide with a real server on
+        // this machine, and neither can a player.
+        let dialing = Dialing::opening(WorldConfig { seed: 77 }, Reach::Alone);
+        let session = settle(&dialing).expect("the world should be opened and joined");
 
-        assert_eq!(session.connection.seed, 77);
         assert!(
             session.hosting.is_some(),
-            "the world was joined without anything hosting it"
+            "the world was joined without anything serving it"
+        );
+        // And it is a real world: the server put this player down somewhere in
+        // it and named the land to look at.
+        assert_ne!(session.connection.spawn, session.connection.facing);
+    }
+
+    #[test]
+    fn the_seed_asked_for_is_the_world_that_opens() {
+        // The seed never reaches a client, so the only way to see that the one
+        // chosen actually got through is that two of them are two places.
+        let first = settle(&Dialing::opening(WorldConfig { seed: 77 }, Reach::Alone))
+            .expect("a world should open");
+        let second = settle(&Dialing::opening(WorldConfig { seed: 78 }, Reach::Alone))
+            .expect("a world should open");
+        assert_ne!(
+            first.connection.spawn, second.connection.spawn,
+            "two seeds opened onto the same patch of water"
         );
     }
 
@@ -594,12 +699,15 @@ mod tests {
         // The point of sharing: the world the host is standing in is reachable
         // from outside, and whoever arrives is somebody else in the same
         // world rather than the host again.
-        let dialing = Dialing::hosting(WorldConfig { seed: 3 }, 0);
-        let session = settle(&dialing).expect("the world should be hosted and joined");
+        let dialing = Dialing::opening(WorldConfig { seed: 3 }, Reach::Alone);
+        let session = settle(&dialing).expect("the world should be opened and joined");
         let port = session.hosting.as_ref().expect("hosting").addr().port();
 
         let guest = Connection::join(&format!("127.0.0.1:{port}")).expect("a guest should get in");
-        assert_eq!(guest.seed, 3, "the guest was let into a different world");
+        assert_eq!(
+            guest.facing, session.connection.facing,
+            "the guest was let into a different world"
+        );
         assert_ne!(guest.id, session.connection.id, "two players, one id");
     }
 
@@ -626,12 +734,12 @@ mod tests {
     }
 
     #[test]
-    fn joining_learns_the_world_from_the_welcome() {
-        let (addr, _socket) = fake_server(42, Vec2::new(100.0, -200.0));
+    fn joining_learns_where_it_is_from_the_welcome() {
+        let (addr, _socket) = fake_server(Vec2::new(100.0, -200.0), Vec2::new(100.0, -400.0));
         let connection = Connection::join(&addr).expect("join");
         assert_eq!(connection.id, PlayerId(1));
-        assert_eq!(connection.seed, 42);
         assert_eq!(connection.spawn, Vec2::new(100.0, -200.0));
+        assert_eq!(connection.facing, Vec2::new(100.0, -400.0));
     }
 
     #[test]
@@ -667,7 +775,7 @@ mod tests {
 
     #[test]
     fn leaving_is_heard_at_the_other_end() {
-        let (addr, socket) = fake_server(1, Vec2::ZERO);
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
         let connection = Connection::join(&addr).expect("join");
         let server = socket.recv().expect("the fake server keeps its socket");
         // So that a connection which is not really closed fails this test
@@ -691,7 +799,7 @@ mod tests {
 
     #[test]
     fn other_players_come_move_and_go_as_markers() {
-        let (addr, socket) = fake_server(1, Vec2::ZERO);
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
         let connection = Connection::join(&addr).expect("join");
         let server = socket.recv().expect("the fake server keeps its socket");
         let mut app = test_app(connection);
@@ -734,7 +842,7 @@ mod tests {
         // found until the frame ends, which is why the session keeps a map of
         // them: two messages about one player in a single drain used to leave
         // a marker nobody could remove, and lose a move outright.
-        let (addr, socket) = fake_server(1, Vec2::ZERO);
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
         let connection = Connection::join(&addr).expect("join");
         let server = socket.recv().expect("the fake server keeps its socket");
         let mut app = test_app(connection);

@@ -1,6 +1,7 @@
-# The world without the engine: terrain generation and the plan renderer,
-# with no Bevy dependency — so a headless server, or a wasm build for another
-# renderer, can generate the same maps without dragging a game engine in.
+# The world without the engine: terrain generation and the plan renderer, with
+# no Bevy dependency. It is a server's crate now — the one process in a session
+# that generates anything — and the plan renderer's, so it never needs a
+# renderer, a window or an ECS.
 [package]
 name = "world"
 version = "0.1.0"
@@ -11,10 +12,17 @@ license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
+# The two-part options `mapgen` takes, shared with the game so the two
+# binaries reject a malformed one the same way.
+args = { path = "../args" }
 # The same maths types Bevy re-exports, taken directly so this crate and the
 # game agree on them without this crate depending on Bevy. Versioned by the
 # workspace, which is what keeps that agreement true.
 glam.workspace = true
+# The wire's own vocabulary: the grid a chunk is drawn on and the palette it is
+# painted from. Generation happens here and is *sent*, so the shape of what
+# gets sent belongs with the words for it rather than here.
+protocol = { path = "../protocol" }
 # PNG encoding for the plan renders.
 image = { version = "0.25", default-features = false, features = ["png"] }
 # A pow this crate can trust. `f32::powf` is whatever libm the platform brought
@@ -23,9 +31,3 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # This one is a port of MUSL's libm in plain Rust, so it is the same arithmetic
 # everywhere it is compiled. See `pow` in terrain.rs.
 libm = "0.2"
-bevy_ecs = { workspace = true, optional = true }
-
-[features]
-# Lets the game hold MapConfig and TerrainGenerator as ECS resources directly.
-# Off by default so every other consumer gets a Bevy-free build.
-bevy = ["dep:bevy_ecs"]

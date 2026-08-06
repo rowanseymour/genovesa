@@ -6,14 +6,18 @@
 //! Every module testing a system needs some of this, and each of them had a
 //! copy of the piece it needed.
 
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
+use protocol::ground::{
+    quantize, ChunkPayload, Surface, Tone, CHUNK_METRES, FACET_METRES, FACET_TRIS, FACET_VERTS,
+    OCEAN_DEPTH,
+};
+
 use crate::bindings::{Action, KeyBindings};
-use crate::terrain::{Archipelago, IslandSpec, WorldConfig};
+use crate::terrain::Ground;
 
 /// How long a test waits before calling something a failure rather than a
 /// slow machine. Only ever paid in full by a test that was going to fail
@@ -73,22 +77,73 @@ pub fn rebind(app: &mut App, action: Action, key: KeyCode) {
         .bind(action, key, None);
 }
 
-/// A world with its biggest island near the origin already generated, and
-/// that island's spec.
+/// How far the test island reaches from the origin, in metres — the radius at
+/// which its ground has fallen all the way to the ocean floor.
+pub const TEST_ISLAND_REACH: f32 = 200.0;
+
+/// How high it stands at the origin.
+const TEST_ISLAND_PEAK: f32 = 120.0;
+
+/// How its profile falls away. Well under one, so the island is a broad top
+/// ending in a near-vertical rim: the shallow cone it would otherwise be has
+/// nothing steep enough on it to make the camera's own clearance clamp fire,
+/// and that clamp is one of the things these tests are for.
+const TEST_ISLAND_PITCH: f32 = 0.35;
+
+/// A patch of world already delivered, exactly as a server would have sent it:
+/// a steep island at the origin reaching [`TEST_ISLAND_REACH`], with open
+/// water round it.
 ///
-/// Anything riding the ground asks [`crate::terrain::WorldTerrain::surface`],
-/// which answers `None` until the island under the point exists — so a test
-/// of the boat floating, the camera grounding itself or a marker standing up
-/// needs terrain that has actually been generated, not merely laid out. The
-/// biggest island, because a test that wants somewhere to put things down
-/// wants room to put them.
-pub fn test_world() -> (Arc<Archipelago>, IslandSpec) {
-    let world = Arc::new(Archipelago::new(&WorldConfig { seed: 1 }));
-    let spec = world
-        .islands_within(Vec2::splat(-6_000.0), Vec2::splat(6_000.0))
-        .into_iter()
-        .max_by_key(|s| s.chunks.x * s.chunks.y)
-        .expect("a world should have an island within a few kilometres");
-    world.island(spec);
-    (world, spec)
+/// Anything riding the ground asks [`Ground::surface`], which answers `None`
+/// until the chunk under the point has arrived — so a test of the boat
+/// floating, the camera grounding itself or a marker standing up needs ground
+/// that has actually turned up, not merely been asked for.
+///
+/// Made here rather than fetched from a real world because a client cannot
+/// generate one: it is handed chunks, and this is a hand of chunks. What the
+/// tests need of it is height to stand on, a waterline to float at, and a
+/// slope steep enough to be a problem.
+pub fn test_ground() -> Ground {
+    let mut ground = Ground::default();
+
+    // Enough chunks to hold the island and a ring of open water around it, so
+    // that a test walking off the coast finds sea rather than the edge of what
+    // has arrived.
+    let reach = (TEST_ISLAND_REACH / CHUNK_METRES).ceil() as i32 + 2;
+    for cz in -reach..=reach {
+        for cx in -reach..=reach {
+            let chunk = IVec2::new(cx, cz);
+            let base = chunk.as_vec2() * CHUNK_METRES;
+            let heights: Vec<u16> = (0..FACET_VERTS * FACET_VERTS)
+                .map(|i| {
+                    let corner = base
+                        + Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32)
+                            * FACET_METRES;
+                    quantize(test_island_height(corner))
+                })
+                .collect();
+
+            // Flat floor is what open water *is* — see `Archipelago::
+            // chunk_payload`, which answers exactly this way.
+            let payload = heights
+                .iter()
+                .any(|h| *h != quantize(-OCEAN_DEPTH))
+                .then(|| ChunkPayload {
+                    heights,
+                    surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
+                });
+            ground.deliver(chunk, payload);
+        }
+    }
+    ground
+}
+
+/// The test island's height field: a broad top falling to the ocean floor at
+/// [`TEST_ISLAND_REACH`], and flat floor beyond.
+fn test_island_height(at: Vec2) -> f32 {
+    let out = at.length() / TEST_ISLAND_REACH;
+    if out >= 1.0 {
+        return -OCEAN_DEPTH;
+    }
+    (TEST_ISLAND_PEAK + OCEAN_DEPTH) * (1.0 - out).powf(TEST_ISLAND_PITCH) - OCEAN_DEPTH
 }

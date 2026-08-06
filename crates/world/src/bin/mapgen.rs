@@ -21,8 +21,8 @@ use std::process::ExitCode;
 
 use glam::{UVec2, Vec2};
 
+use args::{metres, pair, pair_or_single};
 use world::archipelago::{Archipelago, WorldConfig};
-use world::args::{metres, pair, pair_or_single};
 use world::plan;
 use world::terrain::{MapConfig, CHUNK_TILES};
 

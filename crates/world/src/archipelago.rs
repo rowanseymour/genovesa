@@ -22,7 +22,7 @@
 //! World coordinates are `f32` metres, so "endless" has a horizon after all —
 //! not one the layout imposes but one the arithmetic does. Measured against
 //! the two scales that matter, the height field's half-metre steps and the
-//! [`crate::terrain::MESH_STEP`] the ground is drawn at:
+//! [`protocol::ground::FACET_METRES`] the ground is drawn at:
 //!
 //! - out to about **1,280 km** neighbouring `f32` coordinates are 0.15 m
 //!   apart, so a half-metre step in the field still resolves and the ground is
@@ -46,30 +46,20 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, UVec2, Vec2, Vec3};
+use protocol::ground::{quantize, ChunkPayload, Surface};
 
 use crate::noise::smoothstep;
 use crate::terrain::{
-    facet_geometry_from_heights, facet_heights, normal_at, ChunkGeometry, MapConfig,
-    TerrainGenerator, CHUNK_TILES, MAX_DEPTH, SEABED, TILE_SIZE,
+    facet_heights, facet_surfaces, normal_at, MapConfig, TerrainGenerator, CHUNK_TILES, MAX_DEPTH,
+    TILE_SIZE,
 };
 
-/// Metres along the edge of one chunk — the world's unit of streaming, and the
-/// grid every island is laid out on.
-pub const CHUNK_METRES: f32 = CHUNK_TILES as f32 * TILE_SIZE;
+pub use protocol::ground::{chunk_at, CHUNK_METRES};
 
 /// Depth of the open ocean floor between islands, in metres. The same floor
 /// every island's own sea bed is clamped to, so an island's rim and the ocean
 /// around it meet at one level.
 pub const OCEAN_DEPTH: f32 = MAX_DEPTH;
-
-/// Colour of the open ocean floor — exactly the palette's deep sea bed.
-///
-/// Public because the game draws the ocean between islands as one flat
-/// backdrop plane rather than as chunk meshes, and the two surfaces meet at
-/// every island's skirt: any difference between this and the colour the
-/// chunks are painted prints the island's chunk rectangle onto the water as
-/// a faint seam.
-pub const OCEAN_FLOOR_COLOR: Vec3 = SEABED;
 
 // --- The layout --------------------------------------------------------------
 //
@@ -252,9 +242,6 @@ const SKIRT_METRES: f32 = SKIRT_CHUNKS as f32 * CHUNK_METRES;
 /// Parameters the world is generated from — the whole of them: a seed is a
 /// world.
 ///
-/// The `bevy` feature is only the derive, as on [`MapConfig`]: the game holds
-/// this as an ECS resource, and engine-free builds have no ECS to hold it in.
-#[cfg_attr(feature = "bevy", derive(bevy_ecs::prelude::Resource))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorldConfig {
     pub seed: u32,
@@ -443,10 +430,11 @@ impl Island {
         h + (-OCEAN_DEPTH - h) * smoothstep(0.0, SKIRT_METRES, beyond)
     }
 
-    /// Surface colour at a world point, matching [`Island::height`].
-    pub fn color(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Vec3 {
+    /// What the ground is painted at a world point, matching
+    /// [`Island::height`].
+    pub fn surface(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Surface {
         let local = Vec2::new(wx, wz) - self.spec.centre();
-        self.generator.color(local.x, local.y, height, normal)
+        self.generator.surface(local.x, local.y, height, normal)
     }
 
     /// Surface normal at a world point, from central differences one tile out.
@@ -660,19 +648,19 @@ impl Archipelago {
         self.nearest_by(near, IslandSpec::centre)
     }
 
-    /// Where this world is entered, the same on every machine: a point of
-    /// open water [`SPAWN_OFFSHORE`] metres off the waterline of the island
-    /// whose *frame* is nearest the origin, facing it from the origin's
-    /// side.
+    /// Where this world is entered: a point of open water [`SPAWN_OFFSHORE`]
+    /// metres off the waterline of the island whose *frame* is nearest the
+    /// origin, facing it from the origin's side.
     ///
-    /// Entry used to be the origin itself: one point every machine could
-    /// agree on without asking the world anything. What that saved in
-    /// questions it spent in sailing — the nearest land averages half a
-    /// kilometre out, past the haze on every seed's worse days, so a new
-    /// arrival saw water in every direction and steered blind. The world is
-    /// deterministic, so a better point is still one every machine computes
-    /// alike; entry now opens in sight of the first island's coast, and
-    /// finding land takes no search at all.
+    /// Asked once, when a server binds, and sent in every welcome — a client
+    /// has no layout to work it out from.
+    ///
+    /// Entry used to be the origin itself: one point that could be agreed on
+    /// without asking the world anything. What that saved in questions it
+    /// spent in sailing — the nearest land averages half a kilometre out,
+    /// past the haze on every seed's worse days, so a new arrival saw water
+    /// in every direction and steered blind. Entry now opens in sight of the
+    /// first island's coast, and finding land takes no search at all.
     ///
     /// Nearest by frame rather than by centre, as [`Archipelago::nearest_island`] ranks,
     /// because it is the coast entry cares about — a big island's coast can
@@ -810,39 +798,33 @@ impl Archipelago {
         normal_at(wx, wz, |x, z| self.height(x, z))
     }
 
-    /// Surface colour at a world point: the owning island's palette, or the
-    /// ocean floor's own colour where there is no island to ask.
-    pub fn color(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Vec3 {
-        match self.island_at(wx, wz) {
-            Some(spec) => self.island(spec).color(wx, wz, height, normal),
-            None => SEABED,
-        }
-    }
-
-    /// Geometry for one world chunk, or `None` where there is no geometry
-    /// worth building — because no island is answerable for the chunk, or
-    /// because the island answerable for it has nothing but ocean floor there.
+    /// One world chunk as a client is sent it, or `None` where there is no
+    /// ground worth sending — because no island is answerable for the chunk,
+    /// or because the island answerable for it has nothing but ocean floor
+    /// there.
     ///
     /// The second case is most of an island's chunks, not a corner case. An
     /// island is laid out as a rectangle with a skirt, its land is a lobed
     /// shape inside a fitted sea, and every chunk of the rectangle that misses
     /// the land entirely — the whole skirt, and the corners of most frames —
-    /// comes out as a flat plane at minus [`OCEAN_DEPTH`]. Meshing those costs 24
-    /// thousand vertices apiece to draw exactly what the game's ocean-floor
+    /// comes out as a flat plane at minus [`OCEAN_DEPTH`]. Sending those costs
+    /// sixteen kilobytes apiece to draw exactly what a client's ocean-floor
     /// backdrop is already drawing underneath them. Measured over a streaming
     /// radius on five seeds it ran from a quarter of the chunks to nearly two
     /// thirds — the share goes with the mix of island sizes nearby, since a
     /// skirt is a ring of fixed width and a small island is nearly all ring.
+    /// Everything between islands is `None` outright.
     ///
     /// The test is on the sampled corners rather than on the layout, which is
     /// what makes it exact: if every corner of the facet grid is *precisely*
     /// the floor then every facet built from them is a flat quad at the floor,
     /// and the backdrop stands in for it perfectly. Ground a centimetre off the
-    /// floor fails the test and gets its mesh.
+    /// floor fails the test and gets sent.
     ///
-    /// Generates the owning island on a miss, so this is where streaming
-    /// pays; it is meant to be called from a worker, not a frame.
-    pub fn chunk_geometry(&self, chunk: IVec2) -> Option<ChunkGeometry> {
+    /// Generates the owning island on a miss, so this is where a session pays
+    /// for the ocean; it is meant to be called from a worker, not from
+    /// anything holding a lock or a frame.
+    pub fn chunk_payload(&self, chunk: IVec2) -> Option<ChunkPayload> {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
 
@@ -851,20 +833,23 @@ impl Archipelago {
             return None;
         }
 
-        Some(facet_geometry_from_heights(
-            base,
-            &heights,
-            |wx, wz, height, normal| island.color(wx, wz, height, normal),
-            // With no map to span, UVs tile per chunk — still seamless across
-            // boundaries, since world coordinates are continuous.
-            |wx, wz| [wx / CHUNK_METRES, wz / CHUNK_METRES],
-        ))
+        Some(ChunkPayload {
+            surfaces: facet_surfaces(base, &heights, |wx, wz, height, normal| {
+                island.surface(wx, wz, height, normal)
+            }),
+            heights: heights.iter().copied().map(quantize).collect(),
+        })
     }
 
     /// Drops every cached island whose frame lies entirely beyond `radius` of
-    /// `focus`. The cache is only a cache — anything dropped regenerates,
-    /// identical to the bit, if it is ever wanted again.
-    pub fn retain_near(&self, focus: Vec2, radius: f32) {
+    /// every one of `foci`. The cache is only a cache — anything dropped
+    /// regenerates, identical to the bit, if it is ever wanted again.
+    ///
+    /// A list rather than a point because a server holds one world for however
+    /// many players are in it, and they are not standing together: an island
+    /// is worth keeping if *anybody* is near it. An empty list keeps nothing,
+    /// which is the right answer for a world nobody is in.
+    pub fn retain_near(&self, foci: &[Vec2], radius: f32) {
         let mut islands = self.islands.write().expect("no poisoned lock");
         islands.retain(|spec, slot| {
             // An empty slot is an island being generated right now, on some
@@ -882,8 +867,10 @@ impl Archipelago {
                 return true;
             }
             let half = spec.extent() * 0.5;
-            let apart = (spec.centre() - focus).abs() - half;
-            apart.max(Vec2::ZERO).length() <= radius
+            foci.iter().any(|focus| {
+                let apart = (spec.centre() - *focus).abs() - half;
+                apart.max(Vec2::ZERO).length() <= radius
+            })
         });
     }
 
@@ -891,11 +878,6 @@ impl Archipelago {
     pub fn island_at(&self, wx: f32, wz: f32) -> Option<IslandSpec> {
         self.island_at_chunk(chunk_at(Vec2::new(wx, wz)))
     }
-}
-
-/// The world chunk a world point stands in.
-pub fn chunk_at(world: Vec2) -> IVec2 {
-    (world / CHUNK_METRES).floor().as_ivec2()
 }
 
 #[cfg(test)]
@@ -1165,14 +1147,14 @@ mod tests {
     }
 
     #[test]
-    fn open_ocean_is_flat_floor_and_builds_no_chunks() {
+    fn open_ocean_is_flat_floor_and_sends_nothing() {
         let world = world(1);
         // Find a chunk of open ocean: walk until one has no island.
         let chunk = (0..)
             .map(|i| IVec2::new(i, i))
             .find(|c| world.island_at_chunk(*c).is_none())
             .expect("some ocean");
-        assert!(world.chunk_geometry(chunk).is_none());
+        assert!(world.chunk_payload(chunk).is_none());
 
         let w = chunk.as_vec2() * CHUNK_METRES + CHUNK_METRES * 0.5;
         assert_eq!(world.height(w.x, w.y), -OCEAN_DEPTH);
@@ -1180,10 +1162,10 @@ mod tests {
     }
 
     #[test]
-    fn an_islands_flat_chunks_build_no_geometry_either() {
+    fn an_islands_flat_chunks_send_nothing_either() {
         // An island is answerable for its skirt, but a skirt chunk is flat
-        // ocean floor — the backdrop plane's job, not a mesh's. Building them
-        // was most of what streaming spent its time on.
+        // ocean floor — the backdrop plane's job, not a mesh's. Sending them
+        // would be most of what a session spent its bandwidth on.
         let world = world(1);
         let spec = specs(&world)
             .into_iter()
@@ -1201,15 +1183,15 @@ mod tests {
                 }
                 skirt += 1;
                 assert!(
-                    world.chunk_geometry(chunk).is_none(),
-                    "skirt chunk {chunk} built a mesh of flat floor"
+                    world.chunk_payload(chunk).is_none(),
+                    "skirt chunk {chunk} sends a payload of flat floor"
                 );
             }
         }
         assert!(skirt > 0, "the island has no skirt to check");
 
         // And the chunk under the highest ground on the island still does
-        // build, or the test above would pass on a world with no meshes at all.
+        // send, or the test above would pass on a world with no ground at all.
         let centre = spec.centre();
         let half = spec.extent() * 0.5;
         let land = (0..64)
@@ -1219,8 +1201,8 @@ mod tests {
             .expect("some ground");
         assert!(world.height(land.x, land.y) > 0.0, "the island is all sea");
         assert!(
-            world.chunk_geometry(chunk_at(land)).is_some(),
-            "the chunk holding the island's summit built nothing"
+            world.chunk_payload(chunk_at(land)).is_some(),
+            "the chunk holding the island's summit sent nothing"
         );
     }
 
@@ -1237,12 +1219,60 @@ mod tests {
         world.island(spec);
         assert!(world.ready_height(centre.x, centre.y).is_some());
 
-        world.retain_near(centre + Vec2::splat(1.0e6), 100.0);
+        world.retain_near(&[centre + Vec2::splat(1.0e6)], 100.0);
         assert_eq!(
             world.ready_height(centre.x, centre.y),
             None,
             "eviction left the island behind"
         );
+    }
+
+    /// What one client's arrival costs a server: every chunk within a
+    /// streaming radius of where a world is entered, made and measured.
+    ///
+    /// The number that matters for the shape of the whole arrangement — a
+    /// client asks for all of these at once, and the server has to make them
+    /// and put them on a socket. The water is nearly free at both ends; the
+    /// ground is sixteen kilobytes apiece and is where a slow link would be
+    /// felt, so the split between them is as much the point as the time is.
+    #[test]
+    #[ignore]
+    fn arrival_cost() {
+        use std::time::Instant;
+
+        // A client's streaming radius, in metres — the game's own
+        // `STREAM_RADIUS`, restated here because this crate has no business
+        // importing a camera's reach.
+        const RADIUS: f32 = 1024.0;
+        let reach = (RADIUS / CHUNK_METRES).ceil() as i32;
+
+        for seed in [1u32, 7, 20_040_112] {
+            let world = world(seed);
+            let entry = world.spawn().map_or(Vec2::ZERO, |spawn| spawn.point);
+            let middle = chunk_at(entry);
+
+            let start = Instant::now();
+            let (mut ground, mut water, mut bytes) = (0, 0, 0usize);
+            for dz in -reach..=reach {
+                for dx in -reach..=reach {
+                    match world.chunk_payload(middle + IVec2::new(dx, dz)) {
+                        Some(payload) => {
+                            ground += 1;
+                            bytes += protocol::ground::PAYLOAD_BYTES;
+                            std::hint::black_box(&payload);
+                        }
+                        None => water += 1,
+                    }
+                }
+            }
+            let elapsed = start.elapsed();
+
+            println!(
+                "seed {seed:>9}  {ground:>4} ground  {water:>4} water  \
+                 {:>6.1} MB  {elapsed:>8.0?}",
+                bytes as f32 / (1024.0 * 1024.0)
+            );
+        }
     }
 
     #[test]
@@ -1283,8 +1313,36 @@ mod tests {
         }
         let ground = digest(floats(heights));
 
-        println!("layout digests to {layout:#018X}, ground to {ground:#018X}");
+        // And one chunk of that island exactly as it would be sent. The
+        // heights above pin the *generator*; this pins the wire — the order
+        // the grid is sampled in, the rounding, the facet walk and what each
+        // triangle comes out painted. None of that moves a raw height, so a
+        // transposed grid or a facet walk that started splitting its quads the
+        // other way would pass everything above and leave two builds drawing
+        // different ground from the same bytes.
+        //
+        // The chunk is the island's middle, which is the part most likely to
+        // hold land; a payload of pure ocean floor would be a digest of the
+        // same number eight thousand times over and would notice nothing.
+        let middle = chunk_at(centre);
+        let payload = world
+            .chunk_payload(middle)
+            .expect("an island's middle chunk should be ground");
+        let sent = digest(payload.heights.iter().flat_map(|h| h.to_le_bytes()).chain(
+            payload.surfaces.iter().map(|s| {
+                // Tone and shade in one byte, as the wire packs them.
+                ((s.tone as u8) << 2) | s.shade as u8
+            }),
+        ));
+
+        println!(
+            "layout digests to {layout:#018X}, ground to {ground:#018X}, sent to {sent:#018X}"
+        );
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0xFA89_ABF4_A2FC_48A1, "the ground changed");
+        assert_eq!(
+            sent, 0x5683_4510_55EA_9B28,
+            "what a client would be sent changed"
+        );
     }
 }

@@ -1,15 +1,20 @@
-//! The server: what makes a world *shared*.
+//! The server: what makes a world *exist*.
 //!
-//! There is deliberately little of it. A seed is a world — the `world` crate
-//! generates the same ocean, bit for bit, on every machine — so terrain never
-//! crosses the wire, and the server's whole authority is the session: which
-//! world this is, who is in it, and where they are. Clients generate the same
-//! ocean for themselves and meet in it here.
+//! It has two jobs. One is the session — who is in the world and where they
+//! are — and that part is a roster and a relay. The other is the world
+//! itself: this is the only process in a session that generates anything. A
+//! client asks for a chunk by coordinate and is sent either open water or the
+//! ground, and it is never told the seed, the layout, or which chunks are
+//! worth asking for. See the `protocol` crate for why the ground travels
+//! rather than the seed.
 //!
-//! Concurrency is plain std threading: a thread per connection blocking on
-//! its reads, a writer thread per connection draining a channel, and one lock
-//! around the roster. A session's traffic is a trickle of tiny messages, so
-//! nothing here needs to be clever — it needs to be obviously correct.
+//! Concurrency is plain std threading. Per connection: a thread blocking on
+//! its reads, and a writer thread draining a channel onto the socket. Shared
+//! between them: one lock around the roster, and a small pool of workers that
+//! turn chunk requests into payloads. The pool is what keeps generation off
+//! the connection threads — an island costs tens to hundreds of milliseconds
+//! the first time anyone approaches it, which is far too long to spend inside
+//! a read loop that also has to relay positions.
 
 pub mod cli;
 
@@ -19,11 +24,13 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use glam::Vec2;
+use glam::{IVec2, Vec2};
 use protocol::{PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
-use world::archipelago::{Archipelago, WorldConfig};
+use world::archipelago::Archipelago;
+
+pub use world::archipelago::{random_seed, WorldConfig, MAX_SEED};
 
 /// How long a fresh connection has to say hello. Generous for a slow link,
 /// and the point is only that a connection which arrives and then says
@@ -33,12 +40,45 @@ use world::archipelago::{Archipelago, WorldConfig};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many messages may be waiting for one player before the session gives
-/// up on them. A session's traffic is a trickle — a few tiny positions a
-/// second per player — so a queue this deep does not mean briefly behind, it
-/// means a client that has stopped reading its socket altogether. Bounded
-/// because the alternative is a queue that grows for as long as such a client
-/// stays connected.
+/// up on them.
+///
+/// Most of the traffic is a trickle — a few tiny positions a second per
+/// player — but chunks are not: a client entering the world asks for a couple
+/// of hundred at once, and a chunk of ground is sixteen kilobytes. So this
+/// has to be deep enough to hold an arrival's whole burst while the socket
+/// drains it, and shallow enough that a client which has stopped reading
+/// altogether is noticed rather than buffered forever. A full queue at this
+/// depth is a few megabytes and several seconds of a client saying nothing,
+/// which is not "briefly behind" — see [`post`], which hangs up on it.
 const OUTBOX_DEPTH: usize = 256;
+
+/// How many chunk requests may be waiting to be generated, across the whole
+/// server.
+///
+/// Deep enough for several clients' arrival bursts at once, and bounded on
+/// purpose: when it fills, the connection threads posting into it block, so a
+/// client asking for ground faster than the world can make it simply waits.
+/// The alternative is a queue a client can grow without limit by asking for
+/// chunks it never intends to look at.
+const CHUNK_QUEUE_DEPTH: usize = 1024;
+
+/// How far from any player an island is kept in the world's cache, in metres.
+///
+/// A client streams a kilometre or so around its camera, and an island is
+/// worth keeping for as long as any of its chunks might be asked for again —
+/// so this is that reach with a big island's width of slack on top, which
+/// means panning back and forth across a coast never pays to regenerate.
+/// Beyond it an island is dropped and regenerates, identical to the bit, if
+/// anybody sails back.
+const ISLAND_CACHE_RADIUS: f32 = 6_144.0;
+
+/// How often the world is asked to forget the islands nobody is near.
+///
+/// Rare, because it takes the cache's write lock and the thing it is bounding
+/// — memory — moves at the speed of players sailing. Between sweeps a world
+/// holds the islands of wherever everyone has recently been, which for a
+/// session of any normal size is a handful.
+const CACHE_SWEEP: Duration = Duration::from_secs(5);
 
 /// How far from the world's spawn point an arriving player may be put down,
 /// in metres. A few boat-lengths: enough that two markers are plainly two
@@ -83,17 +123,39 @@ type Report = Box<dyn Fn(&str) + Send + Sync>;
 pub struct Server {
     listener: TcpListener,
     shared: Arc<Shared>,
+    /// Both ends of the chunk queue, held until there is something to serve.
+    ///
+    /// Deliberately not in [`Shared`], and that is the whole of how the
+    /// workers ever die. They hold the shared state, so a sender kept in there
+    /// would be a sender they were keeping alive themselves: the channel could
+    /// never close, `recv` could never fail, and every server would leave its
+    /// pool running — and its whole world, islands and all, reachable through
+    /// their copies of the state — for the life of the process. Out here the
+    /// senders belong to the things that serve, and when the last of those has
+    /// gone the workers are told so.
+    ///
+    /// It is also why the pool starts at [`Server::run`] rather than at
+    /// [`Server::bind`]: starting it clones the shared state, and
+    /// [`Server::reporting_to`] has to be the only owner of it.
+    queue: (mpsc::SyncSender<ChunkRequest>, mpsc::Receiver<ChunkRequest>),
 }
 
 /// What every connection's thread shares.
 struct Shared {
-    config: WorldConfig,
+    /// The world, generated on demand and cached. Every chunk anyone is ever
+    /// sent comes out of this one, which is what makes a session one place:
+    /// two clients asking for the same chunk are answered from the same
+    /// island, not from two generations of it that merely ought to agree.
+    world: Arc<Archipelago>,
     /// Where this world is entered — [`Archipelago::spawn`]'s answer, asked
-    /// once when the server binds. Every client could compute it for
-    /// themselves, and for the opening view they do; sending it in the
-    /// welcome is what keeps "where do I put this player down" the server's
-    /// call, scatter and all.
+    /// once when the server binds. A client has no layout to work it out
+    /// from, so this and [`Shared::facing`] are the whole of what it is told
+    /// about where it has arrived.
     spawn: Vec2,
+    /// The middle of the island the spawn stands off, so that a client opens
+    /// its view looking at land rather than out to sea. Equal to the spawn
+    /// itself when the layout offered nothing, which names no direction.
+    facing: Vec2,
     /// Dealt in joining order, and never reused within a session.
     next_id: AtomicU32,
     players: Mutex<HashMap<PlayerId, Player>>,
@@ -102,6 +164,16 @@ struct Shared {
     /// true, and [`serve`], which is what makes it mean something.
     stopping: AtomicBool,
     report: Report,
+}
+
+/// A chunk somebody wants, waiting for a worker to make it.
+///
+/// Carries the player rather than their outbox so that a worker finishing
+/// long after they left has nothing to deliver to: the roster no longer holds
+/// them, and the answer is dropped where it stands.
+struct ChunkRequest {
+    for_player: PlayerId,
+    chunk: IVec2,
 }
 
 /// One connected player, as the roster sees them.
@@ -116,21 +188,31 @@ struct Player {
 }
 
 impl Server {
-    /// Binds the listener, and asks the world the one question the server
-    /// ever asks it: where it is entered. That generates the entry island —
-    /// tens to hundreds of milliseconds, once, before anyone can join — and
-    /// the origin is the fallback the world's clearing keeps open should
-    /// the layout offer nothing.
+    /// Binds the listener, makes the world, and asks it where it is entered.
+    ///
+    /// That generates the entry island — tens to hundreds of milliseconds,
+    /// once, before anyone can join — and the origin is the fallback the
+    /// world's clearing keeps open should the layout offer nothing. The world
+    /// then stays: everything served afterwards comes out of it.
+    ///
+    /// Nothing is generated beyond that entry island, and no worker is
+    /// started: a bound server is a world with a door, and [`Server::run`] or
+    /// [`Server::spawn`] is what opens it.
     pub fn bind(addr: impl ToSocketAddrs, config: WorldConfig) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        let spawn = Archipelago::new(&config)
-            .spawn()
-            .map_or(Vec2::ZERO, |spawn| spawn.point);
+        let world = Arc::new(Archipelago::new(&config));
+        let entry = world.spawn();
+        let spawn = entry.map_or(Vec2::ZERO, |entry| entry.point);
+
         Ok(Self {
             listener,
+            queue: mpsc::sync_channel(CHUNK_QUEUE_DEPTH),
             shared: Arc::new(Shared {
-                config,
+                world,
                 spawn,
+                // A world with no island to look at leaves the bearing to the
+                // client, which is what a facing equal to the spawn means.
+                facing: entry.map_or(spawn, |entry| entry.island.centre()),
                 next_id: AtomicU32::new(1),
                 players: Mutex::new(HashMap::new()),
                 stopping: AtomicBool::new(false),
@@ -163,7 +245,9 @@ impl Server {
     /// own, from handshake to hang-up. What a dedicated server does, there
     /// being nothing else for its process to be doing.
     pub fn run(self) {
-        accept(&self.listener, &self.shared);
+        let (wanted, requests) = self.queue;
+        make_ground(&self.shared, requests);
+        accept(&self.listener, &self.shared, &wanted);
     }
 
     /// Serves on a thread of its own, and hands back the handle that ends it.
@@ -175,10 +259,12 @@ impl Server {
     /// is in, would outlive the match that made them.
     pub fn spawn(self) -> io::Result<Host> {
         let addr = self.listener.local_addr()?;
+        let (wanted, requests) = self.queue;
+        make_ground(&self.shared, requests);
         let shared = self.shared.clone();
         let thread = {
             let (listener, shared) = (self.listener, self.shared);
-            thread::spawn(move || accept(&listener, &shared))
+            thread::spawn(move || accept(&listener, &shared, &wanted))
         };
         Ok(Host {
             addr,
@@ -243,11 +329,19 @@ impl Drop for Host {
     }
 }
 
-/// Takes connections until asked to stop, giving each a thread of its own.
-fn accept(listener: &TcpListener, shared: &Arc<Shared>) {
+/// Takes connections until asked to stop, giving each a thread of its own,
+/// and lets the world forget the islands nobody is near.
+///
+/// The sweep rides along here rather than on a thread of its own because this
+/// loop already wakes on a timer and has nothing else to do between
+/// connections. It has to happen *somewhere* — a world that only ever grew
+/// would hold every island anybody had sailed past for the life of the
+/// process.
+fn accept(listener: &TcpListener, shared: &Arc<Shared>, wanted: &mpsc::SyncSender<ChunkRequest>) {
     // Non-blocking, so that the stop above is noticed within [`STOP_POLL`]
     // rather than whenever the next connection happens to arrive.
     let _ = listener.set_nonblocking(true);
+    let mut swept = Instant::now();
 
     while !shared.stopping.load(Ordering::Relaxed) {
         match listener.accept() {
@@ -257,14 +351,86 @@ fn accept(listener: &TcpListener, shared: &Arc<Shared>) {
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
-                let shared = shared.clone();
-                thread::spawn(move || serve(stream, shared));
+                let (shared, wanted) = (shared.clone(), wanted.clone());
+                thread::spawn(move || serve(stream, shared, wanted));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(STOP_POLL),
             // A connection that failed to arrive is its problem, not the
             // session's.
             Err(_) => {}
         }
+
+        if swept.elapsed() >= CACHE_SWEEP {
+            swept = Instant::now();
+            let where_everyone_is: Vec<Vec2> = {
+                let players = shared.players.lock().expect("no poisoned lock");
+                players.values().map(|player| player.position).collect()
+            };
+            shared
+                .world
+                .retain_near(&where_everyone_is, ISLAND_CACHE_RADIUS);
+        }
+    }
+}
+
+/// Starts the workers that turn chunk requests into ground.
+///
+/// One per core, near enough, because generating an island is the most
+/// expensive thing this process does and a client arriving somewhere new
+/// blocks on it: with one worker a player entering the world would watch the
+/// ground arrive an island at a time, however many cores the machine had
+/// spare. They share one queue rather than having one each, so a client whose
+/// island is still being made does not hold up everyone else's open water.
+///
+/// Nothing joins them. They end when the last [`Shared`] is dropped and the
+/// queue closes, which is after the session that could still want them has
+/// gone; a worker outliving its server by one island's generation holds
+/// nothing anybody needs back.
+fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
+    let workers = thread::available_parallelism()
+        .map(|cores| cores.get())
+        .unwrap_or(4)
+        .clamp(2, 8);
+    let requests = Arc::new(Mutex::new(requests));
+
+    for _ in 0..workers {
+        let shared = shared.clone();
+        let requests = requests.clone();
+        thread::spawn(move || loop {
+            // Waiting for work holds the lock, since a blocking `recv` needs
+            // the receiver borrowed for the length of it — so only one worker
+            // is ever the one listening, and the rest are queued behind it.
+            // That serialises the *handing out*, which is a mutex handoff
+            // against a hundred milliseconds of generating an island, and the
+            // guard is dropped before any of that happens. What matters is
+            // that the work itself runs on all of them at once, and it does.
+            let request = {
+                let queue = requests.lock().expect("no poisoned lock");
+                queue.recv()
+            };
+            // The channel has closed, which means every sender has gone: the
+            // listener has stopped and the last connection has ended, so
+            // there is nobody left to want ground. This is the pool's death,
+            // and with it the last hold on the world it was generating.
+            let Ok(request) = request else {
+                return;
+            };
+
+            let ground = shared.world.chunk_payload(request.chunk);
+            let answer = ToClient::Chunk {
+                chunk: request.chunk,
+                ground,
+            };
+
+            // Posted under the roster's lock, like everything else a player
+            // hears, so an answer cannot overtake the departure of the player
+            // it was for. Somebody who left while their ground was being made
+            // is simply no longer here, and the answer goes nowhere.
+            let players = shared.players.lock().expect("no poisoned lock");
+            if let Some(player) = players.get(&request.for_player) {
+                post(player, answer);
+            }
+        });
     }
 }
 
@@ -291,7 +457,7 @@ impl Shared {
 
 /// One connection, cradle to grave: handshake, introductions, relay,
 /// departure.
-fn serve(stream: TcpStream, shared: Arc<Shared>) {
+fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkRequest>) {
     // Position reports are a dozen bytes that matter now or not at all;
     // batching them behind Nagle's algorithm would only add lag.
     let _ = stream.set_nodelay(true);
@@ -368,8 +534,8 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) {
 
         let welcome = ToClient::Welcome {
             id,
-            seed: shared.config.seed,
             spawn: player.position,
+            facing: shared.facing,
         };
         let arrival = ToClient::Joined {
             id,
@@ -394,10 +560,11 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) {
     }
     (shared.report)(&format!("{id} joined"));
 
-    // Relay until the line drops. Anything else ends the session too: after a
-    // framing error nothing later on the stream can be trusted, a second hello
-    // is a client that has lost its place, and a position no player could be
-    // at is one nobody else should be shown walking towards.
+    // Relay and take orders for ground until the line drops. Anything else
+    // ends the session too: after a framing error nothing later on the stream
+    // can be trusted, a second hello is a client that has lost its place, and
+    // a position or a chunk no player could be at is one to hang up over
+    // rather than to answer.
     loop {
         match ToServer::read(&mut reader) {
             Ok(ToServer::Move { position }) if reachable(position) => {
@@ -406,6 +573,24 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) {
                     player.position = position;
                 }
                 broadcast(&players, id, ToClient::Moved { id, position });
+            }
+            Ok(ToServer::WantChunk { chunk }) if in_the_world(chunk) => {
+                // Queued rather than answered, because answering means
+                // possibly generating an island and this thread also has to
+                // stay listening. A full queue blocks here, which is the
+                // backpressure that keeps one client from ordering ground
+                // faster than the world can make it — and a send that fails
+                // outright means the workers have gone, so there is no more
+                // ground to be had and the session is over.
+                if wanted
+                    .send(ChunkRequest {
+                        for_player: id,
+                        chunk,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
             _ => break,
         }
@@ -427,6 +612,15 @@ fn reachable(position: Vec2) -> bool {
     position.is_finite() && position.abs().max_element() <= MAX_RANGE
 }
 
+/// Whether a chunk coordinate names ground anybody could stand on — the same
+/// [`MAX_RANGE`] test, in chunks. A client asking for ground a thousand
+/// kilometres past where the world resolves is broken or hostile, and
+/// answering would put a worker to work generating an island out of
+/// coordinates that no longer have a metre between them.
+fn in_the_world(chunk: IVec2) -> bool {
+    reachable(chunk.as_vec2() * protocol::ground::CHUNK_METRES)
+}
+
 /// Puts a message in a player's outbox, or hangs up on them.
 ///
 /// Never waits. Most of the sends here happen with the roster's lock held,
@@ -445,7 +639,11 @@ fn post(player: &Player, message: ToClient) {
 fn broadcast(players: &HashMap<PlayerId, Player>, from: PlayerId, message: ToClient) {
     for (id, player) in players {
         if *id != from {
-            post(player, message);
+            // Cloned per recipient: a message is no longer a handful of bytes
+            // that copy for free. Nothing broadcast is ever a chunk, though —
+            // ground is answered to the one player who asked for it — so what
+            // is being cloned here is still a position and an id.
+            post(player, message.clone());
         }
     }
 }

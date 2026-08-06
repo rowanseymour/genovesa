@@ -1,7 +1,8 @@
 //! The server binary's command line: a port to listen on and a world to host.
 
 use protocol::DEFAULT_PORT;
-use world::archipelago::{random_seed, WorldConfig};
+
+use crate::{random_seed, WorldConfig};
 
 /// What the command line asked for.
 pub struct Args {
@@ -23,8 +24,9 @@ Options:
   --seed <n>   the world to host [default: a new one every run, which the
                server names as it starts]
 
-Terrain never crosses the wire: clients generate the same world from the
-seed, and the server only keeps track of who is in it and where.
+The world is generated here and handed out a chunk at a time. Clients need
+know nothing about it — not the seed, not the layout — which is why the seed
+is named on this side of the wire and nowhere else.
 "
     )
 }
