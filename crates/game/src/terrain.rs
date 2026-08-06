@@ -36,7 +36,7 @@ use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
     chunk_at, dequantize, facets, ChunkPayload, Surface, Tone, CHUNK_METRES, FACET_METRES,
-    FACET_QUADS, FACET_TRIS, FACET_VERTS, NO_WATER, OCEAN_DEPTH,
+    FACET_QUADS, FACET_TRIS, FACET_VERTS, HEIGHT_STEP, NO_WATER, OCEAN_DEPTH,
 };
 
 use crate::camera::MapCamera;
@@ -47,12 +47,47 @@ use crate::{matte, AppState};
 /// is keep the two surfaces from being coplanar — but it has to do it a
 /// kilometre out, where the depth buffer is coarse, and the step it leaves at a
 /// chunk's edge is under water.
-const SEA_FLOOR_CLEARANCE: f32 = 2.0;
+///
+/// Two metres of it, plus the half step of [`OFF_LATTICE`]: two metres under
+/// the bed is a height the ground can be drawn at exactly, and being clear of
+/// the pinned bed is no help against a hillside that happens to pass through
+/// that height flat.
+const SEA_FLOOR_CLEARANCE: f32 = 2.0 + OFF_LATTICE;
 
 /// Width of the sea plane, in metres. It travels with the camera, so it only
 /// has to reach past the far plane from wherever the camera is — not across
 /// any particular stretch of world.
 const SEA_EXTENT: f32 = 8000.0;
+
+/// How far a surface that is not itself ground stands off the heights ground
+/// can be drawn at, in metres: half a step of the height lattice, which is as
+/// far off that lattice as anything can get.
+///
+/// Heights arrive quantised — see [`dequantize`] — so every corner this module
+/// draws is one of the values `HEIGHT_FLOOR + n * HEIGHT_STEP` and nothing in
+/// between. A plane put at a whole number of steps is therefore not merely
+/// close to flat ground at that height but *exactly* coplanar with it, to
+/// within nanometres, and coplanar surfaces fight over the depth buffer. Both
+/// planes below travel with the camera, so their half of the fight is
+/// re-rasterised every frame and the result flickers: a patch of ground
+/// appearing and disappearing through the water, its shape changing with a
+/// fraction of a degree of camera movement.
+///
+/// A whole number of steps is what both clearances used to be — the sea stood
+/// at 0.08 m, four of them — and 2 cm of quantisation is coarse enough that
+/// real ground lands on a given step often enough to see: any shoal flat to
+/// within a centimetre of the sea's height is a facet or two pinned exactly to
+/// it. Half a step off, no ground can ever be nearer than a centimetre, which
+/// the depth buffer resolves everywhere the haze lets anything be seen.
+const OFF_LATTICE: f32 = HEIGHT_STEP / 2.0;
+
+/// Height of the sea's surface, in metres.
+///
+/// Sea level is zero and the ground meets it along every coast, so the plane
+/// stands a little above it rather than on it — four steps of clearance, and
+/// the half step of [`OFF_LATTICE`] that keeps it off the lattice those steps
+/// are counted on.
+const SEA_SURFACE: f32 = 4.0 * HEIGHT_STEP + OFF_LATTICE;
 
 /// How far out from the camera's focus chunks are wanted, in metres.
 ///
@@ -441,11 +476,13 @@ fn chunk_mesh(chunk: IVec2, heights: &[f32], surfaces: &[Surface]) -> Mesh {
 /// Builds the surface of one chunk's standing water, or `None` where the
 /// chunk carries none — see [`ChunkPayload::water`].
 ///
-/// One flat quad per facet quad, at the level the payload gives it. No
-/// colour, because water is one colour and the material carries it, and no
-/// slope, because a lake is level: what varies from quad to quad is only how
-/// high the sheet sits, and that changes at all only where a chunk holds more
-/// than one lake.
+/// One flat quad per facet quad, at the level the payload gives it, plus
+/// [`OFF_LATTICE`] — a lake's level is quantised on the same lattice its bed is,
+/// so a shore flat at exactly the lake's height would otherwise be coplanar
+/// with the sheet standing on it. No colour, because water is one colour and
+/// the material carries it, and no slope, because a lake is level: what varies
+/// from quad to quad is only how high the sheet sits, and that changes at all
+/// only where a chunk holds more than one lake.
 ///
 /// **Where the water stops is not decided here.** A quad is drawn wherever
 /// any of its corners has a level at all — which the server sends a corner or
@@ -480,7 +517,7 @@ fn water_mesh(chunk: IVec2, water: &[u16]) -> Option<Mesh> {
             else {
                 continue;
             };
-            let y = dequantize(level);
+            let y = dequantize(level) + OFF_LATTICE;
 
             for (cx, cz) in [tl, bl, tr, tr, bl, br] {
                 positions.push([cx as f32 * FACET_METRES, y, cz as f32 * FACET_METRES]);
@@ -614,9 +651,7 @@ fn enter_world(
         NotShadowCaster,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
         MeshMaterial3d(water),
-        // Nudged above y = 0 so it doesn't z-fight with terrain sitting exactly
-        // at sea level.
-        Transform::from_xyz(0.0, 0.08, 0.0),
+        Transform::from_xyz(0.0, SEA_SURFACE, 0.0),
     ));
 
     // Sun.
@@ -1043,7 +1078,7 @@ mod tests {
             // Dead level, at the height the payload named — a lake that
             // sloped, or that sat at the height of its bed, would show here.
             assert!(
-                (point[1] - 12.0).abs() < 1.0e-3,
+                (point[1] - (12.0 + OFF_LATTICE)).abs() < 1.0e-3,
                 "{point:?} is not on the lake's surface"
             );
             assert_eq!(*normal, [0.0, 1.0, 0.0]);
@@ -1113,14 +1148,66 @@ mod tests {
 
         for point in positions {
             let want = if point[0] < 10.0 * FACET_METRES {
-                6.0
+                6.0 + OFF_LATTICE
             } else {
-                31.0
+                31.0 + OFF_LATTICE
             };
             assert!(
                 (point[1] - want).abs() < 1.0e-3,
                 "{point:?} should stand at {want} m"
             );
+        }
+    }
+
+    /// How far a height is from the nearest one a payload can say, in metres.
+    /// Zero for anything on the lattice, [`OFF_LATTICE`] for anything as far
+    /// off it as a height can be.
+    fn off_the_lattice(y: f32) -> f32 {
+        let steps = (y - protocol::ground::HEIGHT_FLOOR) / HEIGHT_STEP;
+        (dequantize(steps.round() as u16) - y).abs()
+    }
+
+    #[test]
+    fn no_sheet_of_water_lies_on_the_ground_s_own_lattice() {
+        // Ground is drawn at quantised heights and nowhere in between, so
+        // water standing at one of them is exactly coplanar with any flat
+        // patch at that height rather than merely close to it — and coplanar
+        // surfaces fight for the depth buffer. The sea's plane travels with
+        // the camera, which re-rolls the fight every frame: a sandbar drawn at
+        // the plane's own height flickers through the water. Half a step off
+        // is the furthest from the lattice anything can stand.
+        //
+        // Held to half the lift rather than to the lift itself: what matters
+        // is clearance from the lattice, and `dequantize` is arithmetic on
+        // heights of a few hundred metres, so the exact gap at the top of the
+        // range is a micron or two off the nominal one.
+        for (what, y) in [
+            ("the sea", SEA_SURFACE),
+            ("the ocean floor", -OCEAN_DEPTH - SEA_FLOOR_CLEARANCE),
+        ] {
+            assert!(
+                off_the_lattice(y) > OFF_LATTICE / 2.0,
+                "{what} stands {} m from a height the ground can be drawn at",
+                off_the_lattice(y)
+            );
+        }
+
+        // And a lake, whose level is quantised on the very same lattice as the
+        // bed it stands on.
+        for level in [0.0, 0.5, 12.0, 137.5, 402.0] {
+            let mesh = water_mesh(IVec2::ZERO, &a_lake(level, 8)).expect("a lake");
+            let positions = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .expect("positions")
+                .as_float3()
+                .expect("three floats each");
+            for point in positions {
+                assert!(
+                    off_the_lattice(point[1]) > OFF_LATTICE / 2.0,
+                    "a lake at {level} m stands {} m off ground its bed could be drawn at",
+                    off_the_lattice(point[1])
+                );
+            }
         }
     }
 
