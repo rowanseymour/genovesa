@@ -23,7 +23,7 @@ use bevy::math::{UVec2, Vec2, Vec3};
 use protocol::DEFAULT_PORT;
 
 use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
-use crate::AppState;
+use crate::{AppState, Helm};
 use server::{random_seed, WorldConfig};
 
 /// Size of a captured picture, in pixels. Matches the shots already in
@@ -33,6 +33,10 @@ const DEFAULT_RESOLUTION: UVec2 = UVec2::new(2560, 1440);
 /// What the command line asked for.
 pub struct Args {
     pub state: AppState,
+    /// What the player is doing in the world, when the screen asked for is one
+    /// inside a world. Ignored otherwise — there is no helm to be at on a menu
+    /// screen — so it costs the menu screens nothing to carry it.
+    pub helm: Helm,
     pub config: WorldConfig,
     /// Server to join, as `host` or `host:port`. A joined run takes the
     /// world — and, unless `--focus` says otherwise, where to look — from the
@@ -137,9 +141,9 @@ Genovesa — an endless ocean of generated islands to look around.
 Usage: game [options]
 
 Options:
-  --state <screen>  start on `mainmenu`, `newworld`, `joinworld`, `settings`
-                    or `inworld` [default: mainmenu, or inworld when shots or
-                    a server are asked for]
+  --state <screen>  start on `mainmenu`, `newworld`, `joinworld`, `settings`,
+                    `inworld`, `paused` or `pausedcontrols` [default: mainmenu,
+                    or inworld when shots or a server are asked for]
   --seed <n>        the world to open [default: a new one every run, and the
                     run says which so it can be asked for again]
   --join <host[:port]>  play in somebody else's world instead of opening one;
@@ -192,6 +196,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // so a run that says nothing is better off somewhere it has not been.
     let mut args = Args {
         state: AppState::MainMenu,
+        helm: Helm::Sailing,
         config: WorldConfig {
             seed: random_seed(),
         },
@@ -220,7 +225,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
             .ok_or_else(|| format!("`{flag}` needs a value"))?;
         match flag.as_str() {
             "--state" => {
-                args.state = state(value)?;
+                (args.state, args.helm) = state(value)?;
                 state_given = true;
             }
             "--seed" => {
@@ -287,15 +292,22 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     Ok(args)
 }
 
-fn state(value: &str) -> Result<AppState, String> {
+/// A screen by name, as the two states it takes to be on one. The screens
+/// inside a world are named in their own right rather than behind a second
+/// flag: a picture of the pause menu is as fair a thing to ask for as a
+/// picture of any other, and it wants a world drawn behind it.
+fn state(value: &str) -> Result<(AppState, Helm), String> {
     match value {
-        "mainmenu" => Ok(AppState::MainMenu),
-        "newworld" => Ok(AppState::NewWorld),
-        "joinworld" => Ok(AppState::JoinWorld),
-        "settings" => Ok(AppState::Settings),
-        "inworld" => Ok(AppState::InWorld),
+        "mainmenu" => Ok((AppState::MainMenu, Helm::Sailing)),
+        "newworld" => Ok((AppState::NewWorld, Helm::Sailing)),
+        "joinworld" => Ok((AppState::JoinWorld, Helm::Sailing)),
+        "settings" => Ok((AppState::Settings, Helm::Sailing)),
+        "inworld" => Ok((AppState::InWorld, Helm::Sailing)),
+        "paused" => Ok((AppState::InWorld, Helm::Paused)),
+        "pausedcontrols" => Ok((AppState::InWorld, Helm::Controls)),
         other => Err(format!(
-            "`{other}` is not a screen — try mainmenu, newworld, joinworld, settings or inworld"
+            "`{other}` is not a screen — try mainmenu, newworld, joinworld, \
+             settings, inworld, paused or pausedcontrols"
         )),
     }
 }
@@ -379,6 +391,29 @@ mod tests {
         assert_eq!(ok("--state newworld").state, AppState::NewWorld);
         assert_eq!(ok("--state settings").state, AppState::Settings);
         assert_eq!(ok("--state inworld").state, AppState::InWorld);
+    }
+
+    /// The screens inside a world are a world plus what the player is doing in
+    /// it, so naming one has to set both — a pause menu with no world under it
+    /// would be a picture of nothing.
+    #[test]
+    fn the_screens_over_a_world_open_with_the_world_under_them() {
+        assert_eq!(ok("--state inworld").helm, Helm::Sailing);
+
+        let paused = ok("--state paused");
+        assert_eq!(paused.state, AppState::InWorld);
+        assert_eq!(paused.helm, Helm::Paused);
+
+        let controls = ok("--state pausedcontrols");
+        assert_eq!(controls.state, AppState::InWorld);
+        assert_eq!(controls.helm, Helm::Controls);
+    }
+
+    /// Pausing is inside the served world, so it is one of the few screens a
+    /// joined run may start on — unlike the menus, which it may not.
+    #[test]
+    fn a_joined_run_may_start_paused() {
+        assert_eq!(ok("--state paused --join x").helm, Helm::Paused);
     }
 
     /// A spawn and a facing as a server would have named them: afloat, with

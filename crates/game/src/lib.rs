@@ -93,3 +93,35 @@ pub enum AppState {
     Settings,
     InWorld,
 }
+
+/// What the player is doing while [`AppState::InWorld`] — which is a state
+/// under that one rather than beside it, and that is the whole point of it.
+///
+/// A world lives exactly as long as `AppState::InWorld` does: the ground, the
+/// boat, the connection and the served world behind it all hang off entering
+/// and leaving that state. So pausing must not be a way of leaving it. Escape
+/// used to set [`AppState::MainMenu`] outright, which despawned the world,
+/// dropped the chunks and hung up the connection — and for a shared world that
+/// meant one mispress evicted everyone else sailing in it. Standing the pause
+/// menu up *inside* `InWorld` means the pause costs nothing but the player's
+/// own hands: chunks keep arriving, the server keeps serving, and the other
+/// boats keep moving.
+///
+/// Which is why only the systems that read the player's input are held while
+/// paused. Everything that merely keeps the world true to itself — floating
+/// the hull, easing the camera, streaming ground, answering the server — runs
+/// straight through.
+#[derive(SubStates, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[source(AppState = AppState::InWorld)]
+pub enum Helm {
+    /// The player has the helm.
+    #[default]
+    Sailing,
+    /// The pause menu is up over the world.
+    Paused,
+    /// The controls screen, opened from the pause menu. Distinct from
+    /// [`AppState::Settings`], which is the same screen reached from the main
+    /// menu with no world behind it — both are built by `spawn_controls`, and
+    /// the only difference is which screen Back returns to.
+    Controls,
+}

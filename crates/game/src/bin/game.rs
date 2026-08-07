@@ -23,7 +23,7 @@ use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
 use game::terrain::TerrainPlugin;
-use game::{AppState, SKY, WINDOW};
+use game::{AppState, Helm, SKY, WINDOW};
 
 fn main() -> ExitCode {
     let mut args = match cli::parse(std::env::args().skip(1).collect()) {
@@ -102,6 +102,13 @@ fn run(args: Args, session: Option<Session>) {
     }
 
     app.insert_state(args.state)
+        // Comes into being with the world and goes with it, so it cannot be
+        // inserted the way a top-level state is. The pending value is read
+        // when the state is first created as well as on every change after,
+        // which is what lets `--state paused` open on the pause menu; a run
+        // that asked for no such thing sets the default it would have had.
+        .add_sub_state::<Helm>()
+        .insert_resource(NextState::Pending(args.helm))
         .insert_resource(ClearColor(SKY))
         // Sky fill. Deliberately strong relative to the sun — this look wants
         // shadows that read as a second flat tone, not as darkness.
