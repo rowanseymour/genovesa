@@ -45,7 +45,9 @@ into beaches, rocky shores and cliffs, with the landform and the colours
 reading the same field so that a beach is always flat and sandy and a cliff
 steep and grey. Where the ground encloses a hollow above the sea it holds a
 lake, standing at the height of the lowest saddle on its rim — so the water
-sits where water would gather, at the level it would gather to.
+sits where water would gather, at the level it would gather to. A lake is
+drawn as fresh water rather than as a piece of sea indoors: darker and
+stiller, with the grass coming down to a reed margin instead of a beach.
 
 The look is flat-shaded facets in a small fixed palette — no textures and no
 gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the

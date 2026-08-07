@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use glam::{UVec2, Vec2, Vec3};
 
-use protocol::ground::Tone;
+use protocol::ground::{Tone, LAKE_WATER, SEA_WATER};
 
 use crate::archipelago::{chunk_at, Archipelago, Island, IslandSpec};
 use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES};
@@ -56,15 +56,23 @@ impl Image {
 }
 
 /// One pixel of any plan render: the map's own colour, tinted for the bed
-/// below whatever water stands there — the sea's or a lake's — and
-/// hill-shaded by a sun over the -x/-z corner so relief reads in plan.
-/// `awash` is the height relative to the local water surface, negative under
-/// it; over the sea that is simply the height.
-fn shade(color: Vec3, awash: f32, normal: Vec3) -> [u8; 3] {
+/// below whatever water stands there, and hill-shaded by a sun over the
+/// -x/-z corner so relief reads in plan.
+///
+/// `lake` is the surface of the lake standing over this point, as the
+/// generator answers it — so `None` means the sea, whose surface is zero and
+/// whose water is the other of the two the app draws.
+fn shade(color: Vec3, height: f32, lake: Option<f32>, normal: Vec3) -> [u8; 3] {
+    let (level, water) = match lake {
+        Some(level) => (level, LAKE_WATER),
+        None => (0.0, SEA_WATER),
+    };
     let mut c = color;
-    if awash < 0.0 {
-        // Stand in for the translucent sea plane.
-        c = c * 0.45 + Vec3::new(0.10, 0.42, 0.62) * 0.55;
+    if height < level {
+        // Stand in for the translucent sheet the app draws. Lighter here than
+        // the app's own alpha, because a map is read for what is under the
+        // water as much as for where the water is.
+        c = c * 0.45 + water * 0.55;
     }
     let lit = 0.72 + 0.55 * normal.dot(Vec3::new(-0.5, 0.72, -0.48).normalize());
     let c = (c * lit).clamp(Vec3::ZERO, Vec3::ONE) * 255.0;
@@ -89,8 +97,8 @@ pub fn render(config: &MapConfig, width: u32, height: u32) -> Image {
             let normal = gen.normal(wx, wz);
             let height = gen.height(wx, wz);
             let surface = gen.surface(wx, wz, height, normal);
-            let water = gen.lake_level(wx, wz).unwrap_or(0.0);
-            pixels.extend_from_slice(&shade(surface.color(), height - water, normal));
+            let lake = gen.lake_level(wx, wz);
+            pixels.extend_from_slice(&shade(surface.color(), height, lake, normal));
         }
     }
     Image {
@@ -150,14 +158,15 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
                 None => shade(
                     Tone::Seabed.color(),
                     -crate::archipelago::OCEAN_DEPTH,
+                    None,
                     Vec3::Y,
                 ),
                 Some(island) => {
                     let normal = island.normal(wx, wz);
                     let height = island.height(wx, wz);
                     let surface = island.surface(wx, wz, height, normal);
-                    let water = island.lake_level(wx, wz).unwrap_or(0.0);
-                    shade(surface.color(), height - water, normal)
+                    let lake = island.lake_level(wx, wz);
+                    shade(surface.color(), height, lake, normal)
                 }
             };
             pixels.extend_from_slice(&pixel);

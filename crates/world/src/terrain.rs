@@ -546,11 +546,26 @@ const SKERRY_HEIGHT: f32 = 2.5;
 /// band of colour up the rocky shores and the cliffs as well.
 const SHORE_TOP: f32 = 0.6;
 
+/// The same for a lake, in metres above its own surface — a quarter of the
+/// sea's, and the second half of what tells the two apart.
+///
+/// A sea coast has a shore because the sea *works* one: the tide and the surf
+/// keep a band of ground bare, and it is broad because they reach that far up
+/// it. Fresh water does none of that, so grass grows to the edge of a pond and
+/// what is left bare is only the strip that is actually wet. Given the sea's
+/// figure a lake wore a huge flat apron of bare ground — the ground around a
+/// lake is nearly level, so six tenths of a metre of height buys tens of
+/// metres of it — which read as a drained reservoir whatever colour it was
+/// painted. This is low enough that the green comes down to the water and the
+/// margin is a fringe on it.
+const LAKE_MARGIN: f32 = 0.15;
+
 /// Depths, in metres below the local water surface, at which the bed turns
 /// from shore colours to the bright shelf, and from the shelf to the deep bed.
 /// Written as depths below *the surface standing there* rather than as
-/// heights, because a lake reads its bed off the same two lines the sea does
-/// — only measured from its own waterline instead of the world's.
+/// heights, because a lake divides its bed on the same two lines the sea does
+/// — only measured from its own waterline instead of the world's, and painted
+/// out of fresh water's tones rather than the sea's.
 const SHALLOW_DEPTH: f32 = 1.8;
 const SEABED_DEPTH: f32 = 4.5;
 
@@ -1676,26 +1691,34 @@ impl TerrainGenerator {
         let slope = 1.0 - normal.y;
 
         // A lake first, its bed read against its own surface exactly as the
-        // sea's is read against zero. The shore character field takes no part:
-        // that is a property of stretches of *sea* coast, sampled at the
-        // nearest sea waterline, and means nothing on a shore halfway up a
-        // hillside — so a lake's margin is sand where it lies flat and bare
-        // rock where it stands steep, which is what tarns and lowland pools
-        // do. Above its own little shore band the lake has no say, and the
-        // hillside is painted as the height says.
+        // sea's is read against zero — but out of fresh water's own three
+        // tones, which is the whole of what tells a lake from an inlet. The
+        // sea's bed brightens towards its shore, and a pale shelf under a
+        // beach behind it is what draws the turquoise ring every coast wears;
+        // give that ring to a lake and it reads as an arm of the sea that
+        // happens to be inland. So a lake darkens instead: silt, then weed,
+        // then a reed margin where the sea would have sand.
+        //
+        // The shore character field takes no part. That is a property of
+        // stretches of *sea* coast, sampled at the nearest sea waterline, and
+        // means nothing on a shore halfway up a hillside — so a lake's margin
+        // is marsh where it lies flat and bare rock where it stands steep,
+        // which is what tarns and lowland pools do. Above its own little shore
+        // band the lake has no say, and the hillside is painted as the height
+        // says.
         if let Some(level) = self.lakes.level(wx, wz) {
             let awash = height - level;
             if awash < -SEABED_DEPTH {
-                return Surface::plain(Tone::Seabed);
+                return Surface::plain(Tone::Silt);
             }
             if awash < -SHALLOW_DEPTH {
-                return Surface::plain(Tone::Shallow);
+                return Surface::plain(Tone::Shoal);
             }
-            if awash < SHORE_TOP {
+            if awash < LAKE_MARGIN {
                 return Surface::plain(if slope > ROCK_SLOPE {
                     Tone::RockDark
                 } else {
-                    Tone::Sand
+                    Tone::Marsh
                 });
             }
         }
@@ -3309,8 +3332,8 @@ mod tests {
         // the machine that recorded it; a bumped `libm` would show up here the
         // same way a new platform would.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x850A_EBB7_B62C_6DA3u64),
-            (99, UVec2::new(3, 2), 0xAB16_15B0_41F4_71C5u64),
+            (20_040_112u32, UVec2::new(4, 4), 0x9FA5_D947_ECA3_E267u64),
+            (99, UVec2::new(3, 2), 0xA033_F84C_03E2_0919u64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -3954,6 +3977,55 @@ mod tests {
         assert!(
             wet > 1_000,
             "only {wet} samples under water across seven seeds — nothing was tested"
+        );
+    }
+
+    #[test]
+    fn no_lake_is_painted_in_the_seas_colours() {
+        // What tells a lake from an inlet, said as a rule rather than as a
+        // look: wherever a lake has the say — anywhere under its surface, and
+        // in the margin up to [`LAKE_MARGIN`] above it — the ground is fresh
+        // water's own tones, or the bare rock a steep bank is everywhere.
+        // Never sand, never the bright shelf, never the sea bed. Those three
+        // are what draw a coast, and a lake wearing them is the whole of the
+        // thing this is here to stop coming back.
+        //
+        // Only inside the margin, because above it the lake has no say at all
+        // and the hillside is painted as its height asks — which near the sea
+        // may quite properly be sand.
+        let fresh = [Tone::Silt, Tone::Shoal, Tone::Marsh, Tone::RockDark];
+        let mut painted = 0usize;
+        for seed in [20_040_112u32, 1, 7, 99, 808] {
+            let (config, gen) = generator(8, 8, seed);
+            let half = config.chunks.as_vec2() * CHUNK_METRES / 2.0;
+            let mut wz = -half.y;
+            while wz < half.y {
+                let mut wx = -half.x;
+                while wx < half.x {
+                    let here = wx;
+                    wx += FACET_METRES;
+                    let Some(level) = gen.lake_level(here, wz) else {
+                        continue;
+                    };
+                    let height = gen.height(here, wz);
+                    if height - level >= LAKE_MARGIN {
+                        continue;
+                    }
+                    let tone = gen.surface(here, wz, height, gen.normal(here, wz)).tone;
+                    painted += 1;
+                    assert!(
+                        fresh.contains(&tone),
+                        "seed {seed} paints a lake {tone:?} at ({here}, {wz}), \
+                         {:.2} m from its surface",
+                        height - level
+                    );
+                }
+                wz += FACET_METRES;
+            }
+        }
+        assert!(
+            painted > 1_000,
+            "only {painted} samples on lake ground across five seeds — nothing was tested"
         );
     }
 

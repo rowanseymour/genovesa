@@ -23,7 +23,7 @@
 //! Lakes are the exception that proves it. A lake stands above sea level at a
 //! height nothing local decides, so it cannot be a plane anyone draws
 //! unprompted — it arrives with its chunk, as a second grid of levels, and
-//! gets a second mesh in the same water as the sea.
+//! gets a second mesh, in fresh water rather than in the sea's.
 
 use std::sync::Arc;
 
@@ -38,7 +38,8 @@ use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
     chunk_at, dequantize, facets, ChunkPayload, Surface, Tone, CHUNK_METRES, FACET_METRES,
-    FACET_QUADS, FACET_TRIS, FACET_VERTS, HEIGHT_STEP, NO_WATER, OCEAN_DEPTH,
+    FACET_QUADS, FACET_TRIS, FACET_VERTS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH,
+    SEA_WATER,
 };
 
 use crate::camera::MapCamera;
@@ -90,6 +91,15 @@ const OFF_LATTICE: f32 = HEIGHT_STEP / 2.0;
 /// the half step of [`OFF_LATTICE`] that keeps it off the lattice those steps
 /// are counted on.
 const SEA_SURFACE: f32 = 4.0 * HEIGHT_STEP + OFF_LATTICE;
+
+/// How opaque standing water is drawn, sea and lake alike.
+///
+/// A drawing decision rather than a fact about the world, which is why it
+/// lives here and the two colours it is applied to live in the protocol. High:
+/// water is a flat tone with the bed showing faintly through it, not a pane of
+/// glass over a lit bottom. What it lets through is enough to darken the deep
+/// and lift the shallows, and no more.
+const WATER_ALPHA: f32 = 0.84;
 
 /// How far out from the camera's focus chunks are wanted, in metres.
 ///
@@ -397,11 +407,14 @@ pub(crate) struct ChunkBuild(Task<ChunkMeshes>);
 #[derive(Resource)]
 struct GroundMaterial(Handle<StandardMaterial>);
 
-/// The one material every stretch of water shares — the sea plane and every
-/// lake alike, so that water is one substance in this world rather than two
-/// that happen to have been given similar numbers.
+/// The one material every lake shares, so that all the standing water in a
+/// view still batches into a single draw call however many chunks it crosses.
+///
+/// The sea has no resource of its own: it is a single plane, spawned once with
+/// its material and never asked for again. This is kept because a lake arrives
+/// with its chunk and has to be given the water it is made of at that moment.
 #[derive(Resource)]
-struct WaterMaterial(Handle<StandardMaterial>);
+struct LakeMaterial(Handle<StandardMaterial>);
 
 /// Marks the sea plane, which travels with the camera.
 #[derive(Component)]
@@ -622,21 +635,24 @@ fn enter_world(
         Transform::from_xyz(0.0, -OCEAN_DEPTH - SEA_FLOOR_CLEARANCE, 0.0),
     ));
 
-    // What water is made of, wherever it stands. The sea plane below and
-    // every lake that streams in share this one handle, so a lake cannot
-    // drift into looking like a different liquid from the sea.
+    // What water is made of. Both waters are built the same way and differ
+    // only in colour — see [`SEA_WATER`] and [`LAKE_WATER`], where the two are
+    // named together and the difference between them is argued.
     //
     // Flat and bright rather than glassy — matte like everything else, give
-    // or take the barest reflectance. Still partly transparent, so the sand
-    // band running under the waterline shows through as a turquoise ring
-    // around every coast and every lake shore: two flat tones of water, which
-    // is the whole effect.
-    let water = materials.add(StandardMaterial {
-        reflectance: 0.02,
-        alpha_mode: AlphaMode::Blend,
-        ..matte(Color::srgba(0.10, 0.42, 0.62, 0.84))
-    });
-    commands.insert_resource(WaterMaterial(water.clone()));
+    // or take the barest reflectance. Still partly transparent, so the bright
+    // band running under the waterline shows through as a ring around every
+    // coast: two flat tones of water, which is the whole effect. A lake has no
+    // such band to show, which is most of why it does not wear the ring.
+    let mut still = |tint: Vec3| {
+        materials.add(StandardMaterial {
+            reflectance: 0.02,
+            alpha_mode: AlphaMode::Blend,
+            ..matte(Color::srgba(tint.x, tint.y, tint.z, WATER_ALPHA))
+        })
+    };
+    let sea = still(SEA_WATER);
+    commands.insert_resource(LakeMaterial(still(LAKE_WATER)));
 
     // Sea. Sized past the camera's far plane and moved along with it, so the
     // horizon is water fading into haze whichever way the view goes.
@@ -652,7 +668,7 @@ fn enter_world(
         // cliff's shadow out across the water at its foot.
         NotShadowCaster,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
-        MeshMaterial3d(water),
+        MeshMaterial3d(sea),
         Transform::from_xyz(0.0, SEA_SURFACE, 0.0),
     ));
 
@@ -709,7 +725,7 @@ fn enter_world(
 fn leave_world(mut commands: Commands) {
     commands.remove_resource::<Ground>();
     commands.remove_resource::<GroundMaterial>();
-    commands.remove_resource::<WaterMaterial>();
+    commands.remove_resource::<LakeMaterial>();
 }
 
 // ---------------------------------------------------------------------------
@@ -805,7 +821,7 @@ fn spawn_arrivals(
 fn receive_chunks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    water: Res<WaterMaterial>,
+    lake: Res<LakeMaterial>,
     mut building: Query<(Entity, &mut ChunkBuild)>,
 ) {
     let mut meshed = 0;
@@ -834,7 +850,7 @@ fn receive_chunks(
                 // of the shadow pass for exactly this reason.
                 NotShadowCaster,
                 Mesh3d(meshes.add(surface)),
-                MeshMaterial3d(water.0.clone()),
+                MeshMaterial3d(lake.0.clone()),
             ));
         }
         meshed += 1;
