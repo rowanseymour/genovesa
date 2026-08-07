@@ -12,6 +12,7 @@ pub mod boat;
 pub mod camera;
 pub mod capture;
 pub mod cli;
+pub mod compass;
 pub mod debug;
 pub mod menu;
 pub mod net;

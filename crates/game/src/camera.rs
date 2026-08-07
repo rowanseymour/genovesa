@@ -10,8 +10,10 @@ use crate::boat::Boat;
 use crate::terrain::Ground;
 use crate::{eased, AppState};
 
-/// Downward tilt of the camera, from horizontal.
-const PITCH: f32 = std::f32::consts::FRAC_PI_4 * 1.15;
+/// Downward tilt of the camera, from horizontal. Public because the compass
+/// draws itself under the same tilt, so its card lies in the picture the way
+/// the ground does.
+pub const PITCH: f32 = std::f32::consts::FRAC_PI_4 * 1.15;
 /// Starting rotation about the vertical axis. 45° frames the map down a
 /// diagonal.
 const YAW: f32 = std::f32::consts::FRAC_PI_4;
