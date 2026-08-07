@@ -28,7 +28,9 @@
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver};
+use bevy::light::{
+    CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster, NotShadowReceiver,
+};
 use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
@@ -653,6 +655,19 @@ fn enter_world(
         MeshMaterial3d(water),
         Transform::from_xyz(0.0, SEA_SURFACE, 0.0),
     ));
+
+    // Shadow map resolution. The first cascade spreads its texels over the
+    // whole frustum slice out to its far bound — about a hundred metres of
+    // diagonal at the default zoom — so at Bevy's default 2048 a texel is
+    // around 5 cm of world. The terrain never notices: its facets are metres
+    // across and their shadows are broad shapes. The mast does. It is the
+    // thinnest caster in the world, and at 16 cm its shadow is a stripe three
+    // texels wide, whose edges snap from texel to texel as the boat moves —
+    // a visible flicker along the whole stripe. Doubling the resolution
+    // halves the texel and the stripe stops seething. The cost is GPU memory
+    // (each cascade is one square layer of this size), which is why it stops
+    // at 4096 rather than going further.
+    commands.insert_resource(DirectionalLightShadowMap { size: 4096 });
 
     // Sun.
     commands.spawn((
