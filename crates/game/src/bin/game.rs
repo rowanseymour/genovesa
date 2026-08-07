@@ -18,6 +18,7 @@ use game::boat::BoatPlugin;
 use game::camera::MapCameraPlugin;
 use game::capture::CapturePlugin;
 use game::cli::{self, Args};
+use game::compass::CompassPlugin;
 use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
@@ -114,6 +115,7 @@ fn run(args: Args, session: Option<Session>) {
             TerrainPlugin,
             BoatPlugin,
             MapCameraPlugin,
+            CompassPlugin,
             MenuPlugin,
             // Harmless offline: its systems condition on the joined session.
             NetPlugin,

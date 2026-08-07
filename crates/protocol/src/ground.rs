@@ -43,6 +43,16 @@ pub fn chunk_at(point: Vec2) -> IVec2 {
     (point / CHUNK_METRES).floor().as_ivec2()
 }
 
+/// Which way north lies on the ground plane: the direction a map drawn in
+/// plan puts at the top of the page.
+///
+/// Nothing in the world's arithmetic cares — the direction is a convention,
+/// not a computation — but it is a convention two clients have to share, or
+/// their compasses would disagree about the same sea. So it is written down
+/// here with the rest of the coordinate system rather than left for each
+/// client to pick.
+pub const NORTH: Vec2 = Vec2::NEG_Y;
+
 /// How deep the open ocean's floor lies, in metres below sea level.
 ///
 /// This is what an answer of *no ground* means. A chunk with no payload is
