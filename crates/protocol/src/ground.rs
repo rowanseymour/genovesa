@@ -121,13 +121,16 @@ pub fn dequantize(stored: u16) -> f32 {
 // --- The palette ------------------------------------------------------------
 
 /// The ground palette. Small and flat on purpose — every triangle gets exactly
-/// one of these, so the whole world is drawn in sixteen colours plus three
+/// one of these, so the whole world is drawn in nineteen colours plus three
 /// shade steps. Saturated well past anything natural, because flat shading has
 /// no texture or gradient to carry the picture; the colour has to do that work
 /// on its own.
 ///
-/// The order is the wire's: a tone travels as its own number, so these may be
-/// added to but not shuffled without bumping [`crate::PROTOCOL_VERSION`].
+/// The order is the wire's: a tone travels as its own number, so the only
+/// shape a change to this may take is another entry on the end — anything
+/// shuffled repaints the world of every build that disagrees. Either way it is
+/// a change to the format and bumps [`crate::PROTOCOL_VERSION`], because a
+/// client that has never heard of a tone cannot draw the triangle it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Tone {
@@ -162,10 +165,25 @@ pub enum Tone {
     /// everything else, and it has to stay clearly apart from [`Tone::Rock`]
     /// in shadow.
     Snow = 15,
+    /// The bed of standing fresh water, deep enough to be dark. Green where
+    /// [`Tone::Seabed`] is blue, and darker than it: a lake bottoms out in
+    /// silt and drowned vegetation rather than in sand, and it is what a lake
+    /// is *seen through* that has to say fresh water rather than sea.
+    Silt = 16,
+    /// The weedy shallows of a lake — what [`Tone::Shallow`] is to the sea,
+    /// except that it deliberately refuses the turquoise. A ring of bright
+    /// water is the strongest thing that says *coast* in this palette, so a
+    /// lake wearing one reads as an arm of the sea that happens to be inland.
+    Shoal = 17,
+    /// The margin a lake leaves around itself: reed, mud and wet ground, from
+    /// just under the waterline to just above it. Takes the place a beach
+    /// holds on the sea coast, and is dull and dark where sand is bright —
+    /// fresh water has no surf to wash a shore clean.
+    Marsh = 18,
 }
 
 /// The sRGB the tones stand for, in the order they are numbered.
-const TONES: [Vec3; 16] = [
+const TONES: [Vec3; 19] = [
     Vec3::new(0.16, 0.34, 0.38), // Seabed
     Vec3::new(0.46, 0.68, 0.62), // Shallow
     Vec3::new(0.90, 0.83, 0.58), // Sand
@@ -182,7 +200,26 @@ const TONES: [Vec3; 16] = [
     Vec3::new(0.40, 0.38, 0.37), // RockDark
     Vec3::new(0.68, 0.65, 0.60), // Scree
     Vec3::new(0.90, 0.92, 0.95), // Snow
+    Vec3::new(0.13, 0.24, 0.20), // Silt
+    Vec3::new(0.33, 0.48, 0.32), // Shoal
+    Vec3::new(0.42, 0.42, 0.25), // Marsh
 ];
+
+/// What the sea is drawn in, and what standing fresh water is drawn in.
+///
+/// Not tones — no triangle of ground is ever painted these, and they travel
+/// nowhere. They are here because they are the other half of what a client
+/// needs in order to draw the world, and because the two ends have to agree:
+/// the sea a client draws for itself as a plane at zero has to be the same
+/// substance as the sea in a map rendered by whatever generated the ground.
+///
+/// A lake is deliberately *not* the sea. The sea's blue is a bright open one
+/// with the sky in it; fresh water is darker, greener and stiller, which is
+/// the difference the eye actually uses at a distance — before it can see
+/// whether there is a beach. How far either is seen through is the drawing
+/// end's own business.
+pub const SEA_WATER: Vec3 = Vec3::new(0.10, 0.42, 0.62);
+pub const LAKE_WATER: Vec3 = Vec3::new(0.12, 0.34, 0.38);
 
 impl Tone {
     /// The tone a stored number names, or `None` for one this build has never
@@ -212,7 +249,10 @@ impl Tone {
             12 => Self::Rock,
             13 => Self::RockDark,
             14 => Self::Scree,
-            _ => Self::Snow,
+            15 => Self::Snow,
+            16 => Self::Silt,
+            17 => Self::Shoal,
+            _ => Self::Marsh,
         })
     }
 
@@ -282,8 +322,8 @@ impl Surface {
     }
 
     /// The byte this travels as: the tone in the high bits, the shade in the
-    /// low two. Sixteen tones and three shades, so a valid surface is always
-    /// under 64 and most of the byte is spare.
+    /// low two. Nineteen tones and three shades, so a valid surface is always
+    /// under 80 and a good part of the byte is spare.
     fn to_byte(self) -> u8 {
         ((self.tone as u8) << 2) | self.shade as u8
     }
@@ -530,7 +570,7 @@ mod tests {
 
     #[test]
     fn every_surface_survives_its_byte() {
-        for tone in 0..16u8 {
+        for tone in 0..TONES.len() as u8 {
             for shade in [Shade::Dark, Shade::Plain, Shade::Light] {
                 let surface = Surface::new(Tone::from_byte(tone).expect("a tone"), shade);
                 assert_eq!(Surface::from_byte(surface.to_byte()), Some(surface));
@@ -538,13 +578,13 @@ mod tests {
         }
         // The fourth shade, and a tone past the end of the table.
         assert_eq!(Surface::from_byte(0b11), None);
-        assert_eq!(Surface::from_byte(16 << 2), None);
+        assert_eq!(Surface::from_byte((TONES.len() as u8) << 2), None);
     }
 
     #[test]
     fn the_palette_stays_inside_the_colours_there_are() {
         // Every combination is a colour a renderer can use, clamp and all.
-        for tone in 0..16u8 {
+        for tone in 0..TONES.len() as u8 {
             for shade in [Shade::Dark, Shade::Plain, Shade::Light] {
                 let c = Surface::new(Tone::from_byte(tone).expect("a tone"), shade).color();
                 assert!(
@@ -557,7 +597,7 @@ mod tests {
         // And only the snow reaches the clamp, which is why nothing shades
         // it: a lighter cut of any other tone still moves the colour by the
         // full step, so a shaded parcel really does break into three.
-        for tone in 0..16u8 {
+        for tone in 0..TONES.len() as u8 {
             let tone = Tone::from_byte(tone).expect("a tone");
             let lit = tone.color() * Shade::Light.factor();
             assert_eq!(
