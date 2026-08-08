@@ -1498,10 +1498,16 @@ mod tests {
         let (address, _socket) = fake_server(Vec2::new(100.0, -200.0), Vec2::new(100.0, -400.0));
         let mut app = test_app(AppState::JoinWorld);
         // Time for the steering the boat plugin brings with it; the menu's own
-        // systems never ask what o'clock it is.
-        app.add_plugins((bevy::time::TimePlugin, crate::boat::BoatPlugin))
-            .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>();
+        // systems never ask what o'clock it is. Assets for the boat's own
+        // model, which it is spawned out of a file.
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            bevy::time::TimePlugin,
+            crate::boat::BoatPlugin,
+        ))
+        .init_asset::<Mesh>()
+        .init_resource::<Assets<StandardMaterial>>();
 
         app.world_mut().resource_mut::<JoinSettings>().address = address;
         click(&mut app, MenuButton::Connect);

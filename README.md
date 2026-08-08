@@ -22,6 +22,10 @@ iteration afterwards:
 cargo run --features dev
 ```
 
+That build also watches `assets/`, so a model re-exported while the game is
+running is picked up without restarting it — which is how models are worked
+on here, there being no editor. See [Models](#models).
+
 There is a second binary, `mapgen`, which renders maps from above as PNG
 without opening a window — see [Looking at maps](#looking-at-maps).
 
@@ -177,6 +181,27 @@ cargo test --release island_shape -- --ignored --nocapture
 | `shore_mix` | how each seed's waterline divides between beach, rocky shore and cliff |
 | `generator_cost` | the one-off cost of fitting an island's generator — what a server pays the first time anyone approaches an island |
 | `arrival_cost` | what one client's arrival costs a server: the chunks within a streaming radius of where a world is entered, split into ground and open water, with the megabytes and the milliseconds |
+
+## Models
+
+Everything the game draws that is not ground is a glTF file under `assets/`,
+built from a Blender master. Each model has a directory under `assets-src/`
+named for the file it produces, holding the master and the `build.sh` that
+exports it — the same arrangement the sound uses. Nothing in `assets-src/`
+ships; it is what the shipped file was made from, kept so the shape can be
+taken further.
+
+Working on one means Blender open beside a game started with `--features dev`:
+export, and the running world has the new shape a moment later. There is no
+editor, and this is the substitute — a hull is a thing to be looked at from a
+camera forty metres up while it is being moved, not a set of numbers.
+
+Materials in the file are ignored. The look is a small fixed palette of flat
+tones, and the game assigns those itself, so a model carries shape and nothing
+else. What it *must* carry is checked: `boat.rs` holds the file to the
+dimensions the collision code assumes of it, to the order its meshes are in,
+and to being flat-shaded and wound outwards — the failures a modelling program
+makes easy and the eye lets through.
 
 ## Tests
 

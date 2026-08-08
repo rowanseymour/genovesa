@@ -1,19 +1,24 @@
 //! The boat the player gets about in, and the keys that steer it.
 //!
-//! The hull is a placeholder, meant to be replaced wholesale by a modelled
-//! asset: a dozen triangles cut to plausible dimensions for a small boat —
-//! long enough to see which end is the bow from a camera forty metres up, and
-//! nothing more. What is here to stay is the *entity*: the player's place in
-//! the world, which the movement keys drive ([`steer`]) and the camera stays
-//! centred on.
+//! The hull is modelled rather than drawn here: [`MODEL`] is a glTF file built
+//! from a Blender master under `assets-src/`, and this module spawns its meshes
+//! and steers what they hang off. What is here to stay is the *entity*: the
+//! player's place in the world, which the movement keys drive ([`steer`]) and
+//! the camera stays centred on.
+//!
+//! The few dimensions still named below are the ones the *rules* are written
+//! against — where the keel is, and how deep. Those are not the model's to
+//! change quietly, so `the_model_is_the_hull_the_keel_is_probed_along` holds
+//! the file to them; everything else about the shape is the modeller's, and
+//! this file has no opinion on it.
 //!
 //! It faces down its own -Z, so [`Transform::forward`] is the way it is
 //! pointing and steering can leave the axis convention alone. Its origin is on
 //! the waterline rather than at the keel or the deck, which is what lets
 //! [`float`] put it down by simply setting the height of the surface it is on.
 
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::PrimitiveTopology;
+use bevy::asset::AssetPath;
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
@@ -21,42 +26,56 @@ use crate::camera::View;
 use crate::terrain::Ground;
 use crate::{eased, matte, AppState, Helm};
 
+/// The boat, as a file. Built from `assets-src/boat.glb/boat.blend` by the
+/// `build.sh` beside it, which is also where the export settings the look
+/// depends on are written down.
+const MODEL: &str = "boat.glb";
+
+/// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
+/// them in a way the loader can ask for, so these are positions in the file —
+/// which means reordering the objects in Blender would silently swap the hull
+/// for the spar. `the_model_holds_a_hull_and_a_spar_in_that_order` is what
+/// stops that being found by looking at it.
+const HULL_MESH: usize = 0;
+const SPAR_MESH: usize = 1;
+
 /// Length overall, in metres. A small sailing boat: at the default zoom the
 /// visible ground is some tens of metres across, so this reads as a boat
 /// rather than as a speck, and the same at the far end of the zoom range it is
 /// still a mark on the water rather than gone.
 const LENGTH: f32 = 7.0;
-/// Width at the widest point.
-const BEAM: f32 = 2.4;
-/// Deck height above the waterline.
-const FREEBOARD: f32 = 0.9;
-/// Keel depth below it. The sea is translucent, so this much of the hull shows
-/// through the water as a darker shape under the deck.
+
+/// Keel depth below the waterline. The sea is translucent, so this much of the
+/// hull shows through the water as a darker shape under the deck — but what
+/// makes it the game's business rather than the model's is [`GROUNDING_DRAFT`],
+/// which is measured from it.
 const DRAFT: f32 = 0.8;
 
 /// Where the keel begins and ends, in metres from amidships — negative
-/// forward, the same axis the hull is drawn on. The forefoot stops short of
+/// forward, the same axis the hull is modelled on. The forefoot stops short of
 /// the bow, which is what gives the stem its rake; the heel runs right aft to
-/// the transom. [`hull_faces`] cuts the hull to these and [`grounding`] probes
-/// along them, so what runs aground is the line that is drawn.
+/// the transom. [`grounding`] probes along these, so what runs aground is the
+/// line that is drawn.
 const FOREFOOT_STATION: f32 = -LENGTH * 0.5 * 0.7;
 const HEEL_STATION: f32 = LENGTH * 0.5;
 
+/// How much of the keel the ground is allowed to take before the hull is
+/// stopped. Stopping the boat the instant the ground rises to meet the keel is
+/// an invisible wall a boat's length offshore, whereas a fifth of a metre of
+/// bite is a boat *beaching*: the keel is seen to touch, and then it stops.
+/// Well clear of the two centimetres the heights are quantised to, so the
+/// threshold cannot chatter.
+const KEEL_BITE: f32 = 0.2;
+
 /// How little water the hull is held in: ground standing higher than this far
-/// below the waterline stops it. Shallower than [`DRAFT`] on purpose, and the
-/// difference between the two is the bite the keel is allowed to take first —
-/// stopping the boat the instant the ground rises to meet the keel is an
-/// invisible wall a boat's length offshore, whereas a fifth of a metre of bite
-/// is a boat *beaching*: the keel is seen to touch, and then it stops. Well
-/// clear of the two centimetres the heights are quantised to, so the threshold
-/// cannot chatter.
+/// below the waterline stops it.
 ///
 /// On the coasts the generator draws this puts the hull within a metre or two
 /// of the waterline; where it holds a boat further off, it is off a shelf too
 /// thin to float one, and the shallows are painted as shallows long before
 /// they are this thin — so a boat held out is held out of water it can be
 /// seen to be held out of.
-const GROUNDING_DRAFT: f32 = 0.6;
+const GROUNDING_DRAFT: f32 = DRAFT - KEEL_BITE;
 
 /// How many points along the keel are asked about the bottom. Spread from the
 /// forefoot to the heel inclusive, so the gap between them comes out just under
@@ -81,24 +100,10 @@ const GROUNDING_DRAFT: f32 = 0.6;
 /// The sides are not probed: the hull is a shallow V, drawing only [`DRAFT`] on
 /// the centreline and nothing at all at the beam, so a probe out there would
 /// have to carry a draught of its own to say anything the keel has not said.
+/// That is a standing condition on the model rather than an observation about
+/// one — a hull remodelled with a flat bottom carried out to the beam would
+/// need probes out there too.
 const KEEL_PROBES: usize = 4;
-
-/// Height of the mast above the deck. Tall out of proportion to the hull,
-/// deliberately: from a camera looking down at 50° a mast is most of what says
-/// which way the boat is leaning and where it is against the ground behind it,
-/// and its shadow is what pins it to the water.
-const MAST_HEIGHT: f32 = 6.0;
-const MAST_THICKNESS: f32 = 0.16;
-
-/// Where the hull is widest, as a fraction of its length aft of amidships. Aft
-/// of it, so that the taper to the bow is nearly twice the length of the one to
-/// the transom — the fine entry and full stern is what tells one end from the
-/// other when the camera is looking straight down at it.
-const SHOULDER: f32 = 0.15;
-
-/// Where the mast stands, the same way — about a third of the way back from the
-/// bow, which is where a boat this shape would carry one.
-const MAST_STATION: f32 = -0.15;
 
 /// Metres per second under way. Brisk beyond honesty for a seven-metre hull,
 /// but the boat is how the world is crossed: at this speed the ground in view
@@ -210,12 +215,24 @@ impl Plugin for BoatPlugin {
 /// point — open water the layout keeps just off the first island's coast —
 /// so the boat starts afloat with land dead ahead; a `--focus` can still put
 /// it down inland, aground until the movement keys drive it back to the sea.
+/// The meshes hang off the boat as children rather than on it: a mesh carries
+/// one material, and the hull and the spar are two colours. Their geometry is
+/// already in the boat's own frame — the modeller places the mast on the deck,
+/// not the game — so the children sit at the identity and the only transform
+/// anything writes is the boat's own.
 fn launch(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    assets: Res<AssetServer>,
     view: Res<View>,
 ) {
+    // The file's own materials are ignored, and the meshes are pulled out of it
+    // one at a time rather than the whole scene being spawned. glTF materials
+    // are PBR — a roughness, a metalness, a specular response — and the look
+    // here is a small fixed palette under `matte`, so a hull lit the way the
+    // file asked for would be the one surface in the world with a highlight on
+    // it. Leaving the colours in Rust also keeps them beside the ground's,
+    // which is the comparison that matters when either is picked.
     let hull_material = materials.add(matte(HULL_COLOR));
     let spar_material = materials.add(matte(SPAR_COLOR));
 
@@ -223,18 +240,27 @@ fn launch(
         Name::new("Boat"),
         Boat::default(),
         DespawnOnExit(AppState::InWorld),
-        Mesh3d(meshes.add(hull_mesh())),
-        MeshMaterial3d(hull_material),
         // A rotation of `yaw` about the vertical takes -Z to the camera's own
         // forward, so the boat starts pointing away from the viewer.
         Transform::from_xyz(view.focus.x, 0.0, view.focus.z)
             .with_rotation(Quat::from_rotation_y(view.yaw)),
-        children![(
-            Name::new("Mast"),
-            Mesh3d(meshes.add(Cuboid::new(MAST_THICKNESS, MAST_HEIGHT, MAST_THICKNESS))),
-            MeshMaterial3d(spar_material),
-            Transform::from_xyz(0.0, FREEBOARD + MAST_HEIGHT * 0.5, LENGTH * MAST_STATION),
-        )],
+        // Carried by the parent because the children inherit it: without one
+        // here there is nothing for their own visibility to be computed
+        // against, and a boat whose meshes are on entities of their own would
+        // never be drawn.
+        Visibility::default(),
+        children![
+            (
+                Name::new("Hull"),
+                Mesh3d(assets.load(mesh_in_model(HULL_MESH))),
+                MeshMaterial3d(hull_material),
+            ),
+            (
+                Name::new("Spar"),
+                Mesh3d(assets.load(mesh_in_model(SPAR_MESH))),
+                MeshMaterial3d(spar_material),
+            )
+        ],
     ));
 
     // Said out loud for the same reason a run without a seed says which world
@@ -449,72 +475,13 @@ fn steer(
     }
 }
 
-/// The hull, as the triangles it is made of, wound so that every face looks
-/// outwards.
+/// Where in [`MODEL`] to find one of its meshes.
 ///
-/// Five points around the deck and two along the keel: a bow, a shoulder either
-/// side where the beam is widest, and a transom narrower than the shoulder. The
-/// sides fall from the deck to a keel line rather than to a flat bottom, so the
-/// hull is a shallow V and reads as a boat from the side as well as from above.
-fn hull_faces() -> [[Vec3; 3]; 10] {
-    let (half_length, half_beam) = (LENGTH * 0.5, BEAM * 0.5);
-    let shoulder = LENGTH * SHOULDER;
-
-    // Deck, from the bow round to the transom.
-    let bow = Vec3::new(0.0, FREEBOARD, -half_length);
-    let port_shoulder = Vec3::new(-half_beam, FREEBOARD, shoulder);
-    let port_quarter = Vec3::new(-half_beam * 0.8, FREEBOARD, half_length);
-    let starboard_quarter = Vec3::new(half_beam * 0.8, FREEBOARD, half_length);
-    let starboard_shoulder = Vec3::new(half_beam, FREEBOARD, shoulder);
-
-    // Keel, along the stations the bottom is probed at.
-    let forefoot = Vec3::new(0.0, -DRAFT, FOREFOOT_STATION);
-    let heel = Vec3::new(0.0, -DRAFT, HEEL_STATION);
-
-    [
-        // Deck, fanned from the bow.
-        [bow, port_shoulder, port_quarter],
-        [bow, port_quarter, starboard_quarter],
-        [bow, starboard_quarter, starboard_shoulder],
-        // Port side, bow to transom.
-        [bow, forefoot, port_shoulder],
-        [port_shoulder, forefoot, heel],
-        [port_shoulder, heel, port_quarter],
-        // Starboard, the same three mirrored.
-        [starboard_shoulder, forefoot, bow],
-        [heel, forefoot, starboard_shoulder],
-        [starboard_quarter, heel, starboard_shoulder],
-        // Transom.
-        [port_quarter, heel, starboard_quarter],
-    ]
-}
-
-/// The hull as a mesh: un-indexed with one normal per face, which is what makes
-/// each facet a flat tone in the same way the terrain's are.
-fn hull_mesh() -> Mesh {
-    let faces = hull_faces();
-    let mut positions = Vec::with_capacity(faces.len() * 3);
-    let mut normals = Vec::with_capacity(faces.len() * 3);
-
-    for face in faces {
-        let normal = face_normal(&face);
-        for corner in face {
-            positions.push(corner.to_array());
-            normals.push(normal.to_array());
-        }
-    }
-
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-}
-
-/// Which way a face points, from the order its corners are wound in.
-fn face_normal(face: &[Vec3; 3]) -> Vec3 {
-    (face[1] - face[0]).cross(face[2] - face[0]).normalize()
+/// `primitive: 0` because each object in the master carries one material and so
+/// exports as a mesh of a single primitive; an object split across two
+/// materials would arrive as two, and would want spawning as two children.
+fn mesh_in_model(mesh: usize) -> AssetPath<'static> {
+    GltfAssetLabel::Primitive { mesh, primitive: 0 }.from_asset(MODEL)
 }
 
 #[cfg(test)]
@@ -541,15 +508,26 @@ mod tests {
     /// A headless app with the boat systems running, already in a match.
     fn test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((TimePlugin, StatesPlugin, BoatPlugin))
-            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
-            .init_state::<AppState>()
-            .add_sub_state::<Helm>()
-            .init_resource::<View>()
-            .init_resource::<KeyBindings>()
-            .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>();
+        // `AssetPlugin` because the boat is spawned out of a file now, and
+        // `TaskPoolPlugin` because that is where it finds the thread to read it
+        // on. Nothing here waits for the load — these tests are about where the
+        // hull is and what it does, not what it looks like — but `launch` asks
+        // the asset server for its meshes, and without one there is no boat.
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            TimePlugin,
+            StatesPlugin,
+            BoatPlugin,
+        ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+        .init_state::<AppState>()
+        .add_sub_state::<Helm>()
+        .init_resource::<View>()
+        .init_resource::<KeyBindings>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .init_asset::<Mesh>()
+        .init_resource::<Assets<StandardMaterial>>();
         app.update();
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
@@ -585,35 +563,176 @@ mod tests {
         (heading_yaw(&mut app) - start_yaw) / seconds
     }
 
-    #[test]
-    fn every_hull_face_looks_outwards() {
-        // Winding is invisible until something is drawn — a face wound the
-        // wrong way round is simply culled, and the hull gets a hole in it that
-        // only shows from one angle. So the whole hull is checked against a
-        // point inside it: a closed convex-ish shell has every face pointing
-        // away from its own middle.
-        let faces = hull_faces();
-        let corners: Vec<Vec3> = faces.iter().flatten().copied().collect();
-        let middle = corners.iter().sum::<Vec3>() / corners.len() as f32;
+    /// The model as it sits on disk, read straight out of the `.glb` rather
+    /// than through Bevy's loader.
+    ///
+    /// A glTF binary is a JSON chunk describing the file and a binary chunk
+    /// holding the numbers, and the tests below want both. Going through the
+    /// asset server instead would mean standing up a render app and waiting on
+    /// a load, to learn things the file states plainly.
+    fn model() -> (serde_json::Value, Vec<u8>) {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/boat.glb");
+        let file = std::fs::read(path).expect("assets/boat.glb — run assets-src/boat.glb/build.sh");
+        assert_eq!(&file[..4], b"glTF", "not a glTF binary");
 
-        for face in faces {
-            let outward = (face[0] + face[1] + face[2]) / 3.0 - middle;
-            let normal = face_normal(&face);
-            assert!(
-                normal.dot(outward) > 0.0,
-                "a face at {outward:?} from the middle points {normal:?}, which is inwards"
-            );
+        let (mut at, mut chunks) = (12, Vec::new());
+        while at < file.len() {
+            let length = u32::from_le_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+            chunks.push(file[at + 8..at + 8 + length].to_vec());
+            at += 8 + length;
+        }
+        let json = serde_json::from_slice(&chunks[0]).expect("the glTF's JSON chunk");
+        (json, chunks[1].clone())
+    }
+
+    /// One mesh of the model, as the triangles it is made of — `attribute`
+    /// being `POSITION` for where its corners are or `NORMAL` for where they
+    /// face. Read through the accessors' own view of the buffer, so an
+    /// exporter that changes how it packs the numbers changes nothing here.
+    fn triangles(index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
+        let (json, buffer) = model();
+        let primitive = &json["meshes"][index]["primitives"][0];
+
+        let read = |accessor: &serde_json::Value, stride: usize| -> Vec<u8> {
+            let view = &json["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+            let start = view["byteOffset"].as_u64().unwrap_or(0) as usize
+                + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+            let count = accessor["count"].as_u64().unwrap() as usize;
+            buffer[start..start + count * stride].to_vec()
+        };
+
+        let wanted = primitive["attributes"][attribute].as_u64().unwrap() as usize;
+        let values: Vec<Vec3> = read(&json["accessors"][wanted], 12)
+            .chunks_exact(12)
+            .map(|v| {
+                Vec3::new(
+                    f32::from_le_bytes(v[0..4].try_into().unwrap()),
+                    f32::from_le_bytes(v[4..8].try_into().unwrap()),
+                    f32::from_le_bytes(v[8..12].try_into().unwrap()),
+                )
+            })
+            .collect();
+
+        let indices = &json["accessors"][primitive["indices"].as_u64().unwrap() as usize];
+        // 5123 is glTF's code for an unsigned short, which is what an exporter
+        // reaches for on a mesh this small.
+        assert_eq!(indices["componentType"], 5123, "indices are not u16");
+        read(indices, 2)
+            .chunks_exact(6)
+            .map(|t| {
+                let at = |b: &[u8]| values[u16::from_le_bytes(b.try_into().unwrap()) as usize];
+                [at(&t[0..2]), at(&t[2..4]), at(&t[4..6])]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_model_holds_a_hull_and_a_spar_in_that_order() {
+        // The one thing about the file the game cannot see for itself. It asks
+        // for its meshes by number, and glTF numbers them in whatever order the
+        // objects sat in the master — so an afternoon in Blender that leaves the
+        // spar first would paint the hull in bare-spar cream and stand a
+        // seven-metre plank of timber where the mast should be, with nothing
+        // failing anywhere to say so.
+        let (json, _) = model();
+        assert_eq!(json["meshes"][HULL_MESH]["name"], "hull");
+        assert_eq!(json["meshes"][SPAR_MESH]["name"], "spar");
+    }
+
+    #[test]
+    fn the_model_is_the_hull_the_keel_is_probed_along() {
+        // What `grounding` assumes about a shape it never looks at: the keel
+        // runs at DRAFT below the waterline, from the forefoot aft to the heel,
+        // and the hull is that long. Remodel the boat deeper and every probe
+        // would be reading the water above its own keel — the hull would sail
+        // through the shallows it should be stopped by, and nothing but this
+        // would notice.
+        let corners: Vec<Vec3> = triangles(HULL_MESH, "POSITION")
+            .into_iter()
+            .flatten()
+            .collect();
+        let lowest = corners.iter().map(|c| c.y).fold(f32::MAX, f32::min);
+        let (bow, transom) = corners
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
+
+        assert!(
+            (lowest + DRAFT).abs() < 1e-4,
+            "the model's keel is {lowest} below the waterline, not {}",
+            -DRAFT
+        );
+        assert!(
+            (bow + LENGTH * 0.5).abs() < 1e-4 && (transom - LENGTH * 0.5).abs() < 1e-4,
+            "the model runs {bow}..{transom}, not a {LENGTH}m hull about amidships"
+        );
+
+        // The keel itself, not just the depth: the probes are spread between
+        // these two stations, and each one has to be over hull rather than over
+        // the water ahead of a forefoot that has crept aft.
+        let keel: Vec<&Vec3> = corners
+            .iter()
+            .filter(|c| (c.y + DRAFT).abs() < 1e-4)
+            .collect();
+        let forefoot = keel.iter().map(|c| c.z).fold(f32::MAX, f32::min);
+        let heel = keel.iter().map(|c| c.z).fold(f32::MIN, f32::max);
+        assert!(
+            (forefoot - FOREFOOT_STATION).abs() < 1e-4 && (heel - HEEL_STATION).abs() < 1e-4,
+            "the keel runs {forefoot}..{heel}, not {FOREFOOT_STATION}..{HEEL_STATION}"
+        );
+    }
+
+    #[test]
+    fn the_model_is_flat_shaded() {
+        // The look, as a condition on the file. Everything the game draws is a
+        // flat tone per facet, and a mesh left smooth in Blender exports with
+        // its normals averaged across the faces each vertex meets — which
+        // arrives as a hull with gradients running over it, the one thing this
+        // palette cannot absorb. It is a checkbox in a modelling program and
+        // reads as a subtly wrong-looking boat rather than as a mistake, so it
+        // is worth a test rather than an eye.
+        for mesh in [HULL_MESH, SPAR_MESH] {
+            let faces = triangles(mesh, "POSITION");
+            let normals = triangles(mesh, "NORMAL");
+
+            for (face, normal) in faces.iter().zip(normals) {
+                let flat = (face[1] - face[0]).cross(face[2] - face[0]).normalize();
+                for corner in normal {
+                    assert!(
+                        corner.dot(flat) > 0.999,
+                        "a corner of mesh {mesh} faces {corner:?} on a facet lying {flat:?}"
+                    );
+                }
+            }
         }
     }
 
     #[test]
-    fn the_hull_is_a_flat_shaded_mesh() {
-        let mesh = hull_mesh();
-        assert_eq!(mesh.count_vertices(), hull_faces().len() * 3);
-        assert!(
-            mesh.indices().is_none(),
-            "flat shading needs no index buffer"
-        );
+    fn every_face_looks_outwards() {
+        // Winding is invisible until something is drawn — a face wound the
+        // wrong way round is simply culled, so what is seen through the hole is
+        // the inside of the far side of the shape, lit as though it faced away
+        // from the sun. On a mast that is a mast whose lit side is the shaded
+        // one and whose top has gone; a change small enough to look at without
+        // noticing, and this file caught it once already.
+        //
+        // Checked against a point inside: a closed convex-ish shell has every
+        // face pointing away from its own middle. Both meshes, because the one
+        // that was wound inwards was the spar.
+        for mesh in [HULL_MESH, SPAR_MESH] {
+            let faces = triangles(mesh, "POSITION");
+            let corners: Vec<Vec3> = faces.iter().flatten().copied().collect();
+            let middle = corners.iter().sum::<Vec3>() / corners.len() as f32;
+
+            for face in faces {
+                let outward = (face[0] + face[1] + face[2]) / 3.0 - middle;
+                let normal = (face[1] - face[0]).cross(face[2] - face[0]).normalize();
+                assert!(
+                    normal.dot(outward) > 0.0,
+                    "a face of mesh {mesh} at {outward:?} from the middle points \
+                     {normal:?}, which is inwards"
+                );
+            }
+        }
     }
 
     #[test]
