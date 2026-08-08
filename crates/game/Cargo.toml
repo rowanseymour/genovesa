@@ -28,6 +28,18 @@ args = { path = "../args" }
 # it, and asking for a serif silently gets the same mono as everything else.
 bevy = { workspace = true, features = ["system_font_discovery"] }
 
+[dev-dependencies]
+# Reads assets/boat.glb in the tests that hold the model to what the collision
+# code assumes of it. Only the tests parse glTF — the game hands the file to
+# Bevy's own loader — and this is already in the tree behind Bevy, so it costs
+# a line here and nothing to build.
+serde_json = "1"
+
 [features]
-# Much faster incremental builds while iterating: `cargo run --features dev`
-dev = ["bevy/dynamic_linking"]
+# Much faster incremental builds while iterating: `cargo run --features dev`.
+# `file_watcher` is the other half of that: Bevy reloads an asset when the file
+# changes, so a boat re-exported from Blender arrives in a game that is already
+# running, and a shape can be looked at in the world it is meant for while it is
+# still being moved. Not in a release build — it is a thread watching the
+# assets directory, and a shipped game's assets do not change under it.
+dev = ["bevy/dynamic_linking", "bevy/file_watcher"]

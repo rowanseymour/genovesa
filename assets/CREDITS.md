@@ -2,6 +2,19 @@
 
 Where the files here came from, and what may be done with them.
 
+## boat.glb
+
+Original to this project, and under the same licence as the rest of it. Nothing
+third-party went into it, so nothing here is owed to anybody.
+
+`assets-src/boat.glb/` holds the Blender master and the script that exports it,
+which is where the export settings the look depends on are written down.
+
+The shape started as the placeholder the game used to build in code — ten
+triangles and a spar — and was moved into a model file unchanged, so that the
+first thing through the pipeline could be checked against a picture of the last
+thing before it. It is meant to be taken further.
+
 ## menu.ogg
 
 Cut from [Sailboat Bow](https://freesound.org/s/852108/) by myLoop, published on

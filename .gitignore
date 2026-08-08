@@ -10,3 +10,6 @@
 
 # macOS
 .DS_Store
+
+# Blender's own backup of the previous save, written beside each master
+*.blend1
