@@ -397,6 +397,106 @@ pub struct ChunkPayload {
     /// chunk in the world would be half as much again on the wire for
     /// nothing.
     pub water: Option<Vec<u16>>,
+    /// The palms standing on this chunk, in no order anything may rely on
+    /// beyond its being the same order every time.
+    ///
+    /// Here for the same reason a lake's level is: there is no arithmetic a
+    /// client could do on the heights and surfaces it already has that would
+    /// find them. Where a palm stands is a decision made against the seed —
+    /// which the client has never seen and has no use for — so it travels, or
+    /// two players anchored off the same beach would see different trees on
+    /// it.
+    ///
+    /// A palm belongs to the chunk its foot stands in and to no other, so a
+    /// client draws each exactly once and drops it with the ground it came
+    /// on. What is *not* here is how high it stands: a palm's foot sits on
+    /// the height field at its own position, which the client already holds
+    /// and already interpolates for everything else that rides the world. A
+    /// height sent alongside would be a second opinion about the same ground,
+    /// and the one the eye would catch out — a palm hovering a hand's breadth
+    /// over its own shadow.
+    pub palms: Vec<Palm>,
+}
+
+/// One palm, standing on the ground of the chunk that carries it.
+///
+/// The tree itself is the drawing end's business — this says where one is and
+/// how it is turned, not what a palm looks like, in the same way the wire
+/// names a [`Tone`] rather than sending a colour per triangle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palm {
+    /// Where it stands, in metres from the chunk's own lower corner. Always
+    /// inside the chunk — a palm on the far side of a boundary belongs to the
+    /// chunk over there.
+    pub at: Vec2,
+    /// Which way it is turned about the vertical, in radians.
+    ///
+    /// A modelled palm leans, so its bearing is most of what stops a stand of
+    /// them reading as one tree stamped repeatedly along a beach. Sent rather
+    /// than derived from the position, so that a client picking its own would
+    /// not be a client seeing a different beach.
+    pub yaw: f32,
+    /// How big, as a multiple of the model's own size — see [`PALM_SCALE_MIN`]
+    /// and [`PALM_SCALE_MAX`].
+    pub scale: f32,
+}
+
+/// The range a palm's size is drawn from. Narrow on purpose: a palm is a palm,
+/// and enough variation to break up a row is far less than enough to read as
+/// two different species.
+pub const PALM_SCALE_MIN: f32 = 0.78;
+pub const PALM_SCALE_MAX: f32 = 1.24;
+
+/// The most palms one chunk may carry.
+///
+/// A ceiling rather than a target — palms stand along the back of a beach,
+/// which is a thin band, and a chunk that is all beach still holds only a
+/// fraction of this. It exists so that "how much can one answer cost" keeps
+/// having an answer: it is what [`crate::ToClient`]'s frame ceiling is
+/// derived against, and a reader refuses a chunk claiming more.
+pub const MAX_PALMS: usize = 64;
+
+/// Bytes one palm occupies: two per axis of its position, one for its bearing
+/// and one for its size.
+///
+/// The position gets sixteen bits an axis because it is the one number here
+/// the eye can check — a palm is drawn against a shadow it casts on ground the
+/// client interpolates continuously, so a position on a coarse lattice would
+/// put the tree beside its own foot. The bearing and the size get eight: a
+/// palm turned to within a degree and a half, and sized to within half a
+/// percent, is a palm nobody can tell from an exact one.
+pub const PALM_BYTES: usize = 6;
+
+impl Palm {
+    fn put(&self, out: &mut Vec<u8>) {
+        let axis = |v: f32| {
+            let steps = (v / CHUNK_METRES).clamp(0.0, 1.0) * u16::MAX as f32;
+            (steps.round() as u16).to_le_bytes()
+        };
+        out.extend_from_slice(&axis(self.at.x));
+        out.extend_from_slice(&axis(self.at.y));
+
+        let turns = self.yaw.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
+        // `min` rather than a wrap: a yaw a hair under a full turn rounds to
+        // 256, which is not a byte. It comes back as the same direction.
+        out.push(((turns * 256.0).round() as u32).min(255) as u8);
+
+        let span = PALM_SCALE_MAX - PALM_SCALE_MIN;
+        let step = ((self.scale - PALM_SCALE_MIN) / span).clamp(0.0, 1.0) * u8::MAX as f32;
+        out.push(step.round() as u8);
+    }
+
+    fn take(bytes: &[u8]) -> Self {
+        let axis = |pair: &[u8]| {
+            u16::from_le_bytes([pair[0], pair[1]]) as f32 / u16::MAX as f32 * CHUNK_METRES
+        };
+        Self {
+            at: Vec2::new(axis(&bytes[0..2]), axis(&bytes[2..4])),
+            yaw: bytes[4] as f32 / 256.0 * std::f32::consts::TAU,
+            scale: PALM_SCALE_MIN
+                + bytes[5] as f32 / u8::MAX as f32 * (PALM_SCALE_MAX - PALM_SCALE_MIN),
+        }
+    }
 }
 
 /// The stored water level that means no water — the bottom of the quantised
@@ -417,12 +517,13 @@ pub const PAYLOAD_BYTES: usize = FACET_VERTS * FACET_VERTS * 2 + FACET_TRIS;
 /// like the heights it is compared against.
 pub const WATER_BYTES: usize = FACET_VERTS * FACET_VERTS * 2;
 
-/// What one payload occupies on the wire, which depends on the one thing
-/// about a chunk that is not fixed: whether it carries standing water. The
-/// flag in [`crate::ToClient::Chunk`] is what says which, and so how many
-/// bytes a reader is about to be handed.
-pub const fn payload_bytes(water: bool) -> usize {
-    PAYLOAD_BYTES + if water { WATER_BYTES } else { 0 }
+/// What one payload occupies on the wire, which depends on the two things
+/// about a chunk that are not fixed: whether it carries standing water, and
+/// how many palms stand on it. The flag and the count in
+/// [`crate::ToClient::Chunk`] are what say which, and so how many bytes a
+/// reader is about to be handed.
+pub const fn payload_bytes(water: bool, palms: usize) -> usize {
+    PAYLOAD_BYTES + if water { WATER_BYTES } else { 0 } + palms * PALM_BYTES
 }
 
 impl ChunkPayload {
@@ -437,15 +538,19 @@ impl ChunkPayload {
                 .water
                 .as_ref()
                 .is_none_or(|water| water.len() == corners)
+            && self.palms.len() <= MAX_PALMS
+            && self.palms.iter().all(|palm| {
+                (0.0..CHUNK_METRES).contains(&palm.at.x) && (0.0..CHUNK_METRES).contains(&palm.at.y)
+            })
     }
 
     /// Appends this payload's bytes: every height little-endian, then every
     /// surface, then the water grid where there is one.
     ///
-    /// The water goes last so that a reader of either kind of chunk finds the
-    /// heights and the surfaces at the same offsets — a lake is something a
-    /// chunk carries in addition, never a rearrangement of what it already
-    /// carried.
+    /// The water goes after them, and the palms after that, so that a reader
+    /// of any kind of chunk finds the heights and the surfaces at the same
+    /// offsets — a lake and a stand of palms are things a chunk carries in
+    /// addition, never a rearrangement of what it already carried.
     pub(crate) fn put(&self, out: &mut Vec<u8>) {
         debug_assert!(self.well_formed(), "not a chunk's worth of ground");
         for height in &self.heights {
@@ -455,20 +560,23 @@ impl ChunkPayload {
         for level in self.water.iter().flatten() {
             out.extend_from_slice(&level.to_le_bytes());
         }
+        for palm in &self.palms {
+            palm.put(out);
+        }
     }
 
-    /// Reads a payload from exactly [`payload_bytes`] of them — `water` says
-    /// which length, and comes from the flag the caller has already read.
-    /// `None` if the bytes are not that many, or if any surface byte names
-    /// nothing this build knows.
+    /// Reads a payload from exactly [`payload_bytes`] of them — `water` and
+    /// `palms` say which length, and come from the flag and the count the
+    /// caller has already read. `None` if the bytes are not that many, or if
+    /// any surface byte names nothing this build knows.
     ///
     /// The length is checked rather than asserted because it is the one thing
-    /// here a *frame* can be wrong about: the flag and the length are written
-    /// separately, so a build that disagreed with this one about how long a
-    /// watered chunk is would otherwise be read as a chunk whose lake
-    /// silently vanished.
-    pub(crate) fn take(bytes: &[u8], water: bool) -> Option<Self> {
-        if bytes.len() != payload_bytes(water) {
+    /// here a *frame* can be wrong about: the flag, the count and the length
+    /// are written separately, so a build that disagreed with this one about
+    /// how long a watered chunk is would otherwise be read as a chunk whose
+    /// lake silently vanished.
+    pub(crate) fn take(bytes: &[u8], water: bool, palms: usize) -> Option<Self> {
+        if bytes.len() != payload_bytes(water, palms) || palms > MAX_PALMS {
             return None;
         }
         let levels = |bytes: &[u8]| {
@@ -478,7 +586,8 @@ impl ChunkPayload {
                 .collect::<Vec<u16>>()
         };
         let (heights, rest) = bytes.split_at(FACET_VERTS * FACET_VERTS * 2);
-        let (surfaces, water) = rest.split_at(FACET_TRIS);
+        let (surfaces, rest) = rest.split_at(FACET_TRIS);
+        let (water, palms) = rest.split_at(rest.len() - palms * PALM_BYTES);
         Some(Self {
             heights: levels(heights),
             surfaces: surfaces
@@ -486,6 +595,7 @@ impl ChunkPayload {
                 .map(|byte| Surface::from_byte(*byte))
                 .collect::<Option<_>>()?,
             water: (!water.is_empty()).then(|| levels(water)),
+            palms: palms.chunks_exact(PALM_BYTES).map(Palm::take).collect(),
         })
     }
 }
@@ -540,8 +650,12 @@ mod tests {
         assert_eq!(FACET_TRIS, 8192);
         assert_eq!(PAYLOAD_BYTES, 65 * 65 * 2 + 8192);
         assert_eq!(WATER_BYTES, 65 * 65 * 2);
-        assert_eq!(payload_bytes(false), PAYLOAD_BYTES);
-        assert_eq!(payload_bytes(true), PAYLOAD_BYTES + WATER_BYTES);
+        assert_eq!(payload_bytes(false, 0), PAYLOAD_BYTES);
+        assert_eq!(payload_bytes(true, 0), PAYLOAD_BYTES + WATER_BYTES);
+        assert_eq!(
+            payload_bytes(true, 3),
+            PAYLOAD_BYTES + WATER_BYTES + 3 * PALM_BYTES
+        );
     }
 
     #[test]
@@ -646,9 +760,25 @@ mod tests {
         }
     }
 
+    /// Palms enough to tell one from another, spread across the chunk so that
+    /// a position written to the wrong axis would land outside it.
+    fn some_palms(count: usize) -> Vec<Palm> {
+        (0..count)
+            .map(|i| Palm {
+                at: Vec2::new(
+                    i as f32 / MAX_PALMS as f32 * CHUNK_METRES,
+                    CHUNK_METRES - 1.0 - i as f32,
+                ),
+                yaw: i as f32 / MAX_PALMS as f32 * std::f32::consts::TAU,
+                scale: PALM_SCALE_MIN
+                    + (i as f32 / MAX_PALMS as f32) * (PALM_SCALE_MAX - PALM_SCALE_MIN),
+            })
+            .collect()
+    }
+
     /// A payload whose every value differs from every other, so anything that
     /// transposed or truncated one of its grids would show.
-    fn a_payload(water: bool) -> ChunkPayload {
+    fn a_payload(water: bool, palms: usize) -> ChunkPayload {
         ChunkPayload {
             heights: (0..FACET_VERTS * FACET_VERTS)
                 .map(|i| (i * 7 % 65_535) as u16)
@@ -666,20 +796,67 @@ mod tests {
                     .map(|i| (i * 11 % 65_533) as u16)
                     .collect()
             }),
+            palms: some_palms(palms),
         }
     }
 
     #[test]
     fn a_payload_survives_its_bytes() {
         for water in [false, true] {
-            let payload = a_payload(water);
-            assert!(payload.well_formed());
+            for palms in [0, 1, MAX_PALMS] {
+                let payload = a_payload(water, palms);
+                assert!(payload.well_formed());
 
-            let mut bytes = Vec::new();
-            payload.put(&mut bytes);
-            assert_eq!(bytes.len(), payload_bytes(water));
-            assert_eq!(ChunkPayload::take(&bytes, water), Some(payload));
+                let mut bytes = Vec::new();
+                payload.put(&mut bytes);
+                assert_eq!(bytes.len(), payload_bytes(water, palms));
+
+                // Palms are the one part of a payload that does not survive
+                // exactly — a position is sixteen bits an axis and a bearing
+                // is eight — so they are compared to the tolerance the wire
+                // promises rather than for equality.
+                let back = ChunkPayload::take(&bytes, water, palms).expect("a payload");
+                assert_eq!(back.heights, payload.heights);
+                assert_eq!(back.surfaces, payload.surfaces);
+                assert_eq!(back.water, payload.water);
+                assert_eq!(back.palms.len(), payload.palms.len());
+                for (got, sent) in back.palms.iter().zip(&payload.palms) {
+                    assert!(
+                        (got.at - sent.at).length() < 0.01,
+                        "a palm at {:?} came back at {:?}",
+                        sent.at,
+                        got.at
+                    );
+                    assert!((got.yaw - sent.yaw).abs() < 0.03);
+                    assert!((got.scale - sent.scale).abs() < 0.01);
+                }
+            }
         }
+    }
+
+    #[test]
+    fn a_chunk_claiming_more_palms_than_it_may_is_refused() {
+        // The ceiling is what the frame size is derived against, so a count
+        // past it is a frame that could not have been written by a build that
+        // agrees with this one about how much an answer costs.
+        let payload = a_payload(false, MAX_PALMS);
+        let mut bytes = Vec::new();
+        payload.put(&mut bytes);
+        bytes.extend_from_slice(&[0; PALM_BYTES]);
+        assert_eq!(ChunkPayload::take(&bytes, false, MAX_PALMS + 1), None);
+    }
+
+    #[test]
+    fn a_palm_outside_its_own_chunk_is_malformed() {
+        // What a generator is held to. A palm belongs to the chunk its foot
+        // stands in, so one placed past the boundary would be drawn by a
+        // client that never asked for it — and drawn again by the chunk it
+        // really stands on.
+        let mut strayed = a_payload(false, 1);
+        strayed.palms[0].at.x = CHUNK_METRES;
+        assert!(!strayed.well_formed());
+        strayed.palms[0].at = Vec2::new(1.0, -0.5);
+        assert!(!strayed.well_formed());
     }
 
     #[test]
@@ -689,8 +866,8 @@ mod tests {
         // places, so a reader of either finds them without knowing which it
         // has until it reaches the tail.
         let (mut dry, mut wet) = (Vec::new(), Vec::new());
-        a_payload(false).put(&mut dry);
-        a_payload(true).put(&mut wet);
+        a_payload(false, 0).put(&mut dry);
+        a_payload(true, 0).put(&mut wet);
         assert_eq!(wet[..PAYLOAD_BYTES], dry[..], "the water moved the ground");
         assert_eq!(wet.len() - dry.len(), WATER_BYTES);
     }
@@ -702,9 +879,9 @@ mod tests {
         // that stopped checking surfaces once it knew there was water to come.
         for water in [false, true] {
             let mut bytes = Vec::new();
-            a_payload(water).put(&mut bytes);
+            a_payload(water, 2).put(&mut bytes);
             bytes[PAYLOAD_BYTES - 1] = 0xFF;
-            assert_eq!(ChunkPayload::take(&bytes, water), None);
+            assert_eq!(ChunkPayload::take(&bytes, water, 2), None);
         }
     }
 
@@ -715,16 +892,16 @@ mod tests {
         // wire, but the water is built per chunk from whatever ground has a
         // lake on it, and a payload carrying half a grid would encode to a
         // frame no reader could believe.
-        let mut short = a_payload(true);
+        let mut short = a_payload(true, 0);
         short.water.as_mut().expect("a lake").truncate(4);
         assert!(!short.well_formed());
 
-        let mut empty = a_payload(true);
+        let mut empty = a_payload(true, 0);
         empty.water = Some(Vec::new());
         assert!(!empty.well_formed());
 
         // And no water at all is well formed — most chunks have none.
-        assert!(a_payload(false).well_formed());
+        assert!(a_payload(false, 0).well_formed());
     }
 
     #[test]
@@ -733,11 +910,11 @@ mod tests {
         // way the answer is `None` rather than a payload that quietly gained
         // or lost a lake.
         let mut dry = Vec::new();
-        a_payload(false).put(&mut dry);
-        assert_eq!(ChunkPayload::take(&dry, true), None);
+        a_payload(false, 0).put(&mut dry);
+        assert_eq!(ChunkPayload::take(&dry, true, 0), None);
 
         let mut wet = Vec::new();
-        a_payload(true).put(&mut wet);
-        assert_eq!(ChunkPayload::take(&wet, false), None);
+        a_payload(true, 0).put(&mut wet);
+        assert_eq!(ChunkPayload::take(&wet, false, 0), None);
     }
 }

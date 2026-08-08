@@ -37,7 +37,7 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, facets, ChunkPayload, Surface, Tone, CHUNK_METRES, FACET_METRES,
+    chunk_at, dequantize, facets, ChunkPayload, Palm, Surface, Tone, CHUNK_METRES, FACET_METRES,
     FACET_QUADS, FACET_TRIS, FACET_VERTS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH,
     SEA_WATER,
 };
@@ -205,7 +205,19 @@ struct Arrival {
     /// there is nothing to be gained by dequantising a whole grid of it the
     /// way the corner heights are.
     water: Option<Vec<u16>>,
+    /// The palms standing on it. Carried through untouched and handed on —
+    /// what a palm looks like is `trees`' business, not this module's.
+    palms: Vec<Palm>,
 }
+
+/// The palms a chunk arrived carrying, waiting to be stood up.
+///
+/// A component rather than an argument because the two halves belong to
+/// different modules: this one knows when a chunk's ground exists, and
+/// `trees` knows what a tree is. The component is how the first tells the
+/// second, and `trees` takes it off again once it has planted them.
+#[derive(Component)]
+pub struct PendingPalms(pub Vec<Palm>);
 
 /// A count of what this machine has of the world, and what it is still
 /// waiting on.
@@ -278,6 +290,7 @@ impl Ground {
                     heights,
                     surfaces: payload.surfaces,
                     water: payload.water,
+                    palms: payload.palms,
                 });
             }
         }
@@ -787,6 +800,7 @@ fn spawn_arrivals(
     let pool = AsyncComputeTaskPool::get();
     for arrival in std::mem::take(&mut ground.arrived) {
         let chunk = arrival.chunk;
+        let palms = arrival.palms.clone();
         // Dropped rather than drawn if the camera has already left it behind
         // — an answer can outlive the reason it was asked for.
         let Some(Chunk::Land { mesh, .. }) = ground.chunks.get_mut(&chunk) else {
@@ -800,6 +814,7 @@ fn spawn_arrivals(
                     Name::new(format!("Terrain chunk {},{}", chunk.x, chunk.y)),
                     TerrainChunk { coords: chunk },
                     DespawnOnExit(AppState::InWorld),
+                    PendingPalms(palms),
                     ChunkBuild(task),
                     MeshMaterial3d(material.0.clone()),
                     Transform::from_translation(Vec3::new(
@@ -933,6 +948,7 @@ mod tests {
                 .collect(),
             surfaces: vec![Surface::new(Tone::Grass, Shade::Plain); FACET_TRIS],
             water: None,
+            palms: Vec::new(),
         }
     }
 
@@ -1154,6 +1170,7 @@ mod tests {
             heights: a_slope().heights.iter().copied().map(dequantize).collect(),
             surfaces: a_slope().surfaces,
             water: None,
+            palms: Vec::new(),
         };
         assert!(chunk_meshes(&dry).water.is_none());
     }

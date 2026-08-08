@@ -38,7 +38,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// The port a server listens on, and a client joins on, unless told
 /// otherwise. Nothing else claims it, and it is easily remembered as the
@@ -53,13 +53,15 @@ const MAX_CLIENT_FRAME: u16 = 64;
 
 /// The longest frame a client will accept from a server, which is exactly one
 /// chunk of ground and not a byte more: its tag, its coordinates, the flag
-/// that says what kind of answer this is, and the payload — the largest kind,
-/// which is ground with standing water on it.
+/// that says what kind of answer this is, the count of palms standing on it,
+/// and the payload — the largest kind, which is ground with standing water on
+/// it and a full complement of palms.
 ///
 /// Derived rather than picked, so that a message which outgrew it fails to
 /// send here instead of arriving as garbage — and so that "how much can one
 /// answer cost" has one answer, written down.
-const MAX_SERVER_FRAME: u16 = (1 + 8 + 1 + ground::payload_bytes(true)) as u16;
+const MAX_SERVER_FRAME: u16 =
+    (1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PALMS)) as u16;
 
 /// A player, as the server counts them: dealt out in joining order, never
 /// reused within a session, meaningless across sessions.
@@ -229,6 +231,11 @@ impl ToClient {
                     None => payload.push(0),
                     Some(ground) => {
                         payload.push(if ground.water.is_some() { 2 } else { 1 });
+                        // Alongside the flag rather than inside the payload,
+                        // and for the same reason: between them they say how
+                        // long the rest of the message is, which is what a
+                        // reader needs before it can read any of it.
+                        payload.push(ground.palms.len() as u8);
                         ground.put(&mut payload);
                     }
                 }
@@ -265,8 +272,10 @@ impl ToClient {
                 let chunk = payload.ivec2()?;
                 let ground = match payload.u8()? {
                     0 => None,
-                    1 => Some(payload.chunk_payload(false)?),
-                    2 => Some(payload.chunk_payload(true)?),
+                    flag @ (1 | 2) => {
+                        let palms = payload.u8()? as usize;
+                        Some(payload.chunk_payload(flag == 2, palms)?)
+                    }
                     flag => return Err(corrupt(format!("chunk {chunk} flagged {flag}"))),
                 };
                 Self::Chunk { chunk, ground }
@@ -400,9 +409,9 @@ impl<'a> Payload<'a> {
         Ok(IVec2::new(self.i32()?, self.i32()?))
     }
 
-    fn chunk_payload(&mut self, water: bool) -> io::Result<ChunkPayload> {
-        let bytes = self.take(ground::payload_bytes(water))?;
-        ChunkPayload::take(bytes, water).ok_or_else(|| {
+    fn chunk_payload(&mut self, water: bool, palms: usize) -> io::Result<ChunkPayload> {
+        let bytes = self.take(ground::payload_bytes(water, palms))?;
+        ChunkPayload::take(bytes, water, palms).ok_or_else(|| {
             corrupt("a chunk painted in colours this build has never heard of".into())
         })
     }
@@ -458,6 +467,7 @@ mod tests {
                 })
                 .collect(),
             water: None,
+            palms: Vec::new(),
         }
     }
 
@@ -648,7 +658,7 @@ mod tests {
             chunk: IVec2::new(5, -3),
             ground: Some(a_chunk()),
         });
-        let framed = 1 + 8 + 1 + ground::PAYLOAD_BYTES;
+        let framed = 1 + 8 + 1 + 1 + ground::PAYLOAD_BYTES;
         assert_eq!(ground.len(), 2 + framed);
         assert_eq!(
             ground[..11],
@@ -668,15 +678,16 @@ mod tests {
             "the head of a ground answer"
         );
         assert_eq!(ground[11], 1, "the flag says there is dry ground");
+        assert_eq!(ground[12], 0, "and the count says no palms stand on it");
 
-        // Heights start at 12. Corner 0 is 0, corner 1 is 601, corner 2 is
+        // Heights start at 13. Corner 0 is 0, corner 1 is 601, corner 2 is
         // 1202 — little-endian pairs.
-        assert_eq!(ground[12..18], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
+        assert_eq!(ground[13..19], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
 
         // Surfaces start once the heights are done. The first is Seabed dark
         // — tone 0 in the high bits, shade 0 in the low two — and the second
         // Sand plain: tone 2, shade 1.
-        let surfaces = 12 + FACET_VERTS * FACET_VERTS * 2;
+        let surfaces = 13 + FACET_VERTS * FACET_VERTS * 2;
         assert_eq!(
             ground[surfaces..surfaces + 3],
             [0b0000_0000, 0b0000_1001, 0b0001_0010],
@@ -692,7 +703,7 @@ mod tests {
             chunk: IVec2::new(5, -3),
             ground: Some(a_chunk_with_a_lake()),
         });
-        let wet = 1 + 8 + 1 + ground::payload_bytes(true);
+        let wet = 1 + 8 + 1 + 1 + ground::payload_bytes(true, 0);
         assert_eq!(lake.len(), 2 + wet);
         assert_eq!(
             lake[..2],
@@ -735,22 +746,40 @@ mod tests {
         assert!(wire.is_empty(), "half a frame reached the wire");
 
         // And the server's ceiling is exactly the largest chunk there is —
-        // ground with water on it — so that answer fits with nothing to
-        // spare, and dry ground fits with its water grid's worth to spare.
+        // ground with water on it and as many palms as one may carry — so
+        // that answer fits with nothing to spare, and a plainer chunk fits
+        // with the difference to spare.
+        let mut most = a_chunk_with_a_lake();
+        most.palms = vec![
+            ground::Palm {
+                at: Vec2::ZERO,
+                yaw: 0.0,
+                scale: ground::PALM_SCALE_MIN,
+            };
+            ground::MAX_PALMS
+        ];
+        let biggest = bytes_of_server(&ToClient::Chunk {
+            chunk: IVec2::ZERO,
+            ground: Some(most),
+        });
+        assert_eq!(
+            biggest.len() - 2,
+            MAX_SERVER_FRAME as usize,
+            "a watered chunk under a full stand of palms is what the ceiling is for"
+        );
         let lake = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
             ground: Some(a_chunk_with_a_lake()),
         });
-        assert_eq!(
-            lake.len() - 2,
-            MAX_SERVER_FRAME as usize,
-            "a chunk of watered ground is what the server's ceiling is for"
-        );
         let ground = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
             ground: Some(a_chunk()),
         });
         assert_eq!(lake.len() - ground.len(), ground::WATER_BYTES);
+        assert_eq!(
+            biggest.len() - lake.len(),
+            ground::MAX_PALMS * ground::PALM_BYTES
+        );
     }
 
     #[test]

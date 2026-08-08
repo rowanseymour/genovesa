@@ -222,6 +222,7 @@ mod tests {
             heights: vec![quantize(1.0); FACET_VERTS * FACET_VERTS],
             surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
             water: None,
+            palms: Vec::new(),
         }
     }
 
