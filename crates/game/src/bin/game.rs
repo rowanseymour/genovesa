@@ -23,6 +23,7 @@ use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
 use game::terrain::TerrainPlugin;
+use game::trees::TreesPlugin;
 use game::{AppState, Helm, SKY, WINDOW};
 
 fn main() -> ExitCode {
@@ -120,6 +121,7 @@ fn run(args: Args, session: Option<Session>) {
         .insert_resource(args.starting_view())
         .add_plugins((
             TerrainPlugin,
+            TreesPlugin,
             BoatPlugin,
             MapCameraPlugin,
             CompassPlugin,

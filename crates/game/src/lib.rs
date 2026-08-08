@@ -17,6 +17,7 @@ pub mod debug;
 pub mod menu;
 pub mod net;
 pub mod terrain;
+pub mod trees;
 
 #[cfg(test)]
 mod testing;
