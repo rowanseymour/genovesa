@@ -648,26 +648,64 @@ const SKERRY_HEIGHT: f32 = 2.5;
 /// band of colour up the rocky shores and the cliffs as well.
 const SHORE_TOP: f32 = 0.6;
 
-/// The same for a lake, in metres above its own surface — a quarter of the
-/// sea's, and the second half of what tells the two apart.
+/// How far a lake's reed margin reaches from its own edge, in metres, on both
+/// sides of it — so the fringe is [`LAKE_MARGIN`] of wet ground and the same
+/// again of weed standing in the water.
 ///
 /// A sea coast has a shore because the sea *works* one: the tide and the surf
 /// keep a band of ground bare, and it is broad because they reach that far up
 /// it. Fresh water does none of that, so grass grows to the edge of a pond and
 /// what is left bare is only the strip that is actually wet. Given the sea's
-/// figure a lake wore a huge flat apron of bare ground — the ground around a
-/// lake is nearly level, so six tenths of a metre of height buys tens of
-/// metres of it — which read as a drained reservoir whatever colour it was
-/// painted. This is low enough that the green comes down to the water and the
-/// margin is a fringe on it.
-const LAKE_MARGIN: f32 = 0.15;
+/// own [`SHORE_TOP`] a lake wore a huge flat apron of it, which read as a
+/// drained reservoir whatever colour it was painted.
+///
+/// A height above the water was the first answer to that and is the wrong
+/// shape of answer. What a lake's bank does with a height is whatever its
+/// slope says: the tenth of a metre it was cut to bought tens of metres of
+/// margin on the flat ground a basin usually ends in, and a metre or less of
+/// it — *under one facet* — everywhere the bank had any pitch at all. A
+/// margin thinner than the grid it is drawn on cannot be drawn: the facets
+/// that catch it are a broken chain of triangles, and that chain against the
+/// smooth waterline under it is the sawtooth a lake used to wear. Written as a
+/// reach along the ground it is the same fringe on every bank, and always
+/// several facets of it.
+const LAKE_MARGIN: f32 = 5.0;
 
-/// Depths, in metres below the local water surface, at which the bed turns
-/// from shore colours to the bright shelf, and from the shelf to the deep bed.
-/// Written as depths below *the surface standing there* rather than as
-/// heights, because a lake divides its bed on the same two lines the sea does
-/// — only measured from its own waterline instead of the world's, and painted
-/// out of fresh water's tones rather than the sea's.
+/// How far past its own edge a lake's surface is still an answer, in metres
+/// along the ground.
+///
+/// The level has to reach past the water — a client draws the waterline itself,
+/// by asking where the ground and the surface cross, and cannot find a crossing
+/// it was only told one side of. How far past is the question this answers, and
+/// the reach it replaces was a height: everything within [`LAKE_RELIEF`] of the
+/// surface, which on the flat ground a basin usually ends in is a long way, and
+/// which ends on the fitting grid's own square cells.
+///
+/// That mattered because the two waterlines do not quite agree. The flood ran
+/// on the landform and the drawn ground is shaped again afterwards — the
+/// coastal reshaping most of all, which answers to the sea and will cut a
+/// lake's bank out from under it near a shore. Where that leaves ground below a
+/// surface the flood never flooded, the client dutifully draws water on it, out
+/// to wherever the level stopped being an answer — so the spill took the shape
+/// of the field's edge, and what it drew was a rectangle of water lying on the
+/// grass. Bounded by a distance instead, a spill is a few metres of apron with
+/// the shape of the shore it came off.
+const LAKE_APRON: f32 = 8.0;
+
+/// How far the weed reaches out from a lake's margin before the bed is bare
+/// silt, in metres along the ground.
+///
+/// Out from the shore rather than down from the surface for the same reason
+/// the margin is, and the reason bites harder here: a bed shelves more gently
+/// than a bank climbs, so a depth line falls where the ground has barely any
+/// gradient to place it, and what it drew was not a boundary but a fractal —
+/// fingers of one tone through the other for tens of metres, which the facets
+/// then broke into a starburst. Distance from the shore is what "shallows"
+/// means anyway.
+const LAKE_SHALLOWS: f32 = 22.0;
+
+/// Depths, in metres below sea level, at which the sea bed turns from shore
+/// colours to the bright shelf, and from the shelf to the deep bed.
 const SHALLOW_DEPTH: f32 = 1.8;
 const SEABED_DEPTH: f32 = 4.5;
 
@@ -1692,13 +1730,14 @@ impl TerrainGenerator {
     /// The surface level of the lake standing at or beside this world point,
     /// in metres above sea level — `None` where the only water is the sea's.
     ///
-    /// "Beside" is a real reach: the answer is `Some` all the way up the bank
-    /// until the ground is [`LAKE_RELIEF`] clear of the water. So a caller with
-    /// a height in hand draws the waterline itself — water stands wherever
-    /// `height < level` — and can trust that where the answer runs out the
-    /// ground has long since climbed out of the water. There is no need to
-    /// stop drawing at the edge of the field, and nothing to be gained by it:
-    /// that edge is a straight line on a grid, and a waterline is not.
+    /// "Beside" is a real reach: the answer is `Some` for [`LAKE_APRON`] out
+    /// from the water, and up the bank within that until the ground is
+    /// [`LAKE_RELIEF`] clear of the surface. So a caller with a height in hand
+    /// draws the waterline itself — water stands wherever `height < level` —
+    /// and finds it well inside the field rather than at its edge. There is no
+    /// need to stop drawing before the answer runs out, and nothing to be
+    /// gained by it: a waterline is where two surfaces cross, not where a
+    /// field ends.
     pub fn lake_level(&self, wx: f32, wz: f32) -> Option<f32> {
         self.lakes.level(wx, wz)
     }
@@ -1802,37 +1841,47 @@ impl TerrainGenerator {
         // 0 on flat ground, approaching 1 on a cliff face.
         let slope = 1.0 - normal.y;
 
-        // A lake first, its bed read against its own surface exactly as the
-        // sea's is read against zero — but out of fresh water's own three
-        // tones, which is the whole of what tells a lake from an inlet. The
-        // sea's bed brightens towards its shore, and a pale shelf under a
-        // beach behind it is what draws the turquoise ring every coast wears;
-        // give that ring to a lake and it reads as an arm of the sea that
-        // happens to be inland. So a lake darkens instead: silt, then weed,
-        // then a reed margin where the sea would have sand.
+        // A lake first, out of fresh water's own three tones, which is the
+        // whole of what tells a lake from an inlet. The sea's bed brightens
+        // towards its shore, and a pale shelf under a beach behind it is what
+        // draws the turquoise ring every coast wears; give that ring to a lake
+        // and it reads as an arm of the sea that happens to be inland. So a
+        // lake darkens instead: silt, then weed, then a reed margin where the
+        // sea would have sand.
+        //
+        // The three are measured *out from the lake's own edge*, and not down
+        // from its surface the way the sea's are from zero — see
+        // [`LAKE_MARGIN`] and [`Lakes::shore`] for why a lake cannot afford
+        // that. A ring of a fixed reach is also the truer picture of one:
+        // reeds stand as far out as they can root, not as far up as the water
+        // once came.
         //
         // The shore character field takes no part. That is a property of
         // stretches of *sea* coast, sampled at the nearest sea waterline, and
         // means nothing on a shore halfway up a hillside — so a lake's margin
         // is marsh where it lies flat and bare rock where it stands steep,
-        // which is what tarns and lowland pools do. Above its own little shore
-        // band the lake has no say, and the hillside is painted as the height
-        // says.
-        if let Some(level) = self.lakes.level(wx, wz) {
-            let awash = height - level;
-            if awash < -SEABED_DEPTH {
+        // which is what tarns and lowland pools do. Past its own little fringe
+        // the lake has no say, and the hillside is painted as the height says.
+        //
+        // Ground actually under the water joins them whatever the distance
+        // says, and that is not a belt-and-braces test: the field is measured
+        // on the fitting grid and smoothed, so a pool narrower than the
+        // smoothing reads as barely water at all, and its bed would fall
+        // through to the sea's palette — a tarn painted with a sand bottom.
+        let shore = self.lakes.shore(wx, wz);
+        let drowned = self.lakes.level(wx, wz).is_some_and(|level| height < level);
+        if shore < LAKE_MARGIN || drowned {
+            if shore < -LAKE_SHALLOWS {
                 return Surface::plain(Tone::Silt);
             }
-            if awash < -SHALLOW_DEPTH {
+            if shore < -LAKE_MARGIN {
                 return Surface::plain(Tone::Shoal);
             }
-            if awash < LAKE_MARGIN {
-                return Surface::plain(if slope > ROCK_SLOPE {
-                    Tone::RockDark
-                } else {
-                    Tone::Marsh
-                });
-            }
+            return Surface::plain(if slope > ROCK_SLOPE {
+                Tone::RockDark
+            } else {
+                Tone::Marsh
+            });
         }
 
         // The sea. Two tones of sea bed, both read through translucent
@@ -1969,9 +2018,9 @@ pub(crate) fn facet_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec
 ///
 /// The grid is kept only where some corner is actually *under* its level, and
 /// that is the difference between a lake's water and a lake's mere presence.
-/// [`TerrainGenerator::lake_level`] answers all the way up a lake's bank, so
-/// that a chunk holding a shoreline carries a level on the dry side of it too
-/// and a client can put the waterline where the two fields cross. But a chunk
+/// [`TerrainGenerator::lake_level`] answers out past a lake's edge, so that a
+/// chunk holding a shoreline carries a level on the dry side of it too and a
+/// client can put the waterline where the two fields cross. But a chunk
 /// that catches *only* bank — a lake in the next chunk along, whose shore
 /// climbs over the boundary — has no water in it to draw, and would otherwise
 /// pay a full grid to say so.
@@ -2417,6 +2466,17 @@ impl CoastDistance {
 // with the ground around them holding its bank. What it no longer gets is
 // texture *finer than the fitting grid* punching through, which was never an
 // islet — it was the bed showing.
+//
+// That settles where a lake's water is. Where its *colours* are is a separate
+// question and is not answered by a height at all. Silt, weed and reed margin
+// used to be depths and a height above the surface, and a lake is the worst
+// place on the map to put a threshold on height: the fade leaves its banks
+// smooth and its bed shelves gently, so those lines fell on ground with barely
+// any gradient to place them. The margin came out under a facet wide and the
+// weed's edge came out fractal, and a facet grid draws either as a sawtooth.
+// So they are measured out from the water's edge instead — see
+// [`Lakes::shore`] — which is a distance, is the same width on every bank, and
+// is what the words mean anyway.
 
 /// Metres a lake's surface stands below the saddle it would otherwise spill
 /// over.
@@ -2446,8 +2506,8 @@ const LAKE_FREEBOARD: f32 = 0.5;
 /// where the surface is `relief * t` away, and `t(3-2t)` peaks at 1.125 — so
 /// anything past 1.125 times the displacement's own reach cannot carry ground
 /// across the water however the noise falls. Hence a lake never leaks along a
-/// dip in its bank, and a bed never breaks its own surface, and every consumer
-/// of a level — the painting, the wire, the client's sheet of water — can just
+/// dip in its bank, and a bed never breaks its own surface, and a reader of a
+/// level — the wire, and the client's sheet of water behind it — can just
 /// compare a height against it.
 ///
 /// The displacement it is sized against is the detail, and only the detail.
@@ -2455,24 +2515,29 @@ const LAKE_FREEBOARD: f32 = 0.5;
 /// sea, so a lake sitting within [`SHORE_REACH`] of the sea's own waterline
 /// can still have its bank bent out from under this — a lake near the coast is
 /// on the same footing as everything else that far out, where the landform is
-/// being rebuilt around a different waterline entirely.
+/// being rebuilt around a different waterline entirely. That is what
+/// [`LAKE_APRON`] is for: the guarantee holds where it holds, and where it does
+/// not, what leaks is a few metres of apron rather than everything the level
+/// was ever handed to.
 const LAKE_RELIEF: f32 = (DETAIL_RELIEF + MICRO_RELIEF) * 1.125;
 
 /// Standing water above sea level: how high a lake stands over the ground
 /// around it, and how far it holds that ground to the shape it was found in.
 ///
-/// Two grids over the fitting grid, because a lake asks two different
-/// questions of a point and they do not have the same answer. *Which lake
-/// stands here, and how high* is a step function — a surface is dead level
-/// over its own basin and absent a stride outside it — and is what the water,
-/// the painting and the wire all read. *How much of what is laid over the
-/// landform survives here* has to be smooth, or the ground itself steps, and
-/// a step in the ground along a grid line is the one thing the whole fitting
-/// grid is careful never to produce.
+/// Three grids over the fitting grid, because a lake is asked three different
+/// questions and they do not have the same answer. *Which lake stands here,
+/// and how high* is a step function — a surface is dead level over its own
+/// basin and absent a stride outside it — and is what the water and the wire
+/// read. *How much of what is laid over the landform survives here* has to be
+/// smooth, or the ground itself steps, and a step in the ground along a grid
+/// line is the one thing the whole fitting grid is careful never to produce.
+/// *How far from the water is this* is what the painting reads, and is neither
+/// of the other two: it is a distance, measured out along the ground.
 #[derive(Default)]
 struct Lakes {
     field: GridField,
     weight: GridField,
+    shore: GridField,
 }
 
 /// Which way a lake's level is allowed to travel out of its own water, in
@@ -2480,12 +2545,9 @@ struct Lakes {
 ///
 /// The two questions want different answers, and the difference is a rim.
 /// `Climbing` never drops back towards the water, so it stops on the crest and
-/// the answer is *this lake's own shore* — which is what the painting wants.
-/// `Anywhere` for the painting too was tried and is unmistakable on a map: the
-/// level walks over every rim and away along the far side until the ground
-/// finally drops under it, and since the shore band is a height above the
-/// surface, what it paints is a sand ribbon following that contour clean
-/// across the hillsides. A beach on the outside of a rim belongs to no lake.
+/// the answer is *this lake's own basin* — which is what the water wants, a
+/// level handed out past a rim being water offered to a hillside that drains
+/// somewhere else entirely.
 ///
 /// The ground has to be held over a wider set than that, because the landform
 /// on a four-metre grid does not climb monotonically: a bank that dips a
@@ -2518,6 +2580,10 @@ impl Lakes {
                 }
             })
             .collect();
+        // Measured before either spread, off the water itself: the spreads are
+        // about how far a lake's *level* carries, and this is about where its
+        // edge is.
+        let shore = Self::shore_distance(&levels, ground.dims, ground.origin);
         let mut reach = levels.clone();
         Self::spread(ground, &mut levels, Bank::Climbing);
         Self::spread(ground, &mut reach, Bank::Anywhere);
@@ -2525,7 +2591,61 @@ impl Lakes {
         Self {
             field: GridField::new(levels, ground.dims, ground.origin),
             weight: GridField::new(weight, ground.dims, ground.origin),
+            shore,
         }
+    }
+
+    /// How far each cell is from the nearest lake's edge, in metres — negative
+    /// under water, positive on the ground around it, and zero on the
+    /// waterline the flood found.
+    ///
+    /// Two distance transforms, one out of the water and one into it, which is
+    /// the cheapest way to a signed one and reuses the transform the coast is
+    /// already built on. Each measures from the *cell* it seeded rather than
+    /// from the line between two cells, so both are half a cell long; taking
+    /// that half back is what puts the zero on the waterline instead of half a
+    /// stride behind it, on both sides at once.
+    ///
+    /// Blurred once, for the reason [`CoastDistance::measure`] blurs: the
+    /// transform is exact, and folds in a crease wherever two wavefronts meet
+    /// — down the middle of every arm of every lake — which a tone boundary
+    /// prints as a dead straight seam. Once and no more, unlike the coast's
+    /// four: this field is read at the scale of a few metres rather than of a
+    /// coastline, and smoothing that reaches further than the band it places
+    /// walks the band's edges off the water they belong to — worst on the
+    /// small lakes, where enough of it drags the whole zero inside the pool
+    /// and leaves the grass growing to the waterline.
+    ///
+    /// Capped at a reach nothing reads past, so that a map's far corner holds
+    /// a number rather than an infinity for the blur to spread.
+    fn shore_distance(levels: &[f32], dims: (usize, usize), origin: Vec2) -> GridField {
+        let wet: Vec<bool> = levels.iter().map(|l| *l > f32::NEG_INFINITY).collect();
+        if !wet.iter().any(|wet| *wet) {
+            return GridField::default();
+        }
+        let seeded = |water: bool| {
+            let cells = wet
+                .iter()
+                .map(|wet| if *wet == water { 0.0 } else { f32::INFINITY })
+                .collect();
+            let mut field = GridField::new(cells, dims, origin);
+            field.chamfer();
+            field.cells
+        };
+        let (out, into) = (seeded(true), seeded(false));
+
+        let cap = 2.0 * LAKE_SHALLOWS;
+        let cells = wet
+            .iter()
+            .zip(out.iter().zip(&into))
+            .map(|(wet, (out, into))| {
+                let cells = if *wet { 0.5 - into } else { out - 0.5 };
+                (cells * COAST_GRID).clamp(-cap, cap)
+            })
+            .collect();
+        let mut field = GridField::new(cells, dims, origin);
+        field.blur();
+        field
     }
 
     /// Spreads each lake's level from the cells it covers out over the ground
@@ -2617,10 +2737,13 @@ impl Lakes {
     ///
     /// The cell the point falls in, unblended: a lake's surface is dead level,
     /// so there is nothing to interpolate, and blending across the shore would
-    /// tilt the rim of every lake down into its own banks. The step where the
-    /// answer runs out costs nothing, because by then the ground is clear of
-    /// the water and every reader of a level is asking about a height that is
-    /// clear of it too.
+    /// tilt the rim of every lake down into its own banks.
+    ///
+    /// Where the answer *stops* is a different matter, and is
+    /// [`LAKE_APRON`] out from the water rather than wherever the spread
+    /// happened to stall. A step in a step function costs nothing when it falls
+    /// on ground that is clear of the water anyway; it costs a rectangle of
+    /// water lying on the grass when it does not.
     fn level(&self, wx: f32, wz: f32) -> Option<f32> {
         let (nx, nz) = self.field.dims;
         if nx == 0 {
@@ -2629,7 +2752,7 @@ impl Lakes {
         let fx = ((wx - self.field.origin.x) / COAST_GRID).clamp(0.0, (nx - 1) as f32);
         let fz = ((wz - self.field.origin.y) / COAST_GRID).clamp(0.0, (nz - 1) as f32);
         let level = self.field.cells[fz.round() as usize * nx + fx.round() as usize];
-        (level > f32::NEG_INFINITY).then_some(level)
+        (level > f32::NEG_INFINITY && self.shore(wx, wz) < LAKE_APRON).then_some(level)
     }
 
     /// How much of what is laid over the landform survives at a world point —
@@ -2639,6 +2762,19 @@ impl Lakes {
             return 1.0;
         }
         self.weight.at(wx, wz)
+    }
+
+    /// Metres from the nearest lake's edge at a world point, negative under
+    /// water — and infinite on a map with no lakes, which is most of them.
+    ///
+    /// Blended, unlike [`Lakes::level`]: this one *is* a smooth field, and it
+    /// is read to place a boundary rather than to answer a yes or no, so the
+    /// grid it was measured on must not show through.
+    fn shore(&self, wx: f32, wz: f32) -> f32 {
+        if self.shore.dims.0 == 0 {
+            return f32::INFINITY;
+        }
+        self.shore.at(wx, wz)
     }
 }
 
@@ -3444,8 +3580,8 @@ mod tests {
         // the machine that recorded it; a bumped `libm` would show up here the
         // same way a new platform would.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0xFB67_56AA_11B0_96D8u64),
-            (99, UVec2::new(3, 2), 0xA9AF_4D46_BC6C_DB03u64),
+            (20_040_112u32, UVec2::new(4, 4), 0x7918_FE54_8043_299Fu64),
+            (99, UVec2::new(3, 2), 0xF7DE_E6DE_D08A_0F06u64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -4095,16 +4231,16 @@ mod tests {
     #[test]
     fn no_lake_is_painted_in_the_seas_colours() {
         // What tells a lake from an inlet, said as a rule rather than as a
-        // look: wherever a lake has the say — anywhere under its surface, and
-        // in the margin up to [`LAKE_MARGIN`] above it — the ground is fresh
-        // water's own tones, or the bare rock a steep bank is everywhere.
-        // Never sand, never the bright shelf, never the sea bed. Those three
-        // are what draw a coast, and a lake wearing them is the whole of the
-        // thing this is here to stop coming back.
+        // look: every scrap of ground under a lake's surface is fresh water's
+        // own tones, or the bare rock a steep bank is everywhere. Never sand,
+        // never the bright shelf, never the sea bed. Those three are what draw
+        // a coast, and a lake wearing them is the whole of the thing this is
+        // here to stop coming back.
         //
-        // Only inside the margin, because above it the lake has no say at all
-        // and the hillside is painted as its height asks — which near the sea
-        // may quite properly be sand.
+        // Under the surface and no further, because the bank above it belongs
+        // to the margin rather than to this rule — and above *that* the lake
+        // has no say at all and the hillside is painted as its height asks,
+        // which near the sea may quite properly be sand.
         let fresh = [Tone::Silt, Tone::Shoal, Tone::Marsh, Tone::RockDark];
         let mut painted = 0usize;
         for seed in [20_040_112u32, 1, 7, 99, 808] {
@@ -4120,16 +4256,16 @@ mod tests {
                         continue;
                     };
                     let height = gen.height(here, wz);
-                    if height - level >= LAKE_MARGIN {
+                    if height >= level {
                         continue;
                     }
                     let tone = gen.surface(here, wz, height, gen.normal(here, wz)).tone;
                     painted += 1;
                     assert!(
                         fresh.contains(&tone),
-                        "seed {seed} paints a lake {tone:?} at ({here}, {wz}), \
-                         {:.2} m from its surface",
-                        height - level
+                        "seed {seed} paints a lake bed {tone:?} at ({here}, {wz}), \
+                         {:.2} m under its surface",
+                        level - height
                     );
                 }
                 wz += FACET_METRES;
@@ -4137,7 +4273,63 @@ mod tests {
         }
         assert!(
             painted > 1_000,
-            "only {painted} samples on lake ground across five seeds — nothing was tested"
+            "only {painted} samples of lake bed across five seeds — nothing was tested"
+        );
+    }
+
+    #[test]
+    fn a_lakes_margin_is_wider_than_the_facets_it_is_drawn_on() {
+        // The margin used to be a height above the water, and what a height
+        // buys depends entirely on the bank: on anything with a pitch to it,
+        // under one facet. A band narrower than the grid it is drawn on is not
+        // a band — the facets that catch it are a broken chain of triangles
+        // against the smooth waterline under them, which is the sawtooth every
+        // lake used to wear. So the margin is a reach along the ground, and
+        // this is that said as a number: walk out of the water and the fringe
+        // is several facets deep essentially every time.
+        //
+        // Counted on the dry side only. The wet half is under the water, where
+        // how far it runs is the water's business and not the eye's.
+        let mut crossings = 0usize;
+        let mut deep = 0usize;
+        for seed in [20_040_112u32, 1, 7, 99, 808] {
+            let (config, gen) = generator(8, 8, seed);
+            let half = config.chunks.as_vec2() * CHUNK_METRES / 2.0;
+            let fresh = |wx: f32, wz: f32| {
+                let height = gen.height(wx, wz);
+                let tone = gen.surface(wx, wz, height, gen.normal(wx, wz)).tone;
+                matches!(tone, Tone::Marsh | Tone::RockDark)
+            };
+            let drowned = |wx: f32, wz: f32| {
+                gen.lake_level(wx, wz)
+                    .is_some_and(|level| gen.height(wx, wz) < level)
+            };
+
+            let mut wz = -half.y;
+            while wz < half.y {
+                let mut wx = -half.x + FACET_METRES;
+                while wx < half.x - 4.0 * FACET_METRES {
+                    let here = wx;
+                    wx += FACET_METRES;
+                    // The first dry step out of a lake, walking east.
+                    if !drowned(here - FACET_METRES, wz) || drowned(here, wz) {
+                        continue;
+                    }
+                    crossings += 1;
+                    deep += usize::from(fresh(here, wz) && fresh(here + FACET_METRES, wz));
+                }
+                wz += FACET_METRES;
+            }
+        }
+        assert!(
+            crossings > 300,
+            "only {crossings} lake shores across five seeds — nothing was tested"
+        );
+        let share = deep as f32 / crossings as f32;
+        assert!(
+            share > 0.9,
+            "only {:.0}% of {crossings} lake shores have two facets of margin on them",
+            share * 100.0
         );
     }
 
