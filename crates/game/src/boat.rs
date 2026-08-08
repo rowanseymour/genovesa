@@ -23,6 +23,7 @@ use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
+use crate::sea;
 use crate::terrain::Ground;
 use crate::{eased, matte, AppState, Helm};
 
@@ -269,19 +270,31 @@ fn launch(
     info!("boat launched at {}, {}", view.focus.x, view.focus.z);
 }
 
-/// Keeps the boat on the surface it is over — [`Ground::surface`], the same
-/// rule the other players' markers ride.
+/// Keeps the boat on the surface it is over: the ground where the ground
+/// stands proud of the water, and the swell where it does not — the same rule
+/// the other players' markers ride. [`Ground::surface`] is this with a flat
+/// sea; the swell is what the sea is actually drawn wearing, and taking the
+/// higher of ground and water is what makes the changeover continuous — a
+/// hull nosing onto a beach settles from bobbing to beached with no step,
+/// because at the shoreline the two heights meet.
 ///
 /// The waterline is the hull's origin, so a boat that has run aground is
 /// half-buried in the hillside; that is what aground looks like, and steering
-/// is what will keep it off.
-fn float(ground: Option<Res<Ground>>, mut boats: Query<&mut Transform, With<Boat>>) {
+/// is what will keep it off. No easing on the water's motion either: the
+/// swell is gentle, and a hull seven metres long simply is where the water
+/// is.
+fn float(
+    ground: Option<Res<Ground>>,
+    time: Res<Time>,
+    mut boats: Query<&mut Transform, With<Boat>>,
+) {
     for mut transform in &mut boats {
         let at = transform.translation;
-        let Some(surface) = ground.as_ref().and_then(|g| g.surface(at.x, at.z)) else {
+        let Some(height) = ground.as_ref().and_then(|g| g.height(at.x, at.z)) else {
             continue;
         };
-        transform.translation.y = surface;
+        let water = sea::swell(Vec2::new(at.x, at.z), time.elapsed_secs_wrapped());
+        transform.translation.y = height.max(water);
     }
 }
 
@@ -1094,17 +1107,41 @@ mod tests {
             "the boat is not sitting on the ground it is over"
         );
 
-        // And open water past the coast: the waterline exactly, however deep
-        // the seabed under it.
+        // And open water past the coast: the swell exactly, at the moment the
+        // frame settled, however deep the seabed under it. The same function
+        // the game floats with, because what is being pinned is the
+        // agreement — the hull at the height the water is drawn at.
         let offshore = Vec2::new(TEST_ISLAND_REACH * 1.5, 0.0);
         assert!(
             ground(&app, offshore) < 0.0,
             "the point picked to be open water is dry land"
         );
+        let floated = put_down(&mut app, offshore);
+        let water = crate::sea::swell(offshore, elapsed(&app));
         assert_eq!(
-            put_down(&mut app, offshore),
-            0.0,
-            "the boat is not floating at the waterline"
+            floated, water,
+            "the boat floats at {floated} m, the swell there stands at {water} m"
+        );
+    }
+
+    #[test]
+    fn an_anchored_boat_bobs_on_the_swell() {
+        // Not sailing, not steering — just afloat, and still never quite
+        // still: the water moves, so the hull does. A run of frames has to
+        // find it at more than one height, where the flat sea held it at
+        // exactly one forever.
+        let mut app = island_app();
+        place(&mut app, Vec2::new(TEST_ISLAND_REACH * 1.5, 0.0), Vec2::X);
+
+        let mut heights = Vec::new();
+        for _ in 0..60 {
+            run_frames(&mut app, 1);
+            heights.push(boat(&mut app).translation.y);
+        }
+        assert!(
+            heights.iter().any(|h| h != &heights[0]),
+            "a second of frames never moved the hull off {} m",
+            heights[0]
         );
     }
 
@@ -1184,12 +1221,14 @@ mod tests {
         );
 
         // And stopped is stopped, not grinding: the way came off, so the hull
-        // holds exactly the same spot with the key still down.
+        // holds exactly the same spot with the key still down. The same spot
+        // *on the map* — it still bobs, the water under it being water.
         let aground = boat(&mut app).translation;
         run_frames(&mut app, 10);
+        let held = boat(&mut app).translation;
         assert_eq!(
-            boat(&mut app).translation,
-            aground,
+            Vec2::new(held.x, held.z),
+            Vec2::new(aground.x, aground.z),
             "the boat is still creeping ashore"
         );
     }
@@ -1271,10 +1310,13 @@ mod tests {
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
 
+        // Back at sea means back on the water: riding the swell exactly,
+        // rather than holding any height the hillside gave it.
+        let at = boat(&mut app).translation;
         assert_eq!(
-            boat(&mut app).translation.y,
-            0.0,
-            "the boat never made it back to the waterline"
+            at.y,
+            crate::sea::swell(Vec2::new(at.x, at.z), elapsed(&app)),
+            "the boat never made it back to the water"
         );
         let afloat = from_the_island(&mut app);
         assert!(
