@@ -1,18 +1,26 @@
-//! The `--debug` overlay: frame rate and how much geometry is in the scene.
+//! The `--debug` overlay: frame rate, and how much geometry each pass draws.
 //!
 //! A small readout pinned to a corner of the window, over whatever screen the
-//! app is on. The frame rate comes from Bevy's own frame-time diagnostics,
-//! already smoothed; the triangle count is summed from the meshes actually
-//! spawned, so it rises and falls as chunks stream in and out and reads zero
-//! on the menu, where nothing 3D exists at all. The chunk line shows the
-//! streamer's own bookkeeping: how many chunks it holds, and how many of
-//! those are still building off the main thread. The last line reads the
-//! world and the view back in the terms the command line takes them —
+//! app is on, a subject to a line. The frame rate comes from Bevy's own
+//! frame-time diagnostics, already smoothed; the geometry under it is what the
+//! camera actually draws, so it moves with the view as well as with the
+//! streaming, and reads zero on the menu, where nothing 3D exists at all. The
+//! shadow line is the same frame drawn again as the sun sees it, once per
+//! cascade — a larger number than the one above it, and meant to be read
+//! against it. The chunk line shows the streamer's own bookkeeping instead,
+//! which is about what this machine *holds* rather than what it draws: how
+//! much of the world it has, how much of that was open water, and how much
+//! ground it is still waiting on. The last line reads the world and the view
+//! back in the terms the command line takes them —
 //! `--seed`, `--focus`, `--yaw`, `--zoom` — so a screenshot of the overlay is
 //! the whole of what it takes to stand here again, in a `--shot` run or
 //! otherwise.
 
+use std::any::TypeId;
+
+use bevy::camera::visibility::{CascadesVisibleEntities, VisibleEntities};
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
@@ -68,8 +76,7 @@ fn spawn_overlay(mut commands: Commands) {
 
 fn refresh_overlay(
     diagnostics: Res<DiagnosticsStore>,
-    meshes: Res<Assets<Mesh>>,
-    drawn: Query<&Mesh3d>,
+    scene: Scene,
     ground: Option<Res<Ground>>,
     hosting: Option<Res<Hosting>>,
     cameras: Query<&MapCamera>,
@@ -79,17 +86,7 @@ fn refresh_overlay(
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|fps| fps.smoothed());
 
-    let mut triangles = 0;
-    let mut count = 0;
-    for handle in &drawn {
-        // A handle whose asset hasn't landed yet draws nothing, so it counts
-        // as nothing.
-        let Some(mesh) = meshes.get(&handle.0) else {
-            continue;
-        };
-        triangles += triangles_in(mesh);
-        count += 1;
-    }
+    let counts = scene.counts();
 
     // What this machine has of the world, and what it is still waiting for.
     // Absent outside a match, where the readout has no world to count.
@@ -106,8 +103,127 @@ fn refresh_overlay(
     let seed = hosting.map(|hosting| hosting.0.seed());
 
     for mut text in &mut texts {
-        text.0 = overlay_text(fps, triangles, count, tally.as_ref(), seed, view);
+        text.0 = overlay_text(fps, &counts, tally.as_ref(), seed, view);
     }
+}
+
+/// Everything drawn this frame, from the two points of view that draw it: the
+/// camera's, and the sun's once per cascade.
+///
+/// Both counts are read off culls somebody else has already done — the
+/// camera's [`VisibleEntities`] and the light's [`CascadesVisibleEntities`] —
+/// rather than worked out again here. That is what makes them comparable with
+/// each other, and it means a wrong number here would mean a wrong picture
+/// too, which is the kind of wrong that gets noticed.
+///
+/// Both lists are built in `PostUpdate` and read here in `Update`, so both are
+/// a frame old. Equally so, which is what matters for reading one against the
+/// other.
+#[derive(SystemParam)]
+struct Scene<'w, 's> {
+    meshes: Res<'w, Assets<Mesh>>,
+    drawn: Query<'w, 's, &'static Mesh3d>,
+    cameras: Query<'w, 's, &'static VisibleEntities, With<MapCamera>>,
+    lights: Query<'w, 's, &'static CascadesVisibleEntities>,
+}
+
+/// The geometry lines of the readout: what the eye is given, and what the sun
+/// asks for on top of it.
+struct Counts {
+    triangles: usize,
+    meshes: usize,
+    /// Absent where nothing is casting — see [`Scene::shadows`].
+    shadows: Option<ShadowLoad>,
+}
+
+impl Scene<'_, '_> {
+    /// What the camera draws, and what the sun redraws on top of it.
+    ///
+    /// Deliberately not [`ViewVisibility`], which looks like the same question
+    /// asked per entity and is not: the light sets it as well, so that a
+    /// caster standing behind the camera still reaches the shadow maps.
+    /// Counting that way puts geometry the camera never draws into the
+    /// camera's own line — which is the exact confusion these two lines exist
+    /// to resolve.
+    fn counts(&self) -> Counts {
+        let mut counts = Counts {
+            triangles: 0,
+            meshes: 0,
+            shadows: self.shadows(),
+        };
+        for camera in &self.cameras {
+            for entity in camera.iter(TypeId::of::<Mesh3d>()) {
+                let Some(mesh) = self.mesh_of(*entity) else {
+                    continue;
+                };
+                counts.triangles += triangles_in(mesh);
+                counts.meshes += 1;
+            }
+        }
+        counts
+    }
+
+    /// The mesh an entity draws, if it has one and it has landed — an asset
+    /// still loading draws nothing, so it counts as nothing.
+    fn mesh_of(&self, entity: Entity) -> Option<&Mesh> {
+        self.drawn
+            .get(entity)
+            .ok()
+            .and_then(|handle| self.meshes.get(&handle.0))
+    }
+
+    /// `None` where there is no sun — every menu screen, the light being
+    /// spawned with the world and despawned with it.
+    fn shadows(&self) -> Option<ShadowLoad> {
+        let mut load = ShadowLoad {
+            draws: 0,
+            triangles: 0,
+            cascades: 0,
+        };
+        let mut lit = false;
+        for light in &self.lights {
+            // Keyed by the view the cascades were fitted to, and there is one
+            // camera — but a light with no view yet has an empty map, which is
+            // what nothing to report looks like on the first frames.
+            for cascades in light.entities.values() {
+                lit = true;
+                load.cascades = load.cascades.max(cascades.len());
+                for cascade in cascades {
+                    load.draws += cascade.entities.len();
+                    for entity in &cascade.entities {
+                        let Some(mesh) = self.mesh_of(*entity) else {
+                            continue;
+                        };
+                        load.triangles += triangles_in(mesh);
+                    }
+                }
+            }
+        }
+        lit.then_some(load)
+    }
+}
+
+/// What the sun's cascades ask for in a frame.
+///
+/// The shadow pass is the frame drawn over again from the sun, once per
+/// cascade the mesh falls inside — so this is not the count above it with a
+/// constant on the front, and the two do not even move together. The cascades
+/// are fitted to the camera's frustum out to `maximum_distance`, and that
+/// reach does not shrink when the view does: zoomed out over an island the
+/// camera drew 29 meshes and the sun 67, but zoomed in on the boat the camera
+/// drew 7 and the sun still 100. Close to the ground the shadow pass does
+/// thirty times the camera's geometry, which is not what anybody guesses.
+///
+/// Which is the reason for the line. A frame rate that sags says nothing about
+/// *which* pass grew, and this is the half of the frame the count above it
+/// cannot see.
+struct ShadowLoad {
+    /// Mesh draws submitted, a mesh counted once per cascade that wants it.
+    draws: usize,
+    /// Triangles in those draws, on the same footing — a mesh in three
+    /// cascades is rasterised three times and counted three times.
+    triangles: usize,
+    cascades: usize,
 }
 
 /// Triangles a mesh draws. The terrain's chunk meshes are un-indexed — flat
@@ -123,6 +239,13 @@ fn triangles_in(mesh: &Mesh) -> usize {
 
 /// What the readout says. The frame rate has no value at all for the first
 /// frames, before the diagnostic has anything to average.
+///
+/// One line per subject, slash-separated within it, so the block stays four
+/// lines however much it has to say: what the frame cost, what the sun added
+/// to it, what the streamer holds, and where this is. Every number carries its
+/// own noun — nothing is positional — because the lines come and go with what
+/// exists to count, and a reader should not have to know which line is missing
+/// to know what they are looking at.
 ///
 /// The chunk line is three numbers about two different things:
 ///
@@ -144,31 +267,37 @@ fn triangles_in(mesh: &Mesh) -> usize {
 /// as the count above this one standing still while the chunks climb.
 fn overlay_text(
     fps: Option<f64>,
-    triangles: usize,
-    meshes: usize,
+    counts: &Counts,
     tally: Option<&Tally>,
     seed: Option<u32>,
     view: Option<View>,
 ) -> String {
     let fps = fps.map_or_else(|| "--".to_string(), |fps| format!("{fps:.0}"));
-    let mut text = format!(
-        "{fps} fps\n{} triangles\n{meshes} meshes",
-        thousands(triangles)
-    );
+    let mut lines = vec![format!(
+        "{fps} fps / {} meshes / {} triangles",
+        counts.meshes,
+        thousands(counts.triangles)
+    )];
+    if let Some(shadows) = &counts.shadows {
+        lines.push(format!(
+            "{} shadow tris / {} draws / {} cascades",
+            thousands(shadows.triangles),
+            shadows.draws,
+            shadows.cascades
+        ));
+    }
     if let Some(tally) = tally {
-        text.push('\n');
-        text.push_str(&format!(
-            "{} chunks ({} ocean, {} requested)",
+        lines.push(format!(
+            "{} chunks / {} ocean / {} requested",
             tally.ground + tally.ocean,
             tally.ocean,
             tally.requested
         ));
     }
     if let Some(view) = view {
-        text.push('\n');
-        text.push_str(&view_line(seed, view));
+        lines.push(view_line(seed, view));
     }
-    text
+    lines.join("\n")
 }
 
 /// The world and the view in the terms `--seed`, `--focus`, `--yaw` and
@@ -181,18 +310,17 @@ fn overlay_text(
 /// it stood but not which world it stood in, that never having crossed the
 /// wire.
 fn view_line(seed: Option<u32>, view: View) -> String {
-    let mut line = match seed {
-        Some(seed) => format!("seed {seed}  "),
-        None => String::new(),
-    };
-    line.push_str(&format!(
-        "focus {:.0},{:.0}  yaw {:.0}  zoom {:.0}",
-        view.focus.x,
-        view.focus.z,
-        view.yaw.to_degrees().rem_euclid(360.0),
-        view.distance
+    let mut parts = Vec::new();
+    if let Some(seed) = seed {
+        parts.push(format!("seed {seed}"));
+    }
+    parts.push(format!("focus {:.0},{:.0}", view.focus.x, view.focus.z));
+    parts.push(format!(
+        "yaw {:.0}",
+        view.yaw.to_degrees().rem_euclid(360.0)
     ));
-    line
+    parts.push(format!("zoom {:.0}", view.distance));
+    parts.join(" / ")
 }
 
 /// `1234567` -> `1,234,567`, since triangle counts run to seven digits.
@@ -212,6 +340,7 @@ fn thousands(n: usize) -> String {
 mod tests {
     use super::*;
     use bevy::asset::RenderAssetUsages;
+    use bevy::camera::visibility::VisibleMeshEntities;
     use bevy::mesh::{Indices, PrimitiveTopology};
 
     /// A chunk of flat ground, which is all this needs of one: the readout
@@ -248,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn the_readout_puts_each_count_on_its_own_line() {
+    fn the_readout_puts_each_subject_on_its_own_line() {
         let view = View {
             focus: Vec3::new(98.4, 3.0, -316.7),
             distance: 42.4,
@@ -261,28 +390,47 @@ mod tests {
             ocean: 58,
             requested: 12,
         };
+        // The sun asks for more than the eye does, the outer cascades not
+        // narrowing when the view does — so the two triangle counts are
+        // deliberately unlike each other, and a formatter that muddled them
+        // would be caught here.
+        let counts = Counts {
+            triangles: 1_234_567,
+            meshes: 214,
+            shadows: Some(ShadowLoad {
+                draws: 623,
+                triangles: 3_298_112,
+                cascades: 4,
+            }),
+        };
         assert_eq!(
             overlay_text(
                 Some(59.6),
-                1_234_567,
-                214,
+                &counts,
                 Some(&tally),
                 Some(20_040_112),
                 Some(view)
             ),
-            "60 fps\n1,234,567 triangles\n214 meshes\n\
-             231 chunks (58 ocean, 12 requested)\n\
-             seed 20040112  focus 98,-317  yaw 45  zoom 42"
+            "60 fps / 214 meshes / 1,234,567 triangles\n\
+             3,298,112 shadow tris / 623 draws / 4 cascades\n\
+             231 chunks / 58 ocean / 12 requested\n\
+             seed 20040112 / focus 98,-317 / yaw 45 / zoom 42"
         );
     }
 
     #[test]
     fn the_readout_survives_having_no_frame_rate_yet_and_no_world() {
-        // On a menu screen there is no world to count and no camera to
-        // describe, so the readout is the three lines that are always true.
+        // On a menu screen there is no world to count, no sun casting and no
+        // camera to describe — so the readout falls back to its one line that
+        // is true anywhere.
+        let counts = Counts {
+            triangles: 0,
+            meshes: 0,
+            shadows: None,
+        };
         assert_eq!(
-            overlay_text(None, 0, 0, None, None, None),
-            "-- fps\n0 triangles\n0 meshes"
+            overlay_text(None, &counts, None, None, None),
+            "-- fps / 0 meshes / 0 triangles"
         );
     }
 
@@ -297,11 +445,11 @@ mod tests {
         };
         assert_eq!(
             view_line(Some(7), at(-90.0)),
-            "seed 7  focus 0,0  yaw 270  zoom 100"
+            "seed 7 / focus 0,0 / yaw 270 / zoom 100"
         );
         assert_eq!(
             view_line(Some(7), at(450.0)),
-            "seed 7  focus 0,0  yaw 90  zoom 100"
+            "seed 7 / focus 0,0 / yaw 90 / zoom 100"
         );
     }
 
@@ -319,7 +467,7 @@ mod tests {
                     yaw: 0.0,
                 }
             ),
-            "focus 98,-317  yaw 0  zoom 150"
+            "focus 98,-317 / yaw 0 / zoom 150"
         );
     }
 
@@ -336,15 +484,39 @@ mod tests {
         ))
         .insert_resource(Assets::<Mesh>::default());
 
-        // Two triangles' worth of scene, and a world holding one chunk of
-        // ground and one of open water — a mesh and a fact, which is the
-        // distinction the chunk line exists to draw.
+        // Two meshes of two triangles each — and only one of them in shot.
+        // Both are spawned, so a readout that counted what exists rather than
+        // what is drawn would say four triangles here.
         let handle = app
             .world_mut()
             .resource_mut::<Assets<Mesh>>()
             .add(unindexed(6));
+        let caster = app.world_mut().spawn(Mesh3d(handle.clone())).id();
         app.world_mut().spawn(Mesh3d(handle));
 
+        // A sun whose cascades both want that one mesh, which is the whole
+        // point of counting the shadow pass separately: two triangles in the
+        // scene are four triangles of shadow work, because a mesh inside two
+        // cascades is rasterised into both.
+        let view = app.world_mut().spawn_empty().id();
+        let mut cascades = CascadesVisibleEntities::default();
+        cascades.entities.insert(
+            view,
+            vec![
+                VisibleMeshEntities {
+                    entities: vec![caster],
+                },
+                VisibleMeshEntities {
+                    entities: vec![caster],
+                },
+            ],
+        );
+        app.world_mut().spawn(cascades);
+
+        // A world holding one chunk of ground and one of open water — a mesh
+        // and a fact, which is the distinction the chunk line exists to draw,
+        // and which is why that line stays about what is *held* while the two
+        // above it are about what is drawn.
         let mut ground = Ground::default();
         ground.deliver(IVec2::ZERO, Some(a_chunk()));
         ground.deliver(IVec2::new(1, 0), None);
@@ -359,12 +531,20 @@ mod tests {
             .expect("a server should serve");
         app.insert_resource(Hosting(host));
 
-        // And a camera, for the view line.
-        app.world_mut().spawn(MapCamera::looking(View {
-            focus: Vec3::new(10.0, 0.0, -20.0),
-            distance: 150.0,
-            yaw: 0.0,
-        }));
+        // And a camera, for the view line and for the scene count — which is
+        // its cull, so it is the camera that decides what the geometry line
+        // says. Filled by hand here: `check_visibility` belongs to the render
+        // plugins, and this app has none.
+        let mut seen = VisibleEntities::default();
+        seen.push(caster, TypeId::of::<Mesh3d>());
+        app.world_mut().spawn((
+            MapCamera::looking(View {
+                focus: Vec3::new(10.0, 0.0, -20.0),
+                distance: 150.0,
+                yaw: 0.0,
+            }),
+            seen,
+        ));
 
         // The first update spawns the overlay; the rest give the FPS
         // diagnostic frames with a measurable delta, with real time between
@@ -384,9 +564,10 @@ mod tests {
             .clone();
         assert!(
             text.ends_with(
-                "2 triangles\n1 meshes\n\
-                 2 chunks (1 ocean, 0 requested)\n\
-                 seed 4242  focus 10,-20  yaw 0  zoom 150"
+                "1 meshes / 2 triangles\n\
+                 4 shadow tris / 2 draws / 2 cascades\n\
+                 2 chunks / 1 ocean / 0 requested\n\
+                 seed 4242 / focus 10,-20 / yaw 0 / zoom 150"
             ),
             "overlay reads: {text}"
         );
