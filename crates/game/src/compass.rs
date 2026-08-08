@@ -222,6 +222,7 @@ fn turn_card(cameras: Query<&MapCamera>, mut cards: Query<&mut UiTransform, With
 mod tests {
     use super::*;
     use crate::camera::MapCameraPlugin;
+    use crate::Helm;
     use bevy::input::mouse::AccumulatedMouseScroll;
     use bevy::state::app::StatesPlugin;
     use bevy::time::TimePlugin;
@@ -232,6 +233,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((TimePlugin, StatesPlugin, MapCameraPlugin, CompassPlugin))
             .init_state::<AppState>()
+            .add_sub_state::<Helm>()
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<AccumulatedMouseScroll>();
         app.update();

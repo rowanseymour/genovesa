@@ -370,6 +370,20 @@ impl Dialing {
 #[derive(Resource)]
 pub struct Hosting(pub Host);
 
+impl Hosting {
+    /// Whether anyone off this machine could be in this world — which is the
+    /// difference between leaving a world of one's own and shutting one on
+    /// other people.
+    ///
+    /// Read off the address actually bound rather than remembered from the
+    /// dial. A world of one's own is served too, over the loopback, so merely
+    /// hosting says nothing about who can reach it; being bound somewhere a
+    /// stranger could dial is the whole of what makes a world shared.
+    pub fn shared(&self) -> bool {
+        !self.0.addr().ip().is_loopback()
+    }
+}
+
 /// The joined session. Present only in a run that is playing in a served
 /// world; every system here conditions on it, so a local world pays nothing.
 #[derive(Resource)]
@@ -623,6 +637,7 @@ mod tests {
 
     use super::*;
     use crate::testing::run_until;
+    use crate::Helm;
 
     /// A headless app with the net systems running in a match, and no
     /// terrain — markers then keep their height, which these tests ignore.
@@ -630,6 +645,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((TimePlugin, StatesPlugin, NetPlugin))
             .init_state::<AppState>()
+            .add_sub_state::<Helm>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .insert_resource(Online::new(connection));
@@ -884,5 +900,51 @@ mod tests {
             [(PlayerId(9), Vec2::new(80.0, 0.0))],
             "the one who left is still standing there, or the move was lost"
         );
+    }
+
+    /// Pausing holds the player still; it does not hang up on anyone.
+    ///
+    /// This is what [`Helm`] is for. Hanging up here would mean the other
+    /// boats vanished the moment somebody opened a menu, and — for whoever was
+    /// hosting — that the world itself shut on everyone else in it.
+    #[test]
+    fn pausing_keeps_the_session_and_leaving_ends_it() {
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let _server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+        app.insert_resource(Hosting(
+            Server::bind("127.0.0.1:0", WorldConfig::default())
+                .expect("bind")
+                .spawn()
+                .expect("spawn"),
+        ));
+
+        set_helm(&mut app, Helm::Paused);
+        assert!(
+            app.world().contains_resource::<Online>(),
+            "pausing hung up the connection"
+        );
+        assert!(
+            app.world().contains_resource::<Hosting>(),
+            "pausing shut the world on everyone else in it"
+        );
+
+        // Leaving still costs the whole world, which is the other half of the
+        // bargain — a pause that never let go would leak the port and the
+        // thread behind it.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::MainMenu);
+        app.update();
+        assert!(!app.world().contains_resource::<Online>());
+        assert!(!app.world().contains_resource::<Hosting>());
+        // And the helm goes with the world it belonged to.
+        assert!(app.world().get_resource::<State<Helm>>().is_none());
+    }
+
+    fn set_helm(app: &mut App, helm: Helm) {
+        app.world_mut().resource_mut::<NextState<Helm>>().set(helm);
+        app.update();
     }
 }

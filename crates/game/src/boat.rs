@@ -24,7 +24,7 @@ use bevy::prelude::*;
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
 use crate::terrain::Ground;
-use crate::{eased, matte, AppState};
+use crate::{eased, matte, AppState, Helm};
 
 /// The boat, as a file. Built from `assets-src/boat.glb/boat.blend` by the
 /// `build.sh` beside it, which is also where the export settings the look
@@ -195,7 +195,14 @@ impl Plugin for BoatPlugin {
         app.add_systems(OnEnter(AppState::InWorld), launch)
             .add_systems(
                 Update,
-                (steer, float).chain().run_if(in_state(AppState::InWorld)),
+                // Only the steering stops when the game is paused. Floating is
+                // not motion — it sets the hull to the height of the ground
+                // under it — so leaving it running means a chunk arriving
+                // while the pause menu is up is settled on before the player
+                // looks again, rather than snapping under them on resume.
+                (steer.run_if(in_state(Helm::Sailing)), float)
+                    .chain()
+                    .run_if(in_state(AppState::InWorld)),
             );
     }
 }
@@ -515,6 +522,7 @@ mod tests {
         ))
         .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
         .init_state::<AppState>()
+        .add_sub_state::<Helm>()
         .init_resource::<View>()
         .init_resource::<KeyBindings>()
         .init_resource::<ButtonInput<KeyCode>>()
@@ -740,6 +748,54 @@ mod tests {
             (*heading - expected).length() < 1e-5,
             "a boat at yaw {yaw} faces {heading:?}, not {expected:?}"
         );
+    }
+
+    /// A paused boat is a stopped boat, and the world it is in is still there
+    /// to be sailed on afterwards.
+    #[test]
+    fn pausing_takes_the_helm_away_and_resuming_gives_it_back() {
+        let mut app = test_app();
+        set_helm(&mut app, Helm::Paused);
+
+        let before = boat(&mut app).translation;
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 20);
+        assert_eq!(
+            boat(&mut app).translation,
+            before,
+            "the boat sailed on with the pause menu up"
+        );
+
+        set_helm(&mut app, Helm::Sailing);
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 20);
+        assert_ne!(
+            boat(&mut app).translation,
+            before,
+            "the helm never came back"
+        );
+    }
+
+    /// Floating is not steering — see the run conditions in [`BoatPlugin`].
+    /// Ground arriving while the game is paused is settled on there and then,
+    /// rather than snapping the hull the frame the player resumes.
+    #[test]
+    fn a_paused_boat_still_rides_ground_that_arrives_under_it() {
+        let mut app = test_app();
+        set_helm(&mut app, Helm::Paused);
+        assert_eq!(boat(&mut app).translation.y, 0.0);
+
+        app.insert_resource(test_ground());
+        run_frames(&mut app, 2);
+        assert!(
+            boat(&mut app).translation.y > 0.0,
+            "the hull is still at sea level with an island under it"
+        );
+    }
+
+    fn set_helm(app: &mut App, helm: Helm) {
+        app.world_mut().resource_mut::<NextState<Helm>>().set(helm);
+        app.update();
     }
 
     #[test]
