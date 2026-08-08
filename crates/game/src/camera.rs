@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
 use crate::terrain::Ground;
-use crate::{eased, AppState};
+use crate::{eased, AppState, Helm};
 
 /// Downward tilt of the camera, from horizontal. Public because the compass
 /// draws itself under the same tilt, so its card lies in the picture the way
@@ -188,7 +188,16 @@ impl Plugin for MapCameraPlugin {
             .add_systems(OnEnter(AppState::InWorld), recentre)
             .add_systems(
                 Update,
-                (follow_player, zoom, rotate, apply_transform)
+                // Zooming and turning are the player's hands and stop with the
+                // rest of them while paused; following and easing are the
+                // camera keeping faith with a world that has not stopped, and
+                // carry on. A frozen picture would be the wrong one anyway,
+                // with other boats still moving in it.
+                (
+                    follow_player,
+                    (zoom, rotate).run_if(in_state(Helm::Sailing)),
+                    apply_transform,
+                )
                     .chain()
                     .run_if(in_state(AppState::InWorld)),
             );
@@ -362,6 +371,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((TimePlugin, StatesPlugin, MapCameraPlugin))
             .init_state::<AppState>()
+            .add_sub_state::<Helm>()
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<AccumulatedMouseScroll>();
         app.update();
@@ -496,6 +506,34 @@ mod tests {
             .translation = Vec3::new(-5.0, 0.5, 41.0);
         app.update();
         assert_eq!(focus(&mut app), Vec3::new(-5.0, 0.5, 41.0));
+    }
+
+    /// Turning and zooming are the player's hands, and stop with them.
+    #[test]
+    fn a_paused_view_neither_turns_nor_zooms() {
+        let mut app = test_app();
+        app.world_mut()
+            .resource_mut::<NextState<Helm>>()
+            .set(Helm::Paused);
+        app.update();
+
+        let (yaw, distance) = (
+            read(&mut app, |c| c.target_yaw),
+            read(&mut app, |c| c.target_distance),
+        );
+        hold(&mut app, KeyCode::KeyQ);
+        app.insert_resource(AccumulatedMouseScroll {
+            unit: MouseScrollUnit::Line,
+            delta: Vec2::new(0.0, 3.0),
+        });
+        run_frames(&mut app, 20);
+
+        assert_eq!(read(&mut app, |c| c.target_yaw), yaw, "the view turned");
+        assert_eq!(
+            read(&mut app, |c| c.target_distance),
+            distance,
+            "the view zoomed"
+        );
     }
 
     #[test]

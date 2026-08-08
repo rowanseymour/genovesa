@@ -78,7 +78,8 @@ impl Action {
 /// Keys the player may not take, because taking them would leave no way back.
 /// The arrows are a permanent second set of movement keys, so however
 /// thoroughly the rest is rebound the player can always get about; Escape is
-/// what leaves a match and what backs out of setting a key.
+/// the one step back from wherever the player is — into the pause menu, out of
+/// it again, and out of setting a key.
 pub const RESERVED: [KeyCode; 5] = [
     KeyCode::Escape,
     KeyCode::ArrowUp,

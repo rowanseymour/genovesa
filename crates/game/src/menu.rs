@@ -11,7 +11,7 @@ use protocol::DEFAULT_PORT;
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
 use crate::camera::View;
 use crate::net::{Dialing, Hosting, Online, Reach};
-use crate::AppState;
+use crate::{AppState, Helm};
 use server::{random_seed, WorldConfig, MAX_SEED};
 
 /// Longest seed the user can type — read off [`MAX_SEED`], so the field can
@@ -69,6 +69,10 @@ impl Plugin for MenuPlugin {
             .init_resource::<Rebinding>()
             .add_systems(OnEnter(AppState::MainMenu), spawn_main_menu)
             .add_systems(OnEnter(AppState::Settings), spawn_settings)
+            // The pause menu and the controls screen behind it, both standing
+            // over a world that is still running — see [`Helm`].
+            .add_systems(OnEnter(Helm::Paused), spawn_pause_menu)
+            .add_systems(OnEnter(Helm::Controls), spawn_paused_settings)
             // Cleared before the screen is built, so that a screen only ever
             // shows what this visit to it has had to say.
             .add_systems(
@@ -88,8 +92,9 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(AppState::NewWorld), stop_dialing)
             .add_systems(OnExit(AppState::JoinWorld), stop_dialing)
             // Leaving the screen mid-capture would otherwise come back to it
-            // still waiting for a key.
+            // still waiting for a key. Both ways to the same screen.
             .add_systems(OnExit(AppState::Settings), cancel_rebinding)
+            .add_systems(OnExit(Helm::Controls), cancel_rebinding)
             .add_systems(
                 Update,
                 (
@@ -114,14 +119,20 @@ impl Plugin for MenuPlugin {
                     refresh_status,
                     // Ordered so that arming a row and reading the key meant for
                     // it can't land in the same frame. `settings_keys` carries
-                    // no run condition of its own — see its comment.
+                    // no run condition of its own — see its comment. The rest
+                    // run on the controls screen wherever it was opened from.
                     (
-                        settings_actions.run_if(in_state(AppState::Settings)),
+                        settings_actions
+                            .run_if(in_state(AppState::Settings).or_else(in_state(Helm::Controls))),
                         settings_keys,
-                        refresh_settings.run_if(in_state(AppState::Settings)),
+                        refresh_settings
+                            .run_if(in_state(AppState::Settings).or_else(in_state(Helm::Controls))),
                     )
                         .chain(),
-                    leave_world.run_if(in_state(AppState::InWorld)),
+                    pause_actions.run_if(in_state(Helm::Paused)),
+                    // Wants the state itself, so it can only run where there
+                    // is one — which is to say, inside a world.
+                    helm_keys.run_if(in_state(AppState::InWorld)),
                 ),
             );
     }
@@ -208,6 +219,11 @@ enum MenuButton {
     Rebind(Action),
     ResetKeys,
     Back,
+    /// Puts the player back at the helm of the world behind the pause menu.
+    Resume,
+    /// Gives that world up. Named for what it costs rather than "Back", which
+    /// on every other screen means one step and here means the whole world.
+    LeaveWorld,
 }
 
 /// Marks the seed readout so it can be refreshed as the player types.
@@ -833,13 +849,22 @@ fn refresh_status(status: Res<Status>, mut lines: Query<&mut Text, With<StatusTe
 // Controls
 // ---------------------------------------------------------------------------
 
-fn spawn_settings(mut commands: Commands, bindings: Res<KeyBindings>) {
+/// The controls screen as reached from the main menu.
+fn spawn_settings(commands: Commands, bindings: Res<KeyBindings>) {
+    spawn_controls(commands, &bindings, DespawnOnExit(AppState::Settings));
+}
+
+/// The same screen as reached from the pause menu, differing only in living
+/// and dying with [`Helm::Controls`] instead — so that opening it does not
+/// leave the world, which is the whole reason the pause menu exists.
+fn spawn_paused_settings(commands: Commands, bindings: Res<KeyBindings>) {
+    spawn_controls(commands, &bindings, DespawnOnExit(Helm::Controls));
+}
+
+/// Builds the controls screen, cleared up by whichever state opened it.
+fn spawn_controls(mut commands: Commands, bindings: &KeyBindings, until: impl Bundle) {
     commands
-        .spawn((
-            Name::new("Controls screen"),
-            DespawnOnExit(AppState::Settings),
-            screen(),
-        ))
+        .spawn((Name::new("Controls screen"), until, screen()))
         .with_children(|screen| {
             screen.spawn(panel(8.0)).with_children(|panel| {
                 heading(panel, "Controls", 6.0);
@@ -861,7 +886,7 @@ fn spawn_settings(mut commands: Commands, bindings: Res<KeyBindings>) {
                 // Plain punctuation only: the default font has no dash of
                 // any kind and draws a missing glyph as an empty box.
                 label(panel, "the arrow keys always move, and escape always");
-                label(panel, "leaves; neither can be reassigned");
+                label(panel, "goes back; neither can be reassigned");
 
                 panel
                     .spawn(Node {
@@ -903,12 +928,36 @@ fn spawn_key_row(parent: &mut ChildSpawnerCommands, action: Action, key_name: &s
         });
 }
 
+/// Whether the controls screen currently open is the one over a paused world
+/// rather than the one over the main menu. The two are the same screen — see
+/// [`spawn_controls`] — and this is the only thing that tells them apart.
+fn over_a_world(helm: &Option<Res<State<Helm>>>) -> bool {
+    helm.as_ref().is_some_and(|h| *h.get() == Helm::Controls)
+}
+
+/// Shuts the controls screen, returning to whichever screen opened it.
+fn close_controls(
+    over_a_world: bool,
+    next_app: &mut NextState<AppState>,
+    next_helm: &mut NextState<Helm>,
+) {
+    if over_a_world {
+        next_helm.set(Helm::Paused);
+    } else {
+        next_app.set(AppState::MainMenu);
+    }
+}
+
 fn settings_actions(
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    helm: Option<Res<State<Helm>>>,
     mut rebinding: ResMut<Rebinding>,
     mut bindings: ResMut<KeyBindings>,
-    mut next: ResMut<NextState<AppState>>,
+    mut next_app: ResMut<NextState<AppState>>,
+    mut next_helm: ResMut<NextState<Helm>>,
 ) {
+    let over_a_world = over_a_world(&helm);
+
     for (interaction, button) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
@@ -919,7 +968,7 @@ fn settings_actions(
                 *bindings = KeyBindings::default();
                 rebinding.0 = None;
             }
-            MenuButton::Back => next.set(AppState::MainMenu),
+            MenuButton::Back => close_controls(over_a_world, &mut next_app, &mut next_helm),
             _ => {}
         }
     }
@@ -931,14 +980,22 @@ fn settings_actions(
 /// Runs on every screen rather than only this one so that its cursor into the
 /// keypress stream always advances. Left to lag, it would deliver whatever was
 /// pressed on the way here the instant the screen opened.
+///
+/// Escape on this screen belongs to this system wherever the screen was opened
+/// from, because only here is it known whether a row is armed — in which case
+/// the key means "not that one" and the screen stays put. `helm_keys` steps
+/// aside in [`Helm::Controls`] for exactly that reason.
 fn settings_keys(
     state: Res<State<AppState>>,
+    helm: Option<Res<State<Helm>>>,
     mut presses: MessageReader<KeyboardInput>,
     mut rebinding: ResMut<Rebinding>,
     mut bindings: ResMut<KeyBindings>,
-    mut next: ResMut<NextState<AppState>>,
+    mut next_app: ResMut<NextState<AppState>>,
+    mut next_helm: ResMut<NextState<Helm>>,
 ) {
-    let on_screen = *state.get() == AppState::Settings;
+    let over_a_world = over_a_world(&helm);
+    let on_screen = *state.get() == AppState::Settings || over_a_world;
 
     for press in presses.read() {
         // A key held down repeats; the first press is the one that counts.
@@ -948,7 +1005,7 @@ fn settings_keys(
 
         let Some(action) = rebinding.0 else {
             if press.key_code == KeyCode::Escape {
-                next.set(AppState::MainMenu);
+                close_controls(over_a_world, &mut next_app, &mut next_helm);
             }
             continue;
         };
@@ -1012,9 +1069,89 @@ fn cancel_rebinding(mut rebinding: ResMut<Rebinding>) {
 // In world
 // ---------------------------------------------------------------------------
 
-fn leave_world(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<AppState>>) {
-    if keys.just_pressed(KeyCode::Escape) {
-        next.set(AppState::MainMenu);
+/// The pause menu, over the world rather than instead of it.
+///
+/// A panel like the dialogs, on the dimmed [`screen`] they all stand on, so
+/// the water carries on moving behind it and it is plain that the world is
+/// still there. Leaving is the last of the three and says which world it is
+/// leaving, because it is the one button here that cannot be taken back.
+fn spawn_pause_menu(mut commands: Commands, hosting: Option<Res<Hosting>>) {
+    // Only a *shared* world is worth a word of warning. Every world is served,
+    // a solo one over the loopback — see [`Hosting::shared`] — so saying it
+    // whenever there is a host would tell a player sailing alone that they are
+    // about to strand somebody.
+    let shared = hosting.is_some_and(|hosting| hosting.shared());
+    commands
+        .spawn((
+            Name::new("Pause menu"),
+            DespawnOnExit(Helm::Paused),
+            screen(),
+        ))
+        .with_children(|screen| {
+            screen.spawn(panel(10.0)).with_children(|panel| {
+                heading(panel, "Paused", 6.0);
+                if shared {
+                    label(panel, "others can be sailing in this world, and");
+                    label(panel, "leaving closes it on them");
+                }
+
+                panel
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: Val::Px(8.0),
+                        margin: UiRect::top(Val::Px(20.0)),
+                        ..default()
+                    })
+                    .with_children(|rows| {
+                        spawn_button(rows, MenuButton::Resume, "Resume", 200.0);
+                        spawn_button(rows, MenuButton::Settings, "Controls", 200.0);
+                        spawn_button(rows, MenuButton::LeaveWorld, "Leave World", 200.0);
+                    });
+            });
+        });
+}
+
+fn pause_actions(
+    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    mut next_app: ResMut<NextState<AppState>>,
+    mut next_helm: ResMut<NextState<Helm>>,
+) {
+    for (interaction, button) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match button {
+            MenuButton::Resume => next_helm.set(Helm::Sailing),
+            MenuButton::Settings => next_helm.set(Helm::Controls),
+            // The only way out. Leaving `InWorld` is what takes the world
+            // down — see [`Helm`] — so this is the one press that does.
+            MenuButton::LeaveWorld => next_app.set(AppState::MainMenu),
+            _ => {}
+        }
+    }
+}
+
+/// Escape inside a world: into the pause menu from the helm, and back out of
+/// it again.
+///
+/// One step back, never all the way out. Leaving a world is a button now, and
+/// that is the point — it used to be this key, and a world is far too
+/// expensive to lose to a mispress.
+fn helm_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    helm: Res<State<Helm>>,
+    mut next: ResMut<NextState<Helm>>,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    match helm.get() {
+        Helm::Sailing => next.set(Helm::Paused),
+        Helm::Paused => next.set(Helm::Sailing),
+        // Not ours. On the controls screen Escape may mean "not that key"
+        // rather than "back", and only `settings_keys` knows which.
+        Helm::Controls => {}
     }
 }
 
@@ -1194,6 +1331,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((StatesPlugin, MenuPlugin))
             .insert_state(state)
+            .add_sub_state::<Helm>()
             .init_resource::<ButtonInput<KeyCode>>()
             // Normally the camera plugin's, but entering a world moves the
             // view onto the served spawn — see `settle_dialing`.
@@ -1266,6 +1404,57 @@ mod tests {
 
     fn state(app: &App) -> AppState {
         *app.world().resource::<State<AppState>>().get()
+    }
+
+    /// What the player is doing in the world, or `None` when there is no world
+    /// to be doing it in — which is itself worth asserting, since a pause menu
+    /// that outlived its world would be the bug this all exists to prevent.
+    fn helm(app: &App) -> Option<Helm> {
+        app.world().get_resource::<State<Helm>>().map(|h| *h.get())
+    }
+
+    /// A match with the pause menu already up.
+    fn paused_app() -> App {
+        let mut app = test_app(AppState::InWorld);
+        app.world_mut()
+            .resource_mut::<NextState<Helm>>()
+            .set(Helm::Paused);
+        app.update();
+        app
+    }
+
+    /// A world actually being served, so that a test of what the pause menu
+    /// says about hosting is looking at a real [`Hosting`]. Cheap: the port is
+    /// the kernel's to pick and nothing ever dials it.
+    ///
+    /// `bind` is what decides whether the world counts as shared — the
+    /// loopback is a world of one's own, anything wider is one others could be
+    /// in. An ephemeral port either way, so two test runs cannot collide the
+    /// way binding the real shared port would.
+    fn fake_host(bind: &str) -> server::Host {
+        server::Server::bind(bind, WorldConfig::default())
+            .expect("bind")
+            .spawn()
+            .expect("spawn")
+    }
+
+    /// How many screens of a given name are standing.
+    fn named(app: &mut App, name: &str) -> usize {
+        app.world_mut()
+            .query::<&Name>()
+            .iter(app.world())
+            .filter(|n| n.as_str() == name)
+            .count()
+    }
+
+    /// Everything the pause menu currently says, run together.
+    fn pause_text(app: &mut App) -> String {
+        app.world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|t| t.0.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     #[test]
@@ -1762,11 +1951,123 @@ mod tests {
     }
 
     #[test]
-    fn escape_leaves_the_match() {
+    fn escape_pauses_the_match_rather_than_leaving_it() {
         let mut app = test_app(AppState::InWorld);
         press_key(&mut app, KeyCode::Escape);
         app.update();
+        assert_eq!(helm(&app), Some(Helm::Paused));
+        // The whole point: the world is still there to go back to.
+        assert_eq!(state(&app), AppState::InWorld);
+    }
+
+    #[test]
+    fn escape_again_returns_to_the_helm() {
+        let mut app = test_app(AppState::InWorld);
+        press_key(&mut app, KeyCode::Escape);
+        app.update();
+        press_key(&mut app, KeyCode::Escape);
+        app.update();
+        assert_eq!(helm(&app), Some(Helm::Sailing));
+        assert_eq!(state(&app), AppState::InWorld);
+    }
+
+    #[test]
+    fn resume_returns_to_the_helm() {
+        let mut app = paused_app();
+        click(&mut app, MenuButton::Resume);
+        assert_eq!(helm(&app), Some(Helm::Sailing));
+        assert_eq!(state(&app), AppState::InWorld);
+    }
+
+    /// The one press that gives the world up — and the only one, which is what
+    /// the pause menu is for.
+    #[test]
+    fn leaving_the_world_is_a_button_of_its_own() {
+        let mut app = paused_app();
+        click(&mut app, MenuButton::LeaveWorld);
         assert_eq!(state(&app), AppState::MainMenu);
+        // Gone with the world it belonged to.
+        assert_eq!(helm(&app), None);
+    }
+
+    #[test]
+    fn pausing_puts_a_menu_up_and_resuming_takes_it_down() {
+        let mut app = paused_app();
+        assert_eq!(named(&mut app, "Pause menu"), 1);
+        click(&mut app, MenuButton::Resume);
+        assert_eq!(named(&mut app, "Pause menu"), 0);
+    }
+
+    #[test]
+    fn controls_open_over_the_paused_world_and_come_back_to_it() {
+        let mut app = paused_app();
+        click(&mut app, MenuButton::Settings);
+        assert_eq!(helm(&app), Some(Helm::Controls));
+        assert_eq!(state(&app), AppState::InWorld);
+        assert_eq!(named(&mut app, "Controls screen"), 1);
+
+        click(&mut app, MenuButton::Back);
+        assert_eq!(helm(&app), Some(Helm::Paused));
+        assert_eq!(named(&mut app, "Controls screen"), 0);
+    }
+
+    #[test]
+    fn escape_backs_out_of_the_paused_controls_to_the_pause_menu() {
+        let mut app = paused_app();
+        click(&mut app, MenuButton::Settings);
+        type_key(&mut app, KeyCode::Escape, "");
+        // The frame the transition lands on.
+        app.update();
+        assert_eq!(helm(&app), Some(Helm::Paused));
+        assert_eq!(state(&app), AppState::InWorld);
+    }
+
+    /// Escape means "not that key" while a row is armed, wherever the screen
+    /// was opened from — so it must not also step back to the pause menu.
+    #[test]
+    fn escape_on_the_paused_controls_cancels_an_armed_row_first() {
+        let mut app = paused_app();
+        click(&mut app, MenuButton::Settings);
+        click(&mut app, MenuButton::Rebind(Action::MoveForward));
+        assert_eq!(waiting_on(&app), Some(Action::MoveForward));
+
+        type_key(&mut app, KeyCode::Escape, "");
+        // A frame in which a step back would have landed, had one been taken.
+        app.update();
+        assert_eq!(waiting_on(&app), None);
+        assert_eq!(helm(&app), Some(Helm::Controls));
+    }
+
+    #[test]
+    fn keys_rebound_from_the_pause_menu_take() {
+        let mut app = paused_app();
+        click(&mut app, MenuButton::Settings);
+        click(&mut app, MenuButton::Rebind(Action::MoveForward));
+        type_key(&mut app, KeyCode::KeyT, "t");
+        assert_eq!(bindings(&app).key(Action::MoveForward), KeyCode::KeyT);
+    }
+
+    /// Leaving a shared world shuts it on whoever else is in it, and that is
+    /// worth a word before the button that does it.
+    #[test]
+    fn the_pause_menu_warns_before_closing_a_shared_world() {
+        let mut app = test_app(AppState::InWorld);
+        app.insert_resource(Hosting(fake_host("0.0.0.0:0")));
+        press_key(&mut app, KeyCode::Escape);
+        app.update();
+        assert!(pause_text(&mut app).contains("leaving closes it on them"));
+    }
+
+    /// But a world of one's own is served too — over the loopback — so the
+    /// warning must not go to somebody sailing alone, who has nobody to
+    /// strand.
+    #[test]
+    fn a_world_of_ones_own_gets_no_warning_though_it_is_hosted_too() {
+        let mut app = test_app(AppState::InWorld);
+        app.insert_resource(Hosting(fake_host("127.0.0.1:0")));
+        press_key(&mut app, KeyCode::Escape);
+        app.update();
+        assert!(!pause_text(&mut app).contains("leaving closes it on them"));
     }
 
     #[test]
