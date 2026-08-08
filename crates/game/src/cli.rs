@@ -84,9 +84,8 @@ impl Args {
     }
 
     /// Points the whole run — the starting view and every shot — at a ground
-    /// point, unless `--focus` already chose one. Parsing uses it to point a
-    /// capture run at the island nearest the origin; [`Args::enter`] rides
-    /// on it for everything else.
+    /// point, unless `--focus` already chose one. [`Args::opened_on`] rides
+    /// on it once a welcome has arrived.
     pub fn centre_on(&mut self, centre: Vec2) {
         if self.focus_given {
             return;
@@ -102,11 +101,15 @@ impl Args {
     /// it put this player down, and the land it said to look at.
     ///
     /// A run that said nothing about where to look opens where the world is
-    /// entered — the spawn point just off the first island, facing it. A
-    /// *capture* run is different: a shot nearly always means a shot of
-    /// terrain, and photographing an island means centring on its middle
-    /// rather than floating off its coast, which is exactly what the served
-    /// facing point is.
+    /// entered — the spawn point just off the first island, facing it — and
+    /// that goes for capture runs too. Shots used to centre on the island's
+    /// middle instead, on the theory that a shot means a shot of terrain; but
+    /// the camera is pinned to the boat, so that dragged the boat ashore and
+    /// beached it dead-centre in every picture — the one default shot of a
+    /// world showed an entry the game never makes. The spawn stands
+    /// `SPAWN_OFFSHORE` metres off the coast precisely so that land fills the
+    /// opening screen, so a shot from the entry is a shot of terrain anyway,
+    /// and an island's portrait is `--focus`'s job (or `mapgen`'s).
     ///
     /// Once, and for the whole command line, rather than per shot: the shots
     /// are a sweep over one world, and moving each of them somewhere of its
@@ -119,7 +122,7 @@ impl Args {
         if self.focus_given {
             return;
         }
-        self.centre_on(if self.is_capture() { facing } else { spawn });
+        self.centre_on(spawn);
         if self.yaw_given {
             return;
         }
@@ -161,8 +164,7 @@ the same session a dedicated `server` serves.
 View options, applied in the order given:
   --focus <x,z>     world point to put the player down at and centre the view
                     on, in metres [default: where the server says the world is
-                    entered — open water just off its first island; shots
-                    default to that island itself]
+                    entered — open water just off its first island]
   --zoom <m>        camera distance in metres, {MIN_DISTANCE} to {MAX_DISTANCE}
                     [default: {}]
   --yaw <deg>       bearing to look from [default: facing the island the
@@ -449,19 +451,20 @@ mod tests {
     }
 
     #[test]
-    fn with_no_focus_given_shots_are_taken_of_the_land() {
-        // A world is entered on open water, so a capture run that said nothing
-        // about where to look has to be moved onto the land the server pointed
-        // at — both the starting view and every shot, so a sweep stays a
-        // sweep.
+    fn with_no_focus_given_shots_open_on_the_spawn_too() {
+        // A capture run opens exactly where a played one does — the served
+        // spawn, boat afloat, first coast in frame. Centring shots on the
+        // island's middle instead was tried and beached the boat dead-centre
+        // in every picture (see `opened_on`). The whole run moves together —
+        // the starting view and every shot — so a sweep stays a sweep.
         let mut args = ok("--seed 777 --shot a.png --zoom 300 --shot b.png");
         args.opened_on(SPAWN, LAND);
 
         for view in [args.view, args.shots[0].view, args.shots[1].view] {
             assert_eq!(
                 view.focus,
-                Vec3::new(LAND.x, 0.0, LAND.y),
-                "a shot was framed on the water rather than on the island"
+                Vec3::new(SPAWN.x, 0.0, SPAWN.y),
+                "a shot was framed somewhere other than the world's entry"
             );
         }
         // And only the focus moved — the shots keep their own zooms.
