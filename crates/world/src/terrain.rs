@@ -140,19 +140,73 @@ fn shoal_shift(extent: Vec2) -> f32 {
     1.0 - smoothstep(0.35, 1.0, cycles)
 }
 
-/// The land share for a given map extent, continuous in it so nothing jumps
-/// as a size control sweeps through it. Measured in how many times the
-/// landmass field repeats across the map, since that is what decides what
-/// the land can be: down near a fifth of a repeat the coast has to fit
-/// inside the falloff ring and gets [`LAND_FRACTION_TINY`], up to about one
-/// repeat the land is a single blob and gets [`LAND_FRACTION_SMALL`], and by
-/// one and a half it is lobed enough to carry the full [`LAND_FRACTION`].
+/// A per-seed draw in `0.0..1.0`, unrelated to any noise field's phase —
+/// splitmix64 on the seed and a salt, the same mix [`crate::archipelago::ParcelRng`]
+/// uses to keep unrelated draws from one seed unrelated to each other.
 ///
-fn land_fraction(extent: Vec2) -> f32 {
+/// What this is for is [`land_fraction`]'s tiny-map swing: two islands the
+/// same handful of chunks across should not be the same amount of island. A
+/// spatial noise field cannot supply that on its own — at one chunk across
+/// every field here is close enough to its own lowest octave that "how much
+/// of the map is land" barely varies seed to seed, only *where* the cut
+/// falls — so the swing is drawn independently of them.
+fn seed_draw(seed: u32, salt: u32) -> f32 {
+    let mut z = (seed as u64) ^ ((salt as u64) << 32);
+    z = z.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 40) as f32 * (1.0 / (1u64 << 24) as f32)
+}
+
+/// Salts [`seed_draw`] for [`land_fraction`]'s swing, so it draws unrelated
+/// numbers from a seed already spent on the noise fields' own offsets.
+const LAND_LUCK_SALT: u32 = 0x6C61_6E64; // "land" in ASCII, no meaning beyond being unlike the other salts
+
+/// How far [`land_fraction`]'s swing may multiply the tiny-map target down
+/// or up, at its strongest.
+///
+/// Asymmetric on purpose: pulled down to a third of the target a one-chunk
+/// island is mostly bare sand and standing water, which is the "almost
+/// entirely a sand bar" a fixed target could never give a single seed —
+/// every seed landed on the same share, so an islet either had a beach or it
+/// did not, never the shifting balance real skerries show. Pushed up it only
+/// reaches back towards [`LAND_FRACTION_SMALL`], not past it, because the
+/// tiny share exists for [`LAND_FRACTION_TINY`]'s own reason — the falloff
+/// ring, not variety — and a swing that overshot it would print the ring's
+/// own outline on the lucky seeds exactly as raising the fixed target once
+/// did.
+const LAND_SWING_LOW: f32 = 0.34;
+const LAND_SWING_HIGH: f32 = 1.35;
+
+/// The land share for a given map extent and seed, continuous in the extent
+/// so nothing jumps as a size control sweeps through it. Measured in how many
+/// times the landmass field repeats across the map, since that is what
+/// decides what the land can be: down near a fifth of a repeat the coast has
+/// to fit inside the falloff ring and gets [`LAND_FRACTION_TINY`], up to
+/// about one repeat the land is a single blob and gets [`LAND_FRACTION_SMALL`],
+/// and by one and a half it is lobed enough to carry the full
+/// [`LAND_FRACTION`].
+///
+/// Below one repeat the target is also swung per seed between
+/// [`LAND_SWING_LOW`] and [`LAND_SWING_HIGH`] of itself — see [`seed_draw`] —
+/// fading out over the same stretch [`LAND_FRACTION_TINY`] does, so a healthy
+/// map's fixed, tuned share is never touched. Without it every seed at one
+/// size came out the same amount of island, and since that size is also too
+/// small for the noise to vary the *shape* much either (see
+/// [`feature_zoom`]), the two together were what made every small map read
+/// as the same lozenge of grass with the serial numbers filed off.
+fn land_fraction(extent: Vec2, seed: u32) -> f32 {
     let cycles = mean_extent(extent) / CONTINENT_SCALE;
-    LAND_FRACTION_TINY
+    let target = LAND_FRACTION_TINY
         + (LAND_FRACTION_SMALL - LAND_FRACTION_TINY) * smoothstep(0.15, 0.7, cycles)
-        + (LAND_FRACTION - LAND_FRACTION_SMALL) * smoothstep(1.2, 1.5, cycles)
+        + (LAND_FRACTION - LAND_FRACTION_SMALL) * smoothstep(1.2, 1.5, cycles);
+
+    let swing = 1.0 - smoothstep(0.15, 0.7, cycles);
+    let luck = seed_draw(seed, LAND_LUCK_SALT);
+    let multiplier =
+        1.0 + swing * (LAND_SWING_LOW - 1.0 + (LAND_SWING_HIGH - LAND_SWING_LOW) * luck);
+    target * multiplier
 }
 
 /// Share of that land standing high enough to count as mountain.
@@ -220,9 +274,9 @@ struct Targets {
 }
 
 impl Targets {
-    fn for_extent(extent: Vec2) -> Self {
+    fn for_extent(extent: Vec2, seed: u32) -> Self {
         Self {
-            land: land_fraction(extent),
+            land: land_fraction(extent, seed),
             relief: peak_height(extent) / HEIGHT_SCALE,
             shoal: shoal_shift(extent),
         }
@@ -392,6 +446,54 @@ const MASSIF_FREQ: f32 = FEATURE_SCALE / MASSIF_SCALE;
 /// over half [`MASSIF_SCALE`], so that every range's own summit is inside its
 /// window, and the next range's summit — a wavelength away — mostly is not.
 const MASSIF_WINDOW: f32 = 400.0;
+
+/// How far [`TerrainGenerator::continent_at`] may sample the landmass field
+/// ahead of its tuned wavelength, at its strongest.
+///
+/// [`FEATURE_SCALE`] and [`CONTINENT_SCALE`] are deliberately fixed lengths —
+/// that is what makes a bigger map more landscape rather than a stretched
+/// copy of a smaller one. But fixed also means a map under one repeat gets
+/// none of the shaping this field exists to do: at a chunk across it is most
+/// of the way to its own lowest octave, which is a smooth gradient across the
+/// whole map — so the outline noise draws is close to a straight line, and a
+/// straight line cut through the falloff's disc is a semicircle whichever way
+/// it falls. That is the shape every one-chunk islet shared before this
+/// existed, seed after seed.
+///
+/// Zooming in on the same field buys back cycles the fixed wavelength cannot
+/// supply this small, so the outline gets bays and lobes to be drawn with
+/// instead of one chord. It is not the same fix as making the map bigger —
+/// the wavelength a bigger map earns is *more* landscape, spread further
+/// apart; a small map zoomed in gets the *existing* landscape's texture
+/// packed tighter, which is the only kind of variety a fixed frame this size
+/// can hold at all.
+const FEATURE_ZOOM_MAX: f32 = 3.0;
+
+/// The zoom [`TerrainGenerator::continent_at`] samples the landmass field
+/// with — 1.0 once the map holds most of a [`CONTINENT_SCALE`] repeat, rising
+/// towards [`FEATURE_ZOOM_MAX`] as the map shrinks below it. Opened over much
+/// the stretch [`land_fraction`]'s own tapers cover, a shade wider at the
+/// top: the zoom's last few per cent are a gentler change than a land-share
+/// step, so it can afford to fade later, and at 512 m it is still worth a
+/// couple of per cent of extra coastline cycle.
+///
+/// Left off the hills, the massif and the warp's own drift and bend
+/// deliberately. The warp's guards are already tapered for small maps by
+/// `bend_gain` and `reach_max`, tuned against the wavelength as fixed, and
+/// zooming what they read would detune both without buying anything — the
+/// drift only ever needs to hold the ring on the frame, not to draw its
+/// texture. Zooming the hills as well was tried and cost more than it
+/// bought: hills already sums five octaves down to a wavelength short enough
+/// to pit a small map with hollows of its own, and zoomed it pits more of
+/// them, a few [`COAST_GRID`] cells wide — which the lake flood then floods,
+/// and a lake that small is drawn off a grid that coarse as a square-edged
+/// pond. Nine seeds at 256 m grew a scatter of them. The landmass field's
+/// coarser octaves put nothing at that scale, and it is the field a
+/// coastline actually is, so it is the one worth zooming on its own.
+fn feature_zoom(extent: Vec2) -> f32 {
+    let cycles = mean_extent(extent) / CONTINENT_SCALE;
+    1.0 + (FEATURE_ZOOM_MAX - 1.0) * (1.0 - smoothstep(0.15, 0.8, cycles))
+}
 
 /// How much each massif is measured against its own local peak rather than
 /// the map's tallest. At 0 the map is scaled by its single highest point, and
@@ -763,6 +865,9 @@ pub struct TerrainGenerator {
     drift_excess: Vec2,
     bend_gain: f32,
     reach_max: f32,
+    /// How tightly [`TerrainGenerator::continent_at`] samples the landmass
+    /// field — see [`feature_zoom`].
+    feature_zoom: f32,
 }
 
 /// How sharply [`under_ceiling`] turns over as it meets the ceiling. Higher is
@@ -852,7 +957,7 @@ struct GridPoint {
 impl TerrainGenerator {
     pub fn new(config: &MapConfig) -> Self {
         let seed = config.seed;
-        let targets = Targets::for_extent(config.extent());
+        let targets = Targets::for_extent(config.extent(), seed);
         let cycles = config.extent() / CONTINENT_SCALE;
         let room = smoothstep(1.1, 1.55, cycles.x.min(cycles.y));
 
@@ -880,6 +985,7 @@ impl TerrainGenerator {
             drift_excess: Vec2::ZERO,
             bend_gain: 0.25 + 0.75 * room,
             reach_max: 1.0 + 0.15 * room,
+            feature_zoom: feature_zoom(config.extent()),
         };
         let centre = generator.warped(0.0, 0.0).1 * FEATURE_SCALE * 0.7;
         let tolerance = generator.half_extent * 0.1;
@@ -1033,9 +1139,7 @@ impl TerrainGenerator {
             for ix in 0..px {
                 let wx = pad_origin.x + ix as f32 * COAST_GRID;
                 let (n, drift) = self.warped(wx, wz);
-                let continent = self
-                    .continent
-                    .fbm(n.x * CONTINENT_FREQ, n.y * CONTINENT_FREQ, 4);
+                let continent = self.continent_at(n);
                 seat[iz * px + ix] = self.range_seat(n, continent);
 
                 if (pad..px - pad).contains(&ix) && (pad..pz - pad).contains(&iz) {
@@ -1273,6 +1377,7 @@ impl TerrainGenerator {
     /// into peninsulas and gulfs, and a shorter one for the wandering of the
     /// shore itself. Offsetting the sample point by another noise field is what
     /// turns concentric blobs into meandering, organic shapes.
+    ///
     fn warped(&self, wx: f32, wz: f32) -> (Vec2, Vec2) {
         let nx = wx / FEATURE_SCALE;
         let nz = wz / FEATURE_SCALE;
@@ -1284,6 +1389,15 @@ impl TerrainGenerator {
 
         let drift = Vec2::new(sway_x * 1.35 + warp_x * 0.45, sway_z * 1.35 + warp_z * 0.45);
         (Vec2::new(nx, nz) + drift, drift)
+    }
+
+    /// The landmass field at a warped point, sampled [`feature_zoom`] times
+    /// ahead of its tuned wavelength — the one field zoomed for small maps,
+    /// and why, is explained there.
+    fn continent_at(&self, n: Vec2) -> f32 {
+        let z = self.feature_zoom;
+        self.continent
+            .fbm(n.x * z * CONTINENT_FREQ, n.y * z * CONTINENT_FREQ, 4)
     }
 
     /// Where this map's mountains want to sit: its own mask field, plus a good
@@ -1372,9 +1486,7 @@ impl TerrainGenerator {
         let (nx, nz) = (n.x, n.y);
 
         // Broad landmass shape, then rolling hills layered on top.
-        let continent = self
-            .continent
-            .fbm(nx * CONTINENT_FREQ, nz * CONTINENT_FREQ, 4);
+        let continent = self.continent_at(n);
         let hills = self.hills.fbm(nx * 0.9, nz * 0.9, 5);
 
         let h =
@@ -3332,8 +3444,8 @@ mod tests {
         // the machine that recorded it; a bumped `libm` would show up here the
         // same way a new platform would.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x9FA5_D947_ECA3_E267u64),
-            (99, UVec2::new(3, 2), 0xA033_F84C_03E2_0919u64),
+            (20_040_112u32, UVec2::new(4, 4), 0xFB67_56AA_11B0_96D8u64),
+            (99, UVec2::new(3, 2), 0xA9AF_4D46_BC6C_DB03u64),
         ];
 
         for (seed, chunks, expected) in cases {
