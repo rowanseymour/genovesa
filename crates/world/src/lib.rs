@@ -13,6 +13,7 @@
 
 pub mod archipelago;
 pub mod noise;
+pub mod palms;
 pub mod plan;
 pub mod terrain;
 

@@ -53,6 +53,11 @@ sits where water would gather, at the level it would gather to. A lake is
 drawn as fresh water rather than as a piece of sea indoors: darker and
 stiller, with the grass coming down to a reed margin instead of a beach.
 
+Palms grow along the back of a beach, where the dry sand gives out to
+whatever the island is wearing behind it — scattered, and only where a coast
+has sand to offer, so a rocky island has none and a long shallow bay is
+fringed with them.
+
 The look is flat-shaded facets in a small fixed palette — no textures and no
 gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
 height field is sampled, so the facets read as deliberate shapes.
@@ -186,10 +191,14 @@ cargo test --release island_shape -- --ignored --nocapture
 
 Everything the game draws that is not ground is a glTF file under `assets/`,
 built from a Blender master. Each model has a directory under `assets-src/`
-named for the file it produces, holding the master and the `build.sh` that
-exports it — the same arrangement the sound uses. Nothing in `assets-src/`
-ships; it is what the shipped file was made from, kept so the shape can be
-taken further.
+named for the file it produces, holding the master; one shared
+`assets-src/export.sh` builds any of them, and is where the export settings
+live. Nothing in `assets-src/` ships; it is what the shipped file was made
+from, kept so the shape can be taken further.
+
+```bash
+assets-src/export.sh palm
+```
 
 Working on one means Blender open beside a game started with `--features dev`:
 export, and the running world has the new shape a moment later. There is no
@@ -202,6 +211,13 @@ else. What it *must* carry is checked: `boat.rs` holds the file to the
 dimensions the collision code assumes of it, to the order its meshes are in,
 and to being flat-shaded and wound outwards — the failures a modelling program
 makes easy and the eye lets through.
+
+Where a model *stands*, when it is scenery rather than the player, is not the
+client's business at all. Palms are placed by the server, along the back of
+whatever beaches a seed happens to raise, and travel with the ground a client
+asks for — so two players anchored off the same beach see the same trees on
+it. The rule is in `world`'s `palms` module and is pinned by a digest like
+the terrain's.
 
 ## Tests
 

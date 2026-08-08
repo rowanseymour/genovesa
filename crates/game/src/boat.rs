@@ -26,8 +26,8 @@ use crate::camera::View;
 use crate::terrain::Ground;
 use crate::{eased, matte, AppState, Helm};
 
-/// The boat, as a file. Built from `assets-src/boat.glb/boat.blend` by the
-/// `build.sh` beside it, which is also where the export settings the look
+/// The boat, as a file. Built from `assets-src/boat.glb/boat.blend` by
+/// `assets-src/export.sh`, which is also where the export settings the look
 /// depends on are written down.
 const MODEL: &str = "boat.glb";
 
@@ -493,7 +493,10 @@ mod tests {
     use protocol::ground::FACET_METRES;
 
     use super::*;
-    use crate::testing::{elapsed, hold, rebind, run_frames, test_ground, TEST_ISLAND_REACH};
+    use crate::testing::{
+        elapsed, hold, is_flat_shaded, model, rebind, run_frames, test_ground, triangles,
+        TEST_ISLAND_REACH,
+    };
 
     /// How long every test frame lasts. Headless frames take next to no real
     /// time, which the old instant throttle never noticed — but the eased one
@@ -563,69 +566,6 @@ mod tests {
         (heading_yaw(&mut app) - start_yaw) / seconds
     }
 
-    /// The model as it sits on disk, read straight out of the `.glb` rather
-    /// than through Bevy's loader.
-    ///
-    /// A glTF binary is a JSON chunk describing the file and a binary chunk
-    /// holding the numbers, and the tests below want both. Going through the
-    /// asset server instead would mean standing up a render app and waiting on
-    /// a load, to learn things the file states plainly.
-    fn model() -> (serde_json::Value, Vec<u8>) {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/boat.glb");
-        let file = std::fs::read(path).expect("assets/boat.glb — run assets-src/boat.glb/build.sh");
-        assert_eq!(&file[..4], b"glTF", "not a glTF binary");
-
-        let (mut at, mut chunks) = (12, Vec::new());
-        while at < file.len() {
-            let length = u32::from_le_bytes(file[at..at + 4].try_into().unwrap()) as usize;
-            chunks.push(file[at + 8..at + 8 + length].to_vec());
-            at += 8 + length;
-        }
-        let json = serde_json::from_slice(&chunks[0]).expect("the glTF's JSON chunk");
-        (json, chunks[1].clone())
-    }
-
-    /// One mesh of the model, as the triangles it is made of — `attribute`
-    /// being `POSITION` for where its corners are or `NORMAL` for where they
-    /// face. Read through the accessors' own view of the buffer, so an
-    /// exporter that changes how it packs the numbers changes nothing here.
-    fn triangles(index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
-        let (json, buffer) = model();
-        let primitive = &json["meshes"][index]["primitives"][0];
-
-        let read = |accessor: &serde_json::Value, stride: usize| -> Vec<u8> {
-            let view = &json["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
-            let start = view["byteOffset"].as_u64().unwrap_or(0) as usize
-                + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
-            let count = accessor["count"].as_u64().unwrap() as usize;
-            buffer[start..start + count * stride].to_vec()
-        };
-
-        let wanted = primitive["attributes"][attribute].as_u64().unwrap() as usize;
-        let values: Vec<Vec3> = read(&json["accessors"][wanted], 12)
-            .chunks_exact(12)
-            .map(|v| {
-                Vec3::new(
-                    f32::from_le_bytes(v[0..4].try_into().unwrap()),
-                    f32::from_le_bytes(v[4..8].try_into().unwrap()),
-                    f32::from_le_bytes(v[8..12].try_into().unwrap()),
-                )
-            })
-            .collect();
-
-        let indices = &json["accessors"][primitive["indices"].as_u64().unwrap() as usize];
-        // 5123 is glTF's code for an unsigned short, which is what an exporter
-        // reaches for on a mesh this small.
-        assert_eq!(indices["componentType"], 5123, "indices are not u16");
-        read(indices, 2)
-            .chunks_exact(6)
-            .map(|t| {
-                let at = |b: &[u8]| values[u16::from_le_bytes(b.try_into().unwrap()) as usize];
-                [at(&t[0..2]), at(&t[2..4]), at(&t[4..6])]
-            })
-            .collect()
-    }
-
     #[test]
     fn the_model_holds_a_hull_and_a_spar_in_that_order() {
         // The one thing about the file the game cannot see for itself. It asks
@@ -634,7 +574,7 @@ mod tests {
         // spar first would paint the hull in bare-spar cream and stand a
         // seven-metre plank of timber where the mast should be, with nothing
         // failing anywhere to say so.
-        let (json, _) = model();
+        let (json, _) = model(MODEL);
         assert_eq!(json["meshes"][HULL_MESH]["name"], "hull");
         assert_eq!(json["meshes"][SPAR_MESH]["name"], "spar");
     }
@@ -647,7 +587,7 @@ mod tests {
         // would be reading the water above its own keel — the hull would sail
         // through the shallows it should be stopped by, and nothing but this
         // would notice.
-        let corners: Vec<Vec3> = triangles(HULL_MESH, "POSITION")
+        let corners: Vec<Vec3> = triangles(MODEL, HULL_MESH, "POSITION")
             .into_iter()
             .flatten()
             .collect();
@@ -691,18 +631,13 @@ mod tests {
         // reads as a subtly wrong-looking boat rather than as a mistake, so it
         // is worth a test rather than an eye.
         for mesh in [HULL_MESH, SPAR_MESH] {
-            let faces = triangles(mesh, "POSITION");
-            let normals = triangles(mesh, "NORMAL");
-
-            for (face, normal) in faces.iter().zip(normals) {
-                let flat = (face[1] - face[0]).cross(face[2] - face[0]).normalize();
-                for corner in normal {
-                    assert!(
-                        corner.dot(flat) > 0.999,
-                        "a corner of mesh {mesh} faces {corner:?} on a facet lying {flat:?}"
-                    );
-                }
-            }
+            assert!(
+                is_flat_shaded(
+                    &triangles(MODEL, mesh, "POSITION"),
+                    &triangles(MODEL, mesh, "NORMAL")
+                ),
+                "mesh {mesh} of the boat is smooth-shaded"
+            );
         }
     }
 
@@ -719,7 +654,7 @@ mod tests {
         // face pointing away from its own middle. Both meshes, because the one
         // that was wound inwards was the spar.
         for mesh in [HULL_MESH, SPAR_MESH] {
-            let faces = triangles(mesh, "POSITION");
+            let faces = triangles(MODEL, mesh, "POSITION");
             let corners: Vec<Vec3> = faces.iter().flatten().copied().collect();
             let middle = corners.iter().sum::<Vec3>() / corners.len() as f32;
 

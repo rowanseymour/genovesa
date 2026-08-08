@@ -5,6 +5,11 @@
 //! that presses a key has to clear it the way the real input plugin would.
 //! Every module testing a system needs some of this, and each of them had a
 //! copy of the piece it needed.
+//!
+//! The model readers below are here for the same reason. Two modules draw
+//! glTF files now and both hold theirs to the same handful of conditions, so
+//! the reader that checks them is written once — a second copy would be a
+//! second opinion about what the format says.
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -134,6 +139,8 @@ pub fn test_ground() -> Ground {
                     // The test island is a smooth dome with nothing to
                     // enclose a basin, so there is no lake on it to draw.
                     water: None,
+                    // Nor anything the palm rule would call a beach.
+                    palms: Vec::new(),
                 });
             ground.deliver(chunk, payload);
         }
@@ -149,4 +156,91 @@ fn test_island_height(at: Vec2) -> f32 {
         return -OCEAN_DEPTH;
     }
     (TEST_ISLAND_PEAK + OCEAN_DEPTH) * (1.0 - out).powf(TEST_ISLAND_PITCH) - OCEAN_DEPTH
+}
+
+// --- Models -------------------------------------------------------------------
+
+/// A model under `assets/`, as its glTF JSON and its binary chunk.
+///
+/// Read straight out of the `.glb` rather than through Bevy's loader: what the
+/// tests want to know is what the file *says*, and going through the asset
+/// server would mean standing up a render app and waiting on a load to learn
+/// it.
+pub fn model(name: &str) -> (serde_json::Value, Vec<u8>) {
+    let path = format!("{}/../../assets/{name}", env!("CARGO_MANIFEST_DIR"));
+    let file = std::fs::read(&path).unwrap_or_else(|_| panic!("{path} — run assets-src/export.sh"));
+    assert_eq!(&file[..4], b"glTF", "{name} is not a glTF binary");
+
+    let (mut at, mut chunks) = (12, Vec::new());
+    while at < file.len() {
+        let length = u32::from_le_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+        chunks.push(file[at + 8..at + 8 + length].to_vec());
+        at += 8 + length;
+    }
+    let json = serde_json::from_slice(&chunks[0]).expect("the glTF's JSON chunk");
+    (json, chunks[1].clone())
+}
+
+/// One mesh of a model, as the triangles it is made of — `attribute` being
+/// `POSITION` for where its corners are or `NORMAL` for where they face.
+///
+/// Read through the accessors' own view of the buffer, so an exporter that
+/// changes how it packs the numbers changes nothing here.
+pub fn triangles(name: &str, index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
+    let (json, buffer) = model(name);
+    let primitive = &json["meshes"][index]["primitives"][0];
+
+    let read = |accessor: &serde_json::Value, stride: usize| -> Vec<u8> {
+        let view = &json["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+        let start = view["byteOffset"].as_u64().unwrap_or(0) as usize
+            + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let count = accessor["count"].as_u64().unwrap() as usize;
+        buffer[start..start + count * stride].to_vec()
+    };
+
+    let wanted = primitive["attributes"][attribute].as_u64().unwrap() as usize;
+    let values: Vec<Vec3> = read(&json["accessors"][wanted], 12)
+        .chunks_exact(12)
+        .map(|v| {
+            Vec3::new(
+                f32::from_le_bytes(v[0..4].try_into().unwrap()),
+                f32::from_le_bytes(v[4..8].try_into().unwrap()),
+                f32::from_le_bytes(v[8..12].try_into().unwrap()),
+            )
+        })
+        .collect();
+
+    let indices = &json["accessors"][primitive["indices"].as_u64().unwrap() as usize];
+    // 5123 is glTF's code for an unsigned short, which is what an exporter
+    // reaches for on meshes this small.
+    assert_eq!(indices["componentType"], 5123, "indices are not u16");
+    read(indices, 2)
+        .chunks_exact(6)
+        .map(|t| {
+            let at = |b: &[u8]| values[u16::from_le_bytes(b.try_into().unwrap()) as usize];
+            [at(&t[0..2]), at(&t[2..4]), at(&t[4..6])]
+        })
+        .collect()
+}
+
+/// Whether every face of a mesh is wound to look outwards, by the volume the
+/// winding implies.
+///
+/// A closed shell's faces sum to its own volume through the divergence
+/// theorem, positive when they face out and negative when they all face in.
+/// Written this way rather than by comparing each face against the middle —
+/// which is what the boat does — because a mesh may be several separate
+/// solids, and the middle of seven fronds is not inside any of them.
+pub fn winds_outwards(faces: &[[Vec3; 3]]) -> bool {
+    let volume: f32 = faces.iter().map(|f| f[0].dot(f[1].cross(f[2])) / 6.0).sum();
+    volume > 0.0
+}
+
+/// Whether every corner's normal agrees with the facet it belongs to — which
+/// is what makes a mesh read as flat tones rather than as a curved surface.
+pub fn is_flat_shaded(faces: &[[Vec3; 3]], normals: &[[Vec3; 3]]) -> bool {
+    faces.iter().zip(normals).all(|(face, normal)| {
+        let flat = (face[1] - face[0]).cross(face[2] - face[0]).normalize();
+        normal.iter().all(|corner| corner.dot(flat) > 0.999)
+    })
 }
