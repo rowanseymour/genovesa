@@ -3,10 +3,11 @@
 # bytes of every protocol message — exist to catch a build that has quietly
 # stopped agreeing with every other build about what a seed means or what a
 # message looks like, and a test like that run on one laptop is a test that has
-# never once done its job. So the workspace is tested on Linux, and the crates
-# that hold those pins are tested again on macOS and Windows: three operating
-# systems and two processor architectures, all asked whether seed 20040112
-# still makes the same island and whether the wire is still the same format.
+# never once done its job. So the workspace is tested on Linux, and on main
+# the crates that hold those pins are tested again on macOS and Windows: three
+# operating systems and two processor architectures, all asked whether seed
+# 20040112 still makes the same island and whether the wire is still the same
+# format.
 name: CI
 
 on:
@@ -120,8 +121,20 @@ jobs:
   # is written down. Anything new that pins bytes or digests belongs here too.
   # Linux isn't in this matrix because the job above already ran these tests
   # there as part of the workspace.
+  #
+  # Main only, though these were once run on every PR push too. On a private
+  # repository a macOS minute bills as ten and a Windows minute as two, which
+  # made these few-minute jobs the most expensive thing in the workflow —
+  # nearly two thirds of the monthly bill for a sliver of the compute. A PR
+  # still runs every one of these tests on Linux in the job above; what a PR
+  # loses is only the cross-platform *comparison*, and that lands minutes
+  # later when the merge commit runs here. A platform disagreement is a rare,
+  # slow-moving kind of failure — a toolchain or libm shift, not a bad branch —
+  # so catching it just after merge instead of just before costs one revert in
+  # the unlucky case, not a corrupted main.
   determinism:
     name: Determinism (${{ matrix.os }})
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       # Let both finish. Which platforms disagree is the interesting part, and
