@@ -429,13 +429,19 @@ pub struct NetPlugin;
 
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (receive, ask_for_ground, report_position, place_markers)
-                .chain()
-                .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Online>)),
-        )
-        .add_systems(OnExit(AppState::InWorld), disconnect);
+        // What `receive` writes the weather to and `place_markers` floats
+        // on. Also initialised by the plugins that draw and ride the sea;
+        // initialising a resource twice is free, and each plugin's tests
+        // run it alone.
+        app.init_resource::<sea::Forecast>()
+            .init_resource::<sea::SeaConditions>()
+            .add_systems(
+                Update,
+                (receive, ask_for_ground, report_position, place_markers)
+                    .chain()
+                    .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Online>)),
+            )
+            .add_systems(OnExit(AppState::InWorld), disconnect);
     }
 }
 
@@ -470,6 +476,7 @@ fn receive(
     mut ground: Option<ResMut<Ground>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut forecast: ResMut<sea::Forecast>,
     mut lost: Local<bool>,
 ) {
     let (messages, connected) = online.connection.drain();
@@ -530,6 +537,12 @@ fn receive(
                     ground.deliver(chunk, sent);
                 }
             }
+            ToClient::Weather { wind } => {
+                // A target, not an order: the drawn sea eases towards it —
+                // see [`sea::settle_conditions`] — so the server's occasional
+                // quantised updates arrive as weather rather than as steps.
+                forecast.wind = Some(wind);
+            }
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } => {}
@@ -579,6 +592,7 @@ fn report_position(
 fn place_markers(
     time: Res<Time>,
     ground: Option<Res<Ground>>,
+    sea: Res<sea::SeaConditions>,
     mut markers: Query<(&RemotePlayer, &mut Transform)>,
 ) {
     let t = eased(MARKER_SMOOTHING, time.delta_secs());
@@ -595,7 +609,7 @@ fn place_markers(
         // as the boat and the camera's own focus do.
         let mut height = transform.translation.y;
         if let Some(ground) = ground.as_ref().and_then(|g| g.height(at.x, at.y)) {
-            let water = sea::swell(at, time.elapsed_secs_wrapped(), -ground);
+            let water = sea.swell(at, time.elapsed_secs_wrapped(), -ground);
             height = ground.max(water) + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
         }
         transform.translation = Vec3::new(at.x, height, at.y);

@@ -16,6 +16,7 @@ pub mod noise;
 pub mod palms;
 pub mod plan;
 pub mod terrain;
+pub mod weather;
 
 #[cfg(test)]
 mod testing;

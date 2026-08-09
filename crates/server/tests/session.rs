@@ -87,8 +87,17 @@ impl Client {
         message.write(&mut &self.0).expect("write");
     }
 
+    /// The next message that is *about* something. Weather is skipped: it is
+    /// sent on joining and again whenever the sky moves, on a clock nothing
+    /// in a test controls, so any assertion about message order would be
+    /// flaky against it — and no test here is about the sky.
     fn hear(&self) -> ToClient {
-        ToClient::read(&mut &self.0).expect("read")
+        loop {
+            match ToClient::read(&mut &self.0).expect("read") {
+                ToClient::Weather { .. } => continue,
+                message => return message,
+            }
+        }
     }
 
     /// Reads until the line gives out, and says how. Whatever the session had
@@ -125,6 +134,39 @@ fn a_client_is_welcomed_with_somewhere_to_stand_and_something_to_look_at() {
     // And the view opens on the island that water stands off, which the
     // client could not have worked out for itself.
     assert_eq!(facing, entry.island.centre());
+}
+
+#[test]
+fn a_newcomer_is_told_the_weather_before_anything_else_happens() {
+    // The sky arrives straight after the welcome, before the client has said
+    // or asked anything: a client draws the sea from its first frame, and a
+    // sea drawn under assumed weather would visibly change its mind moments
+    // in. Read raw rather than through `hear`, which exists to skip exactly
+    // this message everywhere else.
+    let addr = host(7);
+    let client = Client::connect(addr);
+    client.say(ToServer::Hello {
+        version: PROTOCOL_VERSION,
+    });
+    match ToClient::read(&mut &client.0).expect("read") {
+        ToClient::Welcome { .. } => {}
+        other => panic!("expected a welcome, heard {other:?}"),
+    }
+    match ToClient::read(&mut &client.0).expect("read") {
+        ToClient::Weather { wind } => {
+            assert!(wind.is_finite(), "the wind blows {wind}");
+            // The same answer the pure function gives for this seed at the
+            // server's age — no exact pin, the server's clock not being the
+            // test's to read, but a session seconds old is in its first
+            // moments of weather and the wind must be a plausible one.
+            assert!(
+                wind.length() <= 16.0,
+                "{} m/s is past the gale",
+                wind.length()
+            );
+        }
+        other => panic!("expected the weather, heard {other:?}"),
+    }
 }
 
 #[test]

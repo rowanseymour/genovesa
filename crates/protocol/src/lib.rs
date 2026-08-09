@@ -38,7 +38,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// The port a server listens on, and a client joins on, unless told
 /// otherwise. Nothing else claims it, and it is easily remembered as the
@@ -145,6 +145,19 @@ pub enum ToClient {
         chunk: IVec2,
         ground: Option<ChunkPayload>,
     },
+    /// What the weather is doing: the wind over the whole world, as a
+    /// velocity — direction and metres per second in one vector, so there is
+    /// no bearing convention to agree on and a calm is simply a short one.
+    ///
+    /// Sent once directly after [`ToClient::Welcome`], and again to everyone
+    /// whenever it has changed enough to matter. The server is the one
+    /// authority on it, exactly as with the ground: weather moves over a
+    /// session, every player in a world is under the same sky, and what a
+    /// client does with it — how a sea wears this much wind — is drawing,
+    /// not simulation.
+    Weather {
+        wind: Vec2,
+    },
 }
 
 impl ToServer {
@@ -218,6 +231,10 @@ impl ToClient {
                 payload.push(4);
                 put_u32(&mut payload, id.0);
             }
+            Self::Weather { wind } => {
+                payload.push(6);
+                put_vec2(&mut payload, *wind);
+            }
             Self::Chunk { chunk, ground } => {
                 payload.push(5);
                 put_ivec2(&mut payload, *chunk);
@@ -280,6 +297,9 @@ impl ToClient {
                 };
                 Self::Chunk { chunk, ground }
             }
+            6 => Self::Weather {
+                wind: payload.vec2()?,
+            },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
         payload.finish()?;
@@ -518,6 +538,9 @@ mod tests {
                 position: at,
             },
             ToClient::Left { id: PlayerId(4) },
+            ToClient::Weather {
+                wind: Vec2::new(-3.25, 8.5),
+            },
             ToClient::Chunk {
                 chunk: IVec2::new(3, -8),
                 ground: None,
@@ -632,6 +655,17 @@ mod tests {
                 5, 0, // length
                 4, // tag
                 7, 0, 0, 0, // id
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::Weather {
+                wind: Vec2::new(1.5, -2.0),
+            }),
+            [
+                9, 0, // length
+                6, // tag
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // y = -2.0
             ],
         );
 
