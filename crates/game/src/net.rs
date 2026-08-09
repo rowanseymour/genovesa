@@ -541,7 +541,17 @@ fn receive(
                 // A target, not an order: the drawn sea eases towards it —
                 // see [`sea::settle_conditions`] — so the server's occasional
                 // quantised updates arrive as weather rather than as steps.
-                forecast.wind = Some(wind);
+                //
+                // Believed only within reason. The server is the authority on
+                // the sky, but a hostile or broken one must not get to poison
+                // the arithmetic every vertex of the sea runs on — a
+                // non-finite wind, once eased into the conditions, is NaN for
+                // good. The ceiling sits far above any honest gale rather
+                // than at it, so a server that learns to blow harder is not
+                // silently ignored here.
+                if wind.is_finite() && wind.length() < 100.0 {
+                    forecast.wind = Some(wind);
+                }
             }
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.

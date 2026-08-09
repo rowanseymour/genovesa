@@ -911,6 +911,125 @@ mod tests {
         assert!(sea.slots[0].heading.dot(downwind) > 0.9999);
     }
 
+    /// A headless app running nothing but the settle system, its clock
+    /// stepped a frame at a time — the same harness the boat's tests sail
+    /// in.
+    fn settle_app() -> App {
+        use bevy::time::{TimePlugin, TimeUpdateStrategy};
+        let mut app = App::new();
+        app.add_plugins(TimePlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_millis(16),
+            ))
+            .init_resource::<Forecast>()
+            .init_resource::<SeaConditions>()
+            .init_resource::<Assets<SeaMaterial>>()
+            .add_systems(Update, settle_conditions);
+        app
+    }
+
+    fn tell(app: &mut App, wind: Vec2) {
+        app.world_mut().resource_mut::<Forecast>().wind = Some(wind);
+    }
+
+    fn drawn(app: &App) -> (Vec2, [Slot; WAVES.len()]) {
+        let conditions = app.world().resource::<SeaConditions>();
+        (conditions.wind, conditions.slots)
+    }
+
+    #[test]
+    fn the_first_forecast_lands_whole_and_the_rest_ease() {
+        let mut app = settle_app();
+        // Frames with no forecast leave the assumed day exactly alone.
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(drawn(&app).0, ASSUMED_WIND);
+
+        // The first word of real weather replaces it outright: until it
+        // came the client was drawing a guess, and easing from a guess to
+        // the truth animates a change of weather that never happened.
+        let told = Vec2::new(0.0, 12.0);
+        tell(&mut app, told);
+        app.update();
+        let (wind, slots) = drawn(&app);
+        assert_eq!(wind, told, "the first forecast was eased, not snapped");
+        assert!(
+            slots[0].heading.dot(Vec2::Y) > 0.9999,
+            "the primary train did not re-aim with the snap"
+        );
+
+        // The second is weather changing, and lands as weather: the drawn
+        // wind leaves where it was but takes its time getting there.
+        let veered = Vec2::new(12.0, 0.0);
+        tell(&mut app, veered);
+        app.update();
+        let (wind, _) = drawn(&app);
+        assert_ne!(wind, told, "the sea ignored the new forecast");
+        assert!(
+            wind.distance(veered) > 1.0,
+            "a later forecast landed as a snap"
+        );
+    }
+
+    #[test]
+    fn a_wave_train_only_turns_while_it_cannot_be_seen() {
+        // The invariant the re-aiming dance exists for: a drawn wave's
+        // direction never changes while the wave is visible, because
+        // rotating a live wave rephases the whole ocean at once. Blow the
+        // wind right around and watch every frame of the sea following it:
+        // any frame whose heading moved must have been all but invisible
+        // the frame before.
+        let mut app = settle_app();
+        tell(&mut app, Vec2::new(7.0, 0.0));
+        app.update();
+
+        tell(&mut app, Vec2::new(0.0, 7.0));
+        let (_, mut before) = drawn(&app);
+        let mut turned = 0;
+        for _ in 0..4_000 {
+            app.update();
+            let (_, after) = drawn(&app);
+            for (was, is) in before.iter().zip(&after) {
+                if was.heading != is.heading {
+                    turned += 1;
+                    // The frame that turns is the frame the fade crossed the
+                    // threshold, so the new heading's first rendered frame is
+                    // under it — and the last of the old heading showed only
+                    // a hair more.
+                    assert!(
+                        is.dim < 0.03,
+                        "a new heading first rendered at {} of its height",
+                        is.dim
+                    );
+                    assert!(
+                        was.dim < 0.04,
+                        "a train turned straight out of plain sight ({})",
+                        was.dim
+                    );
+                }
+            }
+            before = after;
+        }
+
+        // And the dance actually happened and resolved: every train ended
+        // within the hysteresis of its aim off the new wind — a slot that
+        // re-aims mid-veer keeps whatever residual drift fits inside
+        // [`REAIM`], which is the deal that stops a wandering wind re-aiming
+        // it forever — and at full height again.
+        assert!(turned >= WAVES.len(), "the sea never followed the wind");
+        let (_, slots) = drawn(&app);
+        for (i, slot) in slots.iter().enumerate() {
+            let desired = Vec2::from_angle(WAVES[i].0).rotate(Vec2::Y);
+            assert!(
+                slot.heading.dot(desired) > (REAIM.0 + 0.05).cos(),
+                "train {i} settled aimed {} off the wind, past its hysteresis",
+                slot.heading.angle_to(desired)
+            );
+            assert!(slot.dim > 0.9, "train {i} never came back up");
+        }
+    }
+
     #[test]
     fn the_wavelengths_clear_the_mesh() {
         // A wave shorter than two spacings falls between the vertices and
