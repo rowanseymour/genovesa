@@ -854,6 +854,11 @@ fn spawn_arrivals(
                     PendingPalms(palms),
                     ChunkBuild(task),
                     MeshMaterial3d(material.0.clone()),
+                    // Visible from birth: palms parent themselves here as soon
+                    // as the heights land, which can be before the mesh build
+                    // finishes and Mesh3d's required components would have
+                    // supplied this (B0004 otherwise).
+                    Visibility::default(),
                     Transform::from_translation(Vec3::new(
                         chunk.x as f32 * CHUNK_METRES,
                         0.0,
