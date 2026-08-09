@@ -43,6 +43,7 @@ use protocol::ground::{
 };
 
 use crate::camera::MapCamera;
+use crate::sea::{self, SeaExtension, SeaMaterial};
 use crate::{matte, AppState};
 
 /// How far the ocean floor plane hangs below [`OCEAN_DEPTH`], in metres. It
@@ -154,7 +155,8 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::InWorld), enter_world)
+        app.add_plugins(MaterialPlugin::<SeaMaterial>::default())
+            .add_systems(OnEnter(AppState::InWorld), enter_world)
             .add_systems(OnExit(AppState::InWorld), leave_world)
             .add_systems(
                 Update,
@@ -598,6 +600,7 @@ fn enter_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut seas: ResMut<Assets<SeaMaterial>>,
 ) {
     // Nothing is known about the world yet, and nothing is asked for until
     // there is a camera to ask around — so entering a match costs a frame
@@ -657,15 +660,19 @@ fn enter_world(
     // band running under the waterline shows through as a ring around every
     // coast: two flat tones of water, which is the whole effect. A lake has no
     // such band to show, which is most of why it does not wear the ring.
-    let mut still = |tint: Vec3| {
-        materials.add(StandardMaterial {
-            reflectance: 0.02,
-            alpha_mode: AlphaMode::Blend,
-            ..matte(Color::srgba(tint.x, tint.y, tint.z, WATER_ALPHA))
-        })
+    let still = |tint: Vec3| StandardMaterial {
+        reflectance: 0.02,
+        alpha_mode: AlphaMode::Blend,
+        ..matte(Color::srgba(tint.x, tint.y, tint.z, WATER_ALPHA))
     };
-    let sea = still(SEA_WATER);
-    commands.insert_resource(LakeMaterial(still(LAKE_WATER)));
+    commands.insert_resource(LakeMaterial(materials.add(still(LAKE_WATER))));
+
+    // The sea alone wears the swell on top — a lake is sheltered water, and
+    // stiller than the sea is most of what makes it read as one.
+    let sea = seas.add(SeaMaterial {
+        base: still(SEA_WATER),
+        extension: SeaExtension::default(),
+    });
 
     // Sea. Sized past the camera's far plane and moved along with it, so the
     // horizon is water fading into haze whichever way the view goes.
@@ -680,7 +687,7 @@ fn enter_world(
         // the camera moves. It still *receives* shadows, which is what puts a
         // cliff's shadow out across the water at its foot.
         NotShadowCaster,
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
+        Mesh3d(meshes.add(sea::surface_mesh(SEA_EXTENT))),
         MeshMaterial3d(sea),
         Transform::from_xyz(0.0, SEA_SURFACE, 0.0),
     ));
@@ -903,16 +910,21 @@ fn stream_out(mut commands: Commands, mut ground: ResMut<Ground>, cameras: Query
 type TravellingPlanes<'w, 's> =
     Query<'w, 's, &'static mut Transform, Or<(With<Sea>, With<OceanFloor>)>>;
 
-/// Keeps the sea and the ocean floor centred under the camera. They are
-/// featureless planes, so nothing shows them moving — the water simply always
-/// reaches the horizon.
+/// Keeps the sea and the ocean floor centred under the camera, so the water
+/// simply always reaches the horizon.
+///
+/// In whole steps of the sea mesh's own vertex spacing rather than
+/// continuously — see [`sea::snap`]: the sea is no longer featureless, and
+/// its vertices have to keep sampling the same world points or the swell
+/// swims against itself. The floor needs no such care, but there is nothing
+/// on it for a few metres of snap to be seen by either.
 fn follow_camera(cameras: Query<&MapCamera>, mut planes: TravellingPlanes) {
     let Ok(camera) = cameras.single() else {
         return;
     };
     for mut transform in &mut planes {
-        transform.translation.x = camera.focus.x;
-        transform.translation.z = camera.focus.z;
+        transform.translation.x = sea::snap(camera.focus.x);
+        transform.translation.z = sea::snap(camera.focus.z);
     }
 }
 

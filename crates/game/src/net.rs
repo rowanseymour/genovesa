@@ -36,6 +36,7 @@ use protocol::{PlayerId, ToClient, ToServer, DEFAULT_PORT, PROTOCOL_VERSION};
 use server::{Host, Server, WorldConfig};
 
 use crate::boat::Boat;
+use crate::sea;
 use crate::terrain::Ground;
 use crate::{eased, matte, AppState};
 
@@ -587,12 +588,15 @@ fn place_markers(
         let at = at.lerp(player.target, t);
 
         // Standing on the surface, capsule half-height above it, so a player
-        // crossing open ocean is sailing it rather than walking the seabed.
-        // Ground still generating keeps the last height, exactly as the boat
-        // and the camera's own focus do.
+        // crossing open ocean is sailing it rather than walking the seabed —
+        // and riding the swell the way the boat itself does, or a marker
+        // crossing open water would stand still in a sea everything else is
+        // bobbing on. Ground still generating keeps the last height, exactly
+        // as the boat and the camera's own focus do.
         let mut height = transform.translation.y;
-        if let Some(surface) = ground.as_ref().and_then(|g| g.surface(at.x, at.y)) {
-            height = surface + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
+        if let Some(ground) = ground.as_ref().and_then(|g| g.height(at.x, at.y)) {
+            let water = sea::swell(at, time.elapsed_secs_wrapped());
+            height = ground.max(water) + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
         }
         transform.translation = Vec3::new(at.x, height, at.y);
     }

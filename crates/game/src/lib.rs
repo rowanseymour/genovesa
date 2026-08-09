@@ -16,6 +16,7 @@ pub mod compass;
 pub mod debug;
 pub mod menu;
 pub mod net;
+pub mod sea;
 pub mod terrain;
 pub mod trees;
 
