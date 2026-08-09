@@ -163,6 +163,10 @@ struct Shared {
     /// might still be joining one: see [`Host::drop`], which is what makes it
     /// true, and [`serve`], which is what makes it mean something.
     stopping: AtomicBool,
+    /// When this world was opened — the zero of the weather's clock. The
+    /// weather is a pure function of seed and elapsed time (see
+    /// [`world::weather`]), so this is the whole of the state it needs.
+    started: Instant,
     report: Report,
 }
 
@@ -216,6 +220,7 @@ impl Server {
                 next_id: AtomicU32::new(1),
                 players: Mutex::new(HashMap::new()),
                 stopping: AtomicBool::new(false),
+                started: Instant::now(),
                 report: Box::new(|_| {}),
             }),
         })
@@ -247,6 +252,7 @@ impl Server {
     pub fn run(self) {
         let (wanted, requests) = self.queue;
         make_ground(&self.shared, requests);
+        watch_weather(&self.shared);
         accept(&self.listener, &self.shared, &wanted);
     }
 
@@ -261,6 +267,7 @@ impl Server {
         let addr = self.listener.local_addr()?;
         let (wanted, requests) = self.queue;
         make_ground(&self.shared, requests);
+        watch_weather(&self.shared);
         let shared = self.shared.clone();
         let thread = {
             let (listener, shared) = (self.listener, self.shared);
@@ -441,7 +448,47 @@ fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
     }
 }
 
+/// Watches the sky on a thread of its own, telling everyone when the wind
+/// has meaningfully changed. The weather itself needs no ticking — it is a
+/// pure function of the clock — so all this does is notice, about once a
+/// second, that the answer has moved and pass it on. A quarter of a metre a
+/// second of vector change covers a shift in strength and a shift in bearing
+/// with one test, keeps a steady sky silent, and during a real change works
+/// out to a message every few seconds.
+///
+/// The thread ends with the session, within a beat of [`Shared::stopping`]
+/// being set, and is deliberately not joined: unlike a connection it holds
+/// nothing but a share of the state, and making every [`Host`] drop wait out
+/// the last beat would slow every session's end for nothing.
+fn watch_weather(shared: &Arc<Shared>) {
+    let shared = shared.clone();
+    thread::spawn(move || {
+        let mut told = shared.wind();
+        loop {
+            for _ in 0..5 {
+                if shared.stopping.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            let wind = shared.wind();
+            if (wind - told).length() > 0.25 {
+                told = wind;
+                let players = shared.players.lock().expect("no poisoned lock");
+                broadcast_all(&players, ToClient::Weather { wind });
+            }
+        }
+    });
+}
+
 impl Shared {
+    /// The wind over this world right now. Asked rather than kept: the
+    /// weather is a pure function of the seed and the session's clock, so
+    /// there is no cached state for two askers to disagree over.
+    fn wind(&self) -> Vec2 {
+        world::weather::wind(self.world.seed(), self.started.elapsed().as_secs_f32())
+    }
+
     /// Where a given player is put down. Everyone enters on the world's
     /// spawn point — open water just off the first island's coast, see
     /// [`Archipelago::spawn`] — but not on the same square metre: markers
@@ -552,6 +599,17 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
 
         let newcomer = &players[&id];
         post(newcomer, welcome);
+        // The sky, straight after the session itself: a client draws the sea
+        // from the moment it has ground, and until this arrives it can only
+        // assume a day nobody promised. Inside the same hold of the lock as
+        // the welcome, so the watcher's broadcasts cannot slip in front of it
+        // and arrive before the client knows who it is.
+        post(
+            newcomer,
+            ToClient::Weather {
+                wind: shared.wind(),
+            },
+        );
         for (other, existing) in players.iter() {
             if *other != id {
                 post(
@@ -639,6 +697,14 @@ fn in_the_world(chunk: IVec2) -> bool {
 fn post(player: &Player, message: ToClient) {
     if player.outbox.try_send(message).is_err() {
         let _ = player.line.shutdown(Shutdown::Both);
+    }
+}
+
+/// Sends to the whole roster — what the weather takes, nobody having caused
+/// it the way a move or a leaving has an author to skip.
+fn broadcast_all(players: &HashMap<PlayerId, Player>, message: ToClient) {
+    for player in players.values() {
+        post(player, message.clone());
     }
 }
 

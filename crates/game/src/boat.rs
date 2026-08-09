@@ -193,7 +193,11 @@ impl Plugin for BoatPlugin {
     fn build(&self, app: &mut App) {
         // Steering before floating, so ground gained or lost by this frame's
         // movement is under the hull the same frame rather than the next.
-        app.add_systems(OnEnter(AppState::InWorld), launch)
+        // The conditions the hull floats on, here as well as in the terrain
+        // plugin: resources are global and initialising one twice is free,
+        // and the boat's own tests run without any terrain at all.
+        app.init_resource::<sea::SeaConditions>()
+            .add_systems(OnEnter(AppState::InWorld), launch)
             .add_systems(
                 Update,
                 // Only the steering stops when the game is paused. Floating is
@@ -286,6 +290,7 @@ fn launch(
 fn float(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
+    sea: Res<sea::SeaConditions>,
     mut boats: Query<&mut Transform, With<Boat>>,
 ) {
     for mut transform in &mut boats {
@@ -298,7 +303,7 @@ fn float(
         // ground is asked exactly, where the shader reads its windowed
         // picture of the same heights; they differ by at most a texel of
         // interpolation, in water where the swell is smallest.
-        let water = sea::swell(Vec2::new(at.x, at.z), time.elapsed_secs_wrapped(), -height);
+        let water = sea.swell(Vec2::new(at.x, at.z), time.elapsed_secs_wrapped(), -height);
         transform.translation.y = height.max(water);
     }
 }
@@ -1122,7 +1127,13 @@ mod tests {
             "the point picked to be open water is dry land"
         );
         let floated = put_down(&mut app, offshore);
-        let water = crate::sea::swell(offshore, elapsed(&app), -ground(&app, offshore));
+        // The default conditions, because no forecast has reached this app —
+        // exactly what `float` is riding on.
+        let water = crate::sea::SeaConditions::default().swell(
+            offshore,
+            elapsed(&app),
+            -ground(&app, offshore),
+        );
         assert_eq!(
             floated, water,
             "the boat floats at {floated} m, the swell there stands at {water} m"
@@ -1325,7 +1336,7 @@ mod tests {
             .expect("the boat sailed off the ground it was given");
         assert_eq!(
             at.y,
-            crate::sea::swell(Vec2::new(at.x, at.z), elapsed(&app), depth),
+            crate::sea::SeaConditions::default().swell(Vec2::new(at.x, at.z), elapsed(&app), depth),
             "the boat never made it back to the water"
         );
         let afloat = from_the_island(&mut app);

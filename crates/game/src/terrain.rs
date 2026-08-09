@@ -157,6 +157,8 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SeaMaterial>::default())
+            .init_resource::<sea::Forecast>()
+            .init_resource::<sea::SeaConditions>()
             .add_systems(OnEnter(AppState::InWorld), enter_world)
             .add_systems(OnExit(AppState::InWorld), leave_world)
             .add_systems(
@@ -168,6 +170,7 @@ impl Plugin for TerrainPlugin {
                     stream_out,
                     follow_camera,
                     sea::refresh_depth,
+                    sea::settle_conditions,
                 )
                     .chain()
                     .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Ground>)),
