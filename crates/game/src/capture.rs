@@ -18,9 +18,9 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
-use crate::boat::Boat;
 use crate::camera::{MapCamera, View};
 use crate::cli::Shot;
+use crate::player::PlayerPlace;
 use bevy::ecs::system::SystemParam;
 
 use crate::terrain::{ChunkBuild, Ground};
@@ -186,12 +186,36 @@ impl GroundArriving<'_, '_> {
     }
 }
 
+/// The player, as a thing a sweep can move: where they are, resolved through
+/// whatever carries them, and the write access to move that carrier.
+#[derive(SystemParam)]
+struct PlayerSweep<'w, 's> {
+    player: PlayerPlace<'w, 's>,
+    carriers: Query<'w, 's, &'static mut Transform>,
+}
+
+impl PlayerSweep<'_, '_> {
+    /// Moves whatever carries the player — vehicle and rider whole — to a map
+    /// point, leaving the height stale for `float` to settle. Does nothing
+    /// with no player in the world, which is every shot of a menu.
+    fn teleport(&mut self, to: Vec2) {
+        if let Some(mut place) = self
+            .player
+            .carrier()
+            .and_then(|carrier| self.carriers.get_mut(carrier).ok())
+        {
+            place.translation.x = to.x;
+            place.translation.z = to.y;
+        }
+    }
+}
+
 /// Walks the list: settle, take the picture, point the camera at the next one.
 fn capture(
     mut commands: Commands,
     mut capture: ResMut<Capture>,
     mut cameras: Query<&mut MapCamera>,
-    mut boats: Query<&mut Transform, With<Boat>>,
+    mut player: PlayerSweep,
     arriving: GroundArriving,
     mut view: ResMut<View>,
     mut exit: MessageWriter<AppExit>,
@@ -250,16 +274,13 @@ fn capture(
                     for mut camera in &mut cameras {
                         camera.snap_to(wanted);
                     }
-                    // The camera is pinned to the boat, so a sweep moves the
-                    // boat and the view follows — teleported, there being
-                    // nobody to watch it sail there. The height is stale
-                    // until `float` sees the new ground, which the settling
-                    // frames absorb. A shot of a menu has no boat, and the
-                    // camera then stands wherever it was snapped.
-                    for mut boat in &mut boats {
-                        boat.translation.x = wanted.focus.x;
-                        boat.translation.z = wanted.focus.z;
-                    }
+                    // The camera is pinned to the player, so a sweep moves
+                    // whatever carries them and the view follows —
+                    // teleported, there being nobody to watch it sail there.
+                    // The settling frames absorb the stale height; a shot of
+                    // a menu moves nobody, and the camera then stands
+                    // wherever it was snapped.
+                    player.teleport(Vec2::new(wanted.focus.x, wanted.focus.z));
                     capture.phase = Phase::Settling;
                 }
                 None => capture.phase = Phase::Finishing,

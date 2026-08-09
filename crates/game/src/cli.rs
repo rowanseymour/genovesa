@@ -104,7 +104,7 @@ impl Args {
     /// entered — the spawn point just off the first island, facing it — and
     /// that goes for capture runs too. Shots used to centre on the island's
     /// middle instead, on the theory that a shot means a shot of terrain; but
-    /// the camera is pinned to the boat, so that dragged the boat ashore and
+    /// the camera is pinned to the player, so that dragged their boat ashore and
     /// beached it dead-centre in every picture — the one default shot of a
     /// world showed an entry the game never makes. The spawn stands
     /// `SPAWN_OFFSHORE` metres off the coast precisely so that land fills the

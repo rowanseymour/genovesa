@@ -1,18 +1,24 @@
-//! The boat the player gets about in, and the keys that steer it.
+//! Boats: the hulls the player gets about in, and the keys that steer the one
+//! they are aboard.
 //!
-//! The hull is modelled rather than drawn here: [`MODEL`] is a glTF file built
-//! from a Blender master under `assets-src/`, and this module spawns its meshes
-//! and steers what they hang off. What is here to stay is the *entity*: the
-//! player's place in the world, which the movement keys drive ([`steer`]) and
-//! the camera stays centred on.
+//! The player themself is not here. They are a person — see [`crate::player`]
+//! — riding this boat as a child of it, and the boat is one of the vehicles
+//! they will get about in rather than the player's own shape. What *kind* of
+//! boat an entity is lives in its [`Hull`]: the dimensions and manners the
+//! rules below are written against, ship-sized today ([`SHIP`]) and
+//! rowboat-sized next, so a new kind of boat is a new `Hull` and a new model,
+//! not a new module.
 //!
-//! The few dimensions still named below are the ones the *rules* are written
-//! against — where the keel is, and how deep. Those are not the model's to
-//! change quietly, so `the_model_is_the_hull_the_keel_is_probed_along` holds
-//! the file to them; everything else about the shape is the modeller's, and
-//! this file has no opinion on it.
+//! A hull is modelled rather than drawn here: [`MODEL`] is a glTF file built
+//! from a Blender master under `assets-src/`, and this module spawns its
+//! meshes and steers what they hang off. The few dimensions a `Hull` names
+//! are the ones the rules read — where the keel is, and how deep. Those are
+//! not the model's to change quietly, so
+//! `the_model_is_the_hull_the_keel_is_probed_along` holds the file to them;
+//! everything else about the shape is the modeller's, and this file has no
+//! opinion on it.
 //!
-//! It faces down its own -Z, so [`Transform::forward`] is the way it is
+//! A boat faces down its own -Z, so [`Transform::forward`] is the way it is
 //! pointing and steering can leave the axis convention alone. Its origin is on
 //! the waterline rather than at the keel or the deck, which is what lets
 //! [`float`] put it down by simply setting the height of the surface it is on.
@@ -23,11 +29,12 @@ use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
+use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
 use crate::{eased, matte, AppState, Helm};
 
-/// The boat, as a file. Built from `assets-src/boat.glb/boat.blend` by
+/// The ship, as a file. Built from `assets-src/boat.glb/boat.blend` by
 /// `assets-src/export.sh`, which is also where the export settings the look
 /// depends on are written down.
 const MODEL: &str = "boat.glb";
@@ -40,49 +47,137 @@ const MODEL: &str = "boat.glb";
 const HULL_MESH: usize = 0;
 const SPAR_MESH: usize = 1;
 
-/// Length overall, in metres. A small sailing boat: at the default zoom the
-/// visible ground is some tens of metres across, so this reads as a boat
-/// rather than as a speck, and the same at the far end of the zoom range it is
-/// still a mark on the water rather than gone.
-const LENGTH: f32 = 7.0;
+/// The dimensions and manners of one kind of boat — everything [`float`],
+/// [`steer`] and [`grounding`] need to know to drive one. This is a boat's
+/// *character*; what a particular boat is doing lives on [`Boat`]. The values
+/// carry their reasoning where they are picked, on [`SHIP`].
+#[derive(Clone, Copy)]
+struct Hull {
+    /// Length overall, in metres.
+    length: f32,
+    /// Beam, in metres — how far apart the water is sampled athwartships to
+    /// read the roll the waves ask of the hull. Close to the model's planking
+    /// but not held to it the way `length` is: the samples are reading the
+    /// surface's slope, and a slope read a few centimetres wide of the hull
+    /// is the same slope.
+    beam: f32,
+    /// Keel depth below the waterline. The sea is translucent, so this much
+    /// of the hull shows through the water as a darker shape under the deck —
+    /// but what makes it the game's business rather than the model's is
+    /// [`Hull::grounding_draft`], which is measured from it.
+    draft: f32,
+    /// Where the keel begins and ends, in metres from amidships — negative
+    /// forward, the same axis the hull is modelled on. [`grounding`] probes
+    /// along these, so what runs aground is the line that is drawn.
+    forefoot_station: f32,
+    heel_station: f32,
+    /// Metres per second under way.
+    speed: f32,
+    /// Metres per second going astern.
+    astern_speed: f32,
+    /// Seconds of lag between the speed the keys ask for and the speed the
+    /// hull makes — the time constant of an exponential ease, so most of any
+    /// change arrives within this long and it is all but done in three times
+    /// it. Named as a duration rather than as the rate [`eased`] takes, a
+    /// hull having a weight that is easier to think about in seconds. The
+    /// ease is what gives a hull that weight: it gathers way over seconds
+    /// instead of leaping to `speed` on the frame the key goes down, and
+    /// carries a glide when the key comes up.
+    way_response: f32,
+    /// How fast the helm brings the bow round, in radians per second.
+    /// Together with `speed` this fixes the turning circle.
+    turn_rate: f32,
+    /// How far the hull heels in a full-helm turn at full speed, in radians.
+    /// It heels *outwards*, the way a keeled hull does: the water grips the
+    /// keel below the waterline while the turn flings the mass above it, so
+    /// the boat leans out of the corner, not into it like a bicycle.
+    heel_at_full_turn: f32,
+    /// Seconds of lag between the heel a turn asks for and the heel the hull
+    /// shows, the same exponential shape as `way_response` and much quicker:
+    /// rolling is the lightest thing a hull does. Quick enough that the lean
+    /// arrives while the turn is still news, slow enough that the hull rolls
+    /// rather than snaps — and the same curve is the straightening, run back
+    /// down to level when the helm comes off.
+    heel_response: f32,
+    /// Seconds of lag between the tilt the water asks for and the tilt the
+    /// hull shows — the same exponential family as `heel_response`, and a
+    /// good deal slower: heeling is the hull rolling on its own keel, this is
+    /// the whole hull being *lifted* by one end. The lag is also what keeps
+    /// the chop out of the deck. Under way the short seas pass beneath the
+    /// hull every couple of seconds, and a deck that chased each one
+    /// faithfully would wag; on this curve the hull rides the long swell and
+    /// lets the chop go by underneath.
+    sway_response: f32,
+}
 
-/// Keel depth below the waterline. The sea is translucent, so this much of the
-/// hull shows through the water as a darker shape under the deck — but what
-/// makes it the game's business rather than the model's is [`GROUNDING_DRAFT`],
-/// which is measured from it.
-const DRAFT: f32 = 0.8;
+impl Hull {
+    /// How little water the hull is held in: ground standing higher than this
+    /// far below the waterline stops it.
+    ///
+    /// On the coasts the generator draws this puts the hull within a metre or
+    /// two of the waterline; where it holds a boat further off, it is off a
+    /// shelf too thin to float one, and the shallows are painted as shallows
+    /// long before they are this thin — so a boat held out is held out of
+    /// water it can be seen to be held out of.
+    fn grounding_draft(&self) -> f32 {
+        self.draft - KEEL_BITE
+    }
+}
 
-/// Where the keel begins and ends, in metres from amidships — negative
-/// forward, the same axis the hull is modelled on. The forefoot stops short of
-/// the bow, which is what gives the stem its rake; the heel runs right aft to
-/// the transom. [`grounding`] probes along these, so what runs aground is the
-/// line that is drawn.
-const FOREFOOT_STATION: f32 = -LENGTH * 0.5 * 0.7;
-const HEEL_STATION: f32 = LENGTH * 0.5;
+/// The ship: the boat a world is entered aboard, and [`MODEL`]'s subject.
+const SHIP: Hull = Hull {
+    // A small sailing boat: at the default zoom the visible ground is some
+    // tens of metres across, so this length reads as a boat rather than as a
+    // speck, and at the far end of the zoom range it is still a mark on the
+    // water rather than gone.
+    length: 7.0,
+    beam: 2.4,
+    draft: 0.8,
+    // The forefoot stops short of the bow, which is what gives the stem its
+    // rake; the heel runs right aft to the transom.
+    forefoot_station: -7.0 * 0.5 * 0.7,
+    heel_station: 7.0 * 0.5,
+    // Brisk beyond honesty for a seven-metre hull, but the ship is how the
+    // world is crossed: at this speed the ground in view at the default zoom
+    // slides by in a few seconds, and the next island is minutes away rather
+    // than tens of minutes.
+    speed: 10.0,
+    // Enough to back off a beach or out of a cove, and slow enough that
+    // nobody crosses an ocean in reverse.
+    astern_speed: 4.0,
+    // The hull gathers way over a few seconds and carries it for a couple of
+    // lengths' glide — seven metres of timber, felt.
+    way_response: 1.5,
+    // With the speed above, a turning circle of about five metres — tight
+    // enough to feel answerable from a camera forty metres up, wide enough
+    // that coming about reads as a turn rather than a spin.
+    turn_rate: 2.0,
+    // Enough to swing the masthead more than a metre, which is what makes a
+    // turn visible from forty metres up, and shy of anything that reads as
+    // capsizing.
+    heel_at_full_turn: 0.22,
+    // Quick, rolling being the lightest thing seven metres of timber does.
+    heel_response: 0.4,
+    // And the lift of the whole hull much slower than its roll.
+    sway_response: 0.9,
+};
 
-/// How much of the keel the ground is allowed to take before the hull is
-/// stopped. Stopping the boat the instant the ground rises to meet the keel is
+/// How much of the keel the ground is allowed to take before a hull is
+/// stopped. Stopping a boat the instant the ground rises to meet the keel is
 /// an invisible wall a boat's length offshore, whereas a fifth of a metre of
 /// bite is a boat *beaching*: the keel is seen to touch, and then it stops.
 /// Well clear of the two centimetres the heights are quantised to, so the
-/// threshold cannot chatter.
+/// threshold cannot chatter. One constant for every hull — what it answers to
+/// is the quantisation, not the boat.
 const KEEL_BITE: f32 = 0.2;
 
-/// How little water the hull is held in: ground standing higher than this far
-/// below the waterline stops it.
-///
-/// On the coasts the generator draws this puts the hull within a metre or two
-/// of the waterline; where it holds a boat further off, it is off a shelf too
-/// thin to float one, and the shallows are painted as shallows long before
-/// they are this thin — so a boat held out is held out of water it can be
-/// seen to be held out of.
-const GROUNDING_DRAFT: f32 = DRAFT - KEEL_BITE;
-
 /// How many points along the keel are asked about the bottom. Spread from the
-/// forefoot to the heel inclusive, so the gap between them comes out just under
-/// the two metres the ground is sampled at: no facet of the height field can
-/// lie wholly between two probes, so ground that rises across a facet is read
-/// on the way up rather than stepped over.
+/// forefoot to the heel inclusive, so the gap between them comes out under
+/// the two metres the ground is sampled at — an invariant each hull's keel
+/// length has to keep, and `the_keel_is_probed_as_closely_as_the_ground_is_
+/// sampled` pins: no facet of the height field can lie wholly between two
+/// probes, so ground that rises across a facet is read on the way up rather
+/// than stepped over.
 ///
 /// That is what the spacing buys, and it is worth being plain that it is less
 /// than "nothing gets past". A crest only one lattice line wide is *not* seen:
@@ -98,79 +193,20 @@ const GROUNDING_DRAFT: f32 = DRAFT - KEEL_BITE;
 /// need none of it. Sailing through a skerry is the smaller wrong, and the one
 /// that can be paid off from the other end, by giving the skerries some width.
 ///
-/// The sides are not probed: the hull is a shallow V, drawing only [`DRAFT`] on
-/// the centreline and nothing at all at the beam, so a probe out there would
+/// The sides are not probed: a hull here is a shallow V, drawing its full
+/// draft on the centreline and nothing at all at the beam, so a probe out
+/// there would
 /// have to carry a draught of its own to say anything the keel has not said.
 /// That is a standing condition on the model rather than an observation about
 /// one — a hull remodelled with a flat bottom carried out to the beam would
 /// need probes out there too.
 const KEEL_PROBES: usize = 4;
 
-/// Beam, in metres — how far apart the water is sampled athwartships to read
-/// the roll the waves ask of the hull. Close to the model's planking but not
-/// held to it the way [`LENGTH`] is: the samples are reading the surface's
-/// slope, and a slope read a few centimetres wide of the hull is the same
-/// slope.
-const BEAM: f32 = 2.4;
-
-/// Seconds of lag between the tilt the water asks for and the tilt the hull
-/// shows — the same exponential family as [`HEEL_RESPONSE`], and a good deal
-/// slower: heeling is the hull rolling on its own keel, this is seven metres
-/// of timber being *lifted* by one end. The lag is also what keeps the chop
-/// out of the deck. Under way the short seas pass beneath the hull every
-/// couple of seconds, and a deck that chased each one faithfully would wag;
-/// on this curve the hull rides the long swell and lets the chop go by
-/// underneath.
-const SWAY_RESPONSE: f32 = 0.9;
-
-/// Metres per second under way. Brisk beyond honesty for a seven-metre hull,
-/// but the boat is how the world is crossed: at this speed the ground in view
-/// at the default zoom slides by in a few seconds, and the next island is
-/// minutes away rather than tens of minutes.
-const SPEED: f32 = 10.0;
-
-/// Metres per second going astern — enough to back off a beach or out of a
-/// cove, and slow enough that nobody crosses an ocean in reverse.
-const ASTERN_SPEED: f32 = 4.0;
-
-/// Seconds of lag between the speed the keys ask for and the speed the hull
-/// makes — the time constant of an exponential ease, so most of any change
-/// arrives within this long and it is all but done in three times it. Named
-/// as a duration rather than as the rate [`eased`] takes, seven metres of
-/// timber having a weight that is easier to think about in seconds. The
-/// ease is what gives seven metres of timber its weight: the hull gathers
-/// way over a few seconds instead of leaping to [`SPEED`] on the frame the
-/// key goes down, and carries it for a couple of lengths' glide when the
-/// key comes up.
-const WAY_RESPONSE: f32 = 1.5;
-
 /// Way below this, with no drive asked for, is stopped, and [`steer`] snaps
 /// it to exactly zero. The ease only ever halves the remainder — left alone
 /// the boat would creep forever, never quite done stopping — and a hull at
 /// rest should be *at rest*: the same spot every frame, nothing moving.
 const WAY_STOPPED: f32 = 0.02;
-
-/// How fast the helm brings the bow round, in radians per second. Together
-/// with [`SPEED`] this fixes the turning circle at about five metres — tight
-/// enough to feel answerable from a camera forty metres up, wide enough that
-/// coming about reads as a turn rather than a spin.
-const TURN_RATE: f32 = 2.0;
-
-/// How far the hull heels in a full-helm turn at full speed, in radians —
-/// enough to swing the masthead more than a metre, which is what makes a turn
-/// visible from forty metres up, and shy of anything that reads as capsizing.
-/// It heels *outwards*, the way a keeled hull does: the water grips the keel
-/// below the waterline while the turn flings the mass above it, so the boat
-/// leans out of the corner, not into it like a bicycle.
-const HEEL_AT_FULL_TURN: f32 = 0.22;
-
-/// Seconds of lag between the heel a turn asks for and the heel the hull
-/// shows, the same exponential shape as [`WAY_RESPONSE`] and much quicker:
-/// rolling is the lightest thing seven metres of timber does. Quick enough
-/// that the lean arrives while the turn is still news, slow enough that the
-/// hull rolls rather than snaps — and the same curve is the straightening,
-/// run back down to level when the helm comes off.
-const HEEL_RESPONSE: f32 = 0.4;
 
 /// Within this of the heel the turn is asking for, the hull snaps to it
 /// exactly — the same tail-closing that [`WAY_STOPPED`] does for the way,
@@ -187,8 +223,9 @@ const HULL_COLOR: Color = Color::srgb(0.62, 0.28, 0.22);
 /// Bare spar, pale enough to stand off both the water and the hull.
 const SPAR_COLOR: Color = Color::srgb(0.86, 0.80, 0.68);
 
-/// The player's boat. One per match, spawned where the world is entered.
+/// A boat in the world: what kind it is, and what it is doing.
 ///
+/// `hull` is the kind — the ship for now, and the rest is the sailing state.
 /// `way` is the speed the hull is actually making along its heading, in
 /// metres per second, ahead positive — the state the eased throttle lives
 /// in. The keys name a speed; [`steer`] brings `way` towards it.
@@ -202,12 +239,26 @@ const SPAR_COLOR: Color = Color::srgb(0.86, 0.80, 0.68);
 /// transform because the transform holds heading, pitch and the two rolls
 /// multiplied together, and unpicking a quaternion every frame to learn
 /// numbers these systems wrote themselves is work for nothing.
-#[derive(Component, Default)]
+#[derive(Component)]
 pub struct Boat {
+    hull: Hull,
     way: f32,
     heel: f32,
     pitch: f32,
     roll: f32,
+}
+
+impl Boat {
+    /// The ship a world is entered aboard, at rest.
+    pub fn ship() -> Self {
+        Self {
+            hull: SHIP,
+            way: 0.0,
+            heel: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+        }
+    }
 }
 
 pub struct BoatPlugin;
@@ -235,8 +286,9 @@ impl Plugin for BoatPlugin {
     }
 }
 
-/// Puts the boat in the world at the point the world is entered, pointing the
-/// way the opening view looks.
+/// Puts the ship in the world at the point the world is entered, pointing the
+/// way the opening view looks — with the player aboard, entering a world
+/// being something done afloat.
 ///
 /// The view names where the player enters the world, so the boat goes there
 /// rather than anywhere of its own choosing. Entry is the world's spawn
@@ -247,7 +299,10 @@ impl Plugin for BoatPlugin {
 /// one material, and the hull and the spar are two colours. Their geometry is
 /// already in the boat's own frame — the modeller places the mast on the deck,
 /// not the game — so the children sit at the identity and the only transform
-/// anything writes is the boat's own.
+/// anything writes is the boat's own. The player is one more child, at the
+/// identity like the meshes: aboard *is* being in the hierarchy — see
+/// [`crate::player`] — so they stand wherever the hull carries them and go
+/// down with the ship when the world is left.
 fn launch(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -266,7 +321,7 @@ fn launch(
 
     commands.spawn((
         Name::new("Boat"),
-        Boat::default(),
+        Boat::ship(),
         DespawnOnExit(AppState::InWorld),
         // A rotation of `yaw` about the vertical takes -Z to the camera's own
         // forward, so the boat starts pointing away from the viewer.
@@ -287,6 +342,15 @@ fn launch(
                 Name::new("Spar"),
                 Mesh3d(assets.load(mesh_in_model(SPAR_MESH))),
                 MeshMaterial3d(spar_material),
+            ),
+            // No mesh yet — a figure will hang here when there is one worth
+            // drawing. The visibility is so it inherits cleanly like its
+            // sibling meshes the day it grows one.
+            (
+                Name::new("Player"),
+                Player,
+                Transform::default(),
+                Visibility::default(),
             )
         ],
     ));
@@ -314,9 +378,9 @@ fn launch(
 /// Afloat, the hull also wears the water's *slope*: the swell is sampled off
 /// the bow and the stern and out at either beam, and the deck eases towards
 /// the plane those four heights describe — pitching as seas pass under it
-/// fore and aft, rolling as they pass across, on [`SWAY_RESPONSE`], which is
-/// where the hull's weight lives. The height above is not eased and the tilt
-/// is, deliberately: the hull *is* where the water is, but it is seven
+/// fore and aft, rolling as they pass across, on the hull's own sway
+/// response, which is where its weight lives. The height above is not eased
+/// and the tilt is, deliberately: the hull *is* where the water is, but it is
 /// metres long, and turning to a shape that long takes it time the height
 /// does not need. A beached hull eases level instead — the ground is holding
 /// it, and a deck still working to water sliding past a held keel would give
@@ -334,10 +398,11 @@ fn float(
     sea: Res<sea::SeaConditions>,
     mut boats: Query<(&mut Transform, &mut Boat)>,
 ) {
-    let t = eased(1.0 / SWAY_RESPONSE, time.delta_secs());
     let elapsed = time.elapsed_secs_wrapped();
 
     for (mut transform, mut boat) in &mut boats {
+        let hull = boat.hull;
+        let t = eased(1.0 / hull.sway_response, time.delta_secs());
         let at = transform.translation;
         let height = ground.as_ref().and_then(|g| g.height(at.x, at.z));
         let mut afloat = false;
@@ -369,14 +434,14 @@ fn float(
             };
             (
                 f32::atan2(
-                    water_at(Vec3::new(0.0, 0.0, -LENGTH / 2.0))
-                        - water_at(Vec3::new(0.0, 0.0, LENGTH / 2.0)),
-                    LENGTH,
+                    water_at(Vec3::new(0.0, 0.0, -hull.length / 2.0))
+                        - water_at(Vec3::new(0.0, 0.0, hull.length / 2.0)),
+                    hull.length,
                 ),
                 f32::atan2(
-                    water_at(Vec3::new(BEAM / 2.0, 0.0, 0.0))
-                        - water_at(Vec3::new(-BEAM / 2.0, 0.0, 0.0)),
-                    BEAM,
+                    water_at(Vec3::new(hull.beam / 2.0, 0.0, 0.0))
+                        - water_at(Vec3::new(-hull.beam / 2.0, 0.0, 0.0)),
+                    hull.beam,
                 ),
             )
         } else {
@@ -416,10 +481,11 @@ fn settled(eased: f32, target: f32) -> f32 {
 /// How far the bottom stands above the depth the hull is held at, in metres,
 /// taken at the worst-placed point of the keel — negative for as long as there
 /// is water enough under all of it, zero where the hull is about to be stopped.
-/// Not the keel's own penetration, which is this plus the gap between [`DRAFT`]
-/// and [`GROUNDING_DRAFT`]: the rule wants one number that rises as the ground
-/// does, and nothing ever reads it but its sign and its ordering against
-/// itself, both of which the offset leaves alone.
+/// Not the keel's own penetration, which is this plus [`KEEL_BITE`] — the gap
+/// between the hull's draft and its [`Hull::grounding_draft`]: the rule wants
+/// one number that rises as the ground does, and nothing ever reads it but
+/// its sign and its ordering against itself, both of which the offset leaves
+/// alone.
 ///
 /// This is the whole of collision. The ground the client has is a height field
 /// on a two-metre lattice, and the boat is a keel line above it, so "is there
@@ -433,17 +499,17 @@ fn settled(eased: f32, target: f32) -> f32 {
 /// sent is not ground it may invent. Outrunning the stream would take a stalled
 /// server, and if land does turn up under the hull, backing off still works —
 /// see [`steer`] for why.
-fn grounding(ground: Option<&Ground>, transform: &Transform) -> f32 {
+fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32 {
     let Some(ground) = ground else {
         return f32::NEG_INFINITY;
     };
 
-    let keel = HEEL_STATION - FOREFOOT_STATION;
+    let keel = hull.heel_station - hull.forefoot_station;
     (0..KEEL_PROBES)
         .filter_map(|i| {
-            let station = FOREFOOT_STATION + keel * i as f32 / (KEEL_PROBES - 1) as f32;
+            let station = hull.forefoot_station + keel * i as f32 / (KEEL_PROBES - 1) as f32;
             let at = transform.transform_point(Vec3::new(0.0, 0.0, station));
-            Some(ground.height(at.x, at.z)? + GROUNDING_DRAFT)
+            Some(ground.height(at.x, at.z)? + hull.grounding_draft())
         })
         .fold(f32::NEG_INFINITY, f32::max)
 }
@@ -456,7 +522,7 @@ fn grounding(ground: Option<&Ground>, transform: &Transform) -> f32 {
 /// between the camera's yaw and the boat's.
 ///
 /// The throttle is eased rather than instant: the keys name a target speed
-/// and the hull's way relaxes towards it on the [`WAY_RESPONSE`] curve,
+/// and the hull's way relaxes towards it on its own way-response curve,
 /// stepped exactly for however long the frame was, so the ramp is the same
 /// shape at any frame rate. That covers both ends of a sail — way gathered
 /// over seconds when the key goes down, and carried into a glide when it
@@ -479,7 +545,7 @@ fn grounding(ground: Option<&Ground>, transform: &Transform) -> f32 {
 /// can only ever be allowed a pose that floats — `here` at or under zero makes
 /// the second clause imply the first — so a boat under way never reaches dry
 /// ground at all: it halts still afloat, with at most the fifth of a metre
-/// between [`DRAFT`] and [`GROUNDING_DRAFT`] in the mud, and backing off from
+/// of [`KEEL_BITE`] in the mud, and backing off from
 /// there is the *first* clause doing the work, the water astern being water.
 /// What the second clause is for is the pose the boat did not sail into — a
 /// `--focus` that puts it inland, and ground arriving under a hull already
@@ -492,16 +558,16 @@ fn grounding(ground: Option<&Ground>, transform: &Transform) -> f32 {
 ///
 /// Only the pose at the end of the advance is judged; the path swept getting
 /// there is covered by the probes of the frame before, which holds for as long
-/// as a frame's advance stays under the probe spacing. At [`SPEED`] that is
+/// as a frame's advance stays under the probe spacing. At the ship's speed that is
 /// seventeen centimetres at sixty frames a second, and two and a half metres
 /// at the quarter second Bevy clamps a stalled frame to — so the sweep is only
 /// ever missed on a frame that was already a visible break in the picture.
 ///
 /// Turning at speed also heels the hull: the target lean is helm times way —
 /// sharpness times speed, so a hard turn at full way carries the whole of
-/// [`HEEL_AT_FULL_TURN`], a gentle one at half way a quarter of it, and a bow
+/// the hull's full-turn heel, a gentle one at half way a quarter of it, and a bow
 /// swung round at rest none at all — and the shown heel relaxes towards it on
-/// the [`HEEL_RESPONSE`] curve, which is both the roll into the turn and the
+/// the hull's heel-response curve, which is both the roll into the turn and the
 /// straightening out of it. Signed way keeps the geometry honest going
 /// astern: the same helm turns about a centre on the other side, so the heel
 /// flips with it. The roll is applied about the boat's own forward axis, and
@@ -531,7 +597,6 @@ fn steer(
     if bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown) {
         drive -= 1.0;
     }
-    let speed = if drive > 0.0 { SPEED } else { ASTERN_SPEED };
 
     // Port is a positive turn about the vertical, the same way round as the
     // camera's own Q.
@@ -543,15 +608,21 @@ fn steer(
         helm -= 1.0;
     }
 
-    let target = drive * speed;
-    // A response named in seconds is a rate of its reciprocal.
-    let t = eased(1.0 / WAY_RESPONSE, time.delta_secs());
-    let heel_t = eased(1.0 / HEEL_RESPONSE, time.delta_secs());
     let ground = ground.as_deref();
 
     for (mut transform, mut boat) in &mut boats {
+        let hull = boat.hull;
+        let speed = if drive > 0.0 {
+            hull.speed
+        } else {
+            hull.astern_speed
+        };
+        let target = drive * speed;
+        // A response named in seconds is a rate of its reciprocal.
+        let t = eased(1.0 / hull.way_response, time.delta_secs());
+
         if helm != 0.0 {
-            transform.rotate_y(helm * TURN_RATE * time.delta_secs());
+            transform.rotate_y(helm * hull.turn_rate * time.delta_secs());
         }
         // Written only while something is happening, so an idle boat holds
         // still without being marked changed every frame.
@@ -564,8 +635,9 @@ fn steer(
             };
 
             let advance = transform.forward() * way * time.delta_secs();
-            let here = grounding(ground, &transform);
+            let here = grounding(&hull, ground, &transform);
             let there = grounding(
+                &hull,
                 ground,
                 &Transform {
                     translation: transform.translation + advance,
@@ -590,8 +662,9 @@ fn steer(
         // [`float`] — and the helm above multiplies heading on from the
         // left, so rolling on from the right reaches that roll factor alone
         // and the guard keeps an idle boat's rotation unwritten.
-        let target_heel = -HEEL_AT_FULL_TURN * helm * boat.way / SPEED;
+        let target_heel = -hull.heel_at_full_turn * helm * boat.way / hull.speed;
         if boat.heel != target_heel {
+            let heel_t = eased(1.0 / hull.heel_response, time.delta_secs());
             let heel = settled(boat.heel + (target_heel - boat.heel) * heel_t, target_heel);
             transform.rotation *= Quat::from_rotation_z(heel - boat.heel);
             boat.heel = heel;
@@ -706,11 +779,11 @@ mod tests {
     #[test]
     fn the_model_is_the_hull_the_keel_is_probed_along() {
         // What `grounding` assumes about a shape it never looks at: the keel
-        // runs at DRAFT below the waterline, from the forefoot aft to the heel,
-        // and the hull is that long. Remodel the boat deeper and every probe
-        // would be reading the water above its own keel — the hull would sail
-        // through the shallows it should be stopped by, and nothing but this
-        // would notice.
+        // runs at the ship's draft below the waterline, from the forefoot aft
+        // to the heel, and the hull is the ship's length. Remodel the boat
+        // deeper and every probe would be reading the water above its own keel
+        // — the hull would sail through the shallows it should be stopped by,
+        // and nothing but this would notice.
         let corners: Vec<Vec3> = triangles(MODEL, HULL_MESH, "POSITION")
             .into_iter()
             .flatten()
@@ -721,13 +794,15 @@ mod tests {
             .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
 
         assert!(
-            (lowest + DRAFT).abs() < 1e-4,
+            (lowest + SHIP.draft).abs() < 1e-4,
             "the model's keel is {lowest} below the waterline, not {}",
-            -DRAFT
+            -SHIP.draft
         );
+        let half = SHIP.length * 0.5;
         assert!(
-            (bow + LENGTH * 0.5).abs() < 1e-4 && (transom - LENGTH * 0.5).abs() < 1e-4,
-            "the model runs {bow}..{transom}, not a {LENGTH}m hull about amidships"
+            (bow + half).abs() < 1e-4 && (transom - half).abs() < 1e-4,
+            "the model runs {bow}..{transom}, not a {}m hull about amidships",
+            SHIP.length
         );
 
         // The keel itself, not just the depth: the probes are spread between
@@ -735,13 +810,16 @@ mod tests {
         // the water ahead of a forefoot that has crept aft.
         let keel: Vec<&Vec3> = corners
             .iter()
-            .filter(|c| (c.y + DRAFT).abs() < 1e-4)
+            .filter(|c| (c.y + SHIP.draft).abs() < 1e-4)
             .collect();
         let forefoot = keel.iter().map(|c| c.z).fold(f32::MAX, f32::min);
         let heel = keel.iter().map(|c| c.z).fold(f32::MIN, f32::max);
         assert!(
-            (forefoot - FOREFOOT_STATION).abs() < 1e-4 && (heel - HEEL_STATION).abs() < 1e-4,
-            "the keel runs {forefoot}..{heel}, not {FOREFOOT_STATION}..{HEEL_STATION}"
+            (forefoot - SHIP.forefoot_station).abs() < 1e-4
+                && (heel - SHIP.heel_station).abs() < 1e-4,
+            "the keel runs {forefoot}..{heel}, not {}..{}",
+            SHIP.forefoot_station,
+            SHIP.heel_station
         );
     }
 
@@ -898,16 +976,18 @@ mod tests {
     fn ahead_and_astern_each_make_their_own_speed() {
         let ahead = speed_made(KeyCode::ArrowUp);
         assert!(
-            (ahead - SPEED).abs() < SPEED * 0.01,
-            "the boat made {ahead} m/s ahead, not {SPEED}"
+            (ahead - SHIP.speed).abs() < SHIP.speed * 0.01,
+            "the boat made {ahead} m/s ahead, not {}",
+            SHIP.speed
         );
 
         // Backing off a beach is the whole use of astern, so it is slower and
         // it is backwards — along the heading reversed, not a turn.
         let astern = speed_made(KeyCode::ArrowDown);
         assert!(
-            (astern + ASTERN_SPEED).abs() < ASTERN_SPEED * 0.01,
-            "the boat made {astern} m/s astern, not -{ASTERN_SPEED}"
+            (astern + SHIP.astern_speed).abs() < SHIP.astern_speed * 0.01,
+            "the boat made {astern} m/s astern, not -{}",
+            SHIP.astern_speed
         );
     }
 
@@ -925,7 +1005,7 @@ mod tests {
         let made = (boat(&mut app).translation - before).length() / seconds;
         assert!(made > 0.0, "the boat never began to move");
         assert!(
-            made < SPEED * 0.5,
+            made < SHIP.speed * 0.5,
             "{made} m/s inside the first half second is a leap, not gathered way"
         );
     }
@@ -967,14 +1047,16 @@ mod tests {
         let port = turn_rate(KeyCode::ArrowLeft);
         let starboard = turn_rate(KeyCode::ArrowRight);
 
-        let tolerance = TURN_RATE * 0.01;
+        let tolerance = SHIP.turn_rate * 0.01;
         assert!(
-            (port - TURN_RATE).abs() < tolerance,
-            "the bow came round at {port} rad/s to port, not {TURN_RATE}"
+            (port - SHIP.turn_rate).abs() < tolerance,
+            "the bow came round at {port} rad/s to port, not {}",
+            SHIP.turn_rate
         );
         assert!(
-            (starboard + TURN_RATE).abs() < tolerance,
-            "the bow came round at {starboard} rad/s to starboard, not -{TURN_RATE}"
+            (starboard + SHIP.turn_rate).abs() < tolerance,
+            "the bow came round at {starboard} rad/s to starboard, not -{}",
+            SHIP.turn_rate
         );
     }
 
@@ -1016,8 +1098,9 @@ mod tests {
         run_frames(&mut app, SETTLED);
         let heel = heel_shown(&mut app);
         assert!(
-            (heel + HEEL_AT_FULL_TURN).abs() < HEEL_AT_FULL_TURN * 0.05,
-            "a full-speed port turn heels {heel} rad, not -{HEEL_AT_FULL_TURN}"
+            (heel + SHIP.heel_at_full_turn).abs() < SHIP.heel_at_full_turn * 0.05,
+            "a full-speed port turn heels {heel} rad, not -{}",
+            SHIP.heel_at_full_turn
         );
 
         // The lean is the eye's alone: the bow still points along the
@@ -1032,8 +1115,9 @@ mod tests {
         run_frames(&mut app, SETTLED);
         let heel = heel_shown(&mut app);
         assert!(
-            (heel - HEEL_AT_FULL_TURN).abs() < HEEL_AT_FULL_TURN * 0.05,
-            "a full-speed starboard turn heels {heel} rad, not {HEEL_AT_FULL_TURN}"
+            (heel - SHIP.heel_at_full_turn).abs() < SHIP.heel_at_full_turn * 0.05,
+            "a full-speed starboard turn heels {heel} rad, not {}",
+            SHIP.heel_at_full_turn
         );
     }
 
@@ -1050,7 +1134,7 @@ mod tests {
         let heel = heel_shown(&mut app).abs();
         assert!(heel > 0.0, "the hull never began to lean");
         assert!(
-            heel < HEEL_AT_FULL_TURN * 0.5,
+            heel < SHIP.heel_at_full_turn * 0.5,
             "{heel} rad inside the first tenth of a second is a snap, not a roll"
         );
     }
@@ -1174,6 +1258,27 @@ mod tests {
     }
 
     #[test]
+    fn the_player_enters_the_world_aboard_the_boat() {
+        // Entering a world is done afloat: one player, riding the boat as a
+        // child of it — which is what the camera and the position reports
+        // resolve through, so a player spawned loose or not at all would
+        // leave both staring at nothing.
+        let mut app = test_app();
+        let boat = app
+            .world_mut()
+            .query_filtered::<Entity, With<Boat>>()
+            .single(app.world())
+            .expect("a match should have a boat in it");
+        let aboard = app
+            .world_mut()
+            .query_filtered::<&ChildOf, With<Player>>()
+            .single(app.world())
+            .expect("a match should have a player in it")
+            .parent();
+        assert_eq!(aboard, boat, "the player is not aboard the boat");
+    }
+
+    #[test]
     fn the_boat_rides_the_surface_it_is_over() {
         let mut app = island_app();
 
@@ -1284,7 +1389,7 @@ mod tests {
             "the deck never left level ({most} rad at most)"
         );
         assert!(
-            most < HEEL_AT_FULL_TURN,
+            most < SHIP.heel_at_full_turn,
             "the swell alone tilts the hull {most} rad, past a full-helm heel"
         );
         assert!(tilts.iter().any(|t| *t != tilts[0]), "the deck froze");
@@ -1318,10 +1423,10 @@ mod tests {
                     depth,
                 )
             };
-            let asks_pitch = water_at(Vec3::new(0.0, 0.0, -LENGTH / 2.0))
-                - water_at(Vec3::new(0.0, 0.0, LENGTH / 2.0));
-            let asks_roll = water_at(Vec3::new(BEAM / 2.0, 0.0, 0.0))
-                - water_at(Vec3::new(-BEAM / 2.0, 0.0, 0.0));
+            let asks_pitch = water_at(Vec3::new(0.0, 0.0, -SHIP.length / 2.0))
+                - water_at(Vec3::new(0.0, 0.0, SHIP.length / 2.0));
+            let asks_roll = water_at(Vec3::new(SHIP.beam / 2.0, 0.0, 0.0))
+                - water_at(Vec3::new(-SHIP.beam / 2.0, 0.0, 0.0));
             // The bow's lift is the pitch's sine; the starboard rail's is
             // the roll's, masthead to port as it rises.
             fore_aft += asks_pitch * transform.forward().y;
@@ -1378,7 +1483,7 @@ mod tests {
     /// aground and more positive is further in.
     fn bite(app: &mut App) -> f32 {
         let transform = boat(app);
-        grounding(Some(app.world().resource::<Ground>()), &transform)
+        grounding(&SHIP, Some(app.world().resource::<Ground>()), &transform)
     }
 
     #[test]
@@ -1389,7 +1494,7 @@ mod tests {
         // draw — a crest narrower than a facet is read off its flanks and
         // missed, which no spacing at this scale fixes; [`KEEL_PROBES`] carries
         // the argument for wearing that rather than probing the keel to death.
-        let spacing = (HEEL_STATION - FOREFOOT_STATION) / (KEEL_PROBES - 1) as f32;
+        let spacing = (SHIP.heel_station - SHIP.forefoot_station) / (KEEL_PROBES - 1) as f32;
         assert!(
             spacing <= FACET_METRES,
             "{spacing} m between probes leaves room for a {FACET_METRES} m facet to hide in"
@@ -1464,7 +1569,7 @@ mod tests {
         // over, and deeper is always allowed.
         let backed = from_the_island(&mut app);
         assert!(
-            backed > aground + LENGTH,
+            backed > aground + SHIP.length,
             "the boat came off {} m, less than its own length",
             backed - aground
         );
@@ -1490,8 +1595,9 @@ mod tests {
 
         let made = (boat(&mut app).translation - before).length() / seconds;
         assert!(
-            (made - SPEED).abs() < SPEED * 0.01,
-            "the boat made {made} m/s over open water, not {SPEED}"
+            (made - SHIP.speed).abs() < SHIP.speed * 0.01,
+            "the boat made {made} m/s over open water, not {}",
+            SHIP.speed
         );
     }
 

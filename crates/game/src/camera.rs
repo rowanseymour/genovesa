@@ -6,7 +6,7 @@ use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
-use crate::boat::Boat;
+use crate::player::PlayerPlace;
 use crate::terrain::Ground;
 use crate::{eased, AppState, Helm};
 
@@ -253,38 +253,44 @@ fn eye(camera: &MapCamera) -> Vec3 {
     camera.focus + offset * camera.distance
 }
 
-/// Keeps the camera centred on the player's boat — centred on the *map*,
-/// not on the water. The focus height is [`Ground::surface`]: the hillside
-/// where the ground stands proud, the flat waterline where it does not. The
-/// hull rides the swell and the eye deliberately does not — the world bobs
-/// around a steady picture rather than the whole picture heaving with the
-/// boat, which is the promise the module doc in [`crate::sea`] has made
-/// since the swell existed. Reading the boat's whole translation instead
+/// Keeps the camera centred on the player — centred on the *map*, not on the
+/// water. The player is followed through whatever carries them, vehicle or
+/// their own feet — see [`PlayerPlace`] — so the camera neither knows nor
+/// cares what they are aboard. The focus height is [`Ground::surface`]: the
+/// hillside where the ground stands proud, the flat waterline where it does
+/// not. A hull rides the swell and the eye deliberately does not — the world
+/// bobs around a steady picture rather than the whole picture heaving with
+/// the boat, which is the promise the module doc in [`crate::sea`] has made
+/// since the swell existed. Reading the carrier's whole translation instead
 /// quietly broke it: invisibly in a breeze, seasickly in a gale.
 fn follow_player(
     ground: Option<Res<Ground>>,
-    boats: Query<&Transform, With<Boat>>,
+    player: PlayerPlace,
+    carriers: Query<&Transform>,
     mut cameras: Query<&mut MapCamera>,
 ) {
     // Absent in tests that only care about turning and zooming; a match
     // always has one.
-    let Ok(boat) = boats.single() else {
+    let Some(place) = player
+        .carrier()
+        .and_then(|carrier| carriers.get(carrier).ok())
+    else {
         return;
     };
 
-    // Asked of the ground rather than read off the boat, twice over: the
-    // boat's height is a leftover until the chunk under it arrives, and once
-    // it has arrived the hull carries the swell. Until the ground can
-    // answer, the leftover is all there is to follow.
+    // Asked of the ground rather than read off the carrier, twice over: its
+    // height is a leftover until the chunk under it arrives, and once it has
+    // arrived a hull carries the swell. Until the ground can answer, the
+    // leftover is all there is to follow.
     let surface = ground
         .as_ref()
-        .and_then(|g| g.surface(boat.translation.x, boat.translation.z));
+        .and_then(|g| g.surface(place.translation.x, place.translation.z));
 
     for mut camera in &mut cameras {
         camera.target_focus = Vec3::new(
-            boat.translation.x,
-            surface.unwrap_or(boat.translation.y),
-            boat.translation.z,
+            place.translation.x,
+            surface.unwrap_or(place.translation.y),
+            place.translation.z,
         );
 
         if camera.grounded || surface.is_none() {
@@ -375,6 +381,7 @@ fn apply_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::player::Player;
     use crate::testing::{elapsed, hold, rebind, run_frames, test_ground, TEST_ISLAND_REACH};
     use bevy::state::app::StatesPlugin;
     use bevy::time::TimePlugin;
@@ -403,7 +410,7 @@ mod tests {
     fn test_app_on_terrain() -> App {
         let mut app = test_app();
         app.insert_resource(test_ground());
-        spawn_boat(&mut app, Vec3::ZERO);
+        spawn_player(&mut app, Vec3::ZERO);
         app.update();
         app
     }
@@ -416,23 +423,24 @@ mod tests {
             .expect("the test ground has arrived")
     }
 
-    /// Drops a bare boat entity into the world — enough for the camera to
-    /// follow. The real one, mesh and all, is `BoatPlugin`'s to spawn.
-    fn spawn_boat(app: &mut App, at: Vec3) {
+    /// Drops a bare player entity into the world, on their own feet — enough
+    /// for the camera to follow, the camera not caring what carries them.
+    /// The real one rides a boat, which the aboard test covers.
+    fn spawn_player(app: &mut App, at: Vec3) {
         app.world_mut()
-            .spawn((Boat::default(), Transform::from_translation(at)));
+            .spawn((Player, Transform::from_translation(at)));
     }
 
     /// Puts the player down at a spot outright, mid-match, with the camera
     /// already settled there, and lets one frame run so the terrain systems
     /// ground the view.
     fn place_player(app: &mut App, spot: Vec3, distance: f32, yaw: f32) {
-        let mut boats = app
+        let mut players = app
             .world_mut()
-            .query_filtered::<&mut Transform, With<Boat>>();
-        boats
+            .query_filtered::<&mut Transform, With<Player>>();
+        players
             .single_mut(app.world_mut())
-            .expect("boat should exist")
+            .expect("player should exist")
             .translation = spot;
         let mut camera = app
             .world_mut()
@@ -503,23 +511,48 @@ mod tests {
     }
 
     #[test]
-    fn the_camera_follows_the_boat() {
+    fn the_camera_follows_the_player() {
         let mut app = test_app();
-        spawn_boat(&mut app, Vec3::new(30.0, 2.0, -14.0));
+        spawn_player(&mut app, Vec3::new(30.0, 2.0, -14.0));
         app.update();
         assert_eq!(focus(&mut app), Vec3::new(30.0, 2.0, -14.0));
 
-        // And keeps following: wherever the boat goes, the focus goes whole —
-        // height included, since the boat rides the surface the camera wants.
-        let mut boats = app
+        // And keeps following: wherever the player goes, the focus goes whole
+        // — height included, since they ride the surface the camera wants.
+        let mut players = app
             .world_mut()
-            .query_filtered::<&mut Transform, With<Boat>>();
-        boats
+            .query_filtered::<&mut Transform, With<Player>>();
+        players
             .single_mut(app.world_mut())
-            .expect("boat should exist")
+            .expect("player should exist")
             .translation = Vec3::new(-5.0, 0.5, 41.0);
         app.update();
         assert_eq!(focus(&mut app), Vec3::new(-5.0, 0.5, 41.0));
+    }
+
+    #[test]
+    fn the_camera_follows_the_vehicle_the_player_is_aboard() {
+        // A player aboard something is followed by way of it: the focus is
+        // the vehicle's own spot, not the player's identity transform inside
+        // it — and moving the vehicle moves the view, nothing on the player
+        // entity being touched at all.
+        let mut app = test_app();
+        let vehicle = app
+            .world_mut()
+            .spawn(Transform::from_translation(Vec3::new(12.0, 0.0, 7.0)))
+            .id();
+        app.world_mut()
+            .spawn((Player, Transform::default(), ChildOf(vehicle)));
+        app.update();
+        assert_eq!(focus(&mut app), Vec3::new(12.0, 0.0, 7.0));
+
+        app.world_mut()
+            .entity_mut(vehicle)
+            .get_mut::<Transform>()
+            .expect("vehicle should have a transform")
+            .translation = Vec3::new(-3.0, 0.0, 20.0);
+        app.update();
+        assert_eq!(focus(&mut app), Vec3::new(-3.0, 0.0, 20.0));
     }
 
     /// Turning and zooming are the player's hands, and stop with them.
@@ -591,9 +624,9 @@ mod tests {
 
         // Dropped onto the island, the first frame that can see the ground
         // puts the camera down on it rather than easing from sea level. The
-        // boat placed by `place_player` still carries a stale height, which is
-        // exactly the situation at the start of a match — the snap has to ask
-        // the ground, not the boat.
+        // player placed by `place_player` still carries a stale height, which
+        // is exactly the situation at the start of a match — the snap has to
+        // ask the ground, not the player.
         place_player(&mut app, Vec3::ZERO, DEFAULT_DISTANCE, YAW);
         let start = read(&mut app, |c| c.focus);
         assert!(
@@ -605,11 +638,11 @@ mod tests {
 
     #[test]
     fn the_focus_holds_the_waterline_while_the_hull_bobs() {
-        // The hull rides the swell; the eye must not — see the module doc in
+        // A hull rides the swell; the eye must not — see the module doc in
         // `sea`, which promised a steady picture long before anything
-        // enforced it. Heave the boat by hand, the way the swell does every
-        // frame, and however the hull moves the focus stays on the flat
-        // waterline.
+        // enforced it. Heave the player by hand, the way the swell heaves a
+        // hull every frame, and however they move the focus stays on the
+        // flat waterline.
         let mut app = test_app_on_terrain();
         let offshore = Vec3::new(TEST_ISLAND_REACH * 1.5, 0.0, 0.0);
         place_player(&mut app, offshore, DEFAULT_DISTANCE, YAW);
@@ -619,12 +652,12 @@ mod tests {
         );
 
         for heave in [0.4, -0.5, 1.0] {
-            let mut boats = app
+            let mut players = app
                 .world_mut()
-                .query_filtered::<&mut Transform, With<Boat>>();
-            boats
+                .query_filtered::<&mut Transform, With<Player>>();
+            players
                 .single_mut(app.world_mut())
-                .expect("boat should exist")
+                .expect("player should exist")
                 .translation
                 .y = heave;
             run_frames(&mut app, 5);
