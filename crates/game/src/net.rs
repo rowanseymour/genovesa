@@ -35,7 +35,7 @@ use bevy::prelude::*;
 use protocol::{PlayerId, ToClient, ToServer, DEFAULT_PORT, PROTOCOL_VERSION};
 use server::{Host, Server, WorldConfig};
 
-use crate::boat::Boat;
+use crate::player::PlayerPlace;
 use crate::sea;
 use crate::terrain::Ground;
 use crate::{eased, matte, AppState};
@@ -574,18 +574,23 @@ fn ask_for_ground(online: Res<Online>, ground: Option<ResMut<Ground>>) {
     }
 }
 
-/// Tells the server where the player is: where their boat is, the boat being
-/// the avatar the movement keys drive.
+/// Tells the server where the player is: where whatever carries them is —
+/// the boat they are aboard, or one day their own feet — resolved through
+/// [`PlayerPlace`] so this system never learns which.
 fn report_position(
     time: Res<Time>,
     online: Res<Online>,
-    boats: Query<&Transform, With<Boat>>,
+    player: PlayerPlace,
+    carriers: Query<&Transform>,
     mut last: Local<Option<(f32, Vec2)>>,
 ) {
-    let Ok(boat) = boats.single() else {
+    let Some(place) = player
+        .carrier()
+        .and_then(|carrier| carriers.get(carrier).ok())
+    else {
         return;
     };
-    let position = Vec2::new(boat.translation.x, boat.translation.z);
+    let position = Vec2::new(place.translation.x, place.translation.z);
     let now = time.elapsed_secs();
 
     if let Some((reported_at, reported)) = *last {
