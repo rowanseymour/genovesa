@@ -9,15 +9,37 @@
 //! changing tone as they tilt, and the waterline creeping up and down every
 //! beach as the surface rises and falls through the shore.
 //!
+//! The swell is two regimes crossfaded by depth. Over open water it is three
+//! sines crossing at odd angles — see [`WAVES`]. In the shallows those hand
+//! over to a single longer shore wave whose *phase is the depth itself*:
+//! its crests are the depth contours, which by definition run parallel to
+//! whatever shore they approach, so waves wrap into bays and meet every
+//! beach face-on without any refraction being computed. That trick is why
+//! the shore wave has no heading — steering a directional wave by depth
+//! means integrating phase along its path, which has no honest local answer,
+//! while a contour is already the shape refraction bends a crest into. The
+//! shore wave's height is capped by the water it stands in, the way breaking
+//! caps a real one, and the fragment shader paints foam where the cap is
+//! biting on a crest.
+//!
+//! Depth reaches the shader through [`DepthWindow`]: a coarse byte-per-texel
+//! picture of the water depth around the camera, refilled a few rows a frame
+//! from the ground chunks the server has sent. The client is not generating
+//! anything here — it is reading the very heights it was given to draw, the
+//! same way it builds meshes from them.
+//!
 //! Three parties have to agree on where the water stands at a moment: the
 //! shader displacing the sea mesh, the boat riding on it, and the markers
-//! other players stand as. The parameters live once, in [`components`], and
-//! reach the shader through a uniform so they cannot drift from the Rust
-//! side; the *formula* — a sum of sines — is written twice, here in [`swell`]
-//! and once in `assets/shaders/sea.wgsl`, and the two must be kept the same.
-//! Time is the other half of the agreement: the shader reads `globals.time`,
-//! which Bevy fills from `Time::elapsed_secs_wrapped`, so that is what every
-//! Rust caller of [`swell`] must pass.
+//! other players stand as. The parameters live once, in this file, and reach
+//! the shader through a uniform so they cannot drift from the Rust side; the
+//! *formula* — [`swell`] — is written twice, here and in
+//! `assets/shaders/sea.wgsl`, and the two must be kept the same. Time is the
+//! other half of the agreement: the shader reads `globals.time`, which Bevy
+//! fills from `Time::elapsed_secs_wrapped`, so that is what every Rust
+//! caller of [`swell`] must pass. Depth is the last part, and there the
+//! agreement is deliberately loose: the shader reads the windowed texture,
+//! the boat asks the ground exactly, and the two differ by at most a texel
+//! of interpolation in water where the swell is smallest.
 //!
 //! The camera deliberately does *not* ride the swell. Its focus stays on the
 //! flat waterline, so the world bobs around a steady eye rather than the
@@ -26,21 +48,24 @@
 use std::f32::consts::TAU;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::image::{Image, ImageSampler};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
-use bevy::shader::ShaderRef;
+use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
+
+use crate::camera::MapCamera;
+use crate::terrain::Ground;
 
 /// Displaces the sea's vertices and shades the result — see the module doc,
 /// and the file itself, which carries the other copy of [`swell`].
 const SHADER: &str = "shaders/sea.wgsl";
 
-/// The swell, as components: heading, wavelength in metres, amplitude in
-/// metres. Three of them, because one sine reads as a marching pattern and
-/// two as a grid; three, crossing at odd angles, is the fewest that reads as
-/// water. Headings are deliberately unrelated to the axes of the chunk grid
-/// and to each other.
+/// The open sea's swell, as components: heading, wavelength in metres,
+/// amplitude in metres. Three of them, because one sine reads as a marching
+/// pattern and two as a grid; three, crossing at odd angles, is the fewest
+/// that reads as water. Headings are deliberately unrelated to the axes of
+/// the chunk grid and to each other.
 ///
 /// The wavelengths stay well above twice [`SPACING`], or a wave would fall
 /// between the mesh's vertices and alias into shimmer. The amplitudes are
@@ -69,6 +94,75 @@ const GRAVITY: f32 = 9.81;
 /// the surface everything rides stays calm.
 const SHADING_TILT: f32 = 4.0;
 
+/// The depths across which the open sea hands over to the shore wave, in
+/// metres: the crossfade starts as the water shallows through the first and
+/// is complete by the second. The whole ocean floor is only [`OCEAN_DEPTH`]
+/// down, so "deep" here is a few metres — what matters is that the handover
+/// spans the islands' skirts, where the criss-cross of the open sea starts
+/// to look wrong marching over a beach.
+///
+/// [`OCEAN_DEPTH`]: protocol::ground::OCEAN_DEPTH
+const SHOAL: (f32, f32) = (6.5, 2.5);
+
+/// Metres of *depth* between one shore crest and the next. The shore wave's
+/// phase is the depth itself, so this is its wavelength measured down the
+/// beach profile rather than across the water — on a typical island skirt it
+/// comes out a few tens of metres between crests, tightening where the
+/// bottom steepens and stretching where a flat bay hardly deepens at all.
+const CREST_EVERY: f32 = 1.6;
+
+/// Seconds from one shore crest to the next — unhurried, and longer than any
+/// of the open sea's periods: the shallows collect the deep swell into
+/// fewer, larger arrivals, which is precisely what a beach does.
+const SHORE_PERIOD: f32 = 7.5;
+
+/// Height of the shore wave over water deep enough not to break it, metres.
+/// A little larger than any single deep wave, for the same reason the
+/// period is longer: what arrives at a beach is the swell gathered up.
+const SHORE_AMPLITUDE: f32 = 0.3;
+
+/// The tallest wave a depth of water can carry, as a slope: a wave breaks
+/// where its height outruns `BREAK_SLOPE` times the depth under it, so this
+/// is what caps the shore wave as the bottom comes up — and where the cap
+/// bites is where the foam is painted.
+const BREAK_SLOPE: f32 = 0.45;
+
+/// What survives of a broken wave to run up the sand, in metres: the cap on
+/// the shore wave's height never quite closes to zero, so the waterline
+/// itself still breathes instead of the swell dying politely offshore.
+const RUNUP: f32 = 0.06;
+
+/// How much of a crest wears foam: the threshold on the shore wave's sine
+/// above which a breaking crest is painted white. Higher is thinner bands.
+const FOAM_CREST: f32 = 0.35;
+
+/// The least the bottom must be rising, as a grade, for a breaking crest to
+/// foam. Breaking wants a face to trip over: without this, a tidal flat an
+/// inch deep is "breaking" across its whole area at once, and because depth
+/// is phase, the whole flat crests in unison — sheets of white flashing
+/// over every low spit and lagoon in view. Gating on the depth gradient
+/// pins the foam to where the bottom actually comes up — the shelf edge,
+/// the beach face — which is where the white line lives in an aerial
+/// photograph too.
+const FOAM_SLOPE: f32 = 0.02;
+
+/// What must lie behind a breaker for it to be one: this far down the
+/// bottom's slope, at least this much water. A breaking wave is deep water
+/// arriving somewhere too shallow for it, so a face with only shallows at
+/// its back — a ripple in a lagoon floor, the bank of a tidal creek — has
+/// nothing to break. The slope gate alone let those through: a lagoon
+/// floor undulates past [`FOAM_SLOPE`] in plenty of places, and the lagoon
+/// wore slabs of foam no real one would. Metres to look, then metres of
+/// water that must be found there.
+const FOAM_FEED: (f32, f32) = (24.0, 1.2);
+
+/// Wavelength, in metres, of a slow drift the shore wave's phase picks up
+/// along the coast. Without it the phase at the waterline is `ω·t` alone
+/// and every beach in the world breaks in unison, like lights on one
+/// switch; a long spatial term staggers the sets from bay to bay while
+/// leaving each crest still reading as parallel to its shore.
+const SHORE_STAGGER: f32 = 300.0;
+
 /// Metres between the sea mesh's vertices, over the region that waves. The
 /// terrain's facets are 2 m; the sea's are coarser because its shapes are
 /// longer — at 4 m the shortest wave in [`WAVES`] still gets three facets per
@@ -91,39 +185,117 @@ const REACH: f32 = 1024.0;
 /// the haze — the fade exists so the mesh can end, not to be seen.
 const FADE: (f32, f32) = (512.0, 960.0);
 
+/// Texels along each side of the depth window. With a texel per [`SPACING`]
+/// that is a 2560 m square — comfortably past where the swell has faded,
+/// so nothing that moves is ever asking about water outside it.
+const DEPTH_TEXELS: usize = 640;
+
+/// Width of the depth window in metres.
+const DEPTH_EXTENT: f32 = DEPTH_TEXELS as f32 * SPACING;
+
+/// The deepest water a texel can say, in metres: a byte spans this range in
+/// 5 cm steps. Comfortably past [`OCEAN_DEPTH`], and unknown ground — chunks
+/// not yet sent — is encoded as the full value, so water the client has not
+/// been told about wears the open sea's swell until it learns better.
+///
+/// [`OCEAN_DEPTH`]: protocol::ground::OCEAN_DEPTH
+const DEPTH_RANGE: f32 = 12.75;
+
+/// How far the camera may drift from the depth window's centre before the
+/// window is scrolled back under it, in metres. Scrolling shifts the texels
+/// by whole steps of [`SPACING`], so everything already known stays pinned
+/// to the world points it was read from and only the strip that slid into
+/// view is stale — and that strip enters at the window's edge, beyond the
+/// fade, where nothing is drawn moving anyway.
+const RECENTER: f32 = 128.0;
+
+/// Rows of the depth window refilled from the ground each frame. The sweep
+/// simply goes round and round: at ten rows a frame the whole window is
+/// re-read about once a second, which is how arriving chunks, and the gaps a
+/// scroll exposes, find their way in without anyone tracking what changed.
+/// A row is a few hundred height lookups, noise next to a single chunk mesh
+/// build.
+const SWEEP_ROWS: usize = 10;
+
 /// The sea's water, waves and all: the standard water surface underneath,
 /// with the swell displacing its vertices on top.
 pub type SeaMaterial = ExtendedMaterial<StandardMaterial, SeaExtension>;
 
 /// What the sea shader needs beyond the standard material: the swell's
-/// components, packed for the sum the shader runs per vertex.
+/// parameters, packed for the sums the shader runs, and the depth window it
+/// reads the shallows from.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct SeaExtension {
-    /// One wave per row: `xy` is the heading scaled by the wavenumber, `z`
-    /// the angular frequency, `w` the amplitude — exactly the terms of
+    /// One deep wave per row: `xy` is the heading scaled by the wavenumber,
+    /// `z` the angular frequency, `w` the amplitude — exactly the terms of
     /// [`swell`], so the shader adds them up rather than deriving anything.
     #[uniform(100)]
     waves: [Vec4; WAVES.len()],
     /// `x` and `y` are [`FADE`], `z` is [`SHADING_TILT`]; `w` is padding.
     #[uniform(100)]
     fade: Vec4,
+    /// The shore wave: `x` its wavenumber down the depth, `y` its angular
+    /// frequency, `z` [`SHORE_AMPLITUDE`], `w` [`BREAK_SLOPE`].
+    #[uniform(100)]
+    shore: Vec4,
+    /// The shallows: `x` and `y` are [`SHOAL`], `z` is [`RUNUP`], `w` is
+    /// [`FOAM_CREST`].
+    #[uniform(100)]
+    surf: Vec4,
+    /// `xy` is the along-shore stagger as a wave vector — [`SHORE_STAGGER`]
+    /// along the primary deep heading; `z` is [`FOAM_SLOPE`]; `w` is a
+    /// depth texel's width in metres, which is what the shader steps by to
+    /// read the bottom's grade.
+    #[uniform(100)]
+    stagger: Vec4,
+    /// `xy` is [`FOAM_FEED`]; `zw` is padding.
+    #[uniform(100)]
+    feed: Vec4,
+    /// The depth window's place in the world: `xy` the world coordinates of
+    /// its corner texel's corner, `z` `1 / DEPTH_EXTENT`, `w`
+    /// [`DEPTH_RANGE`]. Rewritten whenever the window scrolls.
+    #[uniform(100)]
+    window: Vec4,
+    /// The depth window itself — see [`DepthWindow`], which owns the scroll
+    /// and the sweep that keep it current.
+    #[texture(101)]
+    #[sampler(102)]
+    depth: Handle<Image>,
 }
 
-impl Default for SeaExtension {
-    fn default() -> Self {
+impl SeaExtension {
+    /// `focus` is where the camera enters the world — the window opens
+    /// centred there, exactly as [`DepthWindow::new`] will place it.
+    pub fn new(depth: Handle<Image>, focus: Vec2) -> Self {
+        let origin = DepthWindow::origin_under(focus);
         Self {
             waves: components(),
             fade: Vec4::new(FADE.0, FADE.1, SHADING_TILT, 0.0),
+            shore: Vec4::new(
+                TAU / CREST_EVERY,
+                TAU / SHORE_PERIOD,
+                SHORE_AMPLITUDE,
+                BREAK_SLOPE,
+            ),
+            surf: Vec4::new(SHOAL.0, SHOAL.1, RUNUP, FOAM_CREST),
+            stagger: Vec4::new(stagger_vector().x, stagger_vector().y, FOAM_SLOPE, SPACING),
+            feed: Vec4::new(FOAM_FEED.0, FOAM_FEED.1, 0.0, 0.0),
+            window: Self::window_uniform(origin),
+            depth,
         }
+    }
+
+    fn window_uniform(origin: Vec2) -> Vec4 {
+        Vec4::new(origin.x, origin.y, 1.0 / DEPTH_EXTENT, DEPTH_RANGE)
     }
 }
 
 impl MaterialExtension for SeaExtension {
-    fn vertex_shader() -> ShaderRef {
+    fn vertex_shader() -> bevy::shader::ShaderRef {
         SHADER.into()
     }
 
-    fn fragment_shader() -> ShaderRef {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
         SHADER.into()
     }
 }
@@ -139,17 +311,51 @@ fn components() -> [Vec4; WAVES.len()] {
     })
 }
 
+/// The along-shore stagger as a wave vector — see [`SHORE_STAGGER`].
+fn stagger_vector() -> Vec2 {
+    WAVES[0].0.normalize() * (TAU / SHORE_STAGGER)
+}
+
 /// Height of the swell above the flat waterline at a point, in metres —
 /// negative in a trough. `elapsed` is `Time::elapsed_secs_wrapped`, the same
-/// clock the shader's `globals.time` runs on.
+/// clock the shader's `globals.time` runs on, and `depth` is how much water
+/// stands under the point — the negative of [`Ground::height`], with
+/// anything unknown counting as deep.
 ///
 /// This is the Rust copy of the formula in `assets/shaders/sea.wgsl`; the
 /// two must agree or the boat stops sitting on the water it is drawn in.
-pub fn swell(at: Vec2, elapsed: f32) -> f32 {
-    components()
+pub fn swell(at: Vec2, elapsed: f32, depth: f32) -> f32 {
+    let deep: f32 = components()
         .iter()
         .map(|wave| wave.w * (wave.xy().dot(at) - wave.z * elapsed).sin())
-        .sum()
+        .sum();
+    let w = shore_weight(depth);
+    deep * (1.0 - w) + shore(at, elapsed, depth) * w
+}
+
+/// How much of the swell at a depth is the shore wave rather than the open
+/// sea's: none in the deep, all of it in the shallows — see [`SHOAL`].
+fn shore_weight(depth: f32) -> f32 {
+    1.0 - smoothstep(SHOAL.1, SHOAL.0, depth)
+}
+
+/// The shore wave's height at a point, in metres. Phase runs down the depth
+/// itself — see the module doc for why that alone is what bends crests
+/// parallel to every shore — and its height is capped by the water under
+/// it, which is breaking.
+fn shore(at: Vec2, elapsed: f32, depth: f32) -> f32 {
+    let amplitude = SHORE_AMPLITUDE.min(depth.max(0.0) * BREAK_SLOPE + RUNUP);
+    let phase =
+        depth * (TAU / CREST_EVERY) + stagger_vector().dot(at) + (TAU / SHORE_PERIOD) * elapsed;
+    amplitude * phase.sin()
+}
+
+/// The same curve as WGSL's `smoothstep`, which the shader's copy of the
+/// crossfade uses — the two must be the same function or the boat and the
+/// water part company exactly where the regimes blend.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Snaps a coordinate onto the sea mesh's own lattice.
@@ -162,6 +368,165 @@ pub fn swell(at: Vec2, elapsed: f32) -> f32 {
 /// slides underneath it.
 pub fn snap(coordinate: f32) -> f32 {
     (coordinate / SPACING).round() * SPACING
+}
+
+// ---------------------------------------------------------------------------
+// The depth window
+// ---------------------------------------------------------------------------
+
+/// The picture of the water's depth around the camera that the sea shader
+/// reads: a byte per texel, a texel per [`SPACING`], scrolled to follow the
+/// camera and perpetually re-read from [`Ground`] by [`refresh_depth`].
+///
+/// Holds the handles rather than living on an entity because two assets have
+/// to change together: scrolling the image only means anything if the
+/// material's idea of where the window sits moves in the same frame.
+#[derive(Resource)]
+pub struct DepthWindow {
+    image: Handle<Image>,
+    material: Handle<SeaMaterial>,
+    /// World coordinates of the corner of texel (0, 0), a multiple of
+    /// [`SPACING`] always, so texels stay pinned to world points across
+    /// every scroll.
+    origin: Vec2,
+    /// The row the round-robin sweep refills next.
+    sweep: usize,
+}
+
+impl DepthWindow {
+    pub fn new(image: Handle<Image>, material: Handle<SeaMaterial>, focus: Vec2) -> Self {
+        Self {
+            image,
+            material,
+            origin: Self::origin_under(focus),
+            sweep: 0,
+        }
+    }
+
+    /// The window origin that centres the window on a focus, on the lattice.
+    fn origin_under(focus: Vec2) -> Vec2 {
+        Vec2::new(snap(focus.x), snap(focus.y)) - DEPTH_EXTENT / 2.0
+    }
+}
+
+/// A depth window with nothing in it yet: every texel deep, so the sea wears
+/// the open swell everywhere until the sweep has read the actual ground.
+pub fn depth_image() -> Image {
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: DEPTH_TEXELS as u32,
+            height: DEPTH_TEXELS as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[u8::MAX],
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::default(),
+    );
+    // Bilinear, so a facet between two texels gets water between their
+    // depths rather than one or the other's.
+    image.sampler = ImageSampler::linear();
+    image
+}
+
+/// One texel's worth of depth. Ground the client has not been sent reads as
+/// the deepest water a byte can say — see [`DEPTH_RANGE`].
+fn depth_byte(height: Option<f32>) -> u8 {
+    match height {
+        None => u8::MAX,
+        Some(height) => ((-height).clamp(0.0, DEPTH_RANGE) / DEPTH_RANGE * 255.0).round() as u8,
+    }
+}
+
+/// Keeps the depth window under the camera and its texels agreeing with the
+/// ground.
+///
+/// Two motions, deliberately decoupled. The *scroll* fires when the camera
+/// has drifted [`RECENTER`] from the window's centre: texels shift by whole
+/// steps of the lattice, so every depth already read stays pinned to the
+/// world point it was read from, and the material is told where the window
+/// now sits in the same frame. The strip a scroll exposes is stale, and
+/// allowed to be — it enters at the window's edge, past the swell's fade.
+///
+/// The *sweep* refills [`SWEEP_ROWS`] rows a frame, round and round,
+/// re-reading the ground whether or not anything changed. That sounds
+/// wasteful and is the entire trick: chunks arriving, chunks forgotten and
+/// scroll-exposed strips all heal within a second of sweep with nothing
+/// keeping track of any of them. The rewrite only touches the image asset
+/// when some byte actually changed, so a settled view re-uploads nothing.
+pub(crate) fn refresh_depth(
+    ground: Res<Ground>,
+    cameras: Query<&MapCamera>,
+    mut window: ResMut<DepthWindow>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<SeaMaterial>>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let focus = Vec2::new(camera.focus.x, camera.focus.z);
+
+    // The scroll.
+    let drift = focus - (window.origin + DEPTH_EXTENT / 2.0);
+    if drift.x.abs() > RECENTER || drift.y.abs() > RECENTER {
+        let origin = DepthWindow::origin_under(focus);
+        let step = ((origin - window.origin) / SPACING).round().as_ivec2();
+        if let Some(mut image) = images.get_mut(&window.image) {
+            if let Some(data) = image.data.as_mut() {
+                scroll(data, step);
+            }
+        }
+        window.origin = origin;
+        if let Some(mut material) = materials.get_mut(&window.material) {
+            material.extension.window = SeaExtension::window_uniform(origin);
+        }
+    }
+
+    // The sweep. Read into a scratch first and compare, so a frame that
+    // changed nothing marks nothing changed and re-uploads nothing. The
+    // sweep never straddles the wrap — see `the_sweep_divides_the_window`.
+    let mut rows = [0u8; DEPTH_TEXELS * SWEEP_ROWS];
+    for r in 0..SWEEP_ROWS {
+        let row = window.sweep + r;
+        for x in 0..DEPTH_TEXELS {
+            let at = window.origin + Vec2::new(x as f32 + 0.5, row as f32 + 0.5) * SPACING;
+            rows[r * DEPTH_TEXELS + x] = depth_byte(ground.height(at.x, at.y));
+        }
+    }
+    let start = window.sweep * DEPTH_TEXELS;
+    let stale = |data: &[u8]| data[start..start + rows.len()] != rows[..];
+    if images
+        .get(&window.image)
+        .and_then(|image| image.data.as_deref())
+        .is_some_and(stale)
+    {
+        if let Some(mut image) = images.get_mut(&window.image) {
+            if let Some(data) = image.data.as_mut() {
+                data[start..start + rows.len()].copy_from_slice(&rows);
+            }
+        }
+    }
+    window.sweep = (window.sweep + SWEEP_ROWS) % DEPTH_TEXELS;
+}
+
+/// Shifts the window's texels so that texel `(x, y)` afterwards holds what
+/// texel `(x, y) + step` held before — the data moves opposite to the
+/// window, which is what keeps each surviving texel over the same piece of
+/// world. Texels that slide in from beyond the old window are set deep, and
+/// left for the sweep.
+fn scroll(data: &mut [u8], step: IVec2) {
+    let n = DEPTH_TEXELS as i32;
+    let old = data.to_vec();
+    for y in 0..n {
+        for x in 0..n {
+            let from = IVec2::new(x, y) + step;
+            data[(y * n + x) as usize] = if (0..n).contains(&from.x) && (0..n).contains(&from.y) {
+                old[(from.y * n + from.x) as usize]
+            } else {
+                u8::MAX
+            };
+        }
+    }
 }
 
 /// The sea's mesh: a grid of [`SPACING`] cells out to [`REACH`], with one
@@ -225,24 +590,31 @@ pub fn surface_mesh(extent: f32) -> Mesh {
 mod tests {
     use super::*;
 
-    /// The most the surface can ever stand off the waterline: every wave at
-    /// its crest at once.
+    /// Somewhere with the whole ocean's depth under it.
+    const DEEP: f32 = 8.0;
+
+    /// The most the surface can ever stand off the waterline: every deep
+    /// wave at its crest at once, or the shore wave's whole height.
     fn ceiling() -> f32 {
-        WAVES.iter().map(|(_, _, amplitude)| amplitude).sum()
+        let deep: f32 = WAVES.iter().map(|(_, _, amplitude)| amplitude).sum();
+        deep.max(SHORE_AMPLITUDE)
     }
 
     #[test]
     fn the_swell_stays_within_its_amplitudes() {
         // The boat and the shore both live within centimetres of the
         // waterline, so the swell being bounded is not decoration — it is
-        // what keeps a calm day calm everywhere and forever.
+        // what keeps a calm day calm everywhere and forever, at every depth
+        // the crossfade passes through.
         let limit = ceiling();
         for i in 0..1000 {
             let at = Vec2::new((i * 37 % 997) as f32 * 3.1, (i * 61 % 991) as f32 * -2.7);
-            let height = swell(at, i as f32 * 0.37);
+            let depth = (i % 100) as f32 * 0.1;
+            let height = swell(at, i as f32 * 0.37, depth);
             assert!(
                 height.abs() <= limit,
-                "the swell reaches {height} m at {at}, past every crest combined ({limit} m)"
+                "the swell reaches {height} m at {at} in {depth} m of water, \
+                 past every crest combined ({limit} m)"
             );
         }
     }
@@ -250,9 +622,50 @@ mod tests {
     #[test]
     fn the_swell_moves() {
         // Anywhere at all, the surface a few seconds later is a different
-        // surface — the whole point of it.
+        // surface — the whole point of it. In the deep and in the shallows,
+        // because the two regimes are different waves.
         let at = Vec2::new(12.0, -34.0);
-        assert_ne!(swell(at, 0.0), swell(at, 2.0));
+        for depth in [DEEP, 1.0] {
+            assert_ne!(swell(at, 0.0, depth), swell(at, 2.0, depth));
+        }
+    }
+
+    #[test]
+    fn deep_water_is_all_open_sea() {
+        // At the ocean's own depth the crossfade must not have started: the
+        // shore wave is a coastal thing, and the open sea's look — and every
+        // digest of screenshots anyone has taken of it — stays exactly the
+        // sum of the three deep waves.
+        let at = Vec2::new(517.0, -212.0);
+        let elapsed = 12.3;
+        let deep: f32 = components()
+            .iter()
+            .map(|wave| wave.w * (wave.xy().dot(at) - wave.z * elapsed).sin())
+            .sum();
+        assert_eq!(swell(at, elapsed, DEEP), deep);
+    }
+
+    #[test]
+    fn the_shallows_break_the_wave_down_to_the_runup() {
+        // Breaking is a cap, not a fade to nothing: in ankle-deep water the
+        // shore wave still moves the waterline by the runup, and no more
+        // than the water can carry.
+        for i in 0..500 {
+            let depth = i as f32 * 0.01;
+            let tallest = (0..80)
+                .map(|t| shore(Vec2::ZERO, t as f32 * 0.1, depth).abs())
+                .fold(0.0, f32::max);
+            let cap = SHORE_AMPLITUDE.min(depth * BREAK_SLOPE + RUNUP);
+            assert!(
+                tallest <= cap + 1e-6,
+                "{tallest} m of shore wave in {depth} m of water, over the {cap} m cap"
+            );
+        }
+        // And the waterline itself still breathes.
+        let at_the_sand = (0..80)
+            .map(|t| shore(Vec2::ZERO, t as f32 * 0.1, 0.0).abs())
+            .fold(0.0, f32::max);
+        assert!(at_the_sand > RUNUP * 0.5, "the beach has gone still");
     }
 
     #[test]
@@ -279,5 +692,56 @@ mod tests {
         // The reach is a whole number of spacings — the last fine cell ends
         // exactly at REACH, where the rim begins.
         assert_eq!(REACH % SPACING, 0.0);
+    }
+
+    #[test]
+    fn the_depth_window_outreaches_the_swell() {
+        // Everything that moves fades out inside the window, wherever the
+        // camera has drifted since the last scroll — so no moving water is
+        // ever reading depth from beyond the window's edge.
+        assert!(DEPTH_EXTENT / 2.0 > FADE.1 + RECENTER + SPACING);
+    }
+
+    #[test]
+    fn a_depth_survives_its_texel() {
+        // A byte holds the whole working range to better than the height
+        // quantisation; dry land is zero water, and ground the client has
+        // not been sent reads as the deepest water there is.
+        assert_eq!(depth_byte(Some(2.0)), 0);
+        assert_eq!(depth_byte(None), u8::MAX);
+        let depth = 3.7;
+        let byte = depth_byte(Some(-depth));
+        let decoded = byte as f32 / 255.0 * DEPTH_RANGE;
+        assert!(
+            (decoded - depth).abs() < 0.03,
+            "{depth} m came back {decoded} m"
+        );
+    }
+
+    #[test]
+    fn the_sweep_divides_the_window() {
+        // What lets `refresh_depth` treat every sweep as one contiguous
+        // block: the rows per frame divide the rows there are, so a sweep
+        // never straddles the wrap back to row zero.
+        assert_eq!(DEPTH_TEXELS % SWEEP_ROWS, 0);
+    }
+
+    #[test]
+    fn scrolling_keeps_texels_over_their_ground() {
+        // A scroll is the window moving, not the world: after shifting, the
+        // texel now over a world point holds the byte the old texel over
+        // that point held, and the strip that slid in from beyond is deep.
+        let n = DEPTH_TEXELS;
+        let mut data: Vec<u8> = (0..n * n).map(|i| (i % 251) as u8).collect();
+        let before = data.clone();
+        let step = IVec2::new(3, -2);
+        scroll(&mut data, step);
+
+        // A texel well inside both windows.
+        let (x, y) = (100, 100);
+        let from = ((y + step.y) as usize * n) + (x + step.x) as usize;
+        assert_eq!(data[y as usize * n + x as usize], before[from]);
+        // A texel the scroll exposed.
+        assert_eq!(data[n - 1], u8::MAX);
     }
 }
