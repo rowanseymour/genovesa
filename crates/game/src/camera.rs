@@ -253,9 +253,14 @@ fn eye(camera: &MapCamera) -> Vec3 {
     camera.focus + offset * camera.distance
 }
 
-/// Keeps the camera centred on the player's boat. The boat rides the surface
-/// it is over, so following its whole translation is also what raises the
-/// camera onto a hillside and keeps it at the waterline over open sea.
+/// Keeps the camera centred on the player's boat — centred on the *map*,
+/// not on the water. The focus height is [`Ground::surface`]: the hillside
+/// where the ground stands proud, the flat waterline where it does not. The
+/// hull rides the swell and the eye deliberately does not — the world bobs
+/// around a steady picture rather than the whole picture heaving with the
+/// boat, which is the promise the module doc in [`crate::sea`] has made
+/// since the swell existed. Reading the boat's whole translation instead
+/// quietly broke it: invisibly in a breeze, seasickly in a gale.
 fn follow_player(
     ground: Option<Res<Ground>>,
     boats: Query<&Transform, With<Boat>>,
@@ -267,26 +272,27 @@ fn follow_player(
         return;
     };
 
-    for mut camera in &mut cameras {
-        camera.target_focus = boat.translation;
+    // Asked of the ground rather than read off the boat, twice over: the
+    // boat's height is a leftover until the chunk under it arrives, and once
+    // it has arrived the hull carries the swell. Until the ground can
+    // answer, the leftover is all there is to follow.
+    let surface = ground
+        .as_ref()
+        .and_then(|g| g.surface(boat.translation.x, boat.translation.z));
 
-        if camera.grounded {
+    for mut camera in &mut cameras {
+        camera.target_focus = Vec3::new(
+            boat.translation.x,
+            surface.unwrap_or(boat.translation.y),
+            boat.translation.z,
+        );
+
+        if camera.grounded || surface.is_none() {
             continue;
         }
         // Put down outright the first time the ground under the player can be
-        // answered, rather than easing there from sea level. Asked of the
-        // ground rather than read off the boat because the boat's own height
-        // is a leftover until that same chunk arrives — the same surface,
-        // one frame earlier.
-        let Some(surface) = ground
-            .as_ref()
-            .and_then(|g| g.surface(boat.translation.x, boat.translation.z))
-        else {
-            continue;
-        };
-        let focus = Vec3::new(boat.translation.x, surface, boat.translation.z);
-        camera.focus = focus;
-        camera.target_focus = focus;
+        // answered, rather than easing there from sea level.
+        camera.focus = camera.target_focus;
         camera.grounded = true;
     }
 }
@@ -595,6 +601,35 @@ mod tests {
             "camera started at {} rather than on the ground",
             start.y
         );
+    }
+
+    #[test]
+    fn the_focus_holds_the_waterline_while_the_hull_bobs() {
+        // The hull rides the swell; the eye must not — see the module doc in
+        // `sea`, which promised a steady picture long before anything
+        // enforced it. Heave the boat by hand, the way the swell does every
+        // frame, and however the hull moves the focus stays on the flat
+        // waterline.
+        let mut app = test_app_on_terrain();
+        let offshore = Vec3::new(TEST_ISLAND_REACH * 1.5, 0.0, 0.0);
+        place_player(&mut app, offshore, DEFAULT_DISTANCE, YAW);
+        assert!(
+            ground(&app, offshore.x, offshore.z) < 0.0,
+            "the spot picked to be open water is dry land"
+        );
+
+        for heave in [0.4, -0.5, 1.0] {
+            let mut boats = app
+                .world_mut()
+                .query_filtered::<&mut Transform, With<Boat>>();
+            boats
+                .single_mut(app.world_mut())
+                .expect("boat should exist")
+                .translation
+                .y = heave;
+            run_frames(&mut app, 5);
+            assert_eq!(focus(&mut app).y, 0.0, "the focus rode a {heave} m heave");
+        }
     }
 
     #[test]
