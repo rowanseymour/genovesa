@@ -948,11 +948,12 @@ type TravellingPlanes<'w, 's> =
 /// Keeps the sea and the ocean floor centred under the camera, so the water
 /// simply always reaches the horizon.
 ///
-/// In whole steps of the sea mesh's own vertex spacing rather than
-/// continuously — see [`sea::snap`]: the sea is no longer featureless, and
-/// its vertices have to keep sampling the same world points or the swell
-/// swims against itself. The floor needs no such care, but there is nothing
-/// on it for a few metres of snap to be seen by either.
+/// In whole strides of the sea mesh's own lattice rather than continuously —
+/// see [`sea::snap`]: the sea is no longer featureless, and its vertices have
+/// to keep sampling the same world points — and its facets keep their
+/// diagonals — or the swell swims against itself. The floor needs no such
+/// care, but there is nothing on it for a few metres of snap to be seen by
+/// either.
 fn follow_camera(cameras: Query<&MapCamera>, mut planes: TravellingPlanes) {
     let Ok(camera) = cameras.single() else {
         return;

@@ -579,7 +579,8 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Snaps a coordinate onto the sea mesh's own lattice.
+/// Snaps a coordinate onto the sea mesh's own lattice — in strides of *two*
+/// cells, never one.
 ///
 /// The mesh travels with the camera, and its vertices sample the swell at
 /// whatever world points they land on. Moved continuously, every vertex
@@ -587,8 +588,17 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 /// they are drawing; moved in whole steps of [`SPACING`], each vertex sits
 /// exactly where one sat before, and the surface holds still while the mesh
 /// slides underneath it.
+///
+/// The vertices are not the whole of the surface, though. The grid's
+/// diagonals checker by cell parity — see [`surface_mesh`] — so a
+/// single-cell step lands every vertex on a lattice site while flipping
+/// every facet's split in world terms, and the flat shading of the entire
+/// sea jumps with it: invisibly in a calm, unmissably in a gale, and only
+/// while the camera moves, which made it look like anything but geometry.
+/// Two cells is the stride that maps the checkerboard onto itself.
 pub fn snap(coordinate: f32) -> f32 {
-    (coordinate / SPACING).round() * SPACING
+    const STRIDE: f32 = 2.0 * SPACING;
+    (coordinate / STRIDE).round() * STRIDE
 }
 
 // ---------------------------------------------------------------------------
@@ -789,7 +799,10 @@ pub fn surface_mesh(extent: f32) -> Mesh {
             let c = a + across as u32;
             let d = c + 1;
             // Wound counter-clockwise seen from above, the same way round as
-            // the terrain's facets.
+            // the terrain's facets. The diagonals checker by cell parity so
+            // no one direction ridges the shading — which makes the parity
+            // part of the surface: [`snap`] strides two cells at a time to
+            // land this checkerboard back on itself.
             if (x + z) % 2 == 0 {
                 indices.extend([a, c, d, a, d, b]);
             } else {
@@ -1103,6 +1116,27 @@ mod tests {
         // The reach is a whole number of spacings — the last fine cell ends
         // exactly at REACH, where the rim begins.
         assert_eq!(REACH % SPACING, 0.0);
+    }
+
+    #[test]
+    fn the_mesh_travels_two_cells_at_a_time() {
+        // The travelling mesh may only land where the checkerboard of
+        // diagonals maps onto itself: on the lattice, an even number of
+        // cells from the origin. An odd landing keeps every vertex on a
+        // lattice site — the swell holds perfectly still — while flipping
+        // every facet's split, which is the whole sea's shading jumping
+        // with each step of the camera: worst in a gale, absent at anchor,
+        // and exactly the kind of wrong a vertex-level test cannot see.
+        for i in 0..1_000 {
+            let snapped = snap(i as f32 * 1.7 - 850.0);
+            let cells = (snapped / SPACING).round() as i64;
+            assert_eq!(
+                snapped,
+                cells as f32 * SPACING,
+                "{snapped} is off the lattice"
+            );
+            assert_eq!(cells % 2, 0, "{snapped} lands an odd {cells} cells out");
+        }
     }
 
     #[test]
