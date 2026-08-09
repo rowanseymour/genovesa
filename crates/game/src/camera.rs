@@ -219,20 +219,28 @@ fn spawn_camera(mut commands: Commands, view: Res<View>) {
         Camera3d::default(),
         camera,
         transform,
-        // Aerial haze, both to stop the far side of the map looking flat and to
-        // hide where the sea plane is cut off by the far clip plane. The colour
-        // has to match `ClearColor` and the fade has to finish before the far
-        // plane, or that cut shows up as a hard line along the horizon.
-        DistanceFog {
-            color: crate::SKY,
-            falloff: FogFalloff::Linear {
-                start: crate::HAZE_START,
-                end: crate::HAZE_END,
-            },
-            ..default()
-        },
+        haze(),
         Msaa::Sample4,
     ));
+}
+
+/// Aerial haze, both to stop the far side of the map looking flat and to hide
+/// where the sea plane is cut off by the far clip plane. The colour has to
+/// match `ClearColor` and the fade has to finish before the far plane, or that
+/// cut shows up as a hard line along the horizon.
+///
+/// Its own function so the `--debug` overlay can take it off and put it back
+/// exactly as it was, rather than keeping a second copy of these numbers that
+/// would drift the first time one of them was tuned.
+pub fn haze() -> DistanceFog {
+    DistanceFog {
+        color: crate::SKY,
+        falloff: FogFalloff::Linear {
+            start: crate::HAZE_START,
+            end: crate::HAZE_END,
+        },
+        ..default()
+    }
 }
 
 /// Where the camera eye sits, given its focus point, zoom distance and yaw.

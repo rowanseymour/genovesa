@@ -29,7 +29,8 @@ use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::light::{
-    CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster, NotShadowReceiver,
+    CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster,
+    NotShadowReceiver,
 };
 use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::{HashMap, HashSet};
@@ -734,21 +735,34 @@ fn enter_world(
             shadow_normal_bias: 2.2,
             ..default()
         },
-        // Cascades are fitted to the camera's own frustum, so the far end of the
-        // shadowed region travels with the camera. It has to sit past everything
-        // the camera can see, or that end lands on ground that is in shot and
-        // whole hillsides gain and lose their shadows as the view moves. Out at
-        // the haze it can't be seen doing it.
-        CascadeShadowConfigBuilder {
-            first_cascade_far_bound: 60.0,
-            maximum_distance: crate::HAZE_END,
-            ..default()
-        }
-        .build(),
+        cascades(crate::HAZE_END),
         // Low-ish sun: long shadows pick out the relief far better than an
         // overhead one, which flattens everything.
         Transform::from_xyz(55.0, 42.0, 28.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+}
+
+/// How the sun slices the view up into shadow cascades, out to `reach` metres.
+///
+/// Cascades are fitted to the camera's own frustum, so the far end of the
+/// shadowed region travels with the camera. It has to sit past everything the
+/// camera can see, or that end lands on ground that is in shot and whole
+/// hillsides gain and lose their shadows as the view moves. Out at the haze it
+/// can't be seen doing it, which is why the world builds this with
+/// [`crate::HAZE_END`].
+///
+/// The reach is an argument rather than baked in only so the `--debug` overlay
+/// can wind it in and out to see what it is buying — the shadow pass redraws
+/// most of the scene per cascade, and the outermost one reaches the same
+/// kilometre whether the camera is looking at a kilometre or at forty metres.
+/// Nothing in a played game calls it with anything else.
+pub fn cascades(reach: f32) -> CascadeShadowConfig {
+    CascadeShadowConfigBuilder {
+        first_cascade_far_bound: 60.0,
+        maximum_distance: reach,
+        ..default()
+    }
+    .build()
 }
 
 /// Chunk entities despawn themselves on exit; the resources that tracked them

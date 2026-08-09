@@ -1,4 +1,4 @@
-//! The `--debug` overlay: frame rate, and how much geometry each pass draws.
+//! The `--debug` overlay: what each pass draws, and switches to change it.
 //!
 //! A small readout pinned to a corner of the window, over whatever screen the
 //! app is on, a subject to a line. The frame rate comes from Bevy's own
@@ -15,18 +15,29 @@
 //! `--seed`, `--focus`, `--yaw`, `--zoom` — so a screenshot of the overlay is
 //! the whole of what it takes to stand here again, in a `--shot` run or
 //! otherwise.
+//!
+//! The number keys are switches for whoever is working on the renderer — see
+//! [`Toggles`] — and they are here rather than in their own module because
+//! reading a count and changing what is counted are one job: the reason to
+//! turn the shadows off is to watch the shadow line answer. When any of them
+//! is set the readout says so on a last line, since a doctored picture that
+//! did not admit it would be worth less than no picture at all.
 
 use std::any::TypeId;
 
 use bevy::camera::visibility::{CascadesVisibleEntities, VisibleEntities};
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
+use bevy::light::CascadeShadowConfig;
+use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
+use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::camera::{MapCamera, View};
 use crate::net::Hosting;
 use crate::terrain::{Ground, Tally};
+use crate::Helm;
 
 const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
 const BACKDROP: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
@@ -35,15 +46,160 @@ pub struct DebugOverlayPlugin;
 
 impl Plugin for DebugOverlayPlugin {
     fn build(&self, app: &mut App) {
+        // Wireframes come from the renderer, and the readout's own tests run
+        // an app that has none — text is text without a GPU. Asking whether
+        // the renderer is there keeps every `--debug` system in this file
+        // rather than scattering half of them into the binary to dodge that.
+        if app.is_plugin_added::<bevy::render::RenderPlugin>() {
+            app.add_plugins(WireframePlugin::default());
+        }
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+            .init_resource::<Toggles>()
             .add_systems(Startup, spawn_overlay)
-            .add_systems(Update, refresh_overlay);
+            // Only at the helm. Digits are typed into the seed and address
+            // fields on the menus, and the controls screen binds whatever key
+            // it is given — and that screen is *inside* a world, so gating on
+            // being in one is not enough to keep a toggle out of a binding.
+            .add_systems(Update, take_toggles.run_if(in_state(Helm::Sailing)))
+            .add_systems(Update, (apply_toggles, refresh_overlay).chain());
     }
 }
 
 /// Marks the overlay's one text block, so the refresh can find it.
 #[derive(Component)]
 struct DebugText;
+
+/// How far the sun's cascades reach when `4` has been leaned on, in metres.
+///
+/// The first is the world's own — [`crate::HAZE_END`], where the haze has
+/// closed and nothing can be seen to lose its shadow. The rest walk in far
+/// enough to be worth looking at rather than in polite steps: the question the
+/// key exists to answer is whether a shorter reach is *visibly* worse, and
+/// halving twice puts the far edge of the shadows inside the haze and then
+/// inside plain sight, which is where the answer is.
+const REACHES: [f32; 3] = [crate::HAZE_END, 450.0, 225.0];
+
+/// The switches `--debug` puts on the number keys.
+///
+/// Hard-wired rather than bound through [`crate::bindings`], and deliberately:
+/// these are for whoever is working on the renderer, they never appear on the
+/// controls screen, and a player who has rebound every key they can see still
+/// cannot reach them — the whole plugin is absent without `--debug`.
+#[derive(Resource, Default, PartialEq, Clone, Debug)]
+struct Toggles {
+    /// `1` — the sun stops casting. The shadow line disappears with it, Bevy
+    /// clearing the cascade cull when a light's shadows are off, so the
+    /// readout cannot claim work that is no longer being done.
+    no_shadows: bool,
+    /// `2` — the aerial haze comes off, so what the distant ground is actually
+    /// doing can be seen. Mostly worth having next to `4`: judging what a
+    /// shorter shadow reach costs is impossible while the haze is hiding the
+    /// far end of it.
+    no_haze: bool,
+    /// `3` — every triangle drawn as lines, which is how the fixed 8,192 a
+    /// chunk carries stops being a number and becomes a picture.
+    wireframe: bool,
+    /// `4` — index into [`REACHES`], cycling.
+    reach: usize,
+}
+
+impl Toggles {
+    /// How the overlay owns up to being in a doctored state — `None` when
+    /// nothing has been touched, which is the usual case and costs the readout
+    /// no line at all.
+    ///
+    /// It has to say. The module above promises that a screenshot of this
+    /// overlay is the whole of what it takes to stand here again, and a
+    /// picture taken with the sun switched off would quietly break that
+    /// promise in exactly the place it gets used: an argument about how the
+    /// renderer should be set up.
+    fn line(&self) -> Option<String> {
+        let mut on = Vec::new();
+        if self.no_shadows {
+            on.push("no shadows".to_string());
+        }
+        if self.no_haze {
+            on.push("no haze".to_string());
+        }
+        if self.wireframe {
+            on.push("wireframe".to_string());
+        }
+        if self.reach != 0 {
+            on.push(format!("shadow reach {:.0}m", REACHES[self.reach]));
+        }
+        (!on.is_empty()).then(|| format!("debug: {}", on.join(" / ")))
+    }
+}
+
+/// Reads the number keys. Nothing here touches the world — it only moves
+/// [`Toggles`], which [`apply_toggles`] then makes true of the scene, so that
+/// the state and the acting on it stay one thing each.
+fn take_toggles(keys: Res<ButtonInput<KeyCode>>, mut toggles: ResMut<Toggles>) {
+    if keys.just_pressed(KeyCode::Digit1) {
+        toggles.no_shadows = !toggles.no_shadows;
+    }
+    if keys.just_pressed(KeyCode::Digit2) {
+        toggles.no_haze = !toggles.no_haze;
+    }
+    if keys.just_pressed(KeyCode::Digit3) {
+        toggles.wireframe = !toggles.wireframe;
+    }
+    if keys.just_pressed(KeyCode::Digit4) {
+        toggles.reach = (toggles.reach + 1) % REACHES.len();
+    }
+    // Everything back, for when a session has drifted somewhere nobody can
+    // remember the way out of.
+    if keys.just_pressed(KeyCode::Digit0) {
+        *toggles = Toggles::default();
+    }
+}
+
+/// Makes the scene agree with [`Toggles`].
+///
+/// Written as "set it to what it should be" rather than "change it when the
+/// key is pressed", so that a sun or a camera spawned *after* the key was
+/// pressed — leaving a world and entering another does exactly that — comes up
+/// in the state the readout claims it is in. The `is_changed` guard is only to
+/// keep it from writing the same values every frame, which would have every
+/// light and camera register as changed for anything else watching.
+fn apply_toggles(
+    mut commands: Commands,
+    toggles: Res<Toggles>,
+    wireframe: Option<ResMut<WireframeConfig>>,
+    mut suns: Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
+    cameras: Query<(Entity, Has<DistanceFog>), With<MapCamera>>,
+    mut lit: Local<bool>,
+) {
+    let fresh_sun = !suns.is_empty() && !*lit;
+    *lit = !suns.is_empty();
+    if !toggles.is_changed() && !fresh_sun {
+        return;
+    }
+
+    if let Some(mut wireframe) = wireframe {
+        wireframe.global = toggles.wireframe;
+        // Dark lines. The default is white, which disappears against sand and
+        // surf — the two places the mesh is most worth looking at.
+        wireframe.default_color = Color::srgb(0.05, 0.05, 0.05);
+    }
+
+    for (mut sun, mut cascades) in &mut suns {
+        sun.shadow_maps_enabled = !toggles.no_shadows;
+        *cascades = crate::terrain::cascades(REACHES[toggles.reach]);
+    }
+
+    for (camera, has_fog) in &cameras {
+        match (toggles.no_haze, has_fog) {
+            (true, true) => {
+                commands.entity(camera).remove::<DistanceFog>();
+            }
+            (false, false) => {
+                commands.entity(camera).insert(crate::camera::haze());
+            }
+            _ => {}
+        }
+    }
+}
 
 fn spawn_overlay(mut commands: Commands) {
     commands
@@ -77,6 +233,7 @@ fn spawn_overlay(mut commands: Commands) {
 fn refresh_overlay(
     diagnostics: Res<DiagnosticsStore>,
     scene: Scene,
+    toggles: Res<Toggles>,
     ground: Option<Res<Ground>>,
     hosting: Option<Res<Hosting>>,
     cameras: Query<&MapCamera>,
@@ -103,7 +260,7 @@ fn refresh_overlay(
     let seed = hosting.map(|hosting| hosting.0.seed());
 
     for mut text in &mut texts {
-        text.0 = overlay_text(fps, &counts, tally.as_ref(), seed, view);
+        text.0 = overlay_text(fps, &counts, tally.as_ref(), seed, view, &toggles);
     }
 }
 
@@ -271,6 +428,7 @@ fn overlay_text(
     tally: Option<&Tally>,
     seed: Option<u32>,
     view: Option<View>,
+    toggles: &Toggles,
 ) -> String {
     let fps = fps.map_or_else(|| "--".to_string(), |fps| format!("{fps:.0}"));
     let mut lines = vec![format!(
@@ -296,6 +454,11 @@ fn overlay_text(
     }
     if let Some(view) = view {
         lines.push(view_line(seed, view));
+    }
+    // Last, so it reads as a footnote against everything above it rather than
+    // as another thing being counted.
+    if let Some(doctored) = toggles.line() {
+        lines.push(doctored);
     }
     lines.join("\n")
 }
@@ -409,7 +572,8 @@ mod tests {
                 &counts,
                 Some(&tally),
                 Some(20_040_112),
-                Some(view)
+                Some(view),
+                &Toggles::default()
             ),
             "60 fps / 214 meshes / 1,234,567 triangles\n\
              3,298,112 shadow tris / 623 draws / 4 cascades\n\
@@ -429,7 +593,7 @@ mod tests {
             shadows: None,
         };
         assert_eq!(
-            overlay_text(None, &counts, None, None, None),
+            overlay_text(None, &counts, None, None, None, &Toggles::default()),
             "-- fps / 0 meshes / 0 triangles"
         );
     }
@@ -572,6 +736,93 @@ mod tests {
             "overlay reads: {text}"
         );
         assert!(!text.starts_with("-- fps"), "FPS never got a value: {text}");
+    }
+
+    /// Nothing is said when nothing has been touched — the common case must
+    /// not cost the readout a line.
+    #[test]
+    fn an_untouched_run_admits_to_nothing() {
+        assert_eq!(Toggles::default().line(), None);
+    }
+
+    #[test]
+    fn a_doctored_run_says_so() {
+        // Every switch at once, to pin the order and the separator as well as
+        // the wording.
+        let all = Toggles {
+            no_shadows: true,
+            no_haze: true,
+            wireframe: true,
+            reach: 2,
+        };
+        assert_eq!(
+            all.line().as_deref(),
+            Some("debug: no shadows / no haze / wireframe / shadow reach 225m")
+        );
+
+        // And the reach only speaks up when it is not the world's own, since
+        // the first entry is what a normal run already has.
+        let default_reach = Toggles {
+            reach: 0,
+            ..all.clone()
+        };
+        assert!(!default_reach.line().unwrap().contains("reach"));
+    }
+
+    /// `4` walks the reaches and comes back to the world's own, so leaning on
+    /// it can never strand the sun somewhere there is no key to leave.
+    #[test]
+    fn the_shadow_reach_cycles_back_to_the_worlds_own() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Toggles>()
+            .add_systems(Update, take_toggles);
+
+        for expected in [1, 2, 0, 1] {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::Digit4);
+            app.update();
+            assert_eq!(app.world().resource::<Toggles>().reach, expected);
+            // `clear` would only drop the just-pressed edge and leave the key
+            // held, so the next press would not read as a new one.
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset(KeyCode::Digit4);
+        }
+        assert_eq!(REACHES[0], crate::HAZE_END);
+    }
+
+    /// `0` is the way out of any state the other keys can reach.
+    #[test]
+    fn zero_puts_everything_back() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Toggles>()
+            .add_systems(Update, take_toggles);
+
+        fn press(app: &mut App, key: KeyCode) {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(key);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset(key);
+        }
+        for key in [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+        ] {
+            press(&mut app, key);
+        }
+        assert!(app.world().resource::<Toggles>().line().is_some());
+
+        press(&mut app, KeyCode::Digit0);
+        assert_eq!(*app.world().resource::<Toggles>(), Toggles::default());
+        assert_eq!(app.world().resource::<Toggles>().line(), None);
     }
 
     #[test]
