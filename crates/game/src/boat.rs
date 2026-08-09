@@ -106,6 +106,23 @@ const GROUNDING_DRAFT: f32 = DRAFT - KEEL_BITE;
 /// need probes out there too.
 const KEEL_PROBES: usize = 4;
 
+/// Beam, in metres — how far apart the water is sampled athwartships to read
+/// the roll the waves ask of the hull. Close to the model's planking but not
+/// held to it the way [`LENGTH`] is: the samples are reading the surface's
+/// slope, and a slope read a few centimetres wide of the hull is the same
+/// slope.
+const BEAM: f32 = 2.4;
+
+/// Seconds of lag between the tilt the water asks for and the tilt the hull
+/// shows — the same exponential family as [`HEEL_RESPONSE`], and a good deal
+/// slower: heeling is the hull rolling on its own keel, this is seven metres
+/// of timber being *lifted* by one end. The lag is also what keeps the chop
+/// out of the deck. Under way the short seas pass beneath the hull every
+/// couple of seconds, and a deck that chased each one faithfully would wag;
+/// on this curve the hull rides the long swell and lets the chop go by
+/// underneath.
+const SWAY_RESPONSE: f32 = 0.9;
+
 /// Metres per second under way. Brisk beyond honesty for a seven-metre hull,
 /// but the boat is how the world is crossed: at this speed the ground in view
 /// at the default zoom slides by in a few seconds, and the next island is
@@ -176,15 +193,21 @@ const SPAR_COLOR: Color = Color::srgb(0.86, 0.80, 0.68);
 /// metres per second, ahead positive — the state the eased throttle lives
 /// in. The keys name a speed; [`steer`] brings `way` towards it.
 ///
-/// `heel` is the roll the hull is showing, in radians about its own forward,
-/// positive with the masthead to port. Kept here rather than read back off
-/// the transform because the transform holds heel and heading multiplied
-/// together, and unpicking a quaternion every frame to learn a number this
-/// system wrote itself is work for nothing.
+/// `heel` is the roll the hull is showing *for the turn*, in radians about
+/// its own forward, positive with the masthead to port. `pitch` and `roll`
+/// are the tilt the water is showing on it — [`float`] easing the deck
+/// towards the sea's own slope under the hull, pitch about the athwart axis
+/// with the bow up positive, roll the same sign and the same rotation factor
+/// as the heel. All three are kept here rather than read back off the
+/// transform because the transform holds heading, pitch and the two rolls
+/// multiplied together, and unpicking a quaternion every frame to learn
+/// numbers these systems wrote themselves is work for nothing.
 #[derive(Component, Default)]
 pub struct Boat {
     way: f32,
     heel: f32,
+    pitch: f32,
+    roll: f32,
 }
 
 pub struct BoatPlugin;
@@ -287,24 +310,106 @@ fn launch(
 /// is what will keep it off. No easing on the water's motion either: the
 /// swell is gentle, and a hull seven metres long simply is where the water
 /// is.
+///
+/// Afloat, the hull also wears the water's *slope*: the swell is sampled off
+/// the bow and the stern and out at either beam, and the deck eases towards
+/// the plane those four heights describe — pitching as seas pass under it
+/// fore and aft, rolling as they pass across, on [`SWAY_RESPONSE`], which is
+/// where the hull's weight lives. The height above is not eased and the tilt
+/// is, deliberately: the hull *is* where the water is, but it is seven
+/// metres long, and turning to a shape that long takes it time the height
+/// does not need. A beached hull eases level instead — the ground is holding
+/// it, and a deck still working to water sliding past a held keel would give
+/// the trick away.
+///
+/// The tilt goes on and comes off as a factor of its own. The rotation holds
+/// heading, then the water's pitch, then a single roll factor that the wave
+/// roll shares with the turn's heel — so this system strips the tilt it
+/// applied last frame from the right and hangs the new one on, and [`steer`],
+/// multiplying its heel delta on from the right, keeps reaching the roll
+/// factor it always has.
 fn float(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
     sea: Res<sea::SeaConditions>,
-    mut boats: Query<&mut Transform, With<Boat>>,
+    mut boats: Query<(&mut Transform, &mut Boat)>,
 ) {
-    for mut transform in &mut boats {
+    let t = eased(1.0 / SWAY_RESPONSE, time.delta_secs());
+    let elapsed = time.elapsed_secs_wrapped();
+
+    for (mut transform, mut boat) in &mut boats {
         let at = transform.translation;
-        let Some(height) = ground.as_ref().and_then(|g| g.height(at.x, at.z)) else {
-            continue;
+        let height = ground.as_ref().and_then(|g| g.height(at.x, at.z));
+        let mut afloat = false;
+        if let Some(height) = height {
+            // The water under the hull is `-height` deep, which is what
+            // decides whether the swell here is the open sea's or the
+            // shore's — the ground is asked exactly, where the shader reads
+            // its windowed picture of the same heights; they differ by at
+            // most a texel of interpolation, in water where the swell is
+            // smallest.
+            let water = sea.swell(Vec2::new(at.x, at.z), elapsed, -height);
+            transform.translation.y = height.max(water);
+            afloat = water >= height;
+        }
+
+        let (target_pitch, target_roll) = if afloat {
+            // The same swell the hull's own height rides, at a point of the
+            // hull rather than its middle. Ground not yet sent counts as
+            // deep — the benefit of the doubt the depth window gives the
+            // shader — and ground standing dry puts the shore wave's last
+            // breath there, which is next to no water and next to no tilt.
+            let water_at = |offset: Vec3| {
+                let point = transform.transform_point(offset);
+                let depth = ground
+                    .as_ref()
+                    .and_then(|g| g.height(point.x, point.z))
+                    .map_or(protocol::ground::OCEAN_DEPTH, |h| -h);
+                sea.swell(Vec2::new(point.x, point.z), elapsed, depth)
+            };
+            (
+                f32::atan2(
+                    water_at(Vec3::new(0.0, 0.0, -LENGTH / 2.0))
+                        - water_at(Vec3::new(0.0, 0.0, LENGTH / 2.0)),
+                    LENGTH,
+                ),
+                f32::atan2(
+                    water_at(Vec3::new(BEAM / 2.0, 0.0, 0.0))
+                        - water_at(Vec3::new(-BEAM / 2.0, 0.0, 0.0)),
+                    BEAM,
+                ),
+            )
+        } else {
+            (0.0, 0.0)
         };
-        // The water under the hull is `-height` deep, which is what decides
-        // whether the swell here is the open sea's or the shore's — the
-        // ground is asked exactly, where the shader reads its windowed
-        // picture of the same heights; they differ by at most a texel of
-        // interpolation, in water where the swell is smallest.
-        let water = sea.swell(Vec2::new(at.x, at.z), time.elapsed_secs_wrapped(), -height);
-        transform.translation.y = height.max(water);
+
+        let pitch = settled(boat.pitch + (target_pitch - boat.pitch) * t, target_pitch);
+        let roll = settled(boat.roll + (target_roll - boat.roll) * t, target_roll);
+        if pitch == boat.pitch && roll == boat.roll {
+            // Nothing to change — which is every frame for a boat with no
+            // water under it, whose rotation must stay unwritten the way an
+            // idle boat's does in [`steer`].
+            continue;
+        }
+        transform.rotation = (transform.rotation
+            * Quat::from_rotation_z(-(boat.roll + boat.heel))
+            * Quat::from_rotation_x(pitch - boat.pitch)
+            * Quat::from_rotation_z(roll + boat.heel))
+        .normalize();
+        boat.pitch = pitch;
+        boat.roll = roll;
+    }
+}
+
+/// The tail-closing every eased angle here gets, in [`HEEL_SETTLED`]'s terms:
+/// within a third of a degree of its target the angle *is* the target, so a
+/// hull done settling holds one rotation frame after frame rather than
+/// creeping towards it forever.
+fn settled(eased: f32, target: f32) -> f32 {
+    if (target - eased).abs() < HEEL_SETTLED {
+        target
+    } else {
+        eased
     }
 }
 
@@ -480,18 +585,14 @@ fn steer(
         // aground starts the straightening the same frame it takes the way
         // off. Port helm is a positive turn and an outward lean is to
         // starboard, which about the forward axis is a negative roll — hence
-        // the sign. The transform holds heading-then-heel, and the helm above
-        // multiplies heading on from the left, so rolling on from the right
-        // reaches the heel factor alone and the guard keeps an idle boat's
-        // rotation unwritten.
+        // the sign. The transform holds heading, then the water's pitch,
+        // then one roll factor the heel shares with the wave roll — see
+        // [`float`] — and the helm above multiplies heading on from the
+        // left, so rolling on from the right reaches that roll factor alone
+        // and the guard keeps an idle boat's rotation unwritten.
         let target_heel = -HEEL_AT_FULL_TURN * helm * boat.way / SPEED;
         if boat.heel != target_heel {
-            let heel = boat.heel + (target_heel - boat.heel) * heel_t;
-            let heel = if (target_heel - heel).abs() < HEEL_SETTLED {
-                target_heel
-            } else {
-                heel
-            };
+            let heel = settled(boat.heel + (target_heel - boat.heel) * heel_t, target_heel);
             transform.rotation *= Quat::from_rotation_z(heel - boat.heel);
             boat.heel = heel;
         }
@@ -1159,6 +1260,89 @@ mod tests {
             "a second of frames never moved the hull off {} m",
             heights[0]
         );
+    }
+
+    #[test]
+    fn an_anchored_hull_sways_with_the_swell() {
+        // The other half of bobbing: the water's slope moves the deck, not
+        // just its height. At anchor over open water the hull is never quite
+        // level and never quite still — a degree or two of pitch and roll as
+        // the swell passes under it, and nowhere near the lean of a
+        // full-helm turn, which must stay the biggest thing the hull does.
+        let mut app = island_app();
+        place(&mut app, Vec2::new(TEST_ISLAND_REACH * 1.5, 0.0), Vec2::X);
+        run_frames(&mut app, 300);
+
+        let mut tilts = Vec::new();
+        for _ in 0..400 {
+            run_frames(&mut app, 1);
+            tilts.push(boat(&mut app).up().as_vec3().angle_between(Vec3::Y));
+        }
+        let most = tilts.iter().fold(0.0f32, |a, &b| a.max(b));
+        assert!(
+            most > 0.005,
+            "the deck never left level ({most} rad at most)"
+        );
+        assert!(
+            most < HEEL_AT_FULL_TURN,
+            "the swell alone tilts the hull {most} rad, past a full-helm heel"
+        );
+        assert!(tilts.iter().any(|t| *t != tilts[0]), "the deck froze");
+    }
+
+    #[test]
+    fn the_deck_leans_with_the_water_not_against_it() {
+        // The sign, pinned end to end: the bow rises where the water under
+        // it stands higher than under the stern, and the masthead goes to
+        // port when the starboard beam is the lifted side. Correlated over a
+        // few swell periods rather than matched frame by frame, because the
+        // tilt is eased and trails the water it is following.
+        let mut app = island_app();
+        place(&mut app, Vec2::new(TEST_ISLAND_REACH * 1.5, 0.0), Vec2::X);
+        run_frames(&mut app, 300);
+
+        let (mut fore_aft, mut athwart) = (0.0, 0.0);
+        for _ in 0..600 {
+            run_frames(&mut app, 1);
+            let transform = boat(&mut app);
+            let water_at = |offset: Vec3| {
+                let point = transform.transform_point(offset);
+                let depth = -app
+                    .world()
+                    .resource::<Ground>()
+                    .height(point.x, point.z)
+                    .expect("the test ground has arrived");
+                app.world().resource::<sea::SeaConditions>().swell(
+                    Vec2::new(point.x, point.z),
+                    elapsed(&app),
+                    depth,
+                )
+            };
+            let asks_pitch = water_at(Vec3::new(0.0, 0.0, -LENGTH / 2.0))
+                - water_at(Vec3::new(0.0, 0.0, LENGTH / 2.0));
+            let asks_roll = water_at(Vec3::new(BEAM / 2.0, 0.0, 0.0))
+                - water_at(Vec3::new(-BEAM / 2.0, 0.0, 0.0));
+            // The bow's lift is the pitch's sine; the starboard rail's is
+            // the roll's, masthead to port as it rises.
+            fore_aft += asks_pitch * transform.forward().y;
+            athwart += asks_roll * transform.right().y;
+        }
+        assert!(fore_aft > 0.0, "the bow dips as the water under it rises");
+        assert!(athwart > 0.0, "the hull rolls away from the lifted beam");
+    }
+
+    #[test]
+    fn a_beached_hull_sits_level() {
+        // The ground holds what it has taken: put down on the island's high
+        // ground, the pose is not the water's to touch however the sea moves
+        // — the rotation stays exactly as placed, frame after frame, the
+        // same never-written stillness an idle boat holds.
+        let mut app = island_app();
+        place(&mut app, Vec2::ZERO, Vec2::X);
+        app.update();
+        let posed = boat(&mut app).rotation;
+        run_frames(&mut app, 120);
+        assert_eq!(boat(&mut app).rotation, posed);
     }
 
     /// The same app with a hand of ground already delivered — the island the
