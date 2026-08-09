@@ -196,7 +196,10 @@ pub enum Tone {
 const TONES: [Vec3; 19] = [
     Vec3::new(0.16, 0.34, 0.38), // Seabed
     Vec3::new(0.46, 0.68, 0.62), // Shallow
-    Vec3::new(0.90, 0.83, 0.58), // Sand
+    // A step darker than it once was (0.90, 0.83, 0.58): the surf paints
+    // near-white foam along the waterline now, and sand pale enough to
+    // shoulder it read as more foam rather than as the beach under it.
+    Vec3::new(0.86, 0.78, 0.52), // Sand
     Vec3::new(0.70, 0.65, 0.55), // Shingle
     Vec3::new(0.21, 0.42, 0.22), // Forest
     Vec3::new(0.33, 0.55, 0.23), // GrassDark
