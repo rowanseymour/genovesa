@@ -24,6 +24,7 @@ use game::menu::MenuPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
 use game::terrain::TerrainPlugin;
 use game::trees::TreesPlugin;
+use game::wildlife::WildlifePlugin;
 use game::{AppState, Helm, SKY, WINDOW};
 
 fn main() -> ExitCode {
@@ -122,6 +123,7 @@ fn run(args: Args, session: Option<Session>) {
         .add_plugins((
             TerrainPlugin,
             TreesPlugin,
+            WildlifePlugin,
             BoatPlugin,
             MapCameraPlugin,
             CompassPlugin,
