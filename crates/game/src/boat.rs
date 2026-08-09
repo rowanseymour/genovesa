@@ -293,7 +293,12 @@ fn float(
         let Some(height) = ground.as_ref().and_then(|g| g.height(at.x, at.z)) else {
             continue;
         };
-        let water = sea::swell(Vec2::new(at.x, at.z), time.elapsed_secs_wrapped());
+        // The water under the hull is `-height` deep, which is what decides
+        // whether the swell here is the open sea's or the shore's — the
+        // ground is asked exactly, where the shader reads its windowed
+        // picture of the same heights; they differ by at most a texel of
+        // interpolation, in water where the swell is smallest.
+        let water = sea::swell(Vec2::new(at.x, at.z), time.elapsed_secs_wrapped(), -height);
         transform.translation.y = height.max(water);
     }
 }
@@ -1117,7 +1122,7 @@ mod tests {
             "the point picked to be open water is dry land"
         );
         let floated = put_down(&mut app, offshore);
-        let water = crate::sea::swell(offshore, elapsed(&app));
+        let water = crate::sea::swell(offshore, elapsed(&app), -ground(&app, offshore));
         assert_eq!(
             floated, water,
             "the boat floats at {floated} m, the swell there stands at {water} m"
@@ -1313,9 +1318,14 @@ mod tests {
         // Back at sea means back on the water: riding the swell exactly,
         // rather than holding any height the hillside gave it.
         let at = boat(&mut app).translation;
+        let depth = -app
+            .world()
+            .resource::<Ground>()
+            .height(at.x, at.z)
+            .expect("the boat sailed off the ground it was given");
         assert_eq!(
             at.y,
-            crate::sea::swell(Vec2::new(at.x, at.z), elapsed(&app)),
+            crate::sea::swell(Vec2::new(at.x, at.z), elapsed(&app), depth),
             "the boat never made it back to the water"
         );
         let afloat = from_the_island(&mut app);

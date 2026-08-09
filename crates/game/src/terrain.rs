@@ -42,7 +42,7 @@ use protocol::ground::{
     SEA_WATER,
 };
 
-use crate::camera::MapCamera;
+use crate::camera::{MapCamera, View};
 use crate::sea::{self, SeaExtension, SeaMaterial};
 use crate::{matte, AppState};
 
@@ -166,6 +166,7 @@ impl Plugin for TerrainPlugin {
                     receive_chunks,
                     stream_out,
                     follow_camera,
+                    sea::refresh_depth,
                 )
                     .chain()
                     .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Ground>)),
@@ -601,6 +602,8 @@ fn enter_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut seas: ResMut<Assets<SeaMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    view: Res<View>,
 ) {
     // Nothing is known about the world yet, and nothing is asked for until
     // there is a camera to ask around — so entering a match costs a frame
@@ -668,11 +671,20 @@ fn enter_world(
     commands.insert_resource(LakeMaterial(materials.add(still(LAKE_WATER))));
 
     // The sea alone wears the swell on top — a lake is sheltered water, and
-    // stiller than the sea is most of what makes it read as one.
+    // stiller than the sea is most of what makes it read as one. The swell
+    // reads its shallows from a depth window that opens where the player
+    // enters the world; it opens knowing nothing — every texel deep — and
+    // [`sea::refresh_depth`] fills it in as the ground itself arrives.
+    let depth = images.add(sea::depth_image());
     let sea = seas.add(SeaMaterial {
         base: still(SEA_WATER),
-        extension: SeaExtension::default(),
+        extension: SeaExtension::new(depth.clone(), Vec2::new(view.focus.x, view.focus.z)),
     });
+    commands.insert_resource(sea::DepthWindow::new(
+        depth,
+        sea.clone(),
+        Vec2::new(view.focus.x, view.focus.z),
+    ));
 
     // Sea. Sized past the camera's far plane and moved along with it, so the
     // horizon is water fading into haze whichever way the view goes.
@@ -746,6 +758,7 @@ fn leave_world(mut commands: Commands) {
     commands.remove_resource::<Ground>();
     commands.remove_resource::<GroundMaterial>();
     commands.remove_resource::<LakeMaterial>();
+    commands.remove_resource::<sea::DepthWindow>();
 }
 
 // ---------------------------------------------------------------------------

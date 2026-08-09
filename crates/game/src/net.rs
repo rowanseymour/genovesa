@@ -595,7 +595,7 @@ fn place_markers(
         // as the boat and the camera's own focus do.
         let mut height = transform.translation.y;
         if let Some(ground) = ground.as_ref().and_then(|g| g.height(at.x, at.y)) {
-            let water = sea::swell(at, time.elapsed_secs_wrapped());
+            let water = sea::swell(at, time.elapsed_secs_wrapped(), -ground);
             height = ground.max(water) + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
         }
         transform.translation = Vec3::new(at.x, height, at.y);
