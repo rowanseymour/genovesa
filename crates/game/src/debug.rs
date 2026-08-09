@@ -36,6 +36,7 @@ use bevy::text::FontSize;
 
 use crate::camera::{MapCamera, View};
 use crate::net::Hosting;
+use crate::sea::Forecast;
 use crate::terrain::{Ground, Tally};
 use crate::Helm;
 
@@ -55,6 +56,9 @@ impl Plugin for DebugOverlayPlugin {
         }
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<Toggles>()
+            // Where the commanded wind lands — shared with the plugins that
+            // draw and ride the sea, each initialising it for its own tests.
+            .init_resource::<Forecast>()
             .add_systems(Startup, spawn_overlay)
             // Only at the helm. Digits are typed into the seed and address
             // fields on the menus, and the controls screen binds whatever key
@@ -79,6 +83,21 @@ struct DebugText;
 /// inside plain sight, which is where the answer is.
 const REACHES: [f32; 3] = [crate::HAZE_END, 450.0, 225.0];
 
+/// The winds `5` orders up, cycling — with [`Toggles::wind`] at zero being
+/// the server's own weather, which is not a vector to be listed here. The
+/// strengths are the sea's landmarks rather than round numbers: a flat calm,
+/// the reference breeze the wave amplitudes are written for, and the hardest
+/// gale an honest server can blow. The bearings swing wide between
+/// neighbours on purpose: cycling marches every wave train through its
+/// re-aim dance, which is half of what the key exists to watch — the other
+/// half being how the sea wears each strength, without waiting minutes for
+/// the real sky to happen to visit it.
+const WINDS: [(&str, Vec2); 3] = [
+    ("calm", Vec2::ZERO),
+    ("breeze", Vec2::new(-4.95, -4.95)),
+    ("gale", Vec2::new(11.31, -11.31)),
+];
+
 /// The switches `--debug` puts on the number keys.
 ///
 /// Hard-wired rather than bound through [`crate::bindings`], and deliberately:
@@ -101,6 +120,11 @@ struct Toggles {
     wireframe: bool,
     /// `4` — index into [`REACHES`], cycling.
     reach: usize,
+    /// `5` — the weather taken in hand: one past the index into [`WINDS`],
+    /// with `0` the server's own sky. Local, like every switch here — it
+    /// doctors this machine's sea and nothing anybody else sails on, the
+    /// world's weather staying the server's to tell.
+    wind: usize,
 }
 
 impl Toggles {
@@ -127,6 +151,9 @@ impl Toggles {
         if self.reach != 0 {
             on.push(format!("shadow reach {:.0}m", REACHES[self.reach]));
         }
+        if let Some(i) = self.wind.checked_sub(1) {
+            on.push(format!("wind {}", WINDS[i].0));
+        }
         (!on.is_empty()).then(|| format!("debug: {}", on.join(" / ")))
     }
 }
@@ -147,6 +174,9 @@ fn take_toggles(keys: Res<ButtonInput<KeyCode>>, mut toggles: ResMut<Toggles>) {
     if keys.just_pressed(KeyCode::Digit4) {
         toggles.reach = (toggles.reach + 1) % REACHES.len();
     }
+    if keys.just_pressed(KeyCode::Digit5) {
+        toggles.wind = (toggles.wind + 1) % (WINDS.len() + 1);
+    }
     // Everything back, for when a session has drifted somewhere nobody can
     // remember the way out of.
     if keys.just_pressed(KeyCode::Digit0) {
@@ -166,6 +196,7 @@ fn apply_toggles(
     mut commands: Commands,
     toggles: Res<Toggles>,
     wireframe: Option<ResMut<WireframeConfig>>,
+    mut forecast: ResMut<Forecast>,
     mut suns: Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
     cameras: Query<(Entity, Has<DistanceFog>), With<MapCamera>>,
     mut lit: Local<bool>,
@@ -175,6 +206,11 @@ fn apply_toggles(
     if !toggles.is_changed() && !fresh_sun {
         return;
     }
+
+    // The sea eases towards this like any change of weather — see
+    // [`crate::sea::settle_conditions`] — so a preset arrives as a squall
+    // blowing in rather than as a cut between two oceans.
+    forecast.commanded = toggles.wind.checked_sub(1).map(|i| WINDS[i].1);
 
     if let Some(mut wireframe) = wireframe {
         wireframe.global = toggles.wireframe;
@@ -754,10 +790,11 @@ mod tests {
             no_haze: true,
             wireframe: true,
             reach: 2,
+            wind: 3,
         };
         assert_eq!(
             all.line().as_deref(),
-            Some("debug: no shadows / no haze / wireframe / shadow reach 225m")
+            Some("debug: no shadows / no haze / wireframe / shadow reach 225m / wind gale")
         );
 
         // And the reach only speaks up when it is not the world's own, since
@@ -793,6 +830,48 @@ mod tests {
         assert_eq!(REACHES[0], crate::HAZE_END);
     }
 
+    /// `5` walks the winds and comes back to the server's own sky, so leaning
+    /// on it can never strand the sea under weather no key can lift.
+    #[test]
+    fn the_commanded_wind_cycles_back_to_the_servers_own() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Toggles>()
+            .add_systems(Update, take_toggles);
+
+        for expected in [1, 2, 3, 0] {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::Digit5);
+            app.update();
+            assert_eq!(app.world().resource::<Toggles>().wind, expected);
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset(KeyCode::Digit5);
+        }
+    }
+
+    /// The key has to land in the [`Forecast`] — and clearing it has to lift
+    /// the order, or the server's weather never comes back.
+    #[test]
+    fn the_commanded_wind_reaches_the_forecast_and_leaves_it() {
+        let mut app = App::new();
+        app.init_resource::<Toggles>()
+            .init_resource::<Forecast>()
+            .add_systems(Update, apply_toggles);
+
+        app.world_mut().resource_mut::<Toggles>().wind = 3;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Forecast>().commanded,
+            Some(WINDS[2].1)
+        );
+
+        app.world_mut().resource_mut::<Toggles>().wind = 0;
+        app.update();
+        assert_eq!(app.world().resource::<Forecast>().commanded, None);
+    }
+
     /// `0` is the way out of any state the other keys can reach.
     #[test]
     fn zero_puts_everything_back() {
@@ -815,6 +894,7 @@ mod tests {
             KeyCode::Digit2,
             KeyCode::Digit3,
             KeyCode::Digit4,
+            KeyCode::Digit5,
         ] {
             press(&mut app, key);
         }

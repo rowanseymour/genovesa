@@ -372,6 +372,21 @@ fn stagger_vector() -> Vec2 {
 #[derive(Resource, Default)]
 pub struct Forecast {
     pub wind: Option<Vec2>,
+    /// A wind ordered up from the `--debug` keys, outranking the server's
+    /// word for as long as it is set — see [`crate::debug`]. Local by
+    /// construction: it doctors what this renderer draws and nothing anybody
+    /// else sails on. The server's forecast keeps landing in `wind`
+    /// underneath, so lifting the order eases straight back to the truth
+    /// rather than to wherever the truth was when the order was given.
+    pub commanded: Option<Vec2>,
+}
+
+impl Forecast {
+    /// The wind the sea should be settling towards: the ordered one while a
+    /// debug key holds it, otherwise whatever the server last said.
+    fn told(&self) -> Option<Vec2> {
+        self.commanded.or(self.wind)
+    }
 }
 
 /// One of the sea's wave trains, as currently drawn: the way it runs, and
@@ -471,8 +486,8 @@ pub(crate) fn settle_conditions(
     window: Option<Res<DepthWindow>>,
     mut materials: ResMut<Assets<SeaMaterial>>,
 ) {
-    let told = forecast.wind.unwrap_or(ASSUMED_WIND);
-    if conditions.assumed && forecast.wind.is_some() {
+    let told = forecast.told().unwrap_or(ASSUMED_WIND);
+    if conditions.assumed && forecast.told().is_some() {
         // The first word of real weather replaces the assumed day outright —
         // see [`Forecast`]. Only the wind and the aims: the slots' fades are
         // already at one, and there is nothing on screen worth easing from.
@@ -970,6 +985,40 @@ mod tests {
             wind.distance(veered) > 1.0,
             "a later forecast landed as a snap"
         );
+    }
+
+    #[test]
+    fn a_commanded_wind_outranks_the_forecast_and_hands_back() {
+        let mut app = settle_app();
+        // An order given before any word of weather still snaps the assumed
+        // day away: whichever way the first real wind arrives, the sea being
+        // watched is the one asked for.
+        let ordered = Vec2::new(16.0, 0.0);
+        app.world_mut().resource_mut::<Forecast>().commanded = Some(ordered);
+        app.update();
+        assert_eq!(drawn(&app).0, ordered);
+
+        // A forecast landing under the order changes nothing on screen...
+        tell(&mut app, Vec2::new(0.0, 12.0));
+        for _ in 0..200 {
+            app.update();
+        }
+        assert_eq!(drawn(&app).0, ordered);
+
+        // ...but is kept, so lifting the order eases back to the server's
+        // truth as it stands now — not a snap, this being weather like any
+        // other change of it.
+        app.world_mut().resource_mut::<Forecast>().commanded = None;
+        app.update();
+        assert_ne!(drawn(&app).0, ordered, "the sea ignored the lifted order");
+        assert!(
+            drawn(&app).0.distance(Vec2::new(0.0, 12.0)) > 1.0,
+            "the lifted order landed as a snap"
+        );
+        for _ in 0..4_000 {
+            app.update();
+        }
+        assert!(drawn(&app).0.distance(Vec2::new(0.0, 12.0)) < 0.5);
     }
 
     #[test]
