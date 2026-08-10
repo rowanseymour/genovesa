@@ -13,24 +13,29 @@ use bevy::input::keyboard::Key;
 use bevy::prelude::*;
 
 /// A control the player can put on a key of their choosing: driving their
-/// boat — ahead, astern, helm over — or turning the view around it.
+/// boat — ahead, astern, helm over — stepping ashore and back aboard, or
+/// turning the view around them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     MoveForward,
     MoveBack,
     SteerLeft,
     SteerRight,
+    /// One key for both directions of the same threshold: ashore it boards,
+    /// aboard it goes ashore — see `player::embark_or_land`.
+    Board,
     TurnLeft,
     TurnRight,
 }
 
 impl Action {
     /// Every action, in the order the settings screen lists them.
-    pub const ALL: [Action; 6] = [
+    pub const ALL: [Action; 7] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::SteerLeft,
         Action::SteerRight,
+        Action::Board,
         Action::TurnLeft,
         Action::TurnRight,
     ];
@@ -45,19 +50,22 @@ impl Action {
             Action::MoveBack => "Back",
             Action::SteerLeft => "Steer left",
             Action::SteerRight => "Steer right",
+            Action::Board => "Go ashore / board",
             Action::TurnLeft => "Turn view left",
             Action::TurnRight => "Turn view right",
         }
     }
 
-    /// Where the action starts out: WASD to drive and Q/E to turn the view,
-    /// which is what the game had before any of this was configurable.
+    /// Where the action starts out: WASD to drive, F to step ashore or
+    /// aboard, and Q/E to turn the view — WASD and Q/E being what the game
+    /// had before any of this was configurable.
     pub fn default_key(self) -> KeyCode {
         match self {
             Action::MoveForward => KeyCode::KeyW,
             Action::MoveBack => KeyCode::KeyS,
             Action::SteerLeft => KeyCode::KeyA,
             Action::SteerRight => KeyCode::KeyD,
+            Action::Board => KeyCode::KeyF,
             Action::TurnLeft => KeyCode::KeyQ,
             Action::TurnRight => KeyCode::KeyE,
         }
