@@ -266,15 +266,11 @@ fn eye(camera: &MapCamera) -> Vec3 {
 fn follow_player(
     ground: Option<Res<Ground>>,
     player: PlayerPlace,
-    carriers: Query<&Transform>,
     mut cameras: Query<&mut MapCamera>,
 ) {
     // Absent in tests that only care about turning and zooming; a match
     // always has one.
-    let Some(place) = player
-        .carrier()
-        .and_then(|carrier| carriers.get(carrier).ok())
-    else {
+    let Some(place) = player.at() else {
         return;
     };
 
@@ -282,16 +278,10 @@ fn follow_player(
     // height is a leftover until the chunk under it arrives, and once it has
     // arrived a hull carries the swell. Until the ground can answer, the
     // leftover is all there is to follow.
-    let surface = ground
-        .as_ref()
-        .and_then(|g| g.surface(place.translation.x, place.translation.z));
+    let surface = ground.as_ref().and_then(|g| g.surface(place.x, place.z));
 
     for mut camera in &mut cameras {
-        camera.target_focus = Vec3::new(
-            place.translation.x,
-            surface.unwrap_or(place.translation.y),
-            place.translation.z,
-        );
+        camera.target_focus = Vec3::new(place.x, surface.unwrap_or(place.y), place.z);
 
         if camera.grounded || surface.is_none() {
             continue;

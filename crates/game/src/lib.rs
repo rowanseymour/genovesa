@@ -25,6 +25,8 @@ pub mod wildlife;
 #[cfg(test)]
 mod testing;
 
+use bevy::asset::AssetPath;
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
 /// Colour of the sky above the horizon. The camera's distance fog fades to the
@@ -62,6 +64,21 @@ pub fn matte(base_color: Color) -> StandardMaterial {
         reflectance: 0.0,
         ..default()
     }
+}
+
+/// Where in a glTF file under `assets/` to find one of its meshes.
+///
+/// Every model the game draws is spawned this way — mesh by mesh rather than
+/// as a whole scene, because the files' own PBR materials are ignored in
+/// favour of [`matte`]. glTF numbers meshes rather than naming them in a way
+/// the loader can ask for, so `mesh` is a position in the file, and each
+/// module holds its own file to that order with a test.
+///
+/// `primitive: 0` because each object in a master carries one material and so
+/// exports as a mesh of a single primitive; an object split across two
+/// materials would arrive as two, and would want spawning as two children.
+pub fn model_mesh(file: &str, mesh: usize) -> AssetPath<'static> {
+    GltfAssetLabel::Primitive { mesh, primitive: 0 }.from_asset(file.to_owned())
 }
 
 /// How far of the way to a target an exponential ease travels in `dt`

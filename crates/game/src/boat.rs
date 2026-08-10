@@ -23,8 +23,7 @@
 //! the waterline rather than at the keel or the deck, which is what lets
 //! [`float`] put it down by simply setting the height of the surface it is on.
 
-use bevy::asset::AssetPath;
-use bevy::gltf::GltfAssetLabel;
+use bevy::math::Vec3Swizzles;
 use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
@@ -32,7 +31,7 @@ use crate::camera::View;
 use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
-use crate::{eased, matte, AppState, Helm};
+use crate::{eased, matte, model_mesh, AppState, Helm};
 
 /// The ship, as a file. Built from `assets-src/boat.glb/boat.blend` by
 /// `assets-src/export.sh`, which is also where the export settings the look
@@ -42,7 +41,7 @@ const MODEL: &str = "boat.glb";
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —
 /// which means reordering the objects in Blender would silently swap the hull
-/// for the spar. `the_model_holds_a_hull_and_a_spar_in_that_order` is what
+/// for the spar. `the_model_is_a_hull_and_a_spar_fit_to_draw` is what
 /// stops that being found by looking at it.
 const HULL_MESH: usize = 0;
 const SPAR_MESH: usize = 1;
@@ -335,12 +334,12 @@ fn launch(
         children![
             (
                 Name::new("Hull"),
-                Mesh3d(assets.load(mesh_in_model(HULL_MESH))),
+                Mesh3d(assets.load(model_mesh(MODEL, HULL_MESH))),
                 MeshMaterial3d(hull_material),
             ),
             (
                 Name::new("Spar"),
-                Mesh3d(assets.load(mesh_in_model(SPAR_MESH))),
+                Mesh3d(assets.load(model_mesh(MODEL, SPAR_MESH))),
                 MeshMaterial3d(spar_material),
             ),
             // No mesh yet — a figure will hang here when there is one worth
@@ -407,13 +406,12 @@ fn float(
         let height = ground.as_ref().and_then(|g| g.height(at.x, at.z));
         let mut afloat = false;
         if let Some(height) = height {
-            // The water under the hull is `-height` deep, which is what
-            // decides whether the swell here is the open sea's or the
-            // shore's — the ground is asked exactly, where the shader reads
-            // its windowed picture of the same heights; they differ by at
-            // most a texel of interpolation, in water where the swell is
-            // smallest.
-            let water = sea.swell(Vec2::new(at.x, at.z), elapsed, -height);
+            // The water under the hull decides whether the swell here is the
+            // open sea's or the shore's — the ground is asked exactly, where
+            // the shader reads its windowed picture of the same heights; they
+            // differ by at most a texel of interpolation, in water where the
+            // swell is smallest.
+            let water = sea.water_over(ground.as_deref(), at.xz(), elapsed);
             transform.translation.y = height.max(water);
             afloat = water >= height;
         }
@@ -426,11 +424,7 @@ fn float(
             // breath there, which is next to no water and next to no tilt.
             let water_at = |offset: Vec3| {
                 let point = transform.transform_point(offset);
-                let depth = ground
-                    .as_ref()
-                    .and_then(|g| g.height(point.x, point.z))
-                    .map_or(protocol::ground::OCEAN_DEPTH, |h| -h);
-                sea.swell(Vec2::new(point.x, point.z), elapsed, depth)
+                sea.water_over(ground.as_deref(), point.xz(), elapsed)
             };
             (
                 f32::atan2(
@@ -672,15 +666,6 @@ fn steer(
     }
 }
 
-/// Where in [`MODEL`] to find one of its meshes.
-///
-/// `primitive: 0` because each object in the master carries one material and so
-/// exports as a mesh of a single primitive; an object split across two
-/// materials would arrive as two, and would want spawning as two children.
-fn mesh_in_model(mesh: usize) -> AssetPath<'static> {
-    GltfAssetLabel::Primitive { mesh, primitive: 0 }.from_asset(MODEL)
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -691,7 +676,7 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        elapsed, hold, is_flat_shaded, model, rebind, run_frames, test_ground, triangles,
+        assert_model_draws, elapsed, hold, rebind, run_frames, test_ground, triangles,
         TEST_ISLAND_REACH,
     };
 
@@ -764,16 +749,13 @@ mod tests {
     }
 
     #[test]
-    fn the_model_holds_a_hull_and_a_spar_in_that_order() {
-        // The one thing about the file the game cannot see for itself. It asks
-        // for its meshes by number, and glTF numbers them in whatever order the
-        // objects sat in the master — so an afternoon in Blender that leaves the
-        // spar first would paint the hull in bare-spar cream and stand a
-        // seven-metre plank of timber where the mast should be, with nothing
-        // failing anywhere to say so.
-        let (json, _) = model(MODEL);
-        assert_eq!(json["meshes"][HULL_MESH]["name"], "hull");
-        assert_eq!(json["meshes"][SPAR_MESH]["name"], "spar");
+    fn the_model_is_a_hull_and_a_spar_fit_to_draw() {
+        // The things about the file the game cannot see for itself — see
+        // `assert_model_draws`. The order is the sharp one here: a Blender
+        // afternoon that left the spar first would paint the hull in
+        // bare-spar cream and stand a seven-metre plank of timber where the
+        // mast should be.
+        assert_model_draws(MODEL, &[(HULL_MESH, "hull"), (SPAR_MESH, "spar")]);
     }
 
     #[test]
@@ -821,55 +803,6 @@ mod tests {
             SHIP.forefoot_station,
             SHIP.heel_station
         );
-    }
-
-    #[test]
-    fn the_model_is_flat_shaded() {
-        // The look, as a condition on the file. Everything the game draws is a
-        // flat tone per facet, and a mesh left smooth in Blender exports with
-        // its normals averaged across the faces each vertex meets — which
-        // arrives as a hull with gradients running over it, the one thing this
-        // palette cannot absorb. It is a checkbox in a modelling program and
-        // reads as a subtly wrong-looking boat rather than as a mistake, so it
-        // is worth a test rather than an eye.
-        for mesh in [HULL_MESH, SPAR_MESH] {
-            assert!(
-                is_flat_shaded(
-                    &triangles(MODEL, mesh, "POSITION"),
-                    &triangles(MODEL, mesh, "NORMAL")
-                ),
-                "mesh {mesh} of the boat is smooth-shaded"
-            );
-        }
-    }
-
-    #[test]
-    fn every_face_looks_outwards() {
-        // Winding is invisible until something is drawn — a face wound the
-        // wrong way round is simply culled, so what is seen through the hole is
-        // the inside of the far side of the shape, lit as though it faced away
-        // from the sun. On a mast that is a mast whose lit side is the shaded
-        // one and whose top has gone; a change small enough to look at without
-        // noticing, and this file caught it once already.
-        //
-        // Checked against a point inside: a closed convex-ish shell has every
-        // face pointing away from its own middle. Both meshes, because the one
-        // that was wound inwards was the spar.
-        for mesh in [HULL_MESH, SPAR_MESH] {
-            let faces = triangles(MODEL, mesh, "POSITION");
-            let corners: Vec<Vec3> = faces.iter().flatten().copied().collect();
-            let middle = corners.iter().sum::<Vec3>() / corners.len() as f32;
-
-            for face in faces {
-                let outward = (face[0] + face[1] + face[2]) / 3.0 - middle;
-                let normal = (face[1] - face[0]).cross(face[2] - face[0]).normalize();
-                assert!(
-                    normal.dot(outward) > 0.0,
-                    "a face of mesh {mesh} at {outward:?} from the middle points \
-                     {normal:?}, which is inwards"
-                );
-            }
-        }
     }
 
     #[test]

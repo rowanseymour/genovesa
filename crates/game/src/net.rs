@@ -581,16 +581,11 @@ fn report_position(
     time: Res<Time>,
     online: Res<Online>,
     player: PlayerPlace,
-    carriers: Query<&Transform>,
     mut last: Local<Option<(f32, Vec2)>>,
 ) {
-    let Some(place) = player
-        .carrier()
-        .and_then(|carrier| carriers.get(carrier).ok())
-    else {
+    let Some(position) = player.on_the_map() else {
         return;
     };
-    let position = Vec2::new(place.translation.x, place.translation.z);
     let now = time.elapsed_secs();
 
     if let Some((reported_at, reported)) = *last {
@@ -623,9 +618,9 @@ fn place_markers(
         // bobbing on. Ground still generating keeps the last height, exactly
         // as the boat and the camera's own focus do.
         let mut height = transform.translation.y;
-        if let Some(ground) = ground.as_ref().and_then(|g| g.height(at.x, at.y)) {
-            let water = sea.swell(at, time.elapsed_secs_wrapped(), -ground);
-            height = ground.max(water) + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
+        if let Some(standing) = ground.as_ref().and_then(|g| g.height(at.x, at.y)) {
+            let water = sea.water_over(ground.as_deref(), at, time.elapsed_secs_wrapped());
+            height = standing.max(water) + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
         }
         transform.translation = Vec3::new(at.x, height, at.y);
     }

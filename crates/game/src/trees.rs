@@ -11,13 +11,11 @@
 //! culls on its own: a tree is part of a chunk, and the chunk already knows
 //! when it is wanted.
 
-use bevy::asset::AssetPath;
-use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use protocol::ground::{Palm, CHUNK_METRES};
 
 use crate::terrain::{Ground, PendingPalms, TerrainChunk};
-use crate::{matte, AppState};
+use crate::{matte, model_mesh, AppState};
 
 /// The palm, as a file. Built from `assets-src/palm.glb/palm.blend` by
 /// `assets-src/export.sh`, which is where the export settings the look depends
@@ -25,7 +23,7 @@ use crate::{matte, AppState};
 const MODEL: &str = "palm.glb";
 
 /// Which mesh in [`MODEL`] is which — positions in the file, as the boat's
-/// are, and pinned by `the_model_holds_a_crown_and_a_trunk` for the same
+/// are, and pinned by `the_model_is_a_crown_and_a_trunk_fit_to_draw` for the same
 /// reason. Note the order: the exporter writes meshes by name rather than in
 /// the order the objects were made, so the fronds come first.
 const FRONDS_MESH: usize = 0;
@@ -70,16 +68,9 @@ fn load_the_model(
     mut materials: ResMut<Assets<StandardMaterial>>,
     assets: Res<AssetServer>,
 ) {
-    let mesh = |index: usize| -> AssetPath<'static> {
-        GltfAssetLabel::Primitive {
-            mesh: index,
-            primitive: 0,
-        }
-        .from_asset(MODEL)
-    };
     commands.insert_resource(PalmModel {
-        fronds: assets.load(mesh(FRONDS_MESH)),
-        trunk: assets.load(mesh(TRUNK_MESH)),
+        fronds: assets.load(model_mesh(MODEL, FRONDS_MESH)),
+        trunk: assets.load(model_mesh(MODEL, TRUNK_MESH)),
         frond_material: materials.add(matte(FROND_COLOR)),
         trunk_material: materials.add(matte(TRUNK_COLOR)),
     });
@@ -150,18 +141,16 @@ pub fn stands_at(origin: Vec2, palm: &Palm) -> Vec2 {
 mod tests {
     use super::*;
 
-    use crate::testing::{is_flat_shaded, model, triangles, winds_outwards};
+    use crate::testing::{assert_model_draws, model, triangles};
 
     #[test]
-    fn the_model_holds_a_crown_and_a_trunk() {
-        // The one thing about the file the game cannot see for itself, and a
-        // sharper edge here than on the boat: glTF numbers its meshes in the
-        // order the *exporter* wrote them, which is by name — so the fronds
-        // come first despite the trunk being modelled first, and anything that
-        // reasoned from the modelling order would paint the crown in bark.
-        let (json, _) = model(MODEL);
-        assert_eq!(json["meshes"][FRONDS_MESH]["name"], "fronds");
-        assert_eq!(json["meshes"][TRUNK_MESH]["name"], "trunk");
+    fn the_model_is_a_crown_and_a_trunk_fit_to_draw() {
+        // See `assert_model_draws`. The order has a sharper edge here than on
+        // the boat: glTF numbers its meshes in the order the *exporter* wrote
+        // them, which is by name — so the fronds come first despite the trunk
+        // being modelled first, and anything that reasoned from the modelling
+        // order would paint the crown in bark.
+        assert_model_draws(MODEL, &[(FRONDS_MESH, "fronds"), (TRUNK_MESH, "trunk")]);
     }
 
     #[test]
@@ -179,35 +168,6 @@ mod tests {
             low.abs() < 1e-4,
             "the trunk starts at {low} rather than at the ground"
         );
-    }
-
-    #[test]
-    fn every_face_of_the_palm_looks_outwards() {
-        // The boat's spar shipped inside-out once, which is why this exists
-        // for every model and not just for the one that has been wrong. A
-        // frond wound inwards is a frond that vanishes from one side.
-        for mesh in [FRONDS_MESH, TRUNK_MESH] {
-            assert!(
-                winds_outwards(&triangles(MODEL, mesh, "POSITION")),
-                "mesh {mesh} of the palm is wound inside-out"
-            );
-        }
-    }
-
-    #[test]
-    fn the_palm_is_flat_shaded() {
-        // A crown left smooth in Blender comes through with its normals
-        // averaged across the fronds meeting at the middle, which draws as a
-        // green smear rather than as seven blades.
-        for mesh in [FRONDS_MESH, TRUNK_MESH] {
-            assert!(
-                is_flat_shaded(
-                    &triangles(MODEL, mesh, "POSITION"),
-                    &triangles(MODEL, mesh, "NORMAL")
-                ),
-                "mesh {mesh} of the palm is smooth-shaded"
-            );
-        }
     }
 
     #[test]

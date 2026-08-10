@@ -473,6 +473,26 @@ impl SeaConditions {
         let w = shore_weight(depth);
         deep * (1.0 - w) + self.shore(at, elapsed, depth) * w
     }
+
+    /// Where the water stands over a map point, in metres — [`swell`] with
+    /// the depth looked up rather than passed in.
+    ///
+    /// This is what everything riding the sea wants: a hull, a marker, a
+    /// dolphin. Ground the client has not been sent counts as
+    /// [`OCEAN_DEPTH`] — the same benefit of the doubt the depth window
+    /// gives the shader, and the reason this is one function rather than a
+    /// lookup written out at each of them. A caller reaching for
+    /// [`f32::MAX`] instead would get NaN back: the shore wave's phase *is*
+    /// the depth, and an infinite phase has no sine.
+    ///
+    /// [`swell`]: SeaConditions::swell
+    /// [`OCEAN_DEPTH`]: protocol::ground::OCEAN_DEPTH
+    pub fn water_over(&self, ground: Option<&Ground>, at: Vec2, elapsed: f32) -> f32 {
+        let depth = ground
+            .and_then(|ground| ground.height(at.x, at.y))
+            .map_or(protocol::ground::OCEAN_DEPTH, |height| -height);
+        self.swell(at, elapsed, depth)
+    }
 }
 
 /// Brings the drawn sea to the forecast: the wind eases over, each wave
@@ -824,6 +844,8 @@ pub fn surface_mesh(extent: f32) -> Mesh {
 mod tests {
     use super::*;
 
+    use protocol::ground::OCEAN_DEPTH;
+
     /// Somewhere with the whole ocean's depth under it.
     const DEEP: f32 = 8.0;
 
@@ -839,6 +861,22 @@ mod tests {
     fn ceiling(sea: &SeaConditions) -> f32 {
         let deep: f32 = sea.components().iter().map(|wave| wave.w).sum();
         deep.max(sea.shore_amplitude())
+    }
+
+    #[test]
+    fn water_over_ground_nobody_has_been_sent_is_open_ocean() {
+        // Everything riding the sea asks `water_over`, and some of them ask
+        // over ground that has not arrived — a bird past the end of its
+        // sounded course, a chunk that streamed out behind the boat. The
+        // answer is the open sea's, and the point of having one function say
+        // so is that the obvious hand-rolled fallback is not: the shore
+        // wave's phase *is* the depth, so a caller reaching for `f32::MAX`
+        // gets `inf.sin()` and hands NaN to whatever it was placing.
+        let sea = assumed();
+        let (at, elapsed) = (Vec2::new(37.0, -11.0), 3.0);
+        let answer = sea.water_over(None, at, elapsed);
+        assert!(answer.is_finite(), "unknown ground answered {answer}");
+        assert_eq!(answer, sea.swell(at, elapsed, OCEAN_DEPTH));
     }
 
     #[test]

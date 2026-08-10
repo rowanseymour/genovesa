@@ -11,51 +11,69 @@
 //! behaviour worth reaching for moves to the server and the wire *first* and
 //! becomes a different kind of thing; it does not grow out of these.
 //!
-//! The unit of wildlife is the **formation**, not the individual: a creature
-//! is spawned as a group with a shared course and lifetime, and a member only
-//! ever knows its place in the group — a station, and a phase of the group's
-//! own rhythm. An eagle's formation is usually one bird, which is still a
-//! formation and not a special case. Within that, the kinds sit at opposite
-//! ends of what decoration can be:
+//! Wildlife comes in two shapes, at opposite ends of what decoration can be:
 //!
 //! - An **eagle** belongs to a *place*. A chunk whose ground holds a summit
 //!   worth the name gets a bird — sometimes a pair — circling it. A summit
 //!   is a fact about the chunk grid, so every client raises eagles over the
 //!   same peaks without a word crossing the wire, and the birds hang off the
-//!   chunk entity so streaming despawns them with the ground.
+//!   chunk entity so streaming despawns them with the ground. Each bird
+//!   carries its own circle: a pair is two birds on one thermal rather than
+//!   a thing of its own.
 //! - A **crossing** belongs to a *moment*: a pod porpoising past the boat, a
 //!   line of seabirds undulating along the shallows, one or two whales
 //!   shouldering through open water. It surfaces near whoever is looking and
-//!   is gone; a client anchored a mile away gets its own. A swimming
-//!   formation retires under water, where a despawn cannot be seen; a flying
-//!   one retires out at the edge of the haze.
+//!   is gone; a client anchored a mile away gets its own. Here the unit is
+//!   the [`Formation`] rather than the individual — the group carries the
+//!   course and the lifetime, and a member only ever knows its station in it
+//!   and its phase of the group's own rhythm. A swimming formation retires
+//!   under water, where a despawn cannot be seen; a flying one retires out
+//!   at the edge of the haze.
 //!
 //! And though nothing here can be touched, it can be *approached* — so the
 //! one behaviour wildlife owes the player is absence: birds give way upward
-//! and swimmers give way downward as the hull nears, eased rather than
-//! snapped, so an encounter reads as the creature minding the boat and never
-//! as the boat passing through it.
+//! and swimmers give way downward as the player nears, eased rather than
+//! snapped, so an encounter reads as the creature minding them and never as
+//! the boat passing through it. That is one rule for both shapes, eagle and
+//! pod alike: [`Shy`] carries how much of the player a creature is currently
+//! minding and [`give_way`] eases it on and off, while what being shy
+//! *means* — climbing, sounding — stays each kind's own business.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
+use std::ops::Index;
 
-use bevy::asset::AssetPath;
-use bevy::gltf::GltfAssetLabel;
 use bevy::math::Vec3Swizzles;
 use bevy::prelude::*;
 use protocol::ground::CHUNK_METRES;
 
-use crate::boat::Boat;
 use crate::camera::MapCamera;
+use crate::player::PlayerPlace;
 use crate::sea::SeaConditions;
 use crate::terrain::{Ground, TerrainChunk};
-use crate::{eased, matte, AppState};
+use crate::{eased, matte, model_mesh, AppState};
 
-/// The models, one mesh each. Position 0 in each file, pinned by
-/// `the_models_hold_one_mesh_each` the way the palm's order is.
-const EAGLE_MODEL: &str = "eagle.glb";
-const DOLPHIN_MODEL: &str = "dolphin.glb";
-const SEABIRD_MODEL: &str = "seabird.glb";
-const WHALE_MODEL: &str = "whale.glb";
+/// The kinds of creature. Also an index into [`WildlifeModels`], so anything
+/// that knows what it is can find what to draw it with.
+#[derive(Clone, Copy)]
+enum Kind {
+    Eagle,
+    Dolphin,
+    Seabird,
+    Whale,
+}
+
+/// What each kind is made of, in [`Kind`]'s own order: the file its mesh
+/// comes out of, and the colour it is painted.
+///
+/// The models hold one mesh each, at position 0 — pinned by
+/// `the_models_are_one_creature_each_fit_to_draw` the way the palm's order
+/// is, which reads the file names here to know what it is looking for.
+const KINDS: [(&str, Color); 4] = [
+    ("eagle.glb", EAGLE_COLOR),
+    ("dolphin.glb", DOLPHIN_COLOR),
+    ("seabird.glb", SEABIRD_COLOR),
+    ("whale.glb", WHALE_COLOR),
+];
 
 /// Dark umber. An eagle is seen against sky or against sunlit rock, and in
 /// both it is its silhouette — real plumage colour would only muddy a shape
@@ -76,6 +94,74 @@ const SEABIRD_COLOR: Color = Color::srgb(0.84, 0.84, 0.80);
 /// the water, and what sells the size is a long dark mass rather than a
 /// bright shape.
 const WHALE_COLOR: Color = Color::srgb(0.27, 0.31, 0.37);
+
+// --- Minding the player ------------------------------------------------------
+
+/// How much of the player a creature is currently minding, and what it takes
+/// to mind them at all. The one give-way rule the module doc promises: eased
+/// on and off by [`give_way`], and read by whatever draws the creature.
+#[derive(Component)]
+pub struct Shy {
+    /// `0.0` unbothered, `1.0` fully given way. What that *means* is the
+    /// creature's own — a bird climbs, a pod sounds — so nothing here says.
+    minding: f32,
+    /// How near the player may come across the map, in metres, before it is
+    /// felt. Generous enough on a formation to cover the members' spread
+    /// around the leader the distance is measured to.
+    wary: f32,
+    /// How far above the player it stops being worth minding, in metres: a
+    /// bird already this much higher than the masthead has nothing to give
+    /// way to. Infinite for anything keeping to the water, where the player
+    /// is never below in a sense worth measuring.
+    headroom: f32,
+}
+
+impl Shy {
+    /// Unbothered, minding a player within `wary` metres — the sea's
+    /// version, with no height to it.
+    fn of(wary: f32) -> Self {
+        Self {
+            minding: 0.0,
+            wary,
+            headroom: f32::INFINITY,
+        }
+    }
+}
+
+/// How fast a creature gives way and how fast it settles back, in e-foldings
+/// per second: a couple of seconds either way, which is long enough to read
+/// as the animal deciding and short enough to happen while the boat is still
+/// there.
+const MINDING: f32 = 0.6;
+
+/// Whether a creature at `at` is minding a player at `player` — the whole of
+/// the rule, kept out of the system so it can be asked about directly.
+fn minds(shy: &Shy, at: Vec3, player: Option<Vec3>) -> bool {
+    player.is_some_and(|player| {
+        at.xz().distance(player.xz()) < shy.wary && at.y - player.y < shy.headroom
+    })
+}
+
+/// Eases every creature's [`Shy::minding`] towards whether the player is
+/// there to be minded.
+///
+/// Position comes from the propagated transform, so an eagle hanging off a
+/// chunk is compared in the same world frame a formation is. That is last
+/// frame's — propagation runs after this — and on the frame a creature is
+/// spawned it is the origin, both of which are a fraction of one ease on a
+/// quantity that takes seconds to travel.
+fn give_way(
+    time: Res<Time>,
+    player: PlayerPlace,
+    mut creatures: Query<(&mut Shy, &GlobalTransform)>,
+) {
+    let player = player.at();
+    let ease = eased(MINDING, time.delta_secs());
+    for (mut shy, at) in &mut creatures {
+        let target = f32::from(minds(&shy, at.translation(), player));
+        shy.minding += (target - shy.minding) * ease;
+    }
+}
 
 // --- Eagles ----------------------------------------------------------------
 
@@ -113,10 +199,10 @@ const SOAR_BANK: f32 = 0.20;
 /// the next chunk is entitled to rise through it.
 const SOAR_GROUND_CLEARANCE: f32 = 7.0;
 
-/// How near the player's hull may come, in metres across the map, before an
-/// eagle minds it — and how much air the bird puts on when it does. A boat
-/// under a summit is a boat aground on a mountain, which the game permits,
-/// so the bird has to permit it too: it climbs, eased by [`Eagle::lift`],
+/// How near the player may come, in metres across the map, before an eagle
+/// minds them; how far above them it stops caring; and how much air it puts
+/// on when it does. A boat under a summit is a boat aground on a mountain,
+/// which the game permits, so the bird has to permit it too: it climbs
 /// rather than ever sharing its altitude with a masthead.
 const EAGLE_WARY: f32 = 40.0;
 const EAGLE_HEADROOM: f32 = 25.0;
@@ -138,9 +224,6 @@ pub struct Eagle {
     /// Which way round: `1.0` or `-1.0`. A pair shares one direction, being
     /// on the same thermal.
     turn: f32,
-    /// Extra height currently held to keep clear of the player, in metres —
-    /// the eased state behind the give-way rule, see [`EAGLE_WARY`].
-    lift: f32,
 }
 
 /// Where an eagle would circle over one chunk, in the chunk's own frame —
@@ -166,10 +249,15 @@ pub fn eyrie(ground: &Ground, chunk: IVec2) -> Option<Vec3> {
 }
 
 /// Gives every newly arrived chunk with a summit its eagle — or its pair,
-/// every third summit or so holding two. The pair is one formation on one
-/// thermal: same circle centre, same direction, the second bird higher,
-/// wider and behind, so they read as company rather than as a collision
-/// waiting to happen.
+/// every third summit or so holding two.
+///
+/// A pair is two birds on one thermal rather than a [`Formation`]: they come
+/// out of the same bits, so they share a circle centre and a direction, and
+/// the second is simply put a little higher, on a slightly wider circle, and
+/// most of a sixth of a lap behind — enough to read as company rather than
+/// as a collision waiting to happen. Nothing after this knows the two are a
+/// pair, and nothing needs to: unlike a crossing, they hold no course
+/// between them and no lifetime, having the chunk's.
 ///
 /// Children of the chunk entity, like palms: drawn when the ground is drawn,
 /// forgotten when streaming forgets it, and re-arrival runs this again —
@@ -195,12 +283,13 @@ fn watch_summits(
                     radius: SOAR_RADIUS + 3.0 * trailing,
                     phase: TAU * (bits >> 8) as f32 / (1 << 24) as f32 + 0.9 * trailing,
                     turn: if bits & 1 == 0 { 1.0 } else { -1.0 },
-                    lift: 0.0,
+                },
+                Shy {
+                    headroom: EAGLE_HEADROOM,
+                    ..Shy::of(EAGLE_WARY)
                 },
                 Transform::from_translation(centre),
-                Visibility::default(),
-                Mesh3d(models.eagle.clone()),
-                MeshMaterial3d(models.eagle_material.clone()),
+                models[Kind::Eagle].drawn_as(),
             ));
         }
     }
@@ -217,10 +306,9 @@ fn soar(
     time: Res<Time>,
     ground: Res<Ground>,
     chunks: Query<&TerrainChunk>,
-    boats: Query<&Transform, With<Boat>>,
-    mut eagles: Query<(&mut Eagle, &ChildOf, &mut Transform), Without<Boat>>,
+    mut eagles: Query<(&Eagle, &Shy, &ChildOf, &mut Transform)>,
 ) {
-    for (mut eagle, chunk, mut transform) in &mut eagles {
+    for (eagle, shy, chunk, mut transform) in &mut eagles {
         let angle =
             eagle.phase + eagle.turn * (SOAR_SPEED / eagle.radius) * time.elapsed_secs_wrapped();
         let (sin, cos) = angle.sin_cos();
@@ -234,19 +322,9 @@ fn soar(
             at.y = at.y.max(under + SOAR_GROUND_CLEARANCE);
         }
 
-        // The give-way rule: a hull nearby and not far below means climb,
-        // eased both on and off so the bird soars away rather than
-        // teleporting clear.
-        let mut lift = 0.0;
-        if let Ok(boat) = boats.single() {
-            let hull = boat.translation;
-            if (origin + at.xz()).distance(hull.xz()) < EAGLE_WARY && at.y - hull.y < EAGLE_HEADROOM
-            {
-                lift = EAGLE_LIFT;
-            }
-        }
-        eagle.lift += (lift - eagle.lift) * eased(0.5, time.delta_secs());
-        at.y += eagle.lift;
+        // Giving way is upward, and eased by [`give_way`] both on and off, so
+        // the bird soars clear rather than teleporting there.
+        at.y += EAGLE_LIFT * shy.minding;
 
         let along = Vec3::new(-sin, 0.0, cos) * eagle.turn;
         transform.translation = at;
@@ -259,10 +337,15 @@ fn soar(
 
 // --- Crossings -------------------------------------------------------------
 
-/// What one kind of crossing asks of the sea before it will make one — the
-/// numbers that differ between a pod, a line of seabirds and a whale, kept
-/// together so the differences can be read in one place.
+/// One kind of crossing, whole: what it asks of the sea before it will be
+/// made, and what it is made of. Every number that differs between a pod, a
+/// line of seabirds and a whale is here, so the differences can be read in
+/// one place — and so the spawner below can be written once.
 struct Crossing {
+    /// What the formation is called in the entity tree.
+    name: &'static str,
+    /// The members, and how they sit in it.
+    members: Members,
     /// The ring around the camera's focus the formation enters on, in
     /// metres: far enough to appear as "out there" rather than materialising
     /// alongside, near enough to be seen without being looked for.
@@ -286,13 +369,76 @@ struct Crossing {
     /// under. Zero for flyers, which keep themselves clear of the ground
     /// live instead.
     overrun: f32,
-    /// How close the player's hull may come, in metres, before the
-    /// formation gives way. Generous enough to cover the members' spread
-    /// around the leader the distance is measured to.
+    /// How close the player may come, in metres, before the formation gives
+    /// way — its members' [`Shy::wary`].
     wary: f32,
 }
 
-const DOLPHINS: Crossing = Crossing {
+/// What a crossing's members are, and how they hold their places in it. The
+/// two shapes retire differently and move differently, and nothing else
+/// about them differs at all.
+enum Members {
+    /// A school: dolphins or whales, porpoising at their stations.
+    Swimming(Pod),
+    /// A line: seabirds strung out along the course.
+    Flying(Line),
+}
+
+/// A swimming formation's members. A dolphin and a whale are the same animal
+/// at different sizes and tempos, so the difference between a pod and a pair
+/// of whales is these numbers and not two spawners.
+struct Pod {
+    kind: Kind,
+    /// What one member is called in the entity tree.
+    name: &'static str,
+    /// Where members swim relative to the leader — abreast-and-behind in a
+    /// loose echelon — and how many of the stations get used, fewest to
+    /// most inclusive. The leader's own station comes first.
+    stations: &'static [(f32, f32)],
+    count: (usize, usize),
+    /// Radians between neighbours in the porpoising cycle — enough that a
+    /// pod surfaces as a run of arcs rather than a synchronised display
+    /// team.
+    stagger: f32,
+    /// Metres of station jitter, so no member sits exactly where its
+    /// station says.
+    slop: f32,
+    /// The motion every member shares. Its [`Swimmer::phase`] is the
+    /// leader's; the rest are staggered off it.
+    swimmer: Swimmer,
+}
+
+/// A flying formation's members: birds strung out behind the leader, all on
+/// one undulation.
+struct Line {
+    kind: Kind,
+    name: &'static str,
+    count: (usize, usize),
+    /// Metres of course between one bird and the next.
+    spacing: f32,
+    slop: f32,
+}
+
+static DOLPHINS: Crossing = Crossing {
+    name: "Pod",
+    members: Members::Swimming(Pod {
+        kind: Kind::Dolphin,
+        name: "Dolphin",
+        stations: &[(0.0, 0.0), (-1.7, 2.1), (1.7, 2.4), (-3.3, 4.6), (3.4, 4.9)],
+        count: (2, 5),
+        stagger: 0.45,
+        slop: 0.6,
+        swimmer: Swimmer {
+            // All under water at the spawn — the sine's trough — so a pod
+            // enters the world unseen and *surfaces*.
+            phase: -FRAC_PI_2,
+            period: 3.2,
+            leap: 2.2,
+            cruise: 1.3,
+            refuge: 2.0,
+            hidden_below: -1.2,
+        },
+    }),
     ring: (90.0, 150.0),
     abeam: 50.0,
     speed: 4.5,
@@ -302,7 +448,15 @@ const DOLPHINS: Crossing = Crossing {
     wary: 25.0,
 };
 
-const SEABIRDS: Crossing = Crossing {
+static SEABIRDS: Crossing = Crossing {
+    name: "Seabird line",
+    members: Members::Flying(Line {
+        kind: Kind::Seabird,
+        name: "Seabird",
+        count: (3, 7),
+        spacing: 3.4,
+        slop: 0.5,
+    }),
     ring: (70.0, 140.0),
     abeam: 50.0,
     speed: 6.0,
@@ -319,7 +473,25 @@ const SEABIRDS: Crossing = Crossing {
     wary: 35.0,
 };
 
-const WHALES: Crossing = Crossing {
+static WHALES: Crossing = Crossing {
+    name: "Whales",
+    members: Members::Swimming(Pod {
+        kind: Kind::Whale,
+        name: "Whale",
+        // A second whale swims off the leader's quarter, well clear.
+        stations: &[(0.0, 0.0), (7.0, 12.0)],
+        count: (1, 2),
+        stagger: 0.9,
+        slop: 1.0,
+        swimmer: Swimmer {
+            phase: -FRAC_PI_2,
+            period: 9.0,
+            leap: 1.9,
+            cruise: 2.4,
+            refuge: 2.0,
+            hidden_below: -2.8,
+        },
+    }),
     ring: (110.0, 190.0),
     abeam: 60.0,
     speed: 2.2,
@@ -340,11 +512,6 @@ const COURSE_SOUNDING: f32 = 12.0;
 const CROSSING_REST: f32 = 45.0;
 const CROSSING_RETRY: f32 = 2.0;
 
-/// How far apart neighbouring dolphins are in their cycle, in radians —
-/// enough that a pod surfaces as a run of arcs rather than a synchronised
-/// display team.
-const LEAP_STAGGER: f32 = 0.45;
-
 /// A flying formation's height over the water, the metres of rise and fall
 /// its line undulates through, and the metres of course one undulation
 /// spans. The phase is laid along the course rather than along time, so
@@ -361,35 +528,22 @@ const SKIM_CLIMB: f32 = 7.0;
 /// metres: far enough that a bird winking out is a speck winking out.
 const FLOCK_GONE: f32 = 450.0;
 
-/// Where pod members swim, relative to the leader: abreast-and-behind in a
-/// loose echelon, jittered a little at spawn. As many as the entropy asks
-/// for, up to all five.
-const POD_STATIONS: [(f32, f32); 5] =
-    [(0.0, 0.0), (-1.7, 2.1), (1.7, 2.4), (-3.3, 4.6), (3.4, 4.9)];
-
-/// Where a second whale swims: off the leader's quarter, well clear.
-const WHALE_STATION: (f32, f32) = (7.0, 12.0);
-
 /// One formation on its crossing. The transform carries where its leader is
 /// and which way the whole faces; this carries what the transform must not
 /// be asked to remember.
 #[derive(Component)]
 pub struct Formation {
+    /// Which kind of crossing this is — every number the kind fixes is read
+    /// off it rather than copied in here.
+    kind: &'static Crossing,
     /// The course, as a unit vector on the map.
     heading: Vec2,
-    /// Its way along it, in metres per second.
+    /// Its way along it, in metres per second — the kind's speed, jittered a
+    /// little per spawning, so this one is its own.
     speed: f32,
     /// `Time::elapsed_secs` at the spawn, which every member's cycle counts
     /// from.
     born: f32,
-    /// Seconds the sounded course is good for — when retirement may begin.
-    life: f32,
-    /// The give-way radius, from [`Crossing::wary`].
-    wary: f32,
-    /// How minded of the player it currently is: `0.0` unbothered, `1.0`
-    /// fully given way — eased toward whichever the hull's distance asks
-    /// for, so swimmers sound and birds climb rather than jump.
-    shy: f32,
 }
 
 /// Marks a formation that swims — it retires under water.
@@ -499,21 +653,13 @@ fn send_crossings(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    let focus = Vec2::new(camera.focus.x, camera.focus.z);
+    let focus = camera.focus.xz();
 
     let entropy = scramble(time.elapsed().as_millis() as u32);
-    let roll = scramble(entropy ^ 0x5EA5) % 100;
-    enum Kind {
-        Dolphins,
-        Seabirds,
-        Whales,
-    }
-    let (which, kind) = if roll < 45 {
-        (Kind::Dolphins, &DOLPHINS)
-    } else if roll < 80 {
-        (Kind::Seabirds, &SEABIRDS)
-    } else {
-        (Kind::Whales, &WHALES)
+    let kind = match scramble(entropy ^ 0x5EA5) % 100 {
+        0..45 => &DOLPHINS,
+        45..80 => &SEABIRDS,
+        _ => &WHALES,
     };
     let Some((start, heading)) = plan_course(&ground, focus, entropy, kind) else {
         clock.next_try = now + CROSSING_RETRY;
@@ -525,113 +671,66 @@ fn send_crossings(
     // exactly on its station, in place or in rhythm, or a formation would
     // read as one animal stamped repeatedly, the way a regular palm crown
     // would tile.
-    let jitter = |member: usize, salt: u32| {
-        scramble(entropy ^ salt ^ ((member as u32) << 8)) as f32 / u32::MAX as f32 * 2.0 - 1.0
-    };
+    let jitter = |member: usize, salt: u32| signed(entropy ^ ((member as u32) << 8), salt);
 
-    let parent = (
+    let formation = (
+        Name::new(kind.name),
         Formation {
+            kind,
             heading,
-            speed: kind.speed
-                * (0.92 + 0.16 * (scramble(entropy ^ 0x3EED) as f32 / u32::MAX as f32)),
+            speed: kind.speed * (0.92 + 0.16 * unit(entropy, 0x3EED)),
             born: now,
-            life: kind.life,
-            wary: kind.wary,
-            shy: 0.0,
         },
+        Shy::of(kind.wary),
         DespawnOnExit(AppState::InWorld),
         Transform::from_xyz(start.x, 0.0, start.y)
             .looking_to(Vec3::new(heading.x, 0.0, heading.y), Vec3::Y),
         Visibility::default(),
     );
 
-    if matches!(which, Kind::Dolphins) {
-        let count = 2 + scramble(entropy ^ 0x90D5) as usize % 4;
-        commands
-            .spawn((Name::new("Pod"), School, parent))
-            .with_children(|school| {
-                for (member, (side, lag)) in POD_STATIONS.iter().enumerate().take(count) {
+    match &kind.members {
+        Members::Swimming(pod) => {
+            let count = between(entropy, 0x90D5, pod.count).min(pod.stations.len());
+            commands.spawn((School, formation)).with_children(|school| {
+                for (member, (side, lag)) in pod.stations.iter().enumerate().take(count) {
                     let swimmer = Swimmer {
-                        // All under water at the spawn — the sine's trough —
-                        // so a pod enters the world unseen and *surfaces*.
-                        phase: -FRAC_PI_2
-                            + member as f32 * LEAP_STAGGER
+                        phase: pod.swimmer.phase
+                            + member as f32 * pod.stagger
                             + 0.12 * jitter(member, 0xD01),
-                        period: 3.2,
-                        leap: 2.2,
-                        cruise: 1.3,
-                        refuge: 2.0,
-                        hidden_below: -1.2,
+                        ..pod.swimmer
                     };
                     school.spawn((
-                        Name::new("Dolphin"),
+                        Name::new(pod.name),
                         Transform::from_xyz(
-                            side + 0.5 * jitter(member, 0xD02),
+                            side + pod.slop * jitter(member, 0xD02),
                             -(swimmer.cruise + swimmer.leap),
-                            lag + 0.7 * jitter(member, 0xD03),
+                            lag + pod.slop * jitter(member, 0xD03),
                         ),
                         swimmer,
-                        Visibility::default(),
-                        Mesh3d(models.dolphin.clone()),
-                        MeshMaterial3d(models.dolphin_material.clone()),
+                        models[pod.kind].drawn_as(),
                     ));
                 }
             });
-    } else if matches!(which, Kind::Seabirds) {
-        let count = 3 + scramble(entropy ^ 0x5B1D) as usize % 5;
-        commands
-            .spawn((Name::new("Seabird line"), Flock, parent))
-            .with_children(|line| {
+        }
+        Members::Flying(line) => {
+            let count = between(entropy, 0x5B1D, line.count);
+            commands.spawn((Flock, formation)).with_children(|flock| {
                 for member in 0..count {
-                    let lag = member as f32 * 3.4 + 0.5 * jitter(member, 0x5B2);
-                    line.spawn((
-                        Name::new("Seabird"),
+                    let lag = member as f32 * line.spacing + line.slop * jitter(member, 0x5B2);
+                    flock.spawn((
+                        Name::new(line.name),
                         Seabird {
                             // Phase from *place* on the line, not from the
                             // bird: each crosses a crest where the bird
                             // ahead did.
                             phase: -lag * TAU / UNDULATION_LENGTH,
                         },
-                        Transform::from_xyz(0.5 * jitter(member, 0x5B3), SKIM_HEIGHT, lag),
-                        Visibility::default(),
-                        Mesh3d(models.seabird.clone()),
-                        MeshMaterial3d(models.seabird_material.clone()),
+                        Transform::from_xyz(line.slop * jitter(member, 0x5B3), SKIM_HEIGHT, lag),
+                        models[line.kind].drawn_as(),
                     ));
                 }
             });
-    } else {
-        let count = 1 + (scramble(entropy ^ 0x3A1E) % 5 < 2) as usize;
-        commands
-            .spawn((Name::new("Whales"), School, parent))
-            .with_children(|pair| {
-                for member in 0..count {
-                    let (side, lag) = if member == 0 {
-                        (0.0, 0.0)
-                    } else {
-                        WHALE_STATION
-                    };
-                    let swimmer = Swimmer {
-                        phase: -FRAC_PI_2 + member as f32 * 0.9,
-                        period: 9.0,
-                        leap: 1.9,
-                        cruise: 2.4,
-                        refuge: 2.0,
-                        hidden_below: -2.8,
-                    };
-                    pair.spawn((
-                        Name::new("Whale"),
-                        Transform::from_xyz(
-                            side + jitter(member, 0x3A2),
-                            -(swimmer.cruise + swimmer.leap),
-                            lag + jitter(member, 0x3A3),
-                        ),
-                        swimmer,
-                        Visibility::default(),
-                        Mesh3d(models.whale.clone()),
-                        MeshMaterial3d(models.whale_material.clone()),
-                    ));
-                }
-            });
+        }
     }
 }
 
@@ -644,28 +743,24 @@ fn advance(time: Res<Time>, mut formations: Query<(&Formation, &mut Transform)>)
     }
 }
 
-/// Minds the player for every formation: the hull inside the wary radius
-/// eases [`Formation::shy`] up, and its leaving eases it back down. What
-/// being shy *means* — sounding, or climbing — is the member systems'
-/// business; this only notices the boat.
-fn fright(
-    time: Res<Time>,
-    boats: Query<&Transform, With<Boat>>,
-    mut formations: Query<(&mut Formation, &Transform), Without<Boat>>,
-) {
-    let Ok(boat) = boats.single() else {
-        return;
-    };
-    let hull = boat.translation.xz();
-    let ease = eased(0.7, time.delta_secs());
-    for (mut formation, transform) in &mut formations {
-        let target = if transform.translation.xz().distance(hull) < formation.wary {
-            1.0
-        } else {
-            0.0
-        };
-        formation.shy += (target - formation.shy) * ease;
-    }
+/// Where a member of a formation stands on the map, and where the water is
+/// there — the opening move of both [`porpoise`] and [`skim`], which differ
+/// only in what they do with the answer.
+///
+/// The station is read out of the member's own transform in the plane and
+/// carried into the world through the formation's, so a member swims where
+/// its station says however the group is headed. The swell is the wrapped
+/// clock's, the same one the water is drawn on, so a leap crests a wave
+/// rather than some flat remembered ocean.
+fn over_the_water(
+    ground: &Ground,
+    conditions: &SeaConditions,
+    carrier: &Transform,
+    station: &Transform,
+    elapsed: f32,
+) -> (Vec3, f32) {
+    let at = carrier.transform_point(Vec3::new(station.translation.x, 0.0, station.translation.z));
+    (at, conditions.water_over(Some(ground), at.xz(), elapsed))
 }
 
 /// Rides every swimmer through its arcs: a sine about cruising depth for the
@@ -682,27 +777,22 @@ fn porpoise(
     time: Res<Time>,
     ground: Res<Ground>,
     conditions: Res<SeaConditions>,
-    formations: Query<(&Formation, &Transform)>,
+    formations: Query<(&Formation, &Shy, &Transform)>,
     mut swimmers: Query<(&Swimmer, &ChildOf, &mut Transform), Without<Formation>>,
 ) {
+    let elapsed = time.elapsed_secs_wrapped();
     for (swimmer, of, mut transform) in &mut swimmers {
-        let Ok((formation, carrier)) = formations.get(of.parent()) else {
+        let Ok((formation, shy, carrier)) = formations.get(of.parent()) else {
             continue;
         };
-        let at = carrier.transform_point(Vec3::new(
-            transform.translation.x,
-            0.0,
-            transform.translation.z,
-        ));
-        let depth = ground.height(at.x, at.z).map_or(f32::MAX, |height| -height);
-        let water = conditions.swell(at.xz(), time.elapsed_secs_wrapped(), depth);
+        let (_, water) = over_the_water(&ground, &conditions, carrier, &transform, elapsed);
 
-        let bold = 1.0 - formation.shy;
+        let bold = 1.0 - shy.minding;
         let (rise, run) = (TAU / swimmer.period * (time.elapsed_secs() - formation.born)
             + swimmer.phase)
             .sin_cos();
         transform.translation.y =
-            water - swimmer.cruise - formation.shy * swimmer.refuge + swimmer.leap * bold * rise;
+            water - swimmer.cruise - shy.minding * swimmer.refuge + swimmer.leap * bold * rise;
         let pitch = (swimmer.leap * bold * TAU / swimmer.period * run).atan2(formation.speed);
         transform.rotation = Quat::from_rotation_x(pitch);
     }
@@ -721,25 +811,20 @@ fn skim(
     time: Res<Time>,
     ground: Res<Ground>,
     conditions: Res<SeaConditions>,
-    formations: Query<(&Formation, &Transform)>,
+    formations: Query<(&Formation, &Shy, &Transform)>,
     mut seabirds: Query<(&Seabird, &ChildOf, &mut Transform), Without<Formation>>,
 ) {
+    let elapsed = time.elapsed_secs_wrapped();
     for (seabird, of, mut transform) in &mut seabirds {
-        let Ok((formation, carrier)) = formations.get(of.parent()) else {
+        let Ok((formation, shy, carrier)) = formations.get(of.parent()) else {
             continue;
         };
-        let at = carrier.transform_point(Vec3::new(
-            transform.translation.x,
-            0.0,
-            transform.translation.z,
-        ));
-        let depth = ground.height(at.x, at.z).map_or(f32::MAX, |height| -height);
-        let water = conditions.swell(at.xz(), time.elapsed_secs_wrapped(), depth);
+        let (at, water) = over_the_water(&ground, &conditions, carrier, &transform, elapsed);
 
         let along =
             TAU / UNDULATION_LENGTH * formation.speed * (time.elapsed_secs() - formation.born);
         let (rise, run) = (along + seabird.phase).sin_cos();
-        let flying = water + SKIM_HEIGHT + UNDULATION * rise + formation.shy * SKIM_CLIMB;
+        let flying = water + SKIM_HEIGHT + UNDULATION * rise + shy.minding * SKIM_CLIMB;
         // Unknown ground counts as sea: it is far away by construction, and
         // a decorative bird guessing low is a bird the haze already hides.
         let standing = ground.surface(at.x, at.z).unwrap_or(0.0);
@@ -764,7 +849,7 @@ fn retire_schools(
     let now = time.elapsed_secs();
     for (entity, formation, members) in &schools {
         let age = now - formation.born;
-        if age < formation.life {
+        if age < formation.kind.life {
             continue;
         }
         let hidden = members.iter().all(|member| {
@@ -772,7 +857,7 @@ fn retire_schools(
                 .get(member)
                 .is_ok_and(|(swimmer, t)| t.translation.y < swimmer.hidden_below)
         });
-        if hidden || age > formation.life + 25.0 {
+        if hidden || age > formation.kind.life + 25.0 {
             commands.entity(entity).despawn();
         }
     }
@@ -791,12 +876,12 @@ fn retire_flocks(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    let focus = Vec2::new(camera.focus.x, camera.focus.z);
+    let focus = camera.focus.xz();
     let now = time.elapsed_secs();
     for (entity, formation, transform) in &flocks {
         let age = now - formation.born;
         let gone = transform.translation.xz().distance(focus) > FLOCK_GONE;
-        if (age > formation.life && gone) || age > 3.0 * formation.life {
+        if (age > formation.kind.life && gone) || age > 3.0 * formation.kind.life {
             commands.entity(entity).despawn();
         }
     }
@@ -806,15 +891,35 @@ fn retire_flocks(
 
 /// The meshes and materials every creature of a kind shares, loaded once.
 #[derive(Resource)]
-struct WildlifeModels {
-    eagle: Handle<Mesh>,
-    eagle_material: Handle<StandardMaterial>,
-    dolphin: Handle<Mesh>,
-    dolphin_material: Handle<StandardMaterial>,
-    seabird: Handle<Mesh>,
-    seabird_material: Handle<StandardMaterial>,
-    whale: Handle<Mesh>,
-    whale_material: Handle<StandardMaterial>,
+struct WildlifeModels([Creature; KINDS.len()]);
+
+/// What one kind is drawn with — shared by every creature of it, so a whole
+/// pod draws in one call rather than one apiece.
+struct Creature {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
+impl Creature {
+    /// The components that put one on the screen. Visibility is spelled out
+    /// rather than left to the spawner: a creature that inherited nothing
+    /// would never be drawn, and the ones hanging off a chunk have a parent
+    /// to inherit from.
+    fn drawn_as(&self) -> (Mesh3d, MeshMaterial3d<StandardMaterial>, Visibility) {
+        (
+            Mesh3d(self.mesh.clone()),
+            MeshMaterial3d(self.material.clone()),
+            Visibility::default(),
+        )
+    }
+}
+
+impl Index<Kind> for WildlifeModels {
+    type Output = Creature;
+
+    fn index(&self, kind: Kind) -> &Creature {
+        &self.0[kind as usize]
+    }
 }
 
 fn load_the_models(
@@ -822,23 +927,10 @@ fn load_the_models(
     mut materials: ResMut<Assets<StandardMaterial>>,
     assets: Res<AssetServer>,
 ) {
-    let mesh = |model: &str| -> AssetPath<'static> {
-        GltfAssetLabel::Primitive {
-            mesh: 0,
-            primitive: 0,
-        }
-        .from_asset(model.to_owned())
-    };
-    commands.insert_resource(WildlifeModels {
-        eagle: assets.load(mesh(EAGLE_MODEL)),
-        eagle_material: materials.add(matte(EAGLE_COLOR)),
-        dolphin: assets.load(mesh(DOLPHIN_MODEL)),
-        dolphin_material: materials.add(matte(DOLPHIN_COLOR)),
-        seabird: assets.load(mesh(SEABIRD_MODEL)),
-        seabird_material: materials.add(matte(SEABIRD_COLOR)),
-        whale: assets.load(mesh(WHALE_MODEL)),
-        whale_material: materials.add(matte(WHALE_COLOR)),
-    });
+    commands.insert_resource(WildlifeModels(KINDS.map(|(file, colour)| Creature {
+        mesh: assets.load(model_mesh(file, 0)),
+        material: materials.add(matte(colour)),
+    })));
 }
 
 /// Stirs bits until they stop resembling what they were — SplitMix's mixing
@@ -855,6 +947,24 @@ fn scramble(mut x: u32) -> u32 {
     x ^ (x >> 16)
 }
 
+/// A decorative number in `0.0..1.0` from some bits and a salt — the one way
+/// this module turns entropy into a quantity, so a bearing, a jitter and a
+/// speed are all drawn the same way.
+fn unit(entropy: u32, salt: u32) -> f32 {
+    scramble(entropy ^ salt) as f32 / u32::MAX as f32
+}
+
+/// The same, in `-1.0..1.0`: a wobble either way about whatever it is added
+/// to.
+fn signed(entropy: u32, salt: u32) -> f32 {
+    unit(entropy, salt) * 2.0 - 1.0
+}
+
+/// One of `range.0..=range.1`, evenly.
+fn between(entropy: u32, salt: u32, range: (usize, usize)) -> usize {
+    range.0 + scramble(entropy ^ salt) as usize % (range.1 + 1 - range.0)
+}
+
 pub struct WildlifePlugin;
 
 impl Plugin for WildlifePlugin {
@@ -865,10 +975,10 @@ impl Plugin for WildlifePlugin {
                 Update,
                 (
                     watch_summits,
-                    soar,
                     send_crossings,
                     advance,
-                    fright,
+                    give_way,
+                    soar,
                     porpoise,
                     skim,
                     retire_schools,
@@ -884,9 +994,26 @@ impl Plugin for WildlifePlugin {
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::{TimePlugin, TimeUpdateStrategy};
     use protocol::ground::{quantize, ChunkPayload, Surface, Tone, FACET_TRIS, FACET_VERTS};
 
-    use crate::testing::{is_flat_shaded, model, test_ground, triangles, winds_outwards};
+    use crate::testing::{assert_model_draws, test_ground, triangles};
+
+    /// Every kind of crossing there is — which of them a moment gets is
+    /// `send_crossings`' roll, and this is for saying something about the lot
+    /// of them at once.
+    const CROSSINGS: [&Crossing; 3] = [&DOLPHINS, &SEABIRDS, &WHALES];
+
+    /// Every course this entropy can lay for a kind, tried until one is
+    /// found. Which bits fit is nobody's business, so a claim about the water
+    /// near a spot is a claim about the whole run of tries rather than about
+    /// any one of them.
+    fn some_course(ground: &Ground, focus: Vec2, kind: &Crossing) -> Option<(Vec2, Vec2)> {
+        (0..200).find_map(|entropy| plan_course(ground, focus, scramble(entropy), kind))
+    }
 
     /// A chunk payload holding one round hill: `height` metres at grid corner
     /// `peak`, falling off with distance, over a low plain.
@@ -905,16 +1032,17 @@ mod tests {
         }
     }
 
-    /// A wide flat shelf of sea, three metres deep everywhere — the water a
-    /// seabird's band accepts and a pod's or a whale's refuses.
-    fn a_shelf() -> Ground {
+    /// A wide flat floor of sea at one depth, in metres below the waterline —
+    /// which is the whole of what a course is sounded against, so a depth is
+    /// a choice of which kinds may cross it.
+    fn a_floor(depth: f32) -> Ground {
         let mut ground = Ground::default();
         for cz in -6..=6 {
             for cx in -6..=6 {
                 ground.deliver(
                     IVec2::new(cx, cz),
                     Some(ChunkPayload {
-                        heights: vec![quantize(-3.0); FACET_VERTS * FACET_VERTS],
+                        heights: vec![quantize(-depth); FACET_VERTS * FACET_VERTS],
                         surfaces: vec![Surface::plain(Tone::Sand); FACET_TRIS],
                         water: None,
                         palms: Vec::new(),
@@ -923,6 +1051,12 @@ mod tests {
             }
         }
         ground
+    }
+
+    /// Three metres of water: the band a seabird's line accepts and a pod's
+    /// or a whale's refuses.
+    fn a_shelf() -> Ground {
+        a_floor(3.0)
     }
 
     #[test]
@@ -967,13 +1101,8 @@ mod tests {
         // is ground or shallows: nothing may be found for any kind, whatever
         // the entropy says.
         let ground = test_ground();
-        for kind in [&DOLPHINS, &SEABIRDS, &WHALES] {
-            for entropy in 0..200 {
-                assert_eq!(
-                    plan_course(&ground, Vec2::ZERO, scramble(entropy), kind),
-                    None
-                );
-            }
+        for kind in CROSSINGS {
+            assert_eq!(some_course(&ground, Vec2::ZERO, kind), None);
         }
     }
 
@@ -984,10 +1113,8 @@ mod tests {
         // the course it answers stays clear of the island by construction.
         let ground = test_ground();
         for kind in [&DOLPHINS, &WHALES] {
-            let found = (0..200).find_map(|entropy| {
-                plan_course(&ground, Vec2::new(400.0, 0.0), scramble(entropy), kind)
-            });
-            let (start, _) = found.expect("open water near the focus holds some course");
+            let (start, _) = some_course(&ground, Vec2::new(400.0, 0.0), kind)
+                .expect("open water near the focus holds some course");
             assert!(
                 start.length() > crate::testing::TEST_ISLAND_REACH,
                 "a crossing started over the island at {start}"
@@ -1001,45 +1128,129 @@ mod tests {
         // do not — which is the whole sorting: lines of birds happen off
         // beaches, pods and whales out at sea.
         let shelf = a_shelf();
-        assert!((0..200).any(|entropy| plan_course(
-            &shelf,
-            Vec2::ZERO,
-            scramble(entropy),
-            &SEABIRDS
-        )
-        .is_some()));
+        assert!(some_course(&shelf, Vec2::ZERO, &SEABIRDS).is_some());
         for kind in [&DOLPHINS, &WHALES] {
-            for entropy in 0..200 {
-                assert_eq!(
-                    plan_course(&shelf, Vec2::ZERO, scramble(entropy), kind),
-                    None
-                );
-            }
+            assert_eq!(some_course(&shelf, Vec2::ZERO, kind), None);
         }
 
         // And the open sea offers a seabird line nothing: the floor of the
         // test island's surroundings is below the band, like all open floor.
         let open = test_ground();
-        for entropy in 0..200 {
-            assert_eq!(
-                plan_course(&open, Vec2::new(400.0, 0.0), scramble(entropy), &SEABIRDS),
-                None
-            );
+        assert_eq!(some_course(&open, Vec2::new(400.0, 0.0), &SEABIRDS), None);
+    }
+
+    /// A headless app with the wildlife running over `ground`, in a match and
+    /// with a camera for the crossings to surface near. No render app and no
+    /// waiting on the models: what this is about is where creatures are put,
+    /// not what they look like.
+    ///
+    /// The clock is stepped by hand, at a tenth of a second a frame. Headless
+    /// frames take next to no real time, and which kind of crossing is tried
+    /// is drawn from the elapsed milliseconds — so a run on the true clock
+    /// would roll the same kind over and over, and a fixed step makes the
+    /// sequence of tries the same on every machine as well as varied.
+    fn test_app(ground: Ground) -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            TimePlugin,
+            StatesPlugin,
+            WildlifePlugin,
+        ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )))
+        .init_state::<AppState>()
+        .init_asset::<Mesh>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .init_resource::<SeaConditions>()
+        .insert_resource(ground);
+        app.world_mut().spawn(MapCamera::default());
+        app.update();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InWorld);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn a_crossing_puts_every_member_somewhere_real() {
+        // The whole spawn-and-swim path, end to end, and the assertion worth
+        // making about it from outside: every creature is at a place. A
+        // member reading the swell over ground the client has not been sent
+        // used to come back NaN — see `sea::water_over` — and a NaN
+        // translation is a creature that silently stops being drawn, with
+        // nothing failing anywhere to say so.
+        //
+        // Deep water, so the kinds that want it can cross; a seabird roll
+        // over it simply finds nothing and is tried again a moment later,
+        // which is the retry doing its job.
+        let mut app = test_app(a_floor(20.0));
+        let mut members = Vec::new();
+        for _ in 0..200 {
+            app.update();
+            let mut formations = app
+                .world_mut()
+                .query_filtered::<&Children, With<Formation>>();
+            if let Ok(children) = formations.single(app.world()) {
+                members = children.iter().collect();
+                break;
+            }
+        }
+        assert!(
+            !members.is_empty(),
+            "twenty seconds of open water sent nothing across it"
+        );
+
+        // And they keep being somewhere as the crossing runs, not just at the
+        // spawn: the swell is read afresh under every member every frame.
+        for _ in 0..100 {
+            app.update();
+            for member in &members {
+                let at = app
+                    .world()
+                    .entity(*member)
+                    .get::<Transform>()
+                    .expect("a member stands somewhere")
+                    .translation;
+                assert!(at.is_finite(), "a member of the crossing is at {at}");
+            }
         }
     }
 
     #[test]
-    fn the_models_hold_one_mesh_each() {
-        // The one thing about each file the game cannot see for itself —
-        // that mesh 0 is the animal — held the same way the palm's order is.
-        for (file, name) in [
-            (EAGLE_MODEL, "eagle"),
-            (DOLPHIN_MODEL, "dolphin"),
-            (SEABIRD_MODEL, "seabird"),
-            (WHALE_MODEL, "whale"),
-        ] {
-            let (json, _) = model(file);
-            assert_eq!(json["meshes"][0]["name"], name);
+    fn a_creature_minds_a_player_within_its_wary_radius() {
+        // The give-way rule itself, which both an eagle and a pod hang off.
+        let swimmer = Shy::of(20.0);
+        let boat = Vec3::new(10.0, 0.0, 0.0);
+        assert!(minds(&swimmer, Vec3::ZERO, Some(boat)));
+        assert!(!minds(&swimmer, Vec3::new(-30.0, 0.0, 0.0), Some(boat)));
+        // Nobody playing is nobody to mind — a shot of the menu.
+        assert!(!minds(&swimmer, Vec3::ZERO, None));
+
+        // Height is a bird's business alone: a swimmer minds a hull overhead
+        // exactly as it minds one alongside, while an eagle already well
+        // above the masthead has nothing to climb away from.
+        let overhead = Vec3::new(0.0, 60.0, 0.0);
+        assert!(minds(&swimmer, Vec3::ZERO, Some(overhead)));
+        let eagle = Shy {
+            headroom: EAGLE_HEADROOM,
+            ..Shy::of(EAGLE_WARY)
+        };
+        assert!(minds(&eagle, Vec3::new(0.0, 70.0, 0.0), Some(overhead)));
+        assert!(!minds(&eagle, Vec3::new(0.0, 100.0, 0.0), Some(overhead)));
+    }
+
+    #[test]
+    fn the_models_are_one_creature_each_fit_to_draw() {
+        // See `assert_model_draws`. Each file holds one mesh, at position 0,
+        // and it is the animal the file is named for — which is the one thing
+        // about them the game cannot see for itself.
+        for (file, _) in KINDS {
+            let creature = file.strip_suffix(".glb").expect("a glTF binary");
+            assert_model_draws(file, &[(0, creature)]);
         }
     }
 
@@ -1047,9 +1258,10 @@ mod tests {
     fn the_wildlife_is_built_to_scale() {
         // What the spawners assume when they place the models unscaled: a
         // remodel that came through in centimetres — or with the exporter's
-        // axes wrong — would fly a hundred-metre bird.
-        let span = |name: &str, axis: usize| -> f32 {
-            let corners: Vec<f32> = triangles(name, 0, "POSITION")
+        // axes wrong — would fly a hundred-metre bird. Wingspans lie along X;
+        // nose-to-tail lengths along Z, the forward axis.
+        let span = |kind: Kind, axis: usize| -> f32 {
+            let corners: Vec<f32> = triangles(KINDS[kind as usize].0, 0, "POSITION")
                 .into_iter()
                 .flatten()
                 .map(|corner| corner[axis])
@@ -1057,43 +1269,17 @@ mod tests {
             corners.iter().fold(f32::MIN, |a, b| a.max(*b))
                 - corners.iter().fold(f32::MAX, |a, b| a.min(*b))
         };
-        // Wingspans lie along X; nose-to-tail lengths along Z, the forward
-        // axis.
-        let wingspan = span(EAGLE_MODEL, 0);
-        assert!(
-            (3.0..4.5).contains(&wingspan),
-            "the eagle spans {wingspan}m"
-        );
-        let length = span(DOLPHIN_MODEL, 2);
-        assert!((2.0..3.0).contains(&length), "the dolphin runs {length}m");
-        let wingspan = span(SEABIRD_MODEL, 0);
-        assert!(
-            (1.6..2.6).contains(&wingspan),
-            "the seabird spans {wingspan}m"
-        );
-        let length = span(WHALE_MODEL, 2);
-        assert!((9.0..13.0).contains(&length), "the whale runs {length}m");
-    }
-
-    #[test]
-    fn every_face_of_the_wildlife_looks_outwards() {
-        for name in [EAGLE_MODEL, DOLPHIN_MODEL, SEABIRD_MODEL, WHALE_MODEL] {
+        for (kind, axis, wanted) in [
+            (Kind::Eagle, 0, 3.0..4.5),
+            (Kind::Dolphin, 2, 2.0..3.0),
+            (Kind::Seabird, 0, 1.6..2.6),
+            (Kind::Whale, 2, 9.0..13.0),
+        ] {
+            let measured = span(kind, axis);
             assert!(
-                winds_outwards(&triangles(name, 0, "POSITION")),
-                "{name} is wound inside-out"
-            );
-        }
-    }
-
-    #[test]
-    fn the_wildlife_is_flat_shaded() {
-        for name in [EAGLE_MODEL, DOLPHIN_MODEL, SEABIRD_MODEL, WHALE_MODEL] {
-            assert!(
-                is_flat_shaded(
-                    &triangles(name, 0, "POSITION"),
-                    &triangles(name, 0, "NORMAL")
-                ),
-                "{name} is smooth-shaded"
+                wanted.contains(&measured),
+                "{} measures {measured}m across axis {axis}, not {wanted:?}",
+                KINDS[kind as usize].0
             );
         }
     }

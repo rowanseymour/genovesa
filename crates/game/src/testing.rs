@@ -6,10 +6,10 @@
 //! Every module testing a system needs some of this, and each of them had a
 //! copy of the piece it needed.
 //!
-//! The model readers below are here for the same reason. Two modules draw
-//! glTF files now and both hold theirs to the same handful of conditions, so
-//! the reader that checks them is written once — a second copy would be a
-//! second opinion about what the format says.
+//! The model readers below are here for the same reason. Three modules draw
+//! glTF files now and all of them hold theirs to the same handful of
+//! conditions, so the reader that checks them is written once — a second copy
+//! would be a second opinion about what the format says.
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -223,14 +223,56 @@ pub fn triangles(name: &str, index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
         .collect()
 }
 
+/// Holds a model to everything the game needs of one it did not make.
+///
+/// `meshes` pairs each position in the file with the name the object has in
+/// the master, and all three conditions are checked against every one of
+/// them:
+///
+/// - **The order.** The game asks for its meshes by number, and glTF numbers
+///   them in whatever order the exporter wrote them — so an afternoon in
+///   Blender can silently swap a hull for a spar, painting one in the
+///   other's colour with nothing failing to say so.
+/// - **The winding.** A face wound the wrong way round is simply culled, so
+///   what is seen through the hole is the inside of the far side of the
+///   shape, lit as though it faced away from the sun. Invisible until
+///   something is drawn, and this has caught it once already — a spar.
+/// - **The shading.** Everything the game draws is a flat tone per facet,
+///   and a mesh left smooth in Blender exports with its normals averaged
+///   across the faces each vertex meets, which arrives as gradients running
+///   over the shape. It is a checkbox in a modelling program and reads as a
+///   subtly wrong-looking model rather than as a mistake.
+///
+/// One reader for every model, because the conditions are the same for a
+/// hull, a palm and a whale — a second copy would be a second opinion about
+/// what the look is.
+pub fn assert_model_draws(file: &str, meshes: &[(usize, &str)]) {
+    let (json, _) = model(file);
+    for (index, name) in meshes {
+        assert_eq!(
+            json["meshes"][*index]["name"], *name,
+            "mesh {index} of {file} is not the {name}"
+        );
+        let faces = triangles(file, *index, "POSITION");
+        assert!(
+            winds_outwards(&faces),
+            "the {name} of {file} is wound inside-out"
+        );
+        assert!(
+            is_flat_shaded(&faces, &triangles(file, *index, "NORMAL")),
+            "the {name} of {file} is smooth-shaded"
+        );
+    }
+}
+
 /// Whether every face of a mesh is wound to look outwards, by the volume the
 /// winding implies.
 ///
 /// A closed shell's faces sum to its own volume through the divergence
 /// theorem, positive when they face out and negative when they all face in.
-/// Written this way rather than by comparing each face against the middle —
-/// which is what the boat does — because a mesh may be several separate
-/// solids, and the middle of seven fronds is not inside any of them.
+/// Written this way rather than by comparing each face against its own
+/// middle, because a mesh may be several separate solids and the middle of
+/// seven fronds is not inside any of them.
 pub fn winds_outwards(faces: &[[Vec3; 3]]) -> bool {
     let volume: f32 = faces.iter().map(|f| f[0].dot(f[1].cross(f[2])) / 6.0).sum();
     volume > 0.0
