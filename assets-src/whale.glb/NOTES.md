@@ -1,0 +1,36 @@
+# The whale
+
+What the shape is *for*, which a `.blend` has nowhere to say. The numbers are
+in the file; these are the reasons behind the ones that are not obvious.
+
+A whale is seen as a back: a long dark mass shouldering through the surface
+for a few seconds at a time, mostly submerged even then, with the rest of the
+body a shadow under the water's near-opacity. The model is built for that one
+view — everything is in the top line of the silhouette.
+
+**About eleven metres, life size.** The scale *is* the animal: it reads as a
+whale because it is so much longer than the dolphins the sea has taught the
+player to expect, and against the 7 m boat. Making it bigger would make it a
+sea monster, which is a different promise.
+
+**The girth peaks well forward and the spine rises aft.** A rorqual's lines:
+blunt head, the back's high point forward of the middle, and a tail stock
+that climbs toward the flukes — so what breaks the surface is a long arc
+that is visibly *going somewhere*, not a floating log.
+
+**The dorsal fin is small and far aft.** The rorqual proportion; a tall fin
+amidships would read as an orca, and an orca circling a sailing boat is a
+mood this world is not selling.
+
+**Broad horizontal flukes, long flippers.** Both mostly seen as shadow under
+the surface just before the back appears — the hint that the mass has a
+shape. Horizontal flukes for the same reason as the dolphin's: vertical
+means shark.
+
+**Origin amidships**, where the surfacing arc pivots. **It faces +Y in this
+file**, which the +Y-up export turns into Bevy's -Z forward, the boat's own
+convention.
+
+Where a whale *swims* is the game's business, in
+`crates/game/src/wildlife.rs` — decorative wildlife is client-side, so
+nothing about this model or its placing crosses the wire.

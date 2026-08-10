@@ -46,6 +46,26 @@ closed sheets.
 `assets-src/dolphin.glb/` holds the Blender master and the notes. Like the
 eagle, where pods swim is decided client-side in `game`'s `wildlife` module.
 
+## seabird.glb
+
+Original to this project, and under the same licence as the rest of it. A
+gliding silhouette with drooped wingtips and a long bill, seen only as one of
+a line skimming the shallows.
+
+`assets-src/seabird.glb/` holds the Blender master and the notes. Like all
+wildlife, where lines fly is decided client-side in `game`'s `wildlife`
+module.
+
+## whale.glb
+
+Original to this project, and under the same licence as the rest of it. A
+rorqual — lofted hex-ring body, small dorsal fin far aft, broad horizontal
+flukes — built for the one view a whale gets: a back through the surface.
+
+`assets-src/whale.glb/` holds the Blender master and the notes. Like all
+wildlife, where whales swim is decided client-side in `game`'s `wildlife`
+module.
+
 ## menu.ogg
 
 Cut from [Sailboat Bow](https://freesound.org/s/852108/) by myLoop, published on
