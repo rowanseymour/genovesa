@@ -371,6 +371,26 @@ impl Ground {
             }
         }
     }
+
+    /// The highest corner of one chunk's height grid: where it stands in the
+    /// world, and how high. `None` for open water and for chunks that have
+    /// not arrived. What the wildlife asks when it is looking for a summit —
+    /// see `wildlife::eyrie` for how a peak on the chunk's border is read.
+    pub fn peak(&self, chunk: IVec2) -> Option<(Vec2, f32)> {
+        let Chunk::Land { heights, .. } = self.chunks.get(&chunk)? else {
+            return None;
+        };
+        let (highest, height) = heights
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        let local = Vec2::new(
+            (highest % FACET_VERTS) as f32,
+            (highest / FACET_VERTS) as f32,
+        ) * FACET_METRES;
+        Some((chunk.as_vec2() * CHUNK_METRES + local, height))
+    }
 }
 
 /// The height of one point inside a chunk, interpolated across the very facet

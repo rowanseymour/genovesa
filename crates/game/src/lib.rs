@@ -20,6 +20,7 @@ pub mod player;
 pub mod sea;
 pub mod terrain;
 pub mod trees;
+pub mod wildlife;
 
 #[cfg(test)]
 mod testing;

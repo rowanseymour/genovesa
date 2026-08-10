@@ -26,6 +26,46 @@ does about which way a face points.
 here at all — that is the world's business, and is decided in `world`'s
 `palms` module and sent to clients with the ground.
 
+## eagle.glb
+
+Original to this project, and under the same licence as the rest of it. A
+soaring silhouette — body, two kinked wings and a fanned tail, every sheet a
+closed solid so the model obeys the same winding rule everything else does.
+
+`assets-src/eagle.glb/` holds the Blender master and the notes on what the
+shape is for. Where eagles *fly* is the game's own business, decided
+client-side in `game`'s `wildlife` module — nothing about them crosses the
+wire.
+
+## dolphin.glb
+
+Original to this project, and under the same licence as the rest of it. A
+lofted hex-ring body with dorsal fin, horizontal flukes and pectorals as thin
+closed sheets.
+
+`assets-src/dolphin.glb/` holds the Blender master and the notes. Like the
+eagle, where pods swim is decided client-side in `game`'s `wildlife` module.
+
+## seabird.glb
+
+Original to this project, and under the same licence as the rest of it. A
+gliding silhouette with drooped wingtips and a long bill, seen only as one of
+a line skimming the shallows.
+
+`assets-src/seabird.glb/` holds the Blender master and the notes. Like all
+wildlife, where lines fly is decided client-side in `game`'s `wildlife`
+module.
+
+## whale.glb
+
+Original to this project, and under the same licence as the rest of it. A
+rorqual — lofted hex-ring body, small dorsal fin far aft, broad horizontal
+flukes — built for the one view a whale gets: a back through the surface.
+
+`assets-src/whale.glb/` holds the Blender master and the notes. Like all
+wildlife, where whales swim is decided client-side in `game`'s `wildlife`
+module.
+
 ## menu.ogg
 
 Cut from [Sailboat Bow](https://freesound.org/s/852108/) by myLoop, published on
