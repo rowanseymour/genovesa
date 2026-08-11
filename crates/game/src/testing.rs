@@ -215,7 +215,8 @@ fn test_island_height(at: Vec2) -> f32 {
 /// it.
 pub fn model(name: &str) -> (serde_json::Value, Vec<u8>) {
     let path = format!("{}/../../assets/{name}", env!("CARGO_MANIFEST_DIR"));
-    let file = std::fs::read(&path).unwrap_or_else(|_| panic!("{path} — run assets-src/export.sh"));
+    let file =
+        std::fs::read(&path).unwrap_or_else(|_| panic!("{path} — run assets-src/models/export.sh"));
     assert_eq!(&file[..4], b"glTF", "{name} is not a glTF binary");
 
     let (mut at, mut chunks) = (12, Vec::new());

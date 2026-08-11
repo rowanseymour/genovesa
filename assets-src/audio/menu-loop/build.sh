@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Builds assets/menu.ogg, the sea heard behind the menu.
+# Builds assets/audio/menu-loop.ogg, the sea heard behind the menu.
 #
-# This directory is named for the file it produces, and holds everything that
-# goes into it: the recording, and this. Nothing here ships — the game reads
-# assets/, and the master is kept only so the loop can be cut again differently.
+# This directory carries the asset's name and holds everything that goes into
+# it: the recording, and this. The name is the asset's and not the file's — the
+# .ogg is this script's business, Vorbis being the one compressed format Bevy
+# decodes untold. Nothing here ships — the game reads assets/, and the master is
+# kept only so the loop can be cut again differently.
 #
-#   assets-src/menu.ogg/build.sh          # from the master beside it
-#   assets-src/menu.ogg/build.sh other    # from a recording of your own
+#   assets-src/audio/menu-loop/build.sh          # from the master beside it
+#   assets-src/audio/menu-loop/build.sh other    # from a recording of your own
 #
 # The master is committed as FLAC rather than as the WAV Freesound serves, which
 # is lossless and on water this quiet about a fifth of the size. It is worth
@@ -24,7 +26,7 @@ set -euo pipefail
 
 me=$(basename "$0")
 here=$(cd "$(dirname "$0")" && pwd)
-root=$(cd "$here/../.." && pwd)
+root=$(cd "$here/../../.." && pwd)
 
 master=$here/852108__myloop__sailboat-bow.flac
 if (( $# > 1 )); then
@@ -79,9 +81,9 @@ ffmpeg -v error -y -i "$tmp/join.wav" -i "$tmp/mid.wav" \
 
 # sox rather than ffmpeg for the last step: Homebrew's ffmpeg is built without
 # libvorbis, and Vorbis is the one compressed format Bevy decodes untold.
-sox "$tmp/loop.wav" -C 6 "$tmp/menu.ogg"
+sox "$tmp/loop.wav" -C 6 "$tmp/menu-loop.ogg"
 
 # Only once it is whole, so a killed run cannot leave the committed file torn.
-mv "$tmp/menu.ogg" "$root/assets/menu.ogg"
+mv "$tmp/menu-loop.ogg" "$root/assets/audio/menu-loop.ogg"
 
-echo "$me: assets/menu.ogg (${WINDOW}s from ${START}s, ${FADE}s crossfade, $(du -h "$root/assets/menu.ogg" | cut -f1))"
+echo "$me: assets/audio/menu-loop.ogg (${WINDOW}s from ${START}s, ${FADE}s crossfade, $(du -h "$root/assets/audio/menu-loop.ogg" | cut -f1))"

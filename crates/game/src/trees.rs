@@ -17,10 +17,10 @@ use protocol::ground::{Palm, CHUNK_METRES};
 use crate::terrain::{Ground, PendingPalms, TerrainChunk};
 use crate::{matte, model_mesh, AppState};
 
-/// The palm, as a file. Built from `assets-src/palm.glb/palm.blend` by
-/// `assets-src/export.sh`, which is where the export settings the look depends
-/// on are written down.
-const MODEL: &str = "palm.glb";
+/// The palm, as a file. Built from `assets-src/models/palm/palm.blend` by
+/// `assets-src/models/export.sh`, which is where the export settings the look
+/// depends on are written down.
+const MODEL: &str = "models/palm.glb";
 
 /// Which mesh in [`MODEL`] is which — positions in the file, as the boat's
 /// are, and pinned by `the_model_is_a_crown_and_a_trunk_fit_to_draw` for the same

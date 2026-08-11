@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# Builds assets/<model>.glb from the Blender master under assets-src/<model>.glb/.
+# Builds assets/models/<model>.glb from the master under assets-src/models/<model>/.
 #
-#   assets-src/export.sh boat
-#   assets-src/export.sh palm
+#   assets-src/models/export.sh boat
+#   assets-src/models/export.sh palm
 #
 # One script for every model rather than one per directory: the master differs,
 # the export does not, and the settings below are the part worth writing down.
 # A copy per model would be the same forty lines drifting apart.
 #
-# Each model still gets a directory named for the file it produces, holding the
-# master and whatever else belongs to it. Nothing under assets-src/ ships — the
-# game reads assets/, and the masters are kept so the shapes can be taken
-# further.
+# Each model still gets a directory of its own, holding the master and whatever
+# else belongs to it. The directory carries the model's name and not the .glb —
+# an asset is a name here, and which extension it ships under is this script's
+# business rather than part of what the thing is called. Nothing under
+# assets-src/ ships — the game reads assets/, and the masters are kept so the
+# shapes can be taken further.
 #
 # Open the master in Blender, change it, run this, and a game already running
 # with `--features dev` picks the new shape up without restarting. That is the
@@ -45,15 +47,15 @@ set -euo pipefail
 
 me=$(basename "$0")
 here=$(cd "$(dirname "$0")" && pwd)
-root=$(cd "$here/.." && pwd)
+root=$(cd "$here/../.." && pwd)
 
 if (( $# != 1 )); then
     echo "usage: $me <model>" >&2
-    echo "       models: $(cd "$here" && ls -d ./*.glb 2>/dev/null | sed 's|^\./||; s|\.glb$||' | tr '\n' ' ')" >&2
+    echo "       models: $(cd "$here" && ls -d ./*/ 2>/dev/null | sed 's|^\./||; s|/$||' | tr '\n' ' ')" >&2
     exit 2
 fi
 model=$1
-master=$here/$model.glb/$model.blend
+master=$here/$model/$model.blend
 
 blender=blender
 if ! command -v "$blender" >/dev/null 2>&1; then
@@ -89,6 +91,6 @@ bpy.ops.export_scene.gltf(
 " >/dev/null
 
 # Only once it is whole, so a killed run cannot leave the committed file torn.
-mv "$tmp/$model.glb" "$root/assets/$model.glb"
+mv "$tmp/$model.glb" "$root/assets/models/$model.glb"
 
-echo "$me: assets/$model.glb ($(du -h "$root/assets/$model.glb" | cut -f1))"
+echo "$me: assets/models/$model.glb ($(du -h "$root/assets/models/$model.glb" | cut -f1))"
