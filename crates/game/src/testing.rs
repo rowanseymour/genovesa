@@ -15,6 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
+use bevy::state::app::StatesPlugin;
+use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
 use protocol::ground::{
     quantize, ChunkPayload, Surface, Tone, CHUNK_METRES, FACET_METRES, FACET_TRIS, FACET_VERTS,
@@ -22,7 +24,52 @@ use protocol::ground::{
 };
 
 use crate::bindings::{Action, KeyBindings};
+use crate::boat::BoatPlugin;
+use crate::camera::View;
+use crate::player::PlayerPlugin;
 use crate::terrain::Ground;
+use crate::{AppState, Helm};
+
+/// How long every test frame lasts in a [`world_app`]. Headless frames take
+/// next to no real time, which nothing eased can live with — the eases are
+/// curves *in seconds* — so the clock is stepped by a fixed sixty-a-second
+/// frame and the tests get the ramp a player would.
+pub const FRAME: Duration = Duration::from_millis(16);
+
+/// A headless app already in a match, with the boat and player systems
+/// running — the world as the movement tests know it, shared here because
+/// the boat's tests and the player's want exactly the same one.
+///
+/// `AssetPlugin` because the boat is spawned out of a file, and
+/// `TaskPoolPlugin` because that is where it finds the thread to read it on.
+/// Nothing here waits for the load — these tests are about where things are
+/// and what they do, not what they look like — but `launch` asks the asset
+/// server for its meshes, and without one there is no boat.
+pub fn world_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        TaskPoolPlugin::default(),
+        AssetPlugin::default(),
+        TimePlugin,
+        StatesPlugin,
+        BoatPlugin,
+        PlayerPlugin,
+    ))
+    .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+    .init_state::<AppState>()
+    .add_sub_state::<Helm>()
+    .init_resource::<View>()
+    .init_resource::<KeyBindings>()
+    .init_resource::<ButtonInput<KeyCode>>()
+    .init_asset::<Mesh>()
+    .init_resource::<Assets<StandardMaterial>>();
+    app.update();
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::InWorld);
+    app.update();
+    app
+}
 
 /// How long a test waits before calling something a failure rather than a
 /// slow machine. Only ever paid in full by a test that was going to fail

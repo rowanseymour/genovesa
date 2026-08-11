@@ -258,6 +258,15 @@ impl Boat {
             roll: 0.0,
         }
     }
+
+    /// Whether the hull has no way on at all. Exact equality is meaningful
+    /// here because [`steer`] snaps the tail of every glide to precisely
+    /// zero — see [`WAY_STOPPED`] — so a hull is either making way or it is
+    /// this. What going ashore asks before it lets anybody step off a moving
+    /// deck.
+    pub fn at_rest(&self) -> bool {
+        self.way == 0.0
+    }
 }
 
 pub struct BoatPlugin;
@@ -508,12 +517,17 @@ fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32
         .fold(f32::NEG_INFINITY, f32::max)
 }
 
-/// Drives the boat in its own frame, the way a boat is driven: forward and
-/// back run the hull along its heading, and the steering keys are the helm,
-/// bringing the bow round for as long as they're held. The view plays no part
-/// — turning the camera changes what the keys look like on screen, never what
-/// they do — which is what makes a long sail a held key rather than a chase
-/// between the camera's yaw and the boat's.
+/// Drives the boat the player is at the helm of, in its own frame, the way a
+/// boat is driven: forward and back run the hull along its heading, and the
+/// steering keys are the helm, bringing the bow round for as long as they're
+/// held. The view plays no part — turning the camera changes what the keys
+/// look like on screen, never what they do — which is what makes a long sail
+/// a held key rather than a chase between the camera's yaw and the boat's.
+///
+/// Only the boat the player is *aboard* answers, which is what being at the
+/// helm means here. Ashore, the same keys are the walker's — see
+/// `player::walk` — and a hull left at anchor holds station rather than
+/// sailing off with its absent owner's keystrokes.
 ///
 /// The throttle is eased rather than instant: the keys name a target speed
 /// and the hull's way relaxes towards it on its own way-response curve,
@@ -580,8 +594,19 @@ fn steer(
     bindings: Res<KeyBindings>,
     time: Res<Time>,
     ground: Option<Res<Ground>>,
+    players: Query<&ChildOf, With<Player>>,
     mut boats: Query<(&mut Transform, &mut Boat)>,
 ) {
+    // A player ashore is in no boat's query, and that is the whole of how
+    // the helm goes dead when they step off.
+    let Some((mut transform, mut boat)) = players
+        .single()
+        .ok()
+        .and_then(|aboard| boats.get_mut(aboard.parent()).ok())
+    else {
+        return;
+    };
+
     // Direction first, speed second, so opposed keys cancel outright rather
     // than the faster gear winning by the difference.
     let mut drive = 0.0;
@@ -604,121 +629,84 @@ fn steer(
 
     let ground = ground.as_deref();
 
-    for (mut transform, mut boat) in &mut boats {
-        let hull = boat.hull;
-        let speed = if drive > 0.0 {
-            hull.speed
+    let hull = boat.hull;
+    let speed = if drive > 0.0 {
+        hull.speed
+    } else {
+        hull.astern_speed
+    };
+    let target = drive * speed;
+    // A response named in seconds is a rate of its reciprocal.
+    let t = eased(1.0 / hull.way_response, time.delta_secs());
+
+    if helm != 0.0 {
+        transform.rotate_y(helm * hull.turn_rate * time.delta_secs());
+    }
+    // Written only while something is happening, so an idle boat holds
+    // still without being marked changed every frame.
+    if target != 0.0 || boat.way != 0.0 {
+        let way = boat.way + (target - boat.way) * t;
+        let way = if target == 0.0 && way.abs() < WAY_STOPPED {
+            0.0
         } else {
-            hull.astern_speed
+            way
         };
-        let target = drive * speed;
-        // A response named in seconds is a rate of its reciprocal.
-        let t = eased(1.0 / hull.way_response, time.delta_secs());
 
-        if helm != 0.0 {
-            transform.rotate_y(helm * hull.turn_rate * time.delta_secs());
+        let advance = transform.forward() * way * time.delta_secs();
+        let here = grounding(&hull, ground, &transform);
+        let there = grounding(
+            &hull,
+            ground,
+            &Transform {
+                translation: transform.translation + advance,
+                ..*transform
+            },
+        );
+
+        if there <= 0.0 || there <= here {
+            boat.way = way;
+            transform.translation += advance;
+        } else {
+            boat.way = 0.0;
         }
-        // Written only while something is happening, so an idle boat holds
-        // still without being marked changed every frame.
-        if target != 0.0 || boat.way != 0.0 {
-            let way = boat.way + (target - boat.way) * t;
-            let way = if target == 0.0 && way.abs() < WAY_STOPPED {
-                0.0
-            } else {
-                way
-            };
+    }
 
-            let advance = transform.forward() * way * time.delta_secs();
-            let here = grounding(&hull, ground, &transform);
-            let there = grounding(
-                &hull,
-                ground,
-                &Transform {
-                    translation: transform.translation + advance,
-                    ..*transform
-                },
-            );
-
-            if there <= 0.0 || there <= here {
-                boat.way = way;
-                transform.translation += advance;
-            } else {
-                boat.way = 0.0;
-            }
-        }
-
-        // Heel last, against the way this frame settled on, so running
-        // aground starts the straightening the same frame it takes the way
-        // off. Port helm is a positive turn and an outward lean is to
-        // starboard, which about the forward axis is a negative roll — hence
-        // the sign. The transform holds heading, then the water's pitch,
-        // then one roll factor the heel shares with the wave roll — see
-        // [`float`] — and the helm above multiplies heading on from the
-        // left, so rolling on from the right reaches that roll factor alone
-        // and the guard keeps an idle boat's rotation unwritten.
-        let target_heel = -hull.heel_at_full_turn * helm * boat.way / hull.speed;
-        if boat.heel != target_heel {
-            let heel_t = eased(1.0 / hull.heel_response, time.delta_secs());
-            let heel = settled(boat.heel + (target_heel - boat.heel) * heel_t, target_heel);
-            transform.rotation *= Quat::from_rotation_z(heel - boat.heel);
-            boat.heel = heel;
-        }
+    // Heel last, against the way this frame settled on, so running
+    // aground starts the straightening the same frame it takes the way
+    // off. Port helm is a positive turn and an outward lean is to
+    // starboard, which about the forward axis is a negative roll — hence
+    // the sign. The transform holds heading, then the water's pitch,
+    // then one roll factor the heel shares with the wave roll — see
+    // [`float`] — and the helm above multiplies heading on from the
+    // left, so rolling on from the right reaches that roll factor alone
+    // and the guard keeps an idle boat's rotation unwritten.
+    let target_heel = -hull.heel_at_full_turn * helm * boat.way / hull.speed;
+    if boat.heel != target_heel {
+        let heel_t = eased(1.0 / hull.heel_response, time.delta_secs());
+        let heel = settled(boat.heel + (target_heel - boat.heel) * heel_t, target_heel);
+        transform.rotation *= Quat::from_rotation_z(heel - boat.heel);
+        boat.heel = heel;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use bevy::state::app::StatesPlugin;
-    use bevy::time::{TimePlugin, TimeUpdateStrategy};
     use protocol::ground::FACET_METRES;
 
     use super::*;
     use crate::testing::{
-        assert_model_draws, elapsed, hold, rebind, run_frames, test_ground, triangles,
+        assert_model_draws, elapsed, hold, rebind, run_frames, test_ground, triangles, world_app,
         TEST_ISLAND_REACH,
     };
-
-    /// How long every test frame lasts. Headless frames take next to no real
-    /// time, which the old instant throttle never noticed — but the eased one
-    /// is a curve *in seconds*, so the clock is stepped by a fixed sixty-a-
-    /// second frame and the tests get the ramp a player would.
-    const FRAME: Duration = Duration::from_millis(16);
 
     /// Frames enough for the ease to be indistinguishable from settled —
     /// over eight time constants, a remainder of a few parts in ten thousand.
     const SETTLED: usize = 800;
 
-    /// A headless app with the boat systems running, already in a match.
+    /// A headless app with the boat systems running, already in a match —
+    /// the shared [`world_app`], under this module's older name.
     fn test_app() -> App {
-        let mut app = App::new();
-        // `AssetPlugin` because the boat is spawned out of a file now, and
-        // `TaskPoolPlugin` because that is where it finds the thread to read it
-        // on. Nothing here waits for the load — these tests are about where the
-        // hull is and what it does, not what it looks like — but `launch` asks
-        // the asset server for its meshes, and without one there is no boat.
-        app.add_plugins((
-            TaskPoolPlugin::default(),
-            AssetPlugin::default(),
-            TimePlugin,
-            StatesPlugin,
-            BoatPlugin,
-        ))
-        .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
-        .init_state::<AppState>()
-        .add_sub_state::<Helm>()
-        .init_resource::<View>()
-        .init_resource::<KeyBindings>()
-        .init_resource::<ButtonInput<KeyCode>>()
-        .init_asset::<Mesh>()
-        .init_resource::<Assets<StandardMaterial>>();
-        app.update();
-        app.world_mut()
-            .resource_mut::<NextState<AppState>>()
-            .set(AppState::InWorld);
-        app.update();
-        app
+        world_app()
     }
 
     fn boat(app: &mut App) -> Transform {

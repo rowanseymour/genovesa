@@ -22,6 +22,7 @@ use game::compass::CompassPlugin;
 use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
+use game::player::PlayerPlugin;
 use game::terrain::TerrainPlugin;
 use game::trees::TreesPlugin;
 use game::wildlife::WildlifePlugin;
@@ -125,6 +126,7 @@ fn run(args: Args, session: Option<Session>) {
             TreesPlugin,
             WildlifePlugin,
             BoatPlugin,
+            PlayerPlugin,
             MapCameraPlugin,
             CompassPlugin,
             MenuPlugin,
