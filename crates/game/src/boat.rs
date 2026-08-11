@@ -33,10 +33,10 @@ use crate::sea;
 use crate::terrain::Ground;
 use crate::{eased, matte, model_mesh, AppState, Helm};
 
-/// The ship, as a file. Built from `assets-src/boat.glb/boat.blend` by
-/// `assets-src/export.sh`, which is also where the export settings the look
-/// depends on are written down.
-const MODEL: &str = "boat.glb";
+/// The ship, as a file. Built from `assets-src/models/boat/boat.blend` by
+/// `assets-src/models/export.sh`, which is also where the export settings the
+/// look depends on are written down.
+const MODEL: &str = "models/boat.glb";
 
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —

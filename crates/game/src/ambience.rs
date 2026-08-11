@@ -11,7 +11,7 @@ use crate::{AppState, Helm};
 /// recording it came from runs for over a minute but quietens markedly towards
 /// the end, so looping the whole of it would have been a sea that calms and
 /// then abruptly picks up again.
-const SEA: &str = "menu.ogg";
+const SEA: &str = "audio/menu-loop.ogg";
 
 /// How long the sea takes to arrive or to leave, in seconds.
 ///

@@ -29,7 +29,7 @@ args = { path = "../args" }
 bevy = { workspace = true, features = ["system_font_discovery"] }
 
 [dev-dependencies]
-# Reads assets/boat.glb in the tests that hold the model to what the collision
+# Reads assets/models/boat.glb in the tests that hold the model to what the collision
 # code assumes of it. Only the tests parse glTF — the game hands the file to
 # Bevy's own loader — and this is already in the tree behind Bevy, so it costs
 # a line here and nothing to build.

@@ -69,10 +69,10 @@ enum Kind {
 /// `the_models_are_one_creature_each_fit_to_draw` the way the palm's order
 /// is, which reads the file names here to know what it is looking for.
 const KINDS: [(&str, Color); 4] = [
-    ("eagle.glb", EAGLE_COLOR),
-    ("dolphin.glb", DOLPHIN_COLOR),
-    ("seabird.glb", SEABIRD_COLOR),
-    ("whale.glb", WHALE_COLOR),
+    ("models/eagle.glb", EAGLE_COLOR),
+    ("models/dolphin.glb", DOLPHIN_COLOR),
+    ("models/seabird.glb", SEABIRD_COLOR),
+    ("models/whale.glb", WHALE_COLOR),
 ];
 
 /// Dark umber. An eagle is seen against sky or against sunlit rock, and in
@@ -1249,7 +1249,10 @@ mod tests {
         // and it is the animal the file is named for — which is the one thing
         // about them the game cannot see for itself.
         for (file, _) in KINDS {
-            let creature = file.strip_suffix(".glb").expect("a glTF binary");
+            let creature = file
+                .strip_prefix("models/")
+                .and_then(|name| name.strip_suffix(".glb"))
+                .expect("a glTF binary under assets/models/");
             assert_model_draws(file, &[(0, creature)]);
         }
     }

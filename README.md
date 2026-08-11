@@ -204,15 +204,18 @@ cargo test --release island_shape -- --ignored --nocapture
 
 ## Models
 
-Everything the game draws that is not ground is a glTF file under `assets/`,
-built from a Blender master. Each model has a directory under `assets-src/`
-named for the file it produces, holding the master; one shared
-`assets-src/export.sh` builds any of them, and is where the export settings
-live. Nothing in `assets-src/` ships; it is what the shipped file was made
-from, kept so the shape can be taken further.
+Everything the game draws that is not ground is a glTF file under
+`assets/models/`, built from a Blender master. What ships is filed by kind —
+`models/`, `audio/`, `shaders/` — and `assets-src/` mirrors that, a directory
+per asset holding what the shipped file was made from. Those directories carry
+the asset's name and not its extension: a name is unique across the tree on its
+own, and which format the thing ships as is the build script's business rather
+than part of what it is called. One shared `assets-src/models/export.sh` builds
+any model, and is where the export settings live. Nothing in `assets-src/`
+ships; it is kept so a shape can be taken further.
 
 ```bash
-assets-src/export.sh palm
+assets-src/models/export.sh palm
 ```
 
 Working on one means Blender open beside a game started with `--features dev`:
