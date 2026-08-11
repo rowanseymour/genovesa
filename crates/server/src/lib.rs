@@ -303,6 +303,14 @@ impl Server {
     /// asks for otherwise, which is what `--time` and the tests of the night
     /// do.
     pub fn opening_at(mut self, phase: f32) -> Self {
+        // Dropped rather than clamped when it is not a number, because a NaN
+        // is not an hour that overshot — there is no hour it was nearly
+        // asking for, so the world opens at the one worlds open at. What it
+        // costs to let one through is the whole session: [`Shared::phase`]
+        // would answer NaN for ever, [`protocol::is_night`] calls that night,
+        // and every client would refuse every telling of the time.
+        let phase = if phase.is_finite() { phase } else { OPENING };
+
         // The same moment [`Server::reporting_to`] uses, and for the same
         // reason: nothing is serving yet, so this is where the shared state
         // still has one owner.
@@ -554,10 +562,11 @@ fn watch_the_sky(shared: &Arc<Shared>) {
             let wound = shared.run_off_the_night(SKY_TICK);
             let wind = shared.wind();
 
-            // Gathered before the roster is locked, and the day's own lock
-            // is taken inside both of these rather than around the sending:
-            // every path into the clock takes it for a moment and lets it go
-            // again, so there is no order for two of them to disagree about.
+            // Gathered before the roster is locked, which is what every path
+            // into the clock does — the welcome in [`serve`] asks for the sky
+            // outside its own hold for the same reason. So the day's lock is
+            // never taken by a thread already holding the roster's, and the
+            // two have no order to disagree about.
             let mut news = Vec::new();
             if (wind - told_wind).length() > WIND_STEP {
                 told_wind = wind;
@@ -613,20 +622,25 @@ impl Shared {
     /// simply asking.
     ///
     /// It runs the clock rather than jumping it so that the night visibly
-    /// passes: everyone watches the moon cross and the light come back, and a client has only ever a small step to make up. The run
-    /// stops at [`protocol::DAYBREAK`] rather than at sunrise, so a night
-    /// waited out ends looking at one.
+    /// passes: everyone watches the moon cross and the light come back, and
+    /// a client has only ever a small step to make up. The run stops at
+    /// [`protocol::DAYBREAK`] rather than at sunrise, so a night waited out
+    /// ends looking at one.
     fn run_off_the_night(&self, tick: Duration) -> bool {
         let phase = self.phase();
         if !protocol::is_night(phase) {
             return false;
         }
+        // One now for the whole roster, read before the lock: everybody's
+        // wish is judged against the same instant, and none of them ages
+        // while the players ahead of them are being looked at.
+        let now = Instant::now();
         {
             let players = self.players.lock().expect("no poisoned lock");
             let all_waiting = !players.is_empty()
                 && players
                     .values()
-                    .all(|player| player.is_waiting_for_dawn(Instant::now()));
+                    .all(|player| player.is_waiting_for_dawn(now));
             if !all_waiting {
                 return false;
             }
@@ -728,6 +742,15 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // already here, everyone else hears the newcomer, and no move can slip
     // between the two — a `Moved` about a player a client has not been
     // introduced to would be about nobody.
+    //
+    // The sky is asked for out here rather than inside that hold, because the
+    // hour has a lock of its own — see [`Shared::skipped`] — and asking for it
+    // with the roster held would be the one path in the process that nested
+    // the two. Nothing needs it to be inside: what the newcomer is owed is a
+    // sky from about the moment they arrived, and a few microseconds older is
+    // the same sky.
+    let wind = shared.wind();
+    let phase = shared.phase();
     {
         let mut players = shared.players.lock().expect("no poisoned lock");
 
@@ -758,22 +781,12 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         // assume a day nobody promised. Inside the same hold of the lock as
         // the welcome, so the watcher's broadcasts cannot slip in front of it
         // and arrive before the client knows who it is.
-        post(
-            newcomer,
-            ToClient::Weather {
-                wind: shared.wind(),
-            },
-        );
+        post(newcomer, ToClient::Weather { wind });
         // And what hour it is, for the same reason: a client with no word on
         // the time can only draw an assumed one, and an arrival that snapped
         // from midday to a night already half gone would be a worse opening
         // than a moment's wait.
-        post(
-            newcomer,
-            ToClient::Daylight {
-                phase: shared.phase(),
-            },
-        );
+        post(newcomer, ToClient::Daylight { phase });
         for (other, existing) in players.iter() {
             if *other != id {
                 post(

@@ -24,6 +24,7 @@ use protocol::DEFAULT_PORT;
 
 use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
 use crate::{AppState, Helm};
+use server::cli::hour;
 use server::{random_seed, WorldConfig, OPENING};
 
 /// Size of a captured picture, in pixels. Matches the shots already in
@@ -317,20 +318,6 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // server is the one that can say where it is entered. See
     // [`Args::opened_on`], which the binary calls once a welcome has arrived.
     Ok(args)
-}
-
-/// An hour of the world's day, as a phase of it: `0` and `24` are both
-/// midnight, `6` dawn, `18` dusk. Hours rather than the fraction the wire
-/// carries, because an hour is what somebody deciding when to arrive thinks
-/// in — even where the day itself is ten minutes long.
-fn hour(value: &str) -> Result<f32, String> {
-    let hours: f32 = value
-        .parse()
-        .map_err(|_| format!("`{value}` is not an hour"))?;
-    if !(0.0..=24.0).contains(&hours) {
-        return Err(format!("`{value}` is not an hour of the day"));
-    }
-    Ok((hours / 24.0).rem_euclid(1.0))
 }
 
 /// A screen by name, as the two states it takes to be on one. The screens

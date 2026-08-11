@@ -570,3 +570,64 @@ fn a_night_keeps_its_pace_while_somebody_is_still_sailing() {
         "the night ran on from {opened} to {phase} with somebody still sailing"
     );
 }
+
+#[test]
+fn a_night_stops_running_off_once_the_asking_stops() {
+    // The asking is a wish that lapses rather than a switch that is thrown —
+    // see `WAIT_LAPSE` — so a client that has gone quiet is one that is no
+    // longer asking, whether it has taken the helm again or stopped talking
+    // altogether. What it costs to get this wrong is a night that goes on
+    // racing under somebody who is sailing again.
+    //
+    // Opened at the first of the night rather than the last of it, so that
+    // what is left to run off outlasts both the asking below and the lapse
+    // after it: a night that had already reached daybreak would say nothing
+    // about either.
+    let addr = host_at(3, 0.82);
+    let (client, _id, _, _) = Client::join(addr);
+
+    // Asked for long enough that the night is plainly running — a second of
+    // one moves a tenth of a day, where the day itself moves a
+    // six-hundredth.
+    let opened = client.hear_the_time();
+    let asking = std::time::Instant::now() + Duration::from_millis(600);
+    let mut phase = opened;
+    while std::time::Instant::now() < asking {
+        client.say(ToServer::WantDawn);
+        phase = client.hear_the_time();
+    }
+    assert!(
+        (phase - opened).rem_euclid(1.0) > 0.02,
+        "the night never started running: {opened} then {phase}"
+    );
+
+    // Then quiet — listened to throughout rather than slept through, so that
+    // nothing piles up in the socket for the readings below to mistake for
+    // the present. Long enough past the lapse that the last of the fast
+    // clock is over well before the first of those readings.
+    let quiet = std::time::Instant::now();
+    let mut before = phase;
+    while quiet.elapsed() < Duration::from_millis(2_500) {
+        before = client.hear_the_time();
+    }
+    assert!(
+        protocol::is_night(before),
+        "the night ran itself out with nobody asking for it: {before}"
+    );
+
+    // And now the day moves at the pace of a day: a couple of real seconds
+    // of a ten-minute one is a few thousandths, where a night still running
+    // off would be a fifth. Bounded loosely on purpose — what is being told
+    // apart here is two paces sixty times apart, and a loaded machine that
+    // took a few seconds over this is still nowhere near.
+    let measured = std::time::Instant::now();
+    let mut after = before;
+    while measured.elapsed() < Duration::from_secs(2) {
+        after = client.hear_the_time();
+    }
+    let moved = (after - before).rem_euclid(1.0);
+    assert!(
+        moved < 0.02,
+        "the day moved {moved} from {before} to {after} with nobody asking"
+    );
+}

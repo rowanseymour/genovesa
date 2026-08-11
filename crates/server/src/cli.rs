@@ -84,10 +84,14 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
 }
 
 /// An hour of the world's day, as a phase of it: `0` and `24` are both
-/// midnight, `6` is dawn, `18` dusk. Hours rather than a fraction because an
-/// hour is what somebody deciding when a world should open thinks in, even
-/// where the day itself is ten minutes long.
-fn hour(value: &str) -> Result<f32, String> {
+/// midnight, `6` dawn, `18` dusk. Hours rather than the fraction the wire
+/// carries, because an hour is what somebody deciding when a world should
+/// open thinks in — even where the day itself is ten minutes long.
+///
+/// Public because both command lines take a `--time` and it is the same
+/// hour: a game opening a world for itself is opening the world a server
+/// would have.
+pub fn hour(value: &str) -> Result<f32, String> {
     let hours: f32 = value
         .parse()
         .map_err(|_| format!("`{value}` is not an hour"))?;

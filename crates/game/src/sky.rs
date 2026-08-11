@@ -305,6 +305,13 @@ struct SkyLight;
 #[derive(Component)]
 struct NightOffer;
 
+/// Marks the text the offer is written into: its one child, and the only
+/// [`Text`] this module has any business writing to. Without it the query
+/// that puts the words there asks for mutable access to every piece of text
+/// in the world — the debug overlay's counters included — to write one.
+#[derive(Component)]
+struct OfferLine;
+
 pub struct SkyPlugin;
 
 impl Plugin for SkyPlugin {
@@ -436,8 +443,24 @@ fn hang_the_light(mut commands: Commands) {
 /// since nothing on this side knows that is happening.
 ///
 /// The gap is taken as the shorter way round, which is safe because the
-/// server never *jumps* its clock: the furthest ahead its word can be is the
-/// few hundredths of a day a fast night puts on between beats.
+/// server never *jumps* its clock — and what bounds how far ahead of us it
+/// can get is two constants of the `server` crate's. A wish for dawn stands
+/// `WAIT_LAPSE` (a second and a half) before it lapses, and a night runs off
+/// at `NIGHT_PACE` (sixty times), so a client that has stopped hearing from a
+/// server mid-night falls at most those ninety seconds of world time behind
+/// it — 0.15 of a day, against the half a day this decides the way round on.
+/// Once the wish has lapsed both clocks are back at a second to the second
+/// and the gap stops growing. Raising either constant spends that margin, so
+/// raising them far enough is a decision about *this*, not only about how
+/// long a night takes to sit through.
+///
+/// The ease trails the server all through a run-off rather than sitting on
+/// it — by around 0.05 of a day — so this machine is still in the night for
+/// about a second after the server has reached daybreak, and goes on
+/// offering to wait it out and sending `WantDawn`. That is meant to be
+/// harmless rather than missed: the server tests `is_night` before it runs
+/// anything off, so the late asking does nothing, and on screen it reads as
+/// the tail of the night it is.
 fn advance_the_day(time: Res<Time>, mut sky: ResMut<Sky>) {
     let step = time.delta_secs() / protocol::DAY_SECONDS;
     sky.phase = (sky.phase + step).rem_euclid(1.0);
@@ -535,8 +558,12 @@ fn waiting_out_the_night(
 /// Whether the boat is lying still. A hull with way on is one being sailed,
 /// and a player sailing has not turned in for the night — the same test
 /// `player::embark_or_land` makes before it lets anybody step off a deck.
+///
+/// There is one boat in a world, so this is a question about *the* boat: no
+/// boat at all is a world still being entered, which has no night to offer
+/// yet.
 fn at_anchor(boats: &Query<&Boat>) -> bool {
-    boats.iter().all(Boat::at_rest) && !boats.is_empty()
+    boats.single().is_ok_and(Boat::at_rest)
 }
 
 /// The line the night puts on the screen, spawned hidden and left to
@@ -555,6 +582,7 @@ fn offer_spawn(mut commands: Commands) {
             ..default()
         },
         children![(
+            OfferLine,
             Text::default(),
             TextFont {
                 font: FontSource::Serif,
@@ -583,7 +611,7 @@ fn offer_the_night(
     boats: Query<&Boat>,
     helm: Option<Res<State<Helm>>>,
     offer: Single<(&mut Visibility, &Children), With<NightOffer>>,
-    mut lines: Query<&mut Text>,
+    mut lines: Query<&mut Text, With<OfferLine>>,
 ) {
     let (mut visibility, children) = offer.into_inner();
     let sailing = helm.is_none_or(|helm| *helm.get() == Helm::Sailing);
@@ -617,21 +645,28 @@ fn offer_the_night(
 
 /// Puts the daylight back on the way out.
 ///
-/// The clear colour and the ambient light are the app's, not the world's, so
-/// a world left at midnight would otherwise hand the menus a black screen and
-/// no light to draw by. The hour goes back to being unknown for the same
-/// reason it snaps on the first word: the next world entered is a different
-/// world, and its time is not this one's.
+/// The clear colour, the ambient light and the camera's haze are the app's,
+/// not the world's — the camera outlives the world it was looking at — so a
+/// world left at midnight would otherwise hand the menus a black screen, no
+/// light to draw by, and a haze still keyed to a violet sky. All three go
+/// back together, exactly as [`light_the_world`] moves them together, or the
+/// next world's first frame fades its ground into last night. The hour goes
+/// back to being unknown for the same reason it snaps on the first word: the
+/// next world entered is a different world, and its time is not this one's.
 fn leave_the_world(
     mut sky: ResMut<Sky>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut clear: ResMut<ClearColor>,
+    mut haze: Query<&mut DistanceFog>,
 ) {
     *sky = Sky::default();
     let day = light_at(NO_HOUR);
     ambient.color = day.fill;
     ambient.brightness = day.brightness;
     clear.0 = day.sky;
+    for mut fog in &mut haze {
+        fog.color = day.sky;
+    }
 }
 
 #[cfg(test)]
