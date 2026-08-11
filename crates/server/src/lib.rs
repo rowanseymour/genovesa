@@ -114,6 +114,41 @@ const STOP_POLL: Duration = Duration::from_millis(10);
 /// marker of that player out to where the world no longer resolves.
 const MAX_RANGE: f32 = 1_280_000.0;
 
+/// What time of day a world opens at, as a phase of the day — see
+/// [`ToClient::Daylight`]. Mid-morning: everyone arrives in daylight with a
+/// good part of the day ahead of them, and the sun stands about where it
+/// stood when there was only ever one hour.
+pub const OPENING: f32 = 0.35;
+
+/// How much faster than real time the world's clock runs while a night is
+/// being waited out. A night is a little under half of a
+/// [`protocol::DAY_SECONDS`] day, so at this pace waiting one out takes a
+/// few seconds — long enough to watch the moon cross and the light come
+/// back, short enough that nobody puts the kettle on.
+const NIGHT_PACE: f32 = 60.0;
+
+/// How long a [`ToServer::WantDawn`] stands before it lapses.
+///
+/// A wish rather than a switch: a client repeats it while the player holds
+/// the key down, so this only has to outlast the gap between two of those.
+/// Short, because what it costs to be long is a night that keeps racing
+/// after somebody has taken the helm again.
+const WAIT_LAPSE: Duration = Duration::from_millis(1_500);
+
+/// How often the sky thread wakes: to notice the wind has moved, to tell the
+/// time, and to run the clock on through a night everybody is waiting out.
+const SKY_TICK: Duration = Duration::from_millis(200);
+
+/// How often the time of day is told when the day is simply passing. Clients
+/// run the same clock themselves between tellings — see
+/// [`ToClient::Daylight`] — so this is a correction, not the sun's only
+/// means of moving, and a second of drift is a fifth of a degree of arc.
+const SKY_TELL: Duration = Duration::from_secs(1);
+
+/// How much the wind must have moved, in metres per second of vector change,
+/// before it is worth telling everyone about.
+const WIND_STEP: f32 = 0.25;
+
 /// Where session news goes. Boxed rather than a type parameter so that a
 /// `Server` is one type however it reports, and defaulted to silence: what a
 /// library does to somebody's stdout is not the library's decision.
@@ -167,6 +202,14 @@ struct Shared {
     /// weather is a pure function of seed and elapsed time (see
     /// [`world::weather`]), so this is the whole of the state it needs.
     started: Instant,
+    /// What time of day the world opened at, as a phase — [`OPENING`] unless
+    /// [`Server::opening_at`] said otherwise.
+    opening: f32,
+    /// Seconds of the world's own time run off over and above the session's:
+    /// the nights its players have waited out. The only state the day has
+    /// beyond the clock, which is what keeps two askers from disagreeing
+    /// about what time it is — see [`Shared::phase`].
+    skipped: Mutex<f32>,
     report: Report,
 }
 
@@ -183,12 +226,25 @@ struct ChunkRequest {
 /// One connected player, as the roster sees them.
 struct Player {
     position: Vec2,
+    /// When this player last asked for the night to be over, if they have —
+    /// see [`ToServer::WantDawn`], which stands only for [`WAIT_LAPSE`].
+    waiting_since: Option<Instant>,
     /// The way to this player's ear: their writer thread drains this onto
     /// their socket.
     outbox: mpsc::SyncSender<ToClient>,
     /// This player's socket, kept only so that the session can hang up on
     /// somebody who has stopped reading it — see [`post`].
     line: TcpStream,
+}
+
+impl Player {
+    /// Whether this player is, as of `now`, asking for the night to be over.
+    /// A wish that lapses, so a client that has gone quiet — taken the helm
+    /// again, or stopped talking altogether — is no longer asking.
+    fn is_waiting_for_dawn(&self, now: Instant) -> bool {
+        self.waiting_since
+            .is_some_and(|asked| now.duration_since(asked) < WAIT_LAPSE)
+    }
 }
 
 impl Server {
@@ -221,6 +277,8 @@ impl Server {
                 players: Mutex::new(HashMap::new()),
                 stopping: AtomicBool::new(false),
                 started: Instant::now(),
+                opening: OPENING,
+                skipped: Mutex::new(0.0),
                 report: Box::new(|_| {}),
             }),
         })
@@ -240,6 +298,20 @@ impl Server {
         self
     }
 
+    /// What time of day the world opens at, as a phase — see
+    /// [`ToClient::Daylight`]. Worlds open in the morning unless somebody
+    /// asks for otherwise, which is what `--time` and the tests of the night
+    /// do.
+    pub fn opening_at(mut self, phase: f32) -> Self {
+        // The same moment [`Server::reporting_to`] uses, and for the same
+        // reason: nothing is serving yet, so this is where the shared state
+        // still has one owner.
+        Arc::get_mut(&mut self.shared)
+            .expect("a server that has not been run yet owns its shared state")
+            .opening = phase.rem_euclid(1.0);
+        self
+    }
+
     /// The address actually bound — port 0 in, a real port out, which is how
     /// tests host on whatever the machine has free.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -252,7 +324,7 @@ impl Server {
     pub fn run(self) {
         let (wanted, requests) = self.queue;
         make_ground(&self.shared, requests);
-        watch_weather(&self.shared);
+        watch_the_sky(&self.shared);
         accept(&self.listener, &self.shared, &wanted);
     }
 
@@ -267,7 +339,7 @@ impl Server {
         let addr = self.listener.local_addr()?;
         let (wanted, requests) = self.queue;
         make_ground(&self.shared, requests);
-        watch_weather(&self.shared);
+        watch_the_sky(&self.shared);
         let shared = self.shared.clone();
         let thread = {
             let (listener, shared) = (self.listener, self.shared);
@@ -448,34 +520,64 @@ fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
     }
 }
 
-/// Watches the sky on a thread of its own, telling everyone when the wind
-/// has meaningfully changed. The weather itself needs no ticking — it is a
-/// pure function of the clock — so all this does is notice, about once a
-/// second, that the answer has moved and pass it on. A quarter of a metre a
-/// second of vector change covers a shift in strength and a shift in bearing
-/// with one test, keeps a steady sky silent, and during a real change works
-/// out to a message every few seconds.
+/// Watches the sky on a thread of its own: the wind, the time of day, and
+/// the nights the players ask to have over with.
+///
+/// Neither the weather nor the clock needs ticking — both are functions of
+/// how long the world has been open — so most of what this does is notice
+/// that an answer has moved and pass it on. The wind is told when it has
+/// meaningfully changed: [`WIND_STEP`] of vector change covers a shift in
+/// strength and a shift in bearing with one test, keeps a steady sky silent,
+/// and during a real change works out to a message every few seconds. The
+/// time is told on a beat instead, because it is always changing and a
+/// client is running the same clock itself between tellings.
+///
+/// The one thing here that does more than watch is the night: while everyone
+/// in the world is waiting one out, this is what runs the clock fast — see
+/// [`Shared::run_off_the_night`].
 ///
 /// The thread ends with the session, within a beat of [`Shared::stopping`]
 /// being set, and is deliberately not joined: unlike a connection it holds
 /// nothing but a share of the state, and making every [`Host`] drop wait out
 /// the last beat would slow every session's end for nothing.
-fn watch_weather(shared: &Arc<Shared>) {
+fn watch_the_sky(shared: &Arc<Shared>) {
     let shared = shared.clone();
     thread::spawn(move || {
-        let mut told = shared.wind();
+        let mut told_wind = shared.wind();
+        let mut told_time = Instant::now();
         loop {
-            for _ in 0..5 {
-                if shared.stopping.load(Ordering::Relaxed) {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(200));
+            if shared.stopping.load(Ordering::Relaxed) {
+                return;
             }
+            thread::sleep(SKY_TICK);
+
+            let wound = shared.run_off_the_night(SKY_TICK);
             let wind = shared.wind();
-            if (wind - told).length() > 0.25 {
-                told = wind;
+
+            // Gathered before the roster is locked, and the day's own lock
+            // is taken inside both of these rather than around the sending:
+            // every path into the clock takes it for a moment and lets it go
+            // again, so there is no order for two of them to disagree about.
+            let mut news = Vec::new();
+            if (wind - told_wind).length() > WIND_STEP {
+                told_wind = wind;
+                news.push(ToClient::Weather { wind });
+            }
+            // A wound clock is told at once, whatever the beat: it is the
+            // one thing that moves the day other than the day passing, and
+            // it is what the client waiting for dawn is watching for.
+            if wound || told_time.elapsed() >= SKY_TELL {
+                told_time = Instant::now();
+                news.push(ToClient::Daylight {
+                    phase: shared.phase(),
+                });
+            }
+
+            if !news.is_empty() {
                 let players = shared.players.lock().expect("no poisoned lock");
-                broadcast_all(&players, ToClient::Weather { wind });
+                for word in news {
+                    broadcast_all(&players, word);
+                }
             }
         }
     });
@@ -487,6 +589,57 @@ impl Shared {
     /// there is no cached state for two askers to disagree over.
     fn wind(&self) -> Vec2 {
         world::weather::wind(self.world.seed(), self.started.elapsed().as_secs_f32())
+    }
+
+    /// What time of day it is here, as a phase — see [`ToClient::Daylight`].
+    ///
+    /// The same construction as the wind, and for the same reason: the hour
+    /// follows from how long the world has been open, so nothing has to be
+    /// kept in step. The one piece of state is [`Shared::skipped`], which is
+    /// what a night waited out leaves behind.
+    fn phase(&self) -> f32 {
+        let skipped = *self.skipped.lock().expect("no poisoned lock");
+        let seconds = self.started.elapsed().as_secs_f32() + skipped;
+        (self.opening + seconds / protocol::DAY_SECONDS).rem_euclid(1.0)
+    }
+
+    /// Runs the clock on through a night everybody is waiting out, and says
+    /// whether it did.
+    ///
+    /// Everybody, not anybody: a world where one player is still sailing
+    /// keeps its night, because the sky is one sky and having it whipped
+    /// away is worse than being kept up. Alone — which is every solo game,
+    /// the world it hosts having exactly one player in it — that reads as
+    /// simply asking.
+    ///
+    /// It runs the clock rather than jumping it so that the night visibly
+    /// passes: everyone watches the moon cross and the light come back, and a client has only ever a small step to make up. The run
+    /// stops at [`protocol::DAYBREAK`] rather than at sunrise, so a night
+    /// waited out ends looking at one.
+    fn run_off_the_night(&self, tick: Duration) -> bool {
+        let phase = self.phase();
+        if !protocol::is_night(phase) {
+            return false;
+        }
+        {
+            let players = self.players.lock().expect("no poisoned lock");
+            let all_waiting = !players.is_empty()
+                && players
+                    .values()
+                    .all(|player| player.is_waiting_for_dawn(Instant::now()));
+            if !all_waiting {
+                return false;
+            }
+        }
+
+        // The extra seconds only: the tick's own second passes anyway, and
+        // counting it twice would put the pace out by one. Capped at what is
+        // left of the night, so the fast clock lands on daybreak rather than
+        // carrying the morning away with it.
+        let to_dawn = (protocol::DAYBREAK - phase).rem_euclid(1.0) * protocol::DAY_SECONDS;
+        let run = (tick.as_secs_f32() * (NIGHT_PACE - 1.0)).min(to_dawn);
+        *self.skipped.lock().expect("no poisoned lock") += run;
+        true
     }
 
     /// Where a given player is put down. Everyone enters on the world's
@@ -556,6 +709,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
 
     let player = Player {
         position: shared.spawn_for(id),
+        waiting_since: None,
         outbox,
         line: stream,
     };
@@ -610,6 +764,16 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 wind: shared.wind(),
             },
         );
+        // And what hour it is, for the same reason: a client with no word on
+        // the time can only draw an assumed one, and an arrival that snapped
+        // from midday to a night already half gone would be a worse opening
+        // than a moment's wait.
+        post(
+            newcomer,
+            ToClient::Daylight {
+                phase: shared.phase(),
+            },
+        );
         for (other, existing) in players.iter() {
             if *other != id {
                 post(
@@ -638,6 +802,16 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     player.position = position;
                 }
                 broadcast(&players, id, ToClient::Moved { id, position });
+            }
+            Ok(ToServer::WantDawn) => {
+                // Noted rather than acted on: whether the night actually
+                // runs depends on what everyone else wants — see
+                // [`Shared::run_off_the_night`], which is where the sky
+                // thread reads this.
+                let mut players = shared.players.lock().expect("no poisoned lock");
+                if let Some(player) = players.get_mut(&id) {
+                    player.waiting_since = Some(Instant::now());
+                }
             }
             Ok(ToServer::WantChunk { chunk }) if in_the_world(chunk) => {
                 // Queued rather than answered, because answering means

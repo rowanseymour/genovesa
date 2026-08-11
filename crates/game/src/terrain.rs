@@ -1,4 +1,5 @@
-//! Putting the world on screen: chunks as they are sent, the sea and the sun.
+//! Putting the world on screen: chunks as they are sent, and the sea they
+//! stand in. The light they are all lit by is [`crate::sky`]'s.
 //!
 //! Nothing here generates anything. The world arrives over the connection a
 //! chunk at a time — corner heights and one palette entry per triangle, see
@@ -29,8 +30,7 @@ use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::light::{
-    CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster,
-    NotShadowReceiver,
+    CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver,
 };
 use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::{HashMap, HashSet};
@@ -727,51 +727,17 @@ fn enter_world(
         MeshMaterial3d(sea),
         Transform::from_xyz(0.0, SEA_SURFACE, 0.0),
     ));
-
-    // Shadow map resolution. The first cascade spreads its texels over the
-    // whole frustum slice out to its far bound — about a hundred metres of
-    // diagonal at the default zoom — so at Bevy's default 2048 a texel is
-    // around 5 cm of world. The terrain never notices: its facets are metres
-    // across and their shadows are broad shapes. The mast does. It is the
-    // thinnest caster in the world, and at 16 cm its shadow is a stripe three
-    // texels wide, whose edges snap from texel to texel as the boat moves —
-    // a visible flicker along the whole stripe. Doubling the resolution
-    // halves the texel and the stripe stops seething. The cost is GPU memory
-    // (each cascade is one square layer of this size), which is why it stops
-    // at 4096 rather than going further.
-    commands.insert_resource(DirectionalLightShadowMap { size: 4096 });
-
-    // Sun.
-    commands.spawn((
-        Name::new("Sun"),
-        DespawnOnExit(AppState::InWorld),
-        DirectionalLight {
-            // Lower than daylight, and paired with a much stronger ambient, so
-            // the gap between a lit facet and a shadowed one is a couple of
-            // steps rather than a full range. Flat shading gets its readability
-            // from facets differing at all, not from deep contrast.
-            illuminance: 8_500.0,
-            shadow_maps_enabled: true,
-            // The default biases cause bad self-shadowing acne on a heightfield
-            // this large — dark speckle all over the hillsides.
-            shadow_depth_bias: 0.06,
-            shadow_normal_bias: 2.2,
-            ..default()
-        },
-        cascades(crate::HAZE_END),
-        // Low-ish sun: long shadows pick out the relief far better than an
-        // overhead one, which flattens everything.
-        Transform::from_xyz(55.0, 42.0, 28.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
 }
 
-/// How the sun slices the view up into shadow cascades, out to `reach` metres.
+/// How the sky's light slices the view up into shadow cascades, out to
+/// `reach` metres. Built here rather than in [`crate::sky`], which hangs the
+/// light, because what it has to reach past is the ground this module streams.
 ///
 /// Cascades are fitted to the camera's own frustum, so the far end of the
 /// shadowed region travels with the camera. It has to sit past everything the
 /// camera can see, or that end lands on ground that is in shot and whole
 /// hillsides gain and lose their shadows as the view moves. Out at the haze it
-/// can't be seen doing it, which is why the world builds this with
+/// can't be seen doing it, which is why the sky hangs its light with
 /// [`crate::HAZE_END`].
 ///
 /// The reach is an argument rather than baked in only so the `--debug` overlay

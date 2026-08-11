@@ -38,7 +38,36 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
+
+/// How long one turn of the world's day takes, in seconds — sunrise to
+/// sunrise, ten minutes of it.
+///
+/// Part of the wire rather than each client's own idea, because a client
+/// runs the clock itself between the server's tellings — see
+/// [`ToClient::Daylight`] — and one running it at its own pace would drift
+/// from the sky everyone else is under.
+pub const DAY_SECONDS: f32 = 600.0;
+
+/// The phase the last of the light has gone by, and [`DAYBREAK`] the phase
+/// the first of it returns at — between them, the night.
+///
+/// Both ends need to agree on where the night is and neither can be talked
+/// out of it: a server runs the clock fast through a night its players are
+/// waiting out (see [`ToServer::WantDawn`]) and stops at [`DAYBREAK`], and a
+/// client only offers to wait when there is a night to wait. Set a little
+/// inside the dark on either side, so the night is the part with nothing to
+/// look at rather than the whole of dusk and dawn.
+pub const NIGHTFALL: f32 = 0.79;
+/// Where the night ends — see [`NIGHTFALL`]. Ahead of the sunrise at 0.25,
+/// so a night waited out ends looking at one.
+pub const DAYBREAK: f32 = 0.22;
+
+/// Whether a phase of the day (see [`ToClient::Daylight`]) falls in the
+/// night — the span from [`NIGHTFALL`] round midnight to [`DAYBREAK`].
+pub fn is_night(phase: f32) -> bool {
+    !(DAYBREAK..NIGHTFALL).contains(&phase)
+}
 
 /// The port a server listens on, and a client joins on, unless told
 /// otherwise. Nothing else claims it, and it is easily remembered as the
@@ -94,6 +123,17 @@ pub enum ToServer {
     /// time to generate and open water takes none, so a request for water
     /// posted after one for land will often be answered first.
     WantChunk { chunk: IVec2 },
+    /// This player is lying to at anchor waiting the night out, and would
+    /// like it over with.
+    ///
+    /// A standing request rather than an order: it says what this player
+    /// wants *now*, and lapses within a beat of the client falling silent,
+    /// so taking the helm again is simply a client that has stopped asking.
+    /// What the server does with it is its own business — the night runs
+    /// fast only while everyone in the world is asking, and a world where
+    /// somebody is still sailing keeps its night. Repeat it while the wish
+    /// stands; a client that sends it once and stops has changed its mind.
+    WantDawn,
 }
 
 /// What a server may say.
@@ -158,6 +198,26 @@ pub enum ToClient {
     Weather {
         wind: Vec2,
     },
+    /// Where the world's day stands: the fraction of it since midnight, so
+    /// 0.0 is midnight, 0.25 sunrise, 0.5 noon and 0.75 sunset. Always in
+    /// `0.0..1.0`.
+    ///
+    /// Sent with the welcome and on a beat of a second or so after that, and
+    /// the server is the authority on it exactly as it is on the weather:
+    /// every player in a world is under the same sun, wherever they are and
+    /// whatever their machine thinks the time is.
+    ///
+    /// A client is expected to run the clock itself between tellings, at
+    /// [`DAY_SECONDS`] to the turn, and to ease onto each new word rather
+    /// than snapping to it — the tellings are a beat apart and a sun that
+    /// jumped every second would be a stuttering one. It never runs
+    /// backwards: the one thing that moves it other than the clock is a
+    /// night being waited out (see [`ToServer::WantDawn`]), which the server
+    /// serves by running the same clock fast, so the difference a client has
+    /// to make up is always a small step forwards.
+    Daylight {
+        phase: f32,
+    },
 }
 
 impl ToServer {
@@ -177,6 +237,7 @@ impl ToServer {
                 payload.push(2);
                 put_ivec2(&mut payload, *chunk);
             }
+            Self::WantDawn => payload.push(3),
         }
         write_frame(to, &payload, MAX_CLIENT_FRAME)
     }
@@ -195,6 +256,7 @@ impl ToServer {
             2 => Self::WantChunk {
                 chunk: payload.ivec2()?,
             },
+            3 => Self::WantDawn,
             tag => return Err(corrupt(format!("unknown client message tag {tag}"))),
         };
         payload.finish()?;
@@ -234,6 +296,10 @@ impl ToClient {
             Self::Weather { wind } => {
                 payload.push(6);
                 put_vec2(&mut payload, *wind);
+            }
+            Self::Daylight { phase } => {
+                payload.push(7);
+                put_f32(&mut payload, *phase);
             }
             Self::Chunk { chunk, ground } => {
                 payload.push(5);
@@ -300,6 +366,9 @@ impl ToClient {
             6 => Self::Weather {
                 wind: payload.vec2()?,
             },
+            7 => Self::Daylight {
+                phase: payload.f32()?,
+            },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
         payload.finish()?;
@@ -355,6 +424,10 @@ fn put_u16(out: &mut Vec<u8>, value: u16) {
 }
 
 fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_f32(out: &mut Vec<u8>, value: f32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -517,6 +590,7 @@ mod tests {
             ToServer::WantChunk {
                 chunk: IVec2::new(-9, 4),
             },
+            ToServer::WantDawn,
         ] {
             let bytes = bytes_of_client(message);
             assert_eq!(ToServer::read(&mut bytes.as_slice()).unwrap(), message);
@@ -541,6 +615,7 @@ mod tests {
             ToClient::Weather {
                 wind: Vec2::new(-3.25, 8.5),
             },
+            ToClient::Daylight { phase: 0.125 },
             ToClient::Chunk {
                 chunk: IVec2::new(3, -8),
                 ground: None,
@@ -600,6 +675,11 @@ mod tests {
                 5, 0, 0, 0, // x = 5
                 0xFD, 0xFF, 0xFF, 0xFF, // z = -3, two's complement LE
             ],
+        );
+        assert_eq!(
+            bytes_of_client(ToServer::WantDawn),
+            [1, 0, 3],
+            "want dawn: length 1, tag 3, and nothing to say"
         );
 
         assert_eq!(
@@ -666,6 +746,14 @@ mod tests {
                 6, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // y = -2.0
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::Daylight { phase: 0.75 }),
+            [
+                5, 0, // length
+                7, // tag
+                0, 0, 0x40, 0x3F, // phase = 0.75, sunset
             ],
         );
 

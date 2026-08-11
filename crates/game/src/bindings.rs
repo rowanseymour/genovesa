@@ -24,18 +24,22 @@ pub enum Action {
     /// One key for both directions of the same threshold: ashore it boards,
     /// aboard it goes ashore — see `player::embark_or_land`.
     Board,
+    /// Held at anchor through the night, to have it over with — see
+    /// `sky::ask_for_dawn`.
+    WaitOutNight,
     TurnLeft,
     TurnRight,
 }
 
 impl Action {
     /// Every action, in the order the settings screen lists them.
-    pub const ALL: [Action; 7] = [
+    pub const ALL: [Action; 8] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::SteerLeft,
         Action::SteerRight,
         Action::Board,
+        Action::WaitOutNight,
         Action::TurnLeft,
         Action::TurnRight,
     ];
@@ -51,14 +55,15 @@ impl Action {
             Action::SteerLeft => "Steer left",
             Action::SteerRight => "Steer right",
             Action::Board => "Go ashore / board",
+            Action::WaitOutNight => "Wait for dawn",
             Action::TurnLeft => "Turn view left",
             Action::TurnRight => "Turn view right",
         }
     }
 
     /// Where the action starts out: WASD to drive, F to step ashore or
-    /// aboard, and Q/E to turn the view — WASD and Q/E being what the game
-    /// had before any of this was configurable.
+    /// aboard, R to wait a night out, and Q/E to turn the view — WASD and
+    /// Q/E being what the game had before any of this was configurable.
     pub fn default_key(self) -> KeyCode {
         match self {
             Action::MoveForward => KeyCode::KeyW,
@@ -66,6 +71,7 @@ impl Action {
             Action::SteerLeft => KeyCode::KeyA,
             Action::SteerRight => KeyCode::KeyD,
             Action::Board => KeyCode::KeyF,
+            Action::WaitOutNight => KeyCode::KeyR,
             Action::TurnLeft => KeyCode::KeyQ,
             Action::TurnRight => KeyCode::KeyE,
         }

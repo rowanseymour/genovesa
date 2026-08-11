@@ -23,10 +23,11 @@ use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
 use game::player::PlayerPlugin;
+use game::sky::SkyPlugin;
 use game::terrain::TerrainPlugin;
 use game::trees::TreesPlugin;
 use game::wildlife::WildlifePlugin;
-use game::{AppState, Helm, SKY, WINDOW};
+use game::{AppState, Helm, WINDOW};
 
 fn main() -> ExitCode {
     let mut args = match cli::parse(std::env::args().skip(1).collect()) {
@@ -55,7 +56,7 @@ fn main() -> ExitCode {
         // Alone, because a run that asked for a world on the command line
         // asked for one to look at rather than one to be joined: sharing is
         // the menu's switch, and a dedicated `server` is the other binary.
-        (None, AppState::InWorld) => Some(Session::open(args.config, Reach::Alone)),
+        (None, AppState::InWorld) => Some(Session::open(args.config, Reach::Alone, args.opening)),
         (None, _) => None,
     };
     let session = match session.transpose() {
@@ -112,17 +113,13 @@ fn run(args: Args, session: Option<Session>) {
         // that asked for no such thing sets the default it would have had.
         .add_sub_state::<Helm>()
         .insert_resource(NextState::Pending(args.helm))
-        .insert_resource(ClearColor(SKY))
-        // Sky fill. Deliberately strong relative to the sun — this look wants
-        // shadows that read as a second flat tone, not as darkness.
-        .insert_resource(GlobalAmbientLight {
-            color: Color::srgb(0.82, 0.89, 1.0),
-            brightness: 1_400.0,
-            ..default()
-        })
         .insert_resource(args.starting_view())
         .add_plugins((
             TerrainPlugin,
+            // Before the terrain and the rest only by convention; what it
+            // owns — the clear colour, the ambient light and the one light in
+            // the sky — is the world's whole lighting.
+            SkyPlugin,
             TreesPlugin,
             WildlifePlugin,
             BoatPlugin,

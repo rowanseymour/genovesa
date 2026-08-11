@@ -20,7 +20,9 @@ fn main() -> ExitCode {
     // The library keeps quiet about sessions; a server run from a terminal is
     // exactly the caller that wants to see them.
     let server = match Server::bind(("0.0.0.0", args.port), args.config) {
-        Ok(server) => server.reporting_to(|line| println!("{line}")),
+        Ok(server) => server
+            .opening_at(args.opening)
+            .reporting_to(|line| println!("{line}")),
         Err(error) => {
             eprintln!("server: cannot listen on port {}: {error}", args.port);
             return ExitCode::FAILURE;

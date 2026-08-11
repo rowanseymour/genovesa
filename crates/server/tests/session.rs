@@ -34,6 +34,20 @@ fn host(seed: u32) -> SocketAddr {
     addr
 }
 
+/// The same, opened at a chosen hour of its day, for the tests that are
+/// about the night — which nothing else can reach, a world's clock running
+/// at ten minutes to the day from whenever it was bound.
+fn host_at(seed: u32, opening: f32) -> SocketAddr {
+    let server = Server::bind(("127.0.0.1", 0), WorldConfig { seed })
+        .expect("bind")
+        .opening_at(opening);
+    let addr = server
+        .local_addr()
+        .expect("a bound listener has an address");
+    std::thread::spawn(move || server.run());
+    addr
+}
+
 /// The same, on a thread the test can end — what a game hosting a world for
 /// its own player holds.
 fn spawn_host(seed: u32) -> Host {
@@ -87,15 +101,25 @@ impl Client {
         message.write(&mut &self.0).expect("write");
     }
 
-    /// The next message that is *about* something. Weather is skipped: it is
-    /// sent on joining and again whenever the sky moves, on a clock nothing
-    /// in a test controls, so any assertion about message order would be
-    /// flaky against it — and no test here is about the sky.
+    /// The next message that is *about* something. The sky is skipped — both
+    /// the weather and the time of day: each is sent on joining and again on
+    /// a clock nothing in a test controls, so any assertion about message
+    /// order would be flaky against them. The tests that *are* about the sky
+    /// read for what they want with [`Client::hear_the_time`].
     fn hear(&self) -> ToClient {
         loop {
             match ToClient::read(&mut &self.0).expect("read") {
-                ToClient::Weather { .. } => continue,
+                ToClient::Weather { .. } | ToClient::Daylight { .. } => continue,
                 message => return message,
+            }
+        }
+    }
+
+    /// The next word on what time it is, ignoring everything else.
+    fn hear_the_time(&self) -> f32 {
+        loop {
+            if let ToClient::Daylight { phase } = ToClient::read(&mut &self.0).expect("read") {
+                return phase;
             }
         }
     }
@@ -137,12 +161,12 @@ fn a_client_is_welcomed_with_somewhere_to_stand_and_something_to_look_at() {
 }
 
 #[test]
-fn a_newcomer_is_told_the_weather_before_anything_else_happens() {
+fn a_newcomer_is_told_the_sky_before_anything_else_happens() {
     // The sky arrives straight after the welcome, before the client has said
-    // or asked anything: a client draws the sea from its first frame, and a
-    // sea drawn under assumed weather would visibly change its mind moments
-    // in. Read raw rather than through `hear`, which exists to skip exactly
-    // this message everywhere else.
+    // or asked anything: a client draws the sea and the light from its first
+    // frame, and either of them drawn under an assumed sky would visibly
+    // change its mind moments in. Read raw rather than through `hear`, which
+    // exists to skip exactly these messages everywhere else.
     let addr = host(7);
     let client = Client::connect(addr);
     client.say(ToServer::Hello {
@@ -166,6 +190,15 @@ fn a_newcomer_is_told_the_weather_before_anything_else_happens() {
             );
         }
         other => panic!("expected the weather, heard {other:?}"),
+    }
+    // And the hour, for the same reason: a world drawn at an assumed midday
+    // would correct itself to a night moments after the player arrived in it.
+    match ToClient::read(&mut &client.0).expect("read") {
+        ToClient::Daylight { phase } => assert!(
+            (phase - server::OPENING).abs() < 0.01,
+            "a world seconds old opened at {phase} rather than its morning"
+        ),
+        other => panic!("expected the time of day, heard {other:?}"),
     }
 }
 
@@ -468,4 +501,72 @@ fn a_corrupt_client_is_dropped() {
     // server must give up on him rather than trying to read past it.
     (&bob.0).write_all(&[0xFF, 0xFF, 1, 2, 3]).expect("write");
     assert_eq!(alice.hear(), ToClient::Left { id: b });
+}
+
+#[test]
+fn a_world_says_what_time_it_is_and_goes_on_saying_so() {
+    // Opened mid-afternoon: the first word is that hour, and the clock is
+    // running — a later word is a later hour, without anybody asking.
+    let addr = host_at(3, 0.6);
+    let (client, _id, _, _) = Client::join(addr);
+
+    let opened = client.hear_the_time();
+    assert!(
+        (opened - 0.6).abs() < 0.01,
+        "the world opened at {opened} rather than the hour it was given"
+    );
+
+    let later = client.hear_the_time();
+    assert!(later > opened, "the day stood still: {opened} then {later}");
+}
+
+#[test]
+fn a_night_everybody_is_waiting_out_runs_off_to_daybreak() {
+    // Opened in the small hours, with one player in the world asking for it
+    // to be over. The night has to pass at a pace nobody sits through, and
+    // stop at daybreak rather than carrying the morning away with it.
+    let addr = host_at(3, 0.10);
+    let (client, _id, _, _) = Client::join(addr);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut phase = client.hear_the_time();
+    while protocol::is_night(phase) && std::time::Instant::now() < deadline {
+        client.say(ToServer::WantDawn);
+        phase = client.hear_the_time();
+    }
+    assert!(
+        !protocol::is_night(phase),
+        "the night never ran off: still {phase}"
+    );
+    // Landed on daybreak, not somewhere past it: a fast clock that overshot
+    // would take the sunrise with it.
+    assert!(
+        phase < protocol::DAYBREAK + 0.02,
+        "the night ran past daybreak to {phase}"
+    );
+}
+
+#[test]
+fn a_night_keeps_its_pace_while_somebody_is_still_sailing() {
+    // Two in the world and one of them asking. The sky is one sky, so the
+    // night stays a night: the player who is still out there does not have
+    // it whipped away.
+    let addr = host_at(3, 0.10);
+    let (alice, _a, _, _) = Client::join(addr);
+    let (_bob, _b, _, _) = Client::join(addr);
+
+    let opened = alice.hear_the_time();
+    let until = std::time::Instant::now() + Duration::from_secs(1);
+    let mut phase = opened;
+    while std::time::Instant::now() < until {
+        alice.say(ToServer::WantDawn);
+        phase = alice.hear_the_time();
+    }
+
+    // About a second of a ten-minute day has passed, which is under a
+    // hundredth of it; a second of a night running off would be a tenth.
+    assert!(
+        phase - opened < 0.02,
+        "the night ran on from {opened} to {phase} with somebody still sailing"
+    );
 }

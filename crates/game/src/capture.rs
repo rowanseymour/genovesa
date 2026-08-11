@@ -97,8 +97,21 @@ impl Plugin for CapturePlugin {
         // After `Startup`, so the camera the map plugin spawns there exists to
         // be pointed somewhere.
         .add_systems(PostStartup, render_off_screen)
-        .add_systems(Update, capture);
+        .add_systems(Update, (hold_the_sky, capture));
     }
+}
+
+/// Stops the clock at the hour the world was entered at, so that the day does
+/// not turn under a run that is taking pictures.
+///
+/// Everything else here is counted in frames, and a capturing run renders
+/// them as fast as it can — so how many seconds a shot is taken at depends on
+/// how quickly the machine got through the warm-up, and two runs of the same
+/// command would light the same view differently. Held at the hour the server
+/// said rather than at one of this file's choosing: what a picture is of is
+/// the world as it was entered.
+fn hold_the_sky(mut sky: ResMut<crate::sky::Sky>) {
+    sky.hold();
 }
 
 /// `Shot` is plain data, but deriving `Clone` on it only to move it out of the
