@@ -30,6 +30,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use protocol::{PlayerId, ToClient, ToServer, DEFAULT_PORT, PROTOCOL_VERSION};
@@ -169,6 +170,16 @@ impl Connection {
         self.say(ToServer::WantChunk { chunk });
     }
 
+    /// Says that this player is at anchor and would like the night over.
+    ///
+    /// Public where the other two are not, because unlike the ground and the
+    /// player's position this is not something this module decides to send:
+    /// [`crate::sky`] owns the night and the key that waits it out, and all
+    /// that belongs here is the wire.
+    pub fn want_dawn(&self) {
+        self.say(ToServer::WantDawn);
+    }
+
     fn say(&self, message: ToServer) {
         if message.write(&mut &self.stream).is_err() {
             let _ = self.stream.shutdown(Shutdown::Both);
@@ -246,9 +257,13 @@ impl Session {
     ///
     /// Joined over the loopback whatever it is bound to: whoever opened the
     /// world is a player in it and gets there the short way.
-    pub fn open(config: WorldConfig, reach: Reach) -> Result<Self, String> {
+    ///
+    /// `opening` is the hour of its day the world starts at, as a phase —
+    /// [`server::OPENING`] for a world nobody asked anything particular of.
+    pub fn open(config: WorldConfig, reach: Reach, opening: f32) -> Result<Self, String> {
         let server = Server::bind(reach.bound_to(), config)
-            .map_err(|error| format!("cannot open a world: {error}"))?;
+            .map_err(|error| format!("cannot open a world: {error}"))?
+            .opening_at(opening);
         let host = server
             .spawn()
             .map_err(|error| format!("cannot open a world: {error}"))?;
@@ -325,8 +340,10 @@ impl Dialing {
 
     /// Starts opening a world on this machine — see [`Session::open`], which
     /// this is the off-the-frame-loop way to reach.
-    pub fn opening(config: WorldConfig, reach: Reach) -> Self {
-        Self::on(reach.described(), move || Session::open(config, reach))
+    pub fn opening(config: WorldConfig, reach: Reach, opening: f32) -> Self {
+        Self::on(reach.described(), move || {
+            Session::open(config, reach, opening)
+        })
     }
 
     fn on(what: String, dial: impl FnOnce() -> Result<Session, String> + Send + 'static) -> Self {
@@ -389,7 +406,11 @@ impl Hosting {
 /// world; every system here conditions on it, so a local world pays nothing.
 #[derive(Resource)]
 pub struct Online {
-    connection: Connection,
+    /// The line itself. Public because a module that owns a piece of the
+    /// world — [`crate::sky`] and the night it waits out — has something of
+    /// its own to say on it, and what may be said is [`Connection`]'s few
+    /// public methods rather than the socket.
+    pub connection: Connection,
     /// The marker standing in for each player the server has introduced.
     ///
     /// Kept, rather than found by looking through the markers themselves,
@@ -435,6 +456,7 @@ impl Plugin for NetPlugin {
         // run it alone.
         app.init_resource::<sea::Forecast>()
             .init_resource::<sea::SeaConditions>()
+            .init_resource::<crate::sky::Sky>()
             .add_systems(
                 Update,
                 (receive, ask_for_ground, report_position, place_markers)
@@ -468,6 +490,16 @@ fn marker_color(id: PlayerId) -> Color {
     Color::hsl((id.0 as f32 * 137.508) % 360.0, 0.65, 0.55)
 }
 
+/// Where a server's word about the sky lands: the wind the sea is drawn
+/// under, and the hour the world is lit at. Two resources belonging to two
+/// other modules, taken together because [`receive`] is the one place either
+/// of them is written and neither is this module's to interpret.
+#[derive(SystemParam)]
+struct SkyReport<'w> {
+    forecast: ResMut<'w, sea::Forecast>,
+    sky: ResMut<'w, crate::sky::Sky>,
+}
+
 /// Applies what the server said since last frame: players joining, moving
 /// and leaving, as markers coming, easing and going.
 fn receive(
@@ -476,7 +508,7 @@ fn receive(
     mut ground: Option<ResMut<Ground>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut forecast: ResMut<sea::Forecast>,
+    mut told: SkyReport,
     mut lost: Local<bool>,
 ) {
     let (messages, connected) = online.connection.drain();
@@ -550,7 +582,16 @@ fn receive(
                 // than at it, so a server that learns to blow harder is not
                 // silently ignored here.
                 if wind.is_finite() && wind.length() < 100.0 {
-                    forecast.wind = Some(wind);
+                    told.forecast.wind = Some(wind);
+                }
+            }
+            ToClient::Daylight { phase } => {
+                // Believed within the same reason as the weather: an hour
+                // outside the day is a broken or hostile server, and a
+                // non-finite one eased into the clock would leave this
+                // machine with no time of day at all, for good.
+                if phase.is_finite() && (0.0..1.0).contains(&phase) {
+                    told.sky.told(phase);
                 }
             }
             // The handshake consumed its own messages; a stray one now is a
@@ -713,7 +754,7 @@ mod tests {
         // the loopback on a port of the machine's choosing, which is what
         // `Reach::Alone` is — a test run cannot collide with a real server on
         // this machine, and neither can a player.
-        let dialing = Dialing::opening(WorldConfig { seed: 77 }, Reach::Alone);
+        let dialing = Dialing::opening(WorldConfig { seed: 77 }, Reach::Alone, server::OPENING);
         let session = settle(&dialing).expect("the world should be opened and joined");
 
         assert!(
@@ -727,10 +768,18 @@ mod tests {
 
     #[test]
     fn the_seed_asked_for_is_the_world_that_opens() {
-        let first = settle(&Dialing::opening(WorldConfig { seed: 77 }, Reach::Alone))
-            .expect("a world should open");
-        let second = settle(&Dialing::opening(WorldConfig { seed: 78 }, Reach::Alone))
-            .expect("a world should open");
+        let first = settle(&Dialing::opening(
+            WorldConfig { seed: 77 },
+            Reach::Alone,
+            server::OPENING,
+        ))
+        .expect("a world should open");
+        let second = settle(&Dialing::opening(
+            WorldConfig { seed: 78 },
+            Reach::Alone,
+            server::OPENING,
+        ))
+        .expect("a world should open");
         // A host can ask its own server which world it made — that is where
         // the debug readout's seed comes from.
         assert_eq!(first.hosting.as_ref().expect("hosting").seed(), 77);
@@ -748,7 +797,7 @@ mod tests {
         // The point of sharing: the world the host is standing in is reachable
         // from outside, and whoever arrives is somebody else in the same
         // world rather than the host again.
-        let dialing = Dialing::opening(WorldConfig { seed: 3 }, Reach::Alone);
+        let dialing = Dialing::opening(WorldConfig { seed: 3 }, Reach::Alone, server::OPENING);
         let session = settle(&dialing).expect("the world should be opened and joined");
         let port = session.hosting.as_ref().expect("hosting").addr().port();
 

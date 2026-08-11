@@ -18,6 +18,7 @@ pub mod menu;
 pub mod net;
 pub mod player;
 pub mod sea;
+pub mod sky;
 pub mod terrain;
 pub mod trees;
 pub mod wildlife;

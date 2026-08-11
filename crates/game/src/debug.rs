@@ -37,6 +37,7 @@ use bevy::text::FontSize;
 use crate::camera::{MapCamera, View};
 use crate::net::Hosting;
 use crate::sea::Forecast;
+use crate::sky::Sky;
 use crate::terrain::{Ground, Tally};
 use crate::Helm;
 
@@ -56,9 +57,11 @@ impl Plugin for DebugOverlayPlugin {
         }
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<Toggles>()
-            // Where the commanded wind lands — shared with the plugins that
-            // draw and ride the sea, each initialising it for its own tests.
+            // Where the commanded wind and hour land — shared with the
+            // plugins that draw the sea and the sky, each initialising them
+            // for its own tests.
             .init_resource::<Forecast>()
+            .init_resource::<Sky>()
             .add_systems(Startup, spawn_overlay)
             // Only at the helm. Digits are typed into the seed and address
             // fields on the menus, and the controls screen binds whatever key
@@ -98,6 +101,14 @@ const WINDS: [(&str, Vec2); 3] = [
     ("gale", Vec2::new(11.31, -11.31)),
 ];
 
+/// One hour of the world's day, as a phase of it — the step `6` moves the
+/// sky on by, and the whole of why that key exists. Ten minutes to the day
+/// means every hour comes round on its own soon enough, but not in the order
+/// or at the moment somebody comparing two of them wants: an hour a press
+/// walks the sun round the whole day in a few seconds, and stops on any hour
+/// of it for as long as it takes to look.
+const HOUR: f32 = 1.0 / 24.0;
+
 /// The switches `--debug` puts on the number keys.
 ///
 /// Hard-wired rather than bound through [`crate::bindings`], and deliberately:
@@ -125,9 +136,32 @@ struct Toggles {
     /// doctors this machine's sea and nothing anybody else sails on, the
     /// world's weather staying the server's to tell.
     wind: usize,
+    /// `6` — the sky held, and moved on by [`HOUR`] a press: `0` is the
+    /// world's own time of day, and anything else is that many hours past
+    /// [`Toggles::hour_from`]. Twenty-four states, so the key walks the day
+    /// and the last press of it lets go — leaning on this can no more strand
+    /// the sun somewhere there is no key to leave than `4` can the shadows.
+    ///
+    /// Local like the wind, and in the same way: the world's clock goes on
+    /// running underneath, and letting go returns to whatever hour it has
+    /// reached meanwhile rather than to the one it was at when the key was
+    /// first pressed.
+    hour: usize,
+    /// The hour the sky was at when `6` was first leaned on, which
+    /// [`Toggles::hour`] counts from — so the first press steps on from the
+    /// sky that is on the screen rather than jumping to a midnight nobody
+    /// asked about. Meaningless, and left where it lay, while `hour` is 0.
+    hour_from: f32,
 }
 
 impl Toggles {
+    /// The hour `6` is holding the sky at: where it was first pressed, plus
+    /// an hour for every press since. Meaningless unless [`Toggles::hour`]
+    /// says the sky is held at all.
+    fn held_hour(&self) -> f32 {
+        (self.hour_from + self.hour as f32 * HOUR).rem_euclid(1.0)
+    }
+
     /// How the overlay owns up to being in a doctored state — `None` when
     /// nothing has been touched, which is the usual case and costs the readout
     /// no line at all.
@@ -154,14 +188,18 @@ impl Toggles {
         if let Some(i) = self.wind.checked_sub(1) {
             on.push(format!("wind {}", WINDS[i].0));
         }
+        if self.hour != 0 {
+            on.push(format!("sky held at {}", clock(self.held_hour())));
+        }
         (!on.is_empty()).then(|| format!("debug: {}", on.join(" / ")))
     }
 }
 
-/// Reads the number keys. Nothing here touches the world — it only moves
+/// Reads the number keys. Nothing here changes the world — it only moves
 /// [`Toggles`], which [`apply_toggles`] then makes true of the scene, so that
-/// the state and the acting on it stay one thing each.
-fn take_toggles(keys: Res<ButtonInput<KeyCode>>, mut toggles: ResMut<Toggles>) {
+/// the state and the acting on it stay one thing each. The sky is *read*
+/// here, and only to know which hour the stepping starts from.
+fn take_toggles(keys: Res<ButtonInput<KeyCode>>, sky: Res<Sky>, mut toggles: ResMut<Toggles>) {
     if keys.just_pressed(KeyCode::Digit1) {
         toggles.no_shadows = !toggles.no_shadows;
     }
@@ -177,11 +215,39 @@ fn take_toggles(keys: Res<ButtonInput<KeyCode>>, mut toggles: ResMut<Toggles>) {
     if keys.just_pressed(KeyCode::Digit5) {
         toggles.wind = (toggles.wind + 1) % (WINDS.len() + 1);
     }
+    if keys.just_pressed(KeyCode::Digit6) {
+        // The hour to count from is grabbed on the way out of the world's own
+        // clock, before the count says anything, so the first step lands an
+        // hour past whatever was on the screen.
+        if toggles.hour == 0 {
+            toggles.hour_from = sky.phase();
+        }
+        toggles.hour = (toggles.hour + 1) % 24;
+    }
     // Everything back, for when a session has drifted somewhere nobody can
     // remember the way out of.
     if keys.just_pressed(KeyCode::Digit0) {
         *toggles = Toggles::default();
     }
+}
+
+/// The two things a switch here orders of the world rather than of the
+/// renderer: the wind on the sea and the hour in the sky. Both are local
+/// commands over what this machine draws — the world's own weather and clock
+/// go on underneath, and letting go returns to them.
+#[derive(SystemParam)]
+struct Ordered<'w> {
+    forecast: ResMut<'w, Forecast>,
+    sky: ResMut<'w, Sky>,
+}
+
+/// What the readout can say about the world under the picture: how much of it
+/// this machine holds, and what time it is there. Together because it is one
+/// question — a menu screen has neither a world to count nor an hour to be at.
+#[derive(SystemParam)]
+struct WorldUnder<'w> {
+    ground: Option<Res<'w, Ground>>,
+    sky: Res<'w, Sky>,
 }
 
 /// Makes the scene agree with [`Toggles`].
@@ -196,7 +262,7 @@ fn apply_toggles(
     mut commands: Commands,
     toggles: Res<Toggles>,
     wireframe: Option<ResMut<WireframeConfig>>,
-    mut forecast: ResMut<Forecast>,
+    mut ordered: Ordered,
     mut suns: Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
     cameras: Query<(Entity, Has<DistanceFog>), With<MapCamera>>,
     mut lit: Local<bool>,
@@ -210,7 +276,16 @@ fn apply_toggles(
     // The sea eases towards this like any change of weather — see
     // [`crate::sea::settle_conditions`] — so a preset arrives as a squall
     // blowing in rather than as a cut between two oceans.
-    forecast.commanded = toggles.wind.checked_sub(1).map(|i| WINDS[i].1);
+    ordered.forecast.commanded = toggles.wind.checked_sub(1).map(|i| WINDS[i].1);
+
+    // The sky's twin of it, and local in the same way: an hour ordered here
+    // changes what this machine draws and not what time it is in the world.
+    // Worked out from the count rather than added to what is already there,
+    // so that this staying idempotent is not a thing to remember — every
+    // other switch has it applied afresh whenever anything changes, and an
+    // hour that stepped on each time would walk the sun round the day every
+    // time somebody reached for the wireframe.
+    ordered.sky.commanded = (toggles.hour != 0).then(|| toggles.held_hour());
 
     if let Some(mut wireframe) = wireframe {
         wireframe.global = toggles.wireframe;
@@ -270,7 +345,7 @@ fn refresh_overlay(
     diagnostics: Res<DiagnosticsStore>,
     scene: Scene,
     toggles: Res<Toggles>,
-    ground: Option<Res<Ground>>,
+    world: WorldUnder,
     hosting: Option<Res<Hosting>>,
     cameras: Query<&MapCamera>,
     mut texts: Query<&mut Text, With<DebugText>>,
@@ -283,7 +358,11 @@ fn refresh_overlay(
 
     // What this machine has of the world, and what it is still waiting for.
     // Absent outside a match, where the readout has no world to count.
-    let tally = ground.map(|ground| ground.tally());
+    let tally = world.ground.as_ref().map(|ground| ground.tally());
+
+    // And what time it is there. On the same condition, the hour being the
+    // world's rather than the app's: a menu screen is at no time at all.
+    let hour = tally.is_some().then(|| world.sky.phase());
 
     let view = cameras.single().ok().map(|camera| View {
         focus: camera.focus,
@@ -296,7 +375,7 @@ fn refresh_overlay(
     let seed = hosting.map(|hosting| hosting.0.seed());
 
     for mut text in &mut texts {
-        text.0 = overlay_text(fps, &counts, tally.as_ref(), seed, view, &toggles);
+        text.0 = overlay_text(fps, &counts, tally.as_ref(), hour, seed, view, &toggles);
     }
 }
 
@@ -462,6 +541,7 @@ fn overlay_text(
     fps: Option<f64>,
     counts: &Counts,
     tally: Option<&Tally>,
+    hour: Option<f32>,
     seed: Option<u32>,
     view: Option<View>,
     toggles: &Toggles,
@@ -488,6 +568,11 @@ fn overlay_text(
             tally.requested
         ));
     }
+    if let Some(hour) = hour {
+        // As a clock rather than as the fraction the wire carries: what the
+        // eye is checking this against is a sky, and a sky reads as an hour.
+        lines.push(format!("sky {}", clock(hour)));
+    }
     if let Some(view) = view {
         lines.push(view_line(seed, view));
     }
@@ -497,6 +582,17 @@ fn overlay_text(
         lines.push(doctored);
     }
     lines.join("\n")
+}
+
+/// A phase of the day as a time on a twenty-four hour clock — 0.0 midnight,
+/// 0.25 six in the morning. Rounded down to the minute, so a day that turns
+/// in ten minutes moves the readout every second and a bit.
+fn clock(phase: f32) -> String {
+    // Rounded rather than truncated, and folded back into the day after: an
+    // hour that is a hair under the minute it means — which is what a phase
+    // written as a decimal usually is — should read as that minute.
+    let minutes = (phase.rem_euclid(1.0) * 24.0 * 60.0).round() as u32 % (24 * 60);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// The world and the view in the terms `--seed`, `--focus`, `--yaw` and
@@ -607,6 +703,7 @@ mod tests {
                 Some(59.6),
                 &counts,
                 Some(&tally),
+                Some(0.35),
                 Some(20_040_112),
                 Some(view),
                 &Toggles::default()
@@ -614,6 +711,7 @@ mod tests {
             "60 fps / 214 meshes / 1,234,567 triangles\n\
              3,298,112 shadow tris / 623 draws / 4 cascades\n\
              231 chunks / 58 ocean / 12 requested\n\
+             sky 08:24\n\
              seed 20040112 / focus 98,-317 / yaw 45 / zoom 42"
         );
     }
@@ -629,7 +727,7 @@ mod tests {
             shadows: None,
         };
         assert_eq!(
-            overlay_text(None, &counts, None, None, None, &Toggles::default()),
+            overlay_text(None, &counts, None, None, None, None, &Toggles::default()),
             "-- fps / 0 meshes / 0 triangles"
         );
     }
@@ -767,6 +865,7 @@ mod tests {
                 "1 meshes / 2 triangles\n\
                  4 shadow tris / 2 draws / 2 cascades\n\
                  2 chunks / 1 ocean / 0 requested\n\
+                 sky 08:24\n\
                  seed 4242 / focus 10,-20 / yaw 0 / zoom 150"
             ),
             "overlay reads: {text}"
@@ -791,10 +890,15 @@ mod tests {
             wireframe: true,
             reach: 2,
             wind: 3,
+            hour: 3,
+            hour_from: 0.5,
         };
         assert_eq!(
             all.line().as_deref(),
-            Some("debug: no shadows / no haze / wireframe / shadow reach 225m / wind gale")
+            Some(
+                "debug: no shadows / no haze / wireframe / shadow reach 225m / wind gale \
+                 / sky held at 15:00"
+            )
         );
 
         // And the reach only speaks up when it is not the world's own, since
@@ -813,6 +917,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<Toggles>()
+            .init_resource::<Sky>()
             .add_systems(Update, take_toggles);
 
         for expected in [1, 2, 0, 1] {
@@ -837,6 +942,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<Toggles>()
+            .init_resource::<Sky>()
             .add_systems(Update, take_toggles);
 
         for expected in [1, 2, 3, 0] {
@@ -851,6 +957,55 @@ mod tests {
         }
     }
 
+    /// `6` steps the sky on an hour a press, from the hour that was on the
+    /// screen — and the last press of a day's worth of them gives the sky
+    /// back to the world, so leaning on it cannot strand the sun.
+    #[test]
+    fn the_held_hour_steps_on_and_comes_back_to_the_worlds_own() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Toggles>()
+            .init_resource::<Sky>()
+            .add_systems(Update, take_toggles);
+        // A world in the middle of its afternoon, which is what the first
+        // press has to start counting from.
+        app.world_mut().resource_mut::<Sky>().commanded = Some(0.6);
+
+        let press = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::Digit6);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset(KeyCode::Digit6);
+        };
+
+        press(&mut app);
+        let stepped = app.world().resource::<Toggles>().held_hour();
+        assert!(
+            (stepped - (0.6 + 1.0 / 24.0)).abs() < 1e-6,
+            "the first press held {stepped} rather than an hour past the afternoon"
+        );
+
+        press(&mut app);
+        let again = app.world().resource::<Toggles>().held_hour();
+        assert!(
+            (again - (stepped + 1.0 / 24.0)).abs() < 1e-6,
+            "the second press held {again} rather than another hour on"
+        );
+
+        // Round the rest of the day, and the sky is the world's again.
+        for _ in 2..24 {
+            press(&mut app);
+        }
+        assert_eq!(
+            app.world().resource::<Toggles>().hour,
+            0,
+            "a day of presses left the sky held"
+        );
+    }
+
     /// The key has to land in the [`Forecast`] — and clearing it has to lift
     /// the order, or the server's weather never comes back.
     #[test]
@@ -858,6 +1013,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Toggles>()
             .init_resource::<Forecast>()
+            .init_resource::<Sky>()
             .add_systems(Update, apply_toggles);
 
         app.world_mut().resource_mut::<Toggles>().wind = 3;
@@ -872,12 +1028,49 @@ mod tests {
         assert_eq!(app.world().resource::<Forecast>().commanded, None);
     }
 
+    /// And the sky's twin of that: a held hour has to reach [`Sky`], and
+    /// applying the same state twice — which happens whenever any other
+    /// switch moves — must not step it on again.
+    #[test]
+    fn a_held_hour_reaches_the_sky_and_stays_where_it_was_put() {
+        let mut app = App::new();
+        app.init_resource::<Toggles>()
+            .init_resource::<Forecast>()
+            .init_resource::<Sky>()
+            .add_systems(Update, apply_toggles);
+
+        {
+            let mut toggles = app.world_mut().resource_mut::<Toggles>();
+            toggles.hour_from = 0.5;
+            toggles.hour = 2;
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<Sky>().commanded,
+            Some(0.5 + 2.0 / 24.0)
+        );
+
+        // Another switch moves; the hour must not move with it.
+        app.world_mut().resource_mut::<Toggles>().wireframe = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Sky>().commanded,
+            Some(0.5 + 2.0 / 24.0),
+            "reaching for another switch walked the sun on"
+        );
+
+        app.world_mut().resource_mut::<Toggles>().hour = 0;
+        app.update();
+        assert_eq!(app.world().resource::<Sky>().commanded, None);
+    }
+
     /// `0` is the way out of any state the other keys can reach.
     #[test]
     fn zero_puts_everything_back() {
         let mut app = App::new();
         app.init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<Toggles>()
+            .init_resource::<Sky>()
             .add_systems(Update, take_toggles);
 
         fn press(app: &mut App, key: KeyCode) {

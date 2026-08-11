@@ -24,7 +24,8 @@ use protocol::DEFAULT_PORT;
 
 use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
 use crate::{AppState, Helm};
-use server::{random_seed, WorldConfig};
+use server::cli::hour;
+use server::{random_seed, WorldConfig, OPENING};
 
 /// Size of a captured picture, in pixels. Matches the shots already in
 /// `screenshots/`, which came off a 1280x720 window on a doubled display.
@@ -42,6 +43,10 @@ pub struct Args {
     /// world — and, unless `--focus` says otherwise, where to look — from the
     /// server's welcome rather than from this command line.
     pub join: Option<String>,
+    /// What hour of its day the world this run opens starts at, as a phase —
+    /// see `protocol::ToClient::Daylight`. Nothing to do with a joined run,
+    /// whose world is somebody else's and already at whatever time it is.
+    pub opening: f32,
     /// Overlay frame rate and geometry counts on the window.
     pub debug: bool,
     /// Where the camera starts. With shots to take this is where the last of
@@ -149,6 +154,9 @@ Options:
                     or inworld when shots or a server are asked for]
   --seed <n>        the world to open [default: a new one every run, and the
                     run says which so it can be asked for again]
+  --time <h>        the hour the world opens at, from 0 to 24 [default:
+                    {opens}, a morning]. Every other hour comes round on its
+                    own in a {day:.0}-second day; this is for arriving at one
   --join <host[:port]>  play in somebody else's world instead of opening one;
                     the server says where the world is entered, and the run
                     starts in that world rather than on a screen
@@ -182,6 +190,8 @@ take its pictures without stealing the display.
         view.yaw.to_degrees(),
         DEFAULT_RESOLUTION.x,
         DEFAULT_RESOLUTION.y,
+        opens = OPENING * 24.0,
+        day = protocol::DAY_SECONDS,
     )
 }
 
@@ -203,6 +213,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
             seed: random_seed(),
         },
         join: None,
+        opening: OPENING,
         debug: false,
         view: View::default(),
         focus_given: false,
@@ -212,6 +223,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         resolution: DEFAULT_RESOLUTION,
     };
     let mut state_given = false;
+    let mut time_given = false;
 
     // `--debug` is the one flag that stands on its own; every other option
     // takes a value, so past it an option in the last position is always a
@@ -237,6 +249,10 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                 args.seed_given = true;
             }
             "--join" => args.join = Some(value.clone()),
+            "--time" => {
+                args.opening = hour(value)?;
+                time_given = true;
+            }
             "--focus" => {
                 args.view.focus = focus(value)?;
                 args.focus_given = true;
@@ -264,6 +280,16 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         return Err(
             "`--seed` picks a world to open, but joining plays in one somebody \
              else has already opened"
+                .into(),
+        );
+    }
+
+    // And its clock is theirs too: the hour is the server's to keep, which is
+    // what makes it the same hour for everyone in the world.
+    if args.join.is_some() && time_given {
+        return Err(
+            "`--time` opens a world at an hour, but joining plays in one that \
+             is already at whatever time it is"
                 .into(),
         );
     }
@@ -546,6 +572,23 @@ mod tests {
         args.centre_on(Vec2::new(10.0, 20.0));
         assert_eq!(args.view.focus, Vec3::new(10.0, 0.0, 20.0));
         assert_eq!(args.shots[0].view.focus, Vec3::new(10.0, 0.0, 20.0));
+    }
+
+    #[test]
+    fn a_world_can_be_opened_at_any_hour() {
+        // Midnight either end and noon in the middle: an hour is a phase of
+        // the day by the time anything past here sees it.
+        assert_eq!(ok("--time 0").opening, 0.0);
+        assert_eq!(ok("--time 12").opening, 0.5);
+        assert_eq!(ok("--time 24").opening, 0.0);
+        assert_eq!(ok("").opening, OPENING, "worlds open in the morning");
+
+        assert!(parse_args("--time dusk").is_err());
+        assert!(parse_args("--time 25").is_err(), "not an hour of any day");
+        assert!(
+            parse_args("--join x --time 6").is_err(),
+            "a joined world's clock is the server's"
+        );
     }
 
     #[test]

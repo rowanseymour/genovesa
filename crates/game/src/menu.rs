@@ -559,6 +559,10 @@ fn open_world(
                 } else {
                     Reach::Alone
                 },
+                // A world opened from the menu opens at the hour worlds
+                // open at; choosing another is a thing the command line can
+                // ask for and this screen has no room to.
+                server::OPENING,
             ));
             return;
         }

@@ -58,6 +58,17 @@ whatever the island is wearing behind it — scattered, and only where a coast
 has sand to offer, so a rocky island has none and a long shallow bay is
 fringed with them.
 
+A day turns in ten minutes. The sun crosses from east to west and the whole
+world's colour goes with it: long warm light at either end of the day, a flat
+blue middle, and dawn and dusk that are the two ends of the same few seconds
+of red without looking alike. Night is lit by a full moon and no more, which
+is dark enough that sailing on through it is a bad idea — so a boat lying
+still can hold a key to wait for dawn, and the clock runs fast rather than
+skipping, so the moon crosses the sky and the light comes back. The hour
+belongs to the server, as the weather does: everyone in a world is under the
+same sky, and a shared world's night only runs off while all of them are at
+anchor waiting it out.
+
 The look is flat-shaded facets in a small fixed palette — no textures and no
 gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
 height field is sampled, so the facets read as deliberate shapes.
@@ -112,6 +123,9 @@ what a dedicated server is:
 cargo run --bin server -- --seed 7
 ```
 
+Worlds open in the morning; `--time` opens one at any hour instead, on either
+binary.
+
 Everyone enters the world in the same place — afloat just off the coast of
 the same island — and other players appear as coloured markers. The wire is
 defined once, in the [`protocol`](crates/protocol/src/lib.rs) crate, which is
@@ -153,8 +167,9 @@ tools/readme-collage.sh 7
 ## Development helpers
 
 The app takes options too — `--state` to open on a given screen, `--seed` to
-pick the world, and `--focus`, `--zoom` and `--yaw` to say where the player
-is put down and how the view opens on them. Run `cargo run -- --help` for the
+pick the world, `--time` to open it at a chosen hour of its day, and
+`--focus`, `--zoom` and `--yaw` to say where the player is put down and how
+the view opens on them. Run `cargo run -- --help` for the
 details. Without `--seed` the run
 picks a world of its own and prints which, so a place worth going back to can
 be asked for by name.
