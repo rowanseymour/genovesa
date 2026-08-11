@@ -224,11 +224,21 @@ editor, and this is the substitute — a hull is a thing to be looked at from a
 camera forty metres up while it is being moved, not a set of numbers.
 
 Materials in the file are ignored. The look is a small fixed palette of flat
-tones, and the game assigns those itself, so a model carries shape and nothing
-else. What it *must* carry is checked: `boat.rs` holds the file to the
-dimensions the collision code assumes of it, to the order its meshes are in,
-and to being flat-shaded and wound outwards — the failures a modelling program
-makes easy and the eye lets through.
+tones, and the game assigns those itself, so a model carries shape and motion
+and nothing else. What it *must* carry is checked: `boat.rs` holds the file to
+the dimensions the collision code assumes of it, to the order its meshes are
+in, and to being flat-shaded and wound outwards — the failures a modelling
+program makes easy and the eye lets through.
+
+A model can also *move*. The player's figure is rigged, and its walk is an
+action on a dope sheet rather than arithmetic in Rust: the master says what a
+running person looks like at any point in the cycle, and the game says where
+in that cycle the figure has got to — which it takes from the ground covered
+rather than from the clock, so the feet keep up at any speed and a player
+backing up runs the cycle backwards. Standing is a second clip, crossfaded
+against the run. Rigging anything else works the same way, and the one rule to
+keep is that a skin must be rigid — every vertex on exactly one bone — or
+facets bend as the model moves and the flat shading goes with them.
 
 Where a model *stands*, when it is scenery rather than the player, is not the
 client's business at all. Palms are placed by the server, along the back of

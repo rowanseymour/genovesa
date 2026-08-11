@@ -45,6 +45,12 @@ pub const FRAME: Duration = Duration::from_millis(16);
 /// Nothing here waits for the load — these tests are about where things are
 /// and what they do, not what they look like — but `launch` asks the asset
 /// server for its meshes, and without one there is no boat.
+///
+/// `AnimationPlugin` for the same reason one step further on: the player's
+/// figure is a rigged model, so the clips it is walked by are assets and the
+/// graph they hang in is another. The clips never load here — there is no
+/// render app to read a glTF with — and the figure's own tests stand a
+/// stand-in clip up in their place.
 pub fn world_app() -> App {
     let mut app = App::new();
     app.add_plugins((
@@ -52,6 +58,7 @@ pub fn world_app() -> App {
         AssetPlugin::default(),
         TimePlugin,
         StatesPlugin,
+        bevy::animation::AnimationPlugin,
         BoatPlugin,
         PlayerPlugin,
     ))
@@ -62,6 +69,10 @@ pub fn world_app() -> App {
     .init_resource::<KeyBindings>()
     .init_resource::<ButtonInput<KeyCode>>()
     .init_asset::<Mesh>()
+    // What a spawned model arrives as, which `DefaultPlugins` would have
+    // registered: the figure asks for one, and an asset server handed a type
+    // it has never heard of panics rather than declining.
+    .init_asset::<bevy::world_serialization::WorldAsset>()
     .init_resource::<Assets<StandardMaterial>>();
     app.update();
     app.world_mut()
@@ -267,6 +278,38 @@ pub fn triangles(name: &str, index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
         .map(|t| {
             let at = |b: &[u8]| values[u16::from_le_bytes(b.try_into().unwrap()) as usize];
             [at(&t[0..2]), at(&t[2..4]), at(&t[4..6])]
+        })
+        .collect()
+}
+
+/// How each vertex of a mesh is shared out between the bones that carry it —
+/// four weights apiece, which is what glTF gives every vertex of a skin
+/// whether it uses them or not.
+///
+/// Only a rigged model has these. What reads them cares about one thing: that
+/// no vertex is shared at all, every one of them riding a single bone at full
+/// weight. That is what keeps a facet a facet while the model moves, and it
+/// is a weight-painting decision in Blender that nothing else would catch.
+pub fn skin_weights(name: &str, index: usize) -> Vec<[f32; 4]> {
+    let (json, buffer) = model(name);
+    let primitive = &json["meshes"][index]["primitives"][0];
+    let accessor = &json["accessors"][primitive["attributes"]["WEIGHTS_0"]
+        .as_u64()
+        .expect("the mesh is skinned") as usize];
+    assert_eq!(
+        accessor["componentType"], 5126,
+        "the weights are not plain floats"
+    );
+
+    let view = &json["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+    let start = view["byteOffset"].as_u64().unwrap_or(0) as usize
+        + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+    let count = accessor["count"].as_u64().unwrap() as usize;
+    buffer[start..start + count * 16]
+        .chunks_exact(16)
+        .map(|v| {
+            let at = |i: usize| f32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap());
+            [at(0), at(1), at(2), at(3)]
         })
         .collect()
 }

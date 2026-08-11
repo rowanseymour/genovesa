@@ -38,11 +38,20 @@
 #
 #   Names kept. The game asks for meshes by their position in the file, and
 #   tests check that order against the names. Dropping them would leave
-#   nothing to check against.
+#   nothing to check against. An animated model is asked for by name outright
+#   — a clip called `run` is played because it is called that.
 #
-# No cameras, no lights, no animation: the game lights its own world, and every
-# object is one static shape. Keeping them out means a stray light left in a
-# master cannot follow a model into the game.
+#   Skins and animation. A model that moves under its own power brings its
+#   armature and its actions with it, each action arriving as a clip of its
+#   own. A master with no armature exports exactly as it did before this was
+#   turned on, so the static shapes are unaffected.
+#
+#   Every keyframe kept: `export_optimize_animation_size` drops keys it thinks
+#   are redundant, and a cycle sampled at its quarters is all extremes and
+#   crossings with nothing redundant in it to drop.
+#
+# No cameras and no lights: the game lights its own world, and keeping them out
+# means a stray light left in a master cannot follow a model into the game.
 set -euo pipefail
 
 me=$(basename "$0")
@@ -85,7 +94,10 @@ bpy.ops.export_scene.gltf(
     export_normals=True,
     export_cameras=False,
     export_lights=False,
-    export_animations=False,
+    export_animations=True,
+    export_animation_mode='ACTIONS',
+    export_skins=True,
+    export_optimize_animation_size=False,
     export_extras=False,
 )
 " >/dev/null

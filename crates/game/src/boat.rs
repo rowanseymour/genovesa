@@ -65,6 +65,13 @@ struct Hull {
     /// but what makes it the game's business rather than the model's is
     /// [`Hull::grounding_draft`], which is measured from it.
     draft: f32,
+    /// Deck height above the waterline — the freeboard, the model's own
+    /// sheer. The game's business because somebody stands on it: a player
+    /// aboard is put down here rather than at the hull's origin, which is the
+    /// waterline and so is knee-deep in the bilges. Held to the model by
+    /// `the_model_is_the_hull_the_keel_is_probed_along`, like the draft it is
+    /// measured against.
+    deck: f32,
     /// Where the keel begins and ends, in metres from amidships — negative
     /// forward, the same axis the hull is modelled on. [`grounding`] probes
     /// along these, so what runs aground is the line that is drawn.
@@ -132,6 +139,7 @@ const SHIP: Hull = Hull {
     length: 7.0,
     beam: 2.4,
     draft: 0.8,
+    deck: 0.9,
     // The forefoot stops short of the bow, which is what gives the stem its
     // rake; the heel runs right aft to the transom.
     forefoot_station: -7.0 * 0.5 * 0.7,
@@ -267,6 +275,13 @@ impl Boat {
     pub fn at_rest(&self) -> bool {
         self.way == 0.0
     }
+
+    /// Where somebody aboard stands, in metres above the hull's origin — see
+    /// [`Hull::deck`]. What a player boarding is put down at, so that they
+    /// stand on the deck rather than in it.
+    pub fn deck(&self) -> f32 {
+        self.hull.deck
+    }
 }
 
 pub struct BoatPlugin;
@@ -351,13 +366,15 @@ fn launch(
                 Mesh3d(assets.load(model_mesh(MODEL, SPAR_MESH))),
                 MeshMaterial3d(spar_material),
             ),
-            // No mesh yet — a figure will hang here when there is one worth
-            // drawing. The visibility is so it inherits cleanly like its
-            // sibling meshes the day it grows one.
+            // The figure itself is hung under this by `figure::dress`, which
+            // is the player's own business rather than the boat's; what the
+            // boat says is where a person aboard stands, which is on its
+            // deck. The visibility is so that figure inherits cleanly from
+            // its siblings.
             (
                 Name::new("Player"),
                 Player,
-                Transform::default(),
+                Transform::from_xyz(0.0, SHIP.deck, 0.0),
                 Visibility::default(),
             )
         ],
@@ -759,6 +776,7 @@ mod tests {
             .flatten()
             .collect();
         let lowest = corners.iter().map(|c| c.y).fold(f32::MAX, f32::min);
+        let highest = corners.iter().map(|c| c.y).fold(f32::MIN, f32::max);
         let (bow, transom) = corners
             .iter()
             .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
@@ -767,6 +785,13 @@ mod tests {
             (lowest + SHIP.draft).abs() < 1e-4,
             "the model's keel is {lowest} below the waterline, not {}",
             -SHIP.draft
+        );
+        // And the sheer, which is where a player aboard is stood: remodel the
+        // hull with more freeboard and they would be shin-deep in the deck.
+        assert!(
+            (highest - SHIP.deck).abs() < 1e-4,
+            "the model's deck is {highest} above the waterline, not {}",
+            SHIP.deck
         );
         let half = SHIP.length * 0.5;
         assert!(

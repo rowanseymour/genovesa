@@ -12,10 +12,11 @@
 //! crossed both ways by the same key. Ashore, [`walk`] drives them with the
 //! keys the helm answers to afloat; which of the two systems is listening is
 //! decided entirely by whether the player has a parent, so there is no mode
-//! flag anywhere to fall out of step with the scene graph. What is drawn is
-//! a stand-in: [`dress`] hangs a person-sized capsule under the entity,
-//! standing on the deck afloat and on the sand ashore, holding the place a
-//! modelled person will take over.
+//! flag anywhere to fall out of step with the scene graph. What is *drawn* is
+//! not this module's business at all: [`crate::figure`] hangs a person under
+//! the entity, standing on the deck afloat and walking on the sand ashore,
+//! and learns which of those is happening from the transform rather than from
+//! anything said here.
 //!
 //! Everything that wants "where the player is" — the camera, the position
 //! reports, the wildlife deciding whether to mind them — asks [`PlayerPlace`],
@@ -34,6 +35,7 @@ use bevy::prelude::*;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
+use crate::figure::FigurePlugin;
 use crate::terrain::Ground;
 use crate::{AppState, Helm};
 
@@ -42,7 +44,11 @@ use crate::{AppState, Helm};
 /// thirtieth of what the ship makes, so an island is *big* on foot without
 /// being a chore. Backing up is half of it: nobody reverses at marching
 /// speed.
-const WALK_SPEED: f32 = 3.0;
+///
+/// Public because the figure drawn walking is scaled against it: full stride
+/// is a player making this, and anything much faster is a teleport rather
+/// than a step.
+pub const WALK_SPEED: f32 = 3.0;
 
 /// Radians per second the walker turns — brisker than any hull, because a
 /// body pivots and seven metres of timber does not.
@@ -81,19 +87,6 @@ const LANDING_RAYS: usize = 8;
 /// How far from a boat's origin the player can board it from — the landing
 /// reach exactly, see above.
 const BOARD_REACH: f32 = LANDING_REACH;
-
-/// The stand-in figure's build, in metres: a person-sized capsule until a
-/// modelled person exists to replace it. Person-sized and not the four-metre
-/// beacon other players stand as — a marker has to be found from hundreds of
-/// metres up, where this figure is only ever looked at from the camera
-/// following it.
-const FIGURE_HEIGHT: f32 = 1.8;
-const FIGURE_RADIUS: f32 = 0.35;
-
-/// Charcoal, for the figure. A silhouette rather than a colour: findable on
-/// sand, grass and deck alike, and out of the way of the hue palette the
-/// remote players' markers are dealt from.
-const FIGURE_COLOR: Color = Color::srgb(0.25, 0.24, 0.28);
 
 /// The person playing: one per match. Spawned aboard the ship the world is
 /// entered on — by `boat::launch`, entering being done afloat. Aboard they
@@ -173,43 +166,16 @@ impl Plugin for PlayerPlugin {
         // is on their own feet the same frame — the chain is what makes Bevy
         // apply the parentage commands between the two. Both are the player's
         // hands and stop while paused, like the helm they share keys with.
-        // Dressing is not the player's hands, so it runs regardless.
-        app.add_systems(
+        //
+        // The figure comes with the player rather than being added beside
+        // them in `main`: it is nothing but how this entity is drawn, and a
+        // player spawned without one would be invisible.
+        app.add_plugins(FigurePlugin).add_systems(
             Update,
-            (
-                (embark_or_land, walk)
-                    .chain()
-                    .run_if(in_state(Helm::Sailing)),
-                dress,
-            ),
+            (embark_or_land, walk)
+                .chain()
+                .run_if(in_state(Helm::Sailing)),
         );
-    }
-}
-
-/// Hangs the stand-in figure under any player that has just appeared —
-/// whoever spawned them, and without them knowing a figure exists. It stands
-/// with its feet at the player's origin, because the origin is what [`walk`]
-/// puts on the ground and what riding a boat holds at the waterline; a
-/// capsule is *centred* on its own origin, so the child sits half the height
-/// up. When a modelled person replaces this, the model's master will put the
-/// feet at the origin itself, the way the boat's master puts its waterline
-/// there, and this offset goes with the capsule.
-fn dress(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    players: Query<Entity, Added<Player>>,
-) {
-    for player in &players {
-        commands.entity(player).with_child((
-            Name::new("Figure"),
-            Mesh3d(meshes.add(Capsule3d::new(
-                FIGURE_RADIUS,
-                FIGURE_HEIGHT - 2.0 * FIGURE_RADIUS,
-            ))),
-            MeshMaterial3d(materials.add(crate::matte(FIGURE_COLOR))),
-            Transform::from_xyz(0.0, FIGURE_HEIGHT / 2.0, 0.0),
-        ));
     }
 }
 
@@ -293,7 +259,7 @@ fn embark_or_land(
         }
         None => {
             let at = place.translation.xz();
-            let Some((boat, _, _)) = boats
+            let Some((boat, _, hull)) = boats
                 .iter()
                 .filter(|(_, transform, _)| transform.translation.xz().distance(at) <= BOARD_REACH)
                 .min_by(|(_, a, _), (_, b, _)| {
@@ -305,10 +271,12 @@ fn embark_or_land(
             else {
                 return;
             };
+            // Standing on the deck, not at the hull's origin: that origin is
+            // the waterline, which is most of a metre down inside the boat.
             commands
                 .entity(player)
                 .remove::<DespawnOnExit<AppState>>()
-                .insert((ChildOf(boat), Transform::default()));
+                .insert((ChildOf(boat), Transform::from_xyz(0.0, hull.deck(), 0.0)));
         }
     }
 }
@@ -663,7 +631,17 @@ mod tests {
             app.world().entity(boat).get::<Boat>().is_some(),
             "the player boarded something that is not a boat"
         );
-        assert_eq!(player_transform(&mut app), Transform::default());
+        // Aboard at the boat's own heading, standing on its deck.
+        let deck = app
+            .world()
+            .entity(boat)
+            .get::<Boat>()
+            .expect("a boat")
+            .deck();
+        assert_eq!(
+            player_transform(&mut app),
+            Transform::from_xyz(0.0, deck, 0.0)
+        );
 
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 30);
@@ -694,31 +672,6 @@ mod tests {
             aboard(&mut app),
             None,
             "the player boarded a boat from halfway up the island"
-        );
-    }
-
-    #[test]
-    fn the_player_is_dressed_in_a_figure_standing_at_their_feet() {
-        // The stand-in capsule: hung under the player by `dress`, centred
-        // half its height up so its feet are at the player's origin — the
-        // point `walk` puts on the ground.
-        let mut app = world_app();
-        let player = app
-            .world_mut()
-            .query_filtered::<Entity, With<Player>>()
-            .single(app.world())
-            .expect("a match should have a player in it");
-
-        let mut figures = app
-            .world_mut()
-            .query_filtered::<(&ChildOf, &Transform), With<Mesh3d>>();
-        let figure = figures
-            .iter(app.world())
-            .find(|(child_of, _)| child_of.parent() == player);
-        let (_, transform) = figure.expect("the player has no figure hung under them");
-        assert_eq!(
-            transform.translation,
-            Vec3::new(0.0, FIGURE_HEIGHT / 2.0, 0.0)
         );
     }
 

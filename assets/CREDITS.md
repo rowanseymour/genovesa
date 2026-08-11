@@ -67,6 +67,23 @@ flukes — built for the one view a whale gets: a back through the surface.
 wildlife, where whales swim is decided client-side in `game`'s `wildlife`
 module.
 
+## player
+
+Original to this project, and under the same licence as the rest of it. The
+figure the player is drawn as: a person of rectangular solids in a tricorn,
+and the first model here with a skeleton and actions in it rather than one
+rigid shape.
+
+The geometry, the rig and the run cycle were laid out by a script — boxes,
+seven bones, and a cycle keyed at its quarters — and the `.blend` it wrote is
+the master from that point on. It is a starting point rather than a modelled
+character, and is meant to be opened and taken further; nothing in the game
+reads the script or knows the figure was ever made that way.
+
+`assets-src/models/player/` holds the master and the notes, which are worth
+reading before moving anything: the tone the game paints a mesh in is matched
+by that mesh's name, and the walk assumes a rigid skin and a cycle that loops.
+
 ## menu-loop
 
 Cut from [Sailboat Bow](https://freesound.org/s/852108/) by myLoop, published on
