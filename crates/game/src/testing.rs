@@ -165,8 +165,92 @@ const TEST_ISLAND_PITCH: f32 = 0.35;
 /// Made here rather than fetched from a real world because a client cannot
 /// generate one: it is handed chunks, and this is a hand of chunks. What the
 /// tests need of it is height to stand on, a waterline to float at, and a
-/// slope steep enough to be a problem.
+/// slope steep enough to be a problem. What they need of the *other* island —
+/// [`test_shore`] — is a coast gentle enough to stand on, which this one, being
+/// a wall at the waterline, has nowhere.
 pub fn test_ground() -> Ground {
+    hand_of_chunks(test_island_height)
+}
+
+/// The test island's height field: a broad top falling to the ocean floor at
+/// [`TEST_ISLAND_REACH`], and flat floor beyond.
+fn test_island_height(at: Vec2) -> f32 {
+    let out = at.length() / TEST_ISLAND_REACH;
+    if out >= 1.0 {
+        return -OCEAN_DEPTH;
+    }
+    (TEST_ISLAND_PEAK + OCEAN_DEPTH) * (1.0 - out).powf(TEST_ISLAND_PITCH) - OCEAN_DEPTH
+}
+
+/// How steeply the shore island's apron rises, in metres of height per metre
+/// inland: gentle enough that a walker crosses it, and steep enough that the
+/// water a hull needs under it and the water a walker will wade are a stride
+/// apart rather than several — which is what lets a boat lie within boarding
+/// reach of where its crew stepped ashore.
+const SHORE_PITCH: f32 = 0.5;
+
+/// How high the apron climbs, in metres, before the bluff behind it takes over.
+/// Public because the tests of what a walker may climb are written against the
+/// two levels of the island: below this is the ground they cross, above it the
+/// ground that turns them back.
+pub const SHORE_BLUFF_FOOT: f32 = 8.0;
+
+/// How far from the middle the shore island's apron crosses the waterline, in
+/// metres — well inside [`TEST_ISLAND_REACH`], the apron starting from the
+/// ocean floor out there. Public because a boat is put down off the coast by
+/// its distance from *this*, the reach being a long way out to sea on this
+/// island.
+pub const SHORE_WATERLINE: f32 = TEST_ISLAND_REACH - OCEAN_DEPTH / SHORE_PITCH;
+
+/// How steeply the bluff climbs — several times anything a walker will take on,
+/// so a test of the limit is not a test of where exactly the limit is set.
+const SHORE_BLUFF_PITCH: f32 = 2.0;
+
+/// Where the bluff gives out into a level top, so that the island is a shape
+/// rather than a spike. Public for the same reason as [`SHORE_BLUFF_FOOT`].
+pub const SHORE_PEAK: f32 = 60.0;
+
+/// How far from the middle that level top begins, in metres: inside this the
+/// ground stands at [`SHORE_PEAK`] and is flat, and at it the bluff drops away.
+/// Public so a test of what a walker will step *down* can put one at the brink.
+pub const SHORE_TOP: f32 = TEST_ISLAND_REACH
+    - (SHORE_BLUFF_FOOT + OCEAN_DEPTH) / SHORE_PITCH
+    - (SHORE_PEAK - SHORE_BLUFF_FOOT) / SHORE_BLUFF_PITCH;
+
+/// The other patch of delivered world: an island of the same reach as
+/// [`test_ground`]'s, shaped like a coast rather than like a cliff — a gently
+/// shelving apron a boat can nose up to and a walker can land on and cross,
+/// and a bluff behind it far steeper than a walker will climb.
+///
+/// This is what the walking tests want, and neither half of it is decoration.
+/// The apron is what lets a landing happen at all and what a walker wades off;
+/// the bluff is the wall they are turned back by, and the two meet at
+/// [`SHORE_BLUFF_FOOT`] so a test can say which side of it somebody ended up
+/// on.
+pub fn test_shore() -> Ground {
+    hand_of_chunks(shore_island_height)
+}
+
+/// The shore island's height field: ocean floor out beyond
+/// [`TEST_ISLAND_REACH`], then an apron at [`SHORE_PITCH`] up through the
+/// waterline, a bluff at [`SHORE_BLUFF_PITCH`] from [`SHORE_BLUFF_FOOT`], and a
+/// level top at [`SHORE_PEAK`].
+fn shore_island_height(at: Vec2) -> f32 {
+    let inland = TEST_ISLAND_REACH - at.length();
+    if inland <= 0.0 {
+        return -OCEAN_DEPTH;
+    }
+    let foot = (SHORE_BLUFF_FOOT + OCEAN_DEPTH) / SHORE_PITCH;
+    if inland <= foot {
+        inland * SHORE_PITCH - OCEAN_DEPTH
+    } else {
+        (SHORE_BLUFF_FOOT + (inland - foot) * SHORE_BLUFF_PITCH).min(SHORE_PEAK)
+    }
+}
+
+/// A height field turned into the chunks a server would have sent of it: the
+/// island and a ring of open water round it, delivered as answers.
+fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
     let mut ground = Ground::default();
 
     // Enough chunks to hold the island and a ring of open water around it, so
@@ -182,7 +266,7 @@ pub fn test_ground() -> Ground {
                     let corner = base
                         + Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32)
                             * FACET_METRES;
-                    quantize(test_island_height(corner))
+                    quantize(height(corner))
                 })
                 .collect();
 
@@ -194,8 +278,8 @@ pub fn test_ground() -> Ground {
                 .then(|| ChunkPayload {
                     heights,
                     surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
-                    // The test island is a smooth dome with nothing to
-                    // enclose a basin, so there is no lake on it to draw.
+                    // Both test islands are smooth shapes with nothing to
+                    // enclose a basin, so there is no lake on either to draw.
                     water: None,
                     // Nor anything the palm rule would call a beach.
                     palms: Vec::new(),
@@ -204,16 +288,6 @@ pub fn test_ground() -> Ground {
         }
     }
     ground
-}
-
-/// The test island's height field: a broad top falling to the ocean floor at
-/// [`TEST_ISLAND_REACH`], and flat floor beyond.
-fn test_island_height(at: Vec2) -> f32 {
-    let out = at.length() / TEST_ISLAND_REACH;
-    if out >= 1.0 {
-        return -OCEAN_DEPTH;
-    }
-    (TEST_ISLAND_PEAK + OCEAN_DEPTH) * (1.0 - out).powf(TEST_ISLAND_PITCH) - OCEAN_DEPTH
 }
 
 // --- Models -------------------------------------------------------------------
