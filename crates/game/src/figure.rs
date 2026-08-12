@@ -49,7 +49,7 @@ use bevy::asset::AssetPath;
 use bevy::gltf::{GltfAssetLabel, GltfMeshName};
 use bevy::prelude::*;
 
-use crate::player::{Player, WALK_SPEED};
+use crate::player::{Afoot, Player};
 use crate::{eased, matte};
 
 /// The figure, rigged and with its two clips in it.
@@ -105,13 +105,35 @@ const STRIDE: f32 = 1.7;
 /// standing is a step rather than a limb snapping out.
 const SETTLING: f32 = 9.0;
 
-/// How much faster than a walk a frame's movement has to be before it is not
-/// a step at all. Boarding a boat puts the player from wherever they stood
-/// onto its deck, and a capture sweep's teleport is a jump in the same
-/// transform this reads — without this, the arithmetic below would take a
-/// hundred metres of either for a hundred metres of walking and spin the legs
-/// through a dozen strides.
-const TELEPORT: f32 = 1.5;
+/// How big a step has to be, in metres, before it is not a step at all.
+/// Boarding a boat puts the player from wherever they stood onto its deck,
+/// and a capture sweep's teleport is a jump in the same transform this reads
+/// — without this, the arithmetic below would take a hundred metres of either
+/// for a hundred metres of walking and spin the legs through a dozen strides.
+///
+/// A distance rather than a speed, deliberately. Judging it as a speed means
+/// dividing by the frame's own `dt`, and a frame that took longer than the one
+/// the movement was made in reads as a jump — a stutter would blank the gait.
+/// A metre is a good deal further than a walking frame covers at any frame
+/// rate worth drawing at, and a good deal less than the shortest jump: going
+/// ashore steps several metres, and boarding crosses the whole distance
+/// between where the player stood and the deck they land on.
+const TELEPORT: f32 = 1.0;
+
+/// How far the player has to move in a frame, in metres, to be walking rather
+/// than standing — enough to reject a transform jittering in its last bits,
+/// and far below any real step.
+///
+/// It is a *threshold* rather than a measure of how hard they are walking, and
+/// that is the point. The swing used to be scaled by speed against the walking
+/// pace, which meant reading a speed off one frame's movement over another
+/// frame's clock: with the frame times a real machine gives, and this
+/// system free to run either side of the one doing the walking, that ratio
+/// swung about wildly and left the figure barely moving while the player ran.
+/// It bought nothing anyway — the cycle already advances by ground covered, so
+/// a slow walk is the same swing taken slowly, which is what a slow walk looks
+/// like.
+const STIRRING: f32 = 0.001;
 
 /// The clips, mixed and ready to play: the graph both are hung in, the node
 /// each occupies, and the run's own handle, which [`animate`] needs to ask
@@ -160,8 +182,19 @@ impl Plugin for FigurePlugin {
         // None of this is the player's hands, so none of it stops with the
         // pause menu up: a paused player is not moving, which the gait reads
         // as standing still and settles into on its own.
-        app.add_systems(Startup, rig)
-            .add_systems(Update, (dress, conduct, paint, (stride, animate).chain()));
+        app.add_systems(Startup, rig).add_systems(
+            Update,
+            (
+                dress,
+                conduct,
+                paint,
+                // After the walking itself: this reads the transform the
+                // player's own systems write, and reading it a frame late
+                // — or, worse, a frame late every other frame — is what
+                // makes a steady walk look like a stutter.
+                (stride, animate).chain().after(Afoot),
+            ),
+        );
     }
 }
 
@@ -183,10 +216,16 @@ fn rig(
     let root = graph.root;
     let blend = graph.add_blend(1.0, root);
     let cycle: Handle<AnimationClip> = assets.load(clip(RUN));
-    // Standing at full weight and running at none: a figure that has not
-    // moved yet is standing, and the first step eases the balance across.
+
+    // Both clips hang at full weight, and the mixing is done entirely by what
+    // [`animate`] sets on the playing animations. The weight a node carries
+    // here is not a starting value to be overridden — it *multiplies* whatever
+    // the player asks for, so a run hung at zero to mean "standing to begin
+    // with" is a run that can never be seen however hard the gait pushes. That
+    // is exactly what it did: the figure walked with its legs still, because
+    // every frame's honest weight was being multiplied by nothing.
     let idle = graph.add_clip(assets.load(clip(IDLE)), 1.0, blend);
-    let run = graph.add_clip(cycle.clone(), 0.0, blend);
+    let run = graph.add_clip(cycle.clone(), 1.0, blend);
 
     commands.insert_resource(Gaits {
         graph: graphs.add(graph),
@@ -300,25 +339,25 @@ fn stride(time: Res<Time>, mut players: Query<(&Transform, &mut Stride)>) {
         return;
     }
     for (place, mut stride) in &mut players {
-        let covered = place.translation.xz().distance(stride.last.xz());
-        let ahead = place
-            .forward()
-            .xz()
-            .dot(place.translation.xz() - stride.last.xz());
+        let step = place.translation.xz() - stride.last.xz();
+        let covered = step.length();
         stride.last = place.translation;
 
         // A jump is not a walk: see `TELEPORT`. The gait is left exactly
         // where it was, so a player who boards mid-step is standing on the
         // deck with their legs still, not finishing the step on it.
-        let speed = covered / dt;
-        if speed > WALK_SPEED * TELEPORT {
+        if covered > TELEPORT {
             stride.amount = 0.0;
             continue;
         }
 
-        let going = if ahead < 0.0 { -1.0 } else { 1.0 };
+        let going = if place.forward().xz().dot(step) < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
         stride.phase = (stride.phase + going * covered / STRIDE * TAU).rem_euclid(TAU);
-        let target = (speed / WALK_SPEED).min(1.0);
+        let target = if covered > STIRRING { 1.0 } else { 0.0 };
         stride.amount += (target - stride.amount) * eased(SETTLING, dt);
     }
 }
@@ -669,6 +708,56 @@ mod tests {
     }
 
     #[test]
+    fn the_gait_sees_the_step_in_the_frame_it_was_taken() {
+        // The gait runs after the walking that moves the player, so what it
+        // measures is this frame's step rather than last frame's. Unordered,
+        // it saw a step in one frame and nothing in the next, which read as a
+        // walker stopping and starting several times a second — and, with the
+        // swing once scaled by the speed that fell out of that, as a walker
+        // barely moving their legs at all.
+        let mut app = ashore_app();
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 1);
+
+        let (_, _, last) = gait_of(&mut app);
+        let now = *app
+            .world_mut()
+            .query_filtered::<&Transform, With<Player>>()
+            .single(app.world())
+            .expect("a match should have a player in it");
+        assert_eq!(
+            last, now.translation,
+            "the gait is reading the walk a frame behind"
+        );
+    }
+
+    #[test]
+    fn a_slow_walk_swings_as_fully_as_a_fast_one() {
+        // The swing is on or off, not scaled by how fast the ground is going
+        // by: the cycle already advances by distance, so a slow walk is the
+        // same swing taken slowly. Scaling it by a speed measured off one
+        // frame's movement was what left the figure shuffling.
+        let mut app = world_app();
+        for _ in 0..60 {
+            let mut players = app
+                .world_mut()
+                .query_filtered::<&mut Transform, With<Player>>();
+            players
+                .single_mut(app.world_mut())
+                .expect("a match should have a player in it")
+                .translation
+                .z -= 0.01;
+            run_frames(&mut app, 1);
+        }
+
+        let (_, amount, _) = gait_of(&mut app);
+        assert!(
+            amount > 0.9,
+            "a walk at a fifth of a walking pace is only {amount} of a run"
+        );
+    }
+
+    #[test]
     fn a_standing_player_settles_into_standing() {
         let mut app = ashore_app();
         let dancer = with_a_dancer(&mut app);
@@ -778,13 +867,26 @@ mod tests {
 
         assert_ne!(gaits.idle, gaits.run, "both clips landed on one node");
         for (node, wanted) in [(gaits.idle, None), (gaits.run, Some(&gaits.cycle))] {
-            let held = match &graph.get(node).expect("a node the graph knows").node_type {
+            let node = graph.get(node).expect("a node the graph knows");
+            let held = match &node.node_type {
                 AnimationNodeType::Clip(clip) => clip.clone(),
                 other => panic!("the gait hangs off a {other:?} rather than a clip"),
             };
             if let Some(wanted) = wanted {
                 assert_eq!(&held, wanted, "the run node is not the run clip");
             }
+
+            // And hung at full weight, because a node's weight *multiplies*
+            // the weight the gait sets frame by frame rather than being a
+            // starting value it overrides. The run was once hung at zero to
+            // mean "standing to begin with", which silently multiplied every
+            // honest weight the walk asked for by nothing: the figure slid
+            // about with its legs held still, and no other test could see it.
+            assert_eq!(
+                node.weight, 1.0,
+                "a clip hung at {} can only ever pose that fraction of itself",
+                node.weight
+            );
         }
     }
 }

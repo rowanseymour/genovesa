@@ -88,6 +88,15 @@ const LANDING_RAYS: usize = 8;
 /// reach exactly, see above.
 const BOARD_REACH: f32 = LANDING_REACH;
 
+/// The player's own movement, as something other systems can run after.
+///
+/// The figure drawn walking reads the transform these systems write, and a
+/// reader free to run either side of them sees a frame's step in one frame
+/// and nothing in the next. That reads as a walker stopping and starting
+/// several times a second, which is exactly what it looked like.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Afoot;
+
 /// The person playing: one per match. Spawned aboard the ship the world is
 /// entered on — by `boat::launch`, entering being done afloat. Aboard they
 /// despawn with the boat, the hierarchy going down as one; ashore they carry
@@ -174,6 +183,7 @@ impl Plugin for PlayerPlugin {
             Update,
             (embark_or_land, walk)
                 .chain()
+                .in_set(Afoot)
                 .run_if(in_state(Helm::Sailing)),
         );
     }
