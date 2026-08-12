@@ -33,6 +33,8 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use protocol::ground::FACET_METRES;
+
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
 use crate::figure::FigurePlugin;
@@ -68,6 +70,24 @@ const WALK_TURN_RATE: f32 = 3.0;
 /// it were dry — visibly wrong in deep lakes, and the honest fix is the
 /// `Ground` resource learning lake levels, not a guess here.
 const WADE_DEPTH: f32 = 0.5;
+
+/// The steepest ground a walker will cross, as a gradient: metres of height
+/// per metre travelled, so this is a slope of about 35°. Up and down are the
+/// same number, because steep ground is a wall from either side — which is
+/// also what keeps the rule from trapping anybody. Every step is judged
+/// against the one that would undo it, so the way back off a slope is as open
+/// as the way onto it was, and there is nowhere a walker can reach that they
+/// cannot leave.
+///
+/// The number is set against the ground the generator actually raises rather
+/// than picked for the look of it: half of any island's land lies under 15°
+/// and a tenth of it over 40°, so a limit here turns back crags, gullies and
+/// cliff faces and leaves ordinary hillside alone. What that costs was
+/// measured by flooding nine seeds outward from their waterlines under this
+/// rule — about two percent of the land walled off, and every one of their
+/// summits still reachable by some way round. A walker is stopped by the
+/// steep, in other words, without being shut out of anywhere.
+const WALKABLE_RISE: f32 = 0.7;
 
 /// The ring the landing probe searches, in metres from the boat's origin:
 /// from just short of the bow — anything nearer is deck — out to a long
@@ -190,11 +210,71 @@ impl Plugin for PlayerPlugin {
 }
 
 /// The ground under a map point when it offers footing, in metres — and
-/// nothing when it does not: sea past [`WADE_DEPTH`] deep, or a chunk that
-/// has not arrived, which is not ground to be stepped onto however briefly.
+/// nothing when it does not: sea past [`WADE_DEPTH`] deep, ground steeper than
+/// [`WALKABLE_RISE`], or a chunk that has not arrived, which is not ground to
+/// be stepped onto however briefly.
+///
+/// The steepness half is [`WALKABLE_RISE`] asked of a spot rather than of a
+/// step, and it is here so that the two agree: a player put down on a cliff face
+/// would be standing where their own legs say they cannot be. It reads the
+/// ground more bluntly than a step is judged — see [`tilt`] — and errs towards
+/// refusing, which for a probe with a whole ring of spots to try is the right
+/// way round.
 fn footing(ground: Option<&Ground>, at: Vec2) -> Option<f32> {
-    let height = ground?.height(at.x, at.y)?;
-    (-height <= WADE_DEPTH).then_some(height)
+    let ground = ground?;
+    let height = ground.height(at.x, at.y)?;
+    (-height <= WADE_DEPTH && tilt(ground, at)? <= WALKABLE_RISE).then_some(height)
+}
+
+/// How steeply the ground tilts at a map point, as a gradient — the limit
+/// [`WALKABLE_RISE`] sets, read of a spot instead of a step. A central
+/// difference a facet wide, which is as fine as the height field says anything:
+/// the ground between two corners is one flat facet, so there is no finer slope
+/// there to read. `None` where any of the four samples is over a chunk that has
+/// not arrived.
+///
+/// That makes it a blunter instrument than [`climb`] rather than the same
+/// measurement, and near a break in the ground the two disagree: a facet-wide
+/// difference smears the break over the facet either side of it, so flat sand a
+/// stride from the foot of a bluff reads as steep, and a rise narrower than a
+/// facet can read as level from the top of it. Neither is worth sharpening. The
+/// first costs a landing spot where the probe has a whole ring of others to try,
+/// and past the landing it is [`climb`] that says where a walker may go.
+fn tilt(ground: &Ground, at: Vec2) -> Option<f32> {
+    // Half a facet either side of the spot, so each difference spans one.
+    let reach = FACET_METRES / 2.0;
+    let across = |step: Vec2| {
+        let (behind, ahead) = (at - step, at + step);
+        Some((ground.height(ahead.x, ahead.y)? - ground.height(behind.x, behind.y)?) / FACET_METRES)
+    };
+    Some(Vec2::new(across(Vec2::X * reach)?, across(Vec2::Y * reach)?).length())
+}
+
+/// How steeply the ground climbs across a step, as a gradient: metres of
+/// height per metre travelled, unsigned, up and down being one rule — see
+/// [`WALKABLE_RISE`].
+///
+/// The two ends of the step and nothing in between, which makes this a *mean*
+/// gradient and so only as honest as the step is short: one long enough to
+/// straddle a wall averages it away against the flat ground either side. Keeping
+/// steps short enough for that not to matter is [`walk`]'s business — and it
+/// does it by cutting the frame's advance up rather than by probing a fixed
+/// distance ahead, because a fixed probe is what a long frame steps clean over,
+/// putting the walker up the wall it was watching for.
+///
+/// Zero where either end is over a chunk that has not arrived — the same
+/// forgiveness [`wading`] shows, and for the same reason: ground the client has
+/// not been sent is no reason to pin a walker where they stand.
+fn climb(ground: Option<&Ground>, from: Vec2, to: Vec2) -> f32 {
+    let along = from.distance(to);
+    let (Some(ground), true) = (ground, along > 0.0) else {
+        return 0.0;
+    };
+    let (Some(here), Some(there)) = (ground.height(from.x, from.y), ground.height(to.x, to.y))
+    else {
+        return 0.0;
+    };
+    (there - here).abs() / along
 }
 
 /// How far past wadeable the water over a map point stands, in metres —
@@ -322,14 +402,34 @@ fn landing(ground: Option<&Ground>, boat: &Transform) -> Option<(Vec2, f32)> {
 /// stands when not. Standing is exact — an idle walker's transform goes
 /// unwritten frame after frame, the same stillness an idle boat holds.
 ///
-/// Where a walker may go is [`wading`]'s answer, judged like the keel's: the
-/// step is allowed into walkable ground, or anywhere no *deeper* than where
-/// they already stand — so a player somehow past their depth is herded
-/// shoreward by the same clause that frees a beached hull, and the sea edge
-/// can never be inched past because every step further in is deeper. The
-/// walker then stands on the ground wherever the frame left them — knee-deep
-/// in the shallows, on the sand above the waterline — and keeps their last
-/// height over a chunk that has not arrived, exactly as everything riding
+/// Two things can refuse a step, and a step has to satisfy both.
+///
+/// The water is [`wading`]'s answer, judged like the keel's: the step is
+/// allowed into walkable ground, or anywhere no *deeper* than where they
+/// already stand — so a player somehow past their depth is herded shoreward by
+/// the same clause that frees a beached hull, and the sea edge can never be
+/// inched past because every step further in is deeper.
+///
+/// The land is [`climb`]'s: ground rising or falling faster than
+/// [`WALKABLE_RISE`] across the step is not walked over. A frame's advance is
+/// taken in strides of at most half a facet and each of them judged in turn, so
+/// that however long the frame was, no stride has a whole facet of ground hidden
+/// inside it — what the limit is held to is the height field's own resolution
+/// rather than the frame rate. A walker turned back mid-advance keeps the
+/// strides they had already made and stops there.
+///
+/// That is a limit on the step and not on the spot, so it turns a walker back
+/// from a cliff without pinning them against it — the face of a bluff can be
+/// crossed along its contour, where the ground being climbed is level, exactly
+/// as a person picks their way across a steep hillside rather than straight up
+/// it. The two rules are ANDed, and between them the climb has the last word:
+/// the shoreward clause above frees a walker who is merely out of their depth,
+/// not one standing under a drop-off, who has nowhere to go until the water
+/// falls. Letting them climb the drop instead would be the worse answer.
+///
+/// The walker then stands on the ground wherever the frame left them —
+/// knee-deep in the shallows, on the sand above the waterline — and keeps their
+/// last height over a chunk that has not arrived, exactly as everything riding
 /// the world does.
 fn walk(
     keys: Res<ButtonInput<KeyCode>>,
@@ -373,10 +473,30 @@ fn walk(
             WALK_SPEED * 0.5
         };
         let advance = transform.forward() * drive * speed * time.delta_secs();
-        let here = wading(ground, transform.translation.xz());
-        let there = wading(ground, (transform.translation + advance).xz());
-        if there <= 0.0 || there <= here {
-            transform.translation += advance;
+        // Half a facet at a time, so that no stride can have a facet of ground
+        // hidden inside it — that is the shortest distance over which the height
+        // field says anything, and a stride judged by its two ends is only as
+        // sharp as it is short.
+        //
+        // In practice this is always one stride: the engine clamps a long frame
+        // before anything sees it, so the worst step is well under half a facet
+        // and this arithmetic rounds to nothing. Written as strides anyway
+        // because then the limit owes nothing to that clamp being where it is,
+        // or to WALK_SPEED being what it is: raise either and the rule still
+        // holds rather than quietly starting to slip.
+        let strides = (advance.length() / (FACET_METRES / 2.0)).ceil().max(1.0);
+        let stride = advance / strides;
+        for _ in 0..strides as usize {
+            let (from, to) = (
+                transform.translation.xz(),
+                (transform.translation + stride).xz(),
+            );
+            let (here, there) = (wading(ground, from), wading(ground, to));
+            let wadeable = there <= 0.0 || there <= here;
+            if !wadeable || climb(ground, from, to) > WALKABLE_RISE {
+                break;
+            }
+            transform.translation += stride;
         }
     }
 
@@ -391,19 +511,31 @@ fn walk(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use bevy::ecs::system::SystemState;
+    use bevy::time::{TimeUpdateStrategy, Virtual};
 
     use super::*;
-    use crate::testing::{hold, run_frames, test_ground, world_app, TEST_ISLAND_REACH};
+    use crate::testing::{
+        elapsed, hold, run_frames, test_ground, test_shore, world_app, SHORE_BLUFF_FOOT,
+        SHORE_PEAK, SHORE_TOP, SHORE_WATERLINE, TEST_ISLAND_REACH,
+    };
 
-    /// A match on the test island's shore: the boat close enough in for a
-    /// landing to have somewhere to go, bow at the island, player aboard.
-    /// The island is a steep-rimmed dome at the origin reaching
-    /// [`TEST_ISLAND_REACH`], so "in close" is a couple of metres past it.
+    /// How far off the waterline the boat is anchored in a [`shore_app`], in
+    /// metres: far enough out that the hull is still floating, near enough that
+    /// the landing probe reaches wadeable ground.
+    const ANCHORAGE: f32 = 4.5;
+
+    /// A match off the shore island's coast: the boat close enough in for a
+    /// landing to have somewhere to go, bow at the island, player aboard. The
+    /// island is the one with a coast on it — an apron up through the waterline
+    /// and a bluff behind — because a landing needs ground a walker could
+    /// stand on, which the cliff-rimmed one has nowhere.
     fn shore_app() -> App {
         let mut app = world_app();
-        app.insert_resource(test_ground());
-        place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH + 2.0, 0.0));
+        app.insert_resource(test_shore());
+        place_boat(&mut app, Vec2::new(SHORE_WATERLINE + ANCHORAGE, 0.0));
         app
     }
 
@@ -483,7 +615,7 @@ mod tests {
         // the player leaving, not the vehicle going anywhere.
         let boat = boat_transform(&mut app).translation.xz();
         assert!(
-            boat.distance(Vec2::new(TEST_ISLAND_REACH + 2.0, 0.0)) < 0.5,
+            boat.distance(Vec2::new(SHORE_WATERLINE + ANCHORAGE, 0.0)) < 0.5,
             "going ashore moved the boat to {boat}"
         );
         assert!(
@@ -498,13 +630,40 @@ mod tests {
         // At anchor in open ocean: nothing within reach offers footing, so
         // the key does nothing and the player stays aboard.
         let mut app = world_app();
-        app.insert_resource(test_ground());
+        app.insert_resource(test_shore());
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
 
         press_board(&mut app);
         assert!(
             aboard(&mut app).is_some(),
             "the player was put over the side in open ocean"
+        );
+    }
+
+    #[test]
+    fn going_ashore_is_refused_against_a_cliff() {
+        // The cliff-rimmed island, nosed right up to: there is dry ground a
+        // stride from the bow and the key still does nothing, because ground
+        // standing on end is not ground anybody could walk off onto. This is
+        // what makes a cliff coast scenery — a landing has to find footing, and
+        // footing is more than shallow water.
+        let mut app = world_app();
+        app.insert_resource(test_ground());
+        place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH + 2.0, 0.0));
+
+        // The probe's own reach does hold dry land, so what refuses the landing
+        // below is the steepness of it and not the distance.
+        let dry = app
+            .world()
+            .resource::<Ground>()
+            .height(TEST_ISLAND_REACH - 1.0, 0.0)
+            .expect("the cliff island's rim has arrived");
+        assert!(dry > 0.0, "the rim is under water, not a cliff");
+
+        press_board(&mut app);
+        assert!(
+            aboard(&mut app).is_some(),
+            "the player stepped off onto a cliff face"
         );
     }
 
@@ -587,15 +746,8 @@ mod tests {
         // out along the seabed.
         let mut app = shore_app();
         press_board(&mut app);
-
-        let mut players = app
-            .world_mut()
-            .query_filtered::<&mut Transform, With<Player>>();
-        let mut transform = players
-            .single_mut(app.world_mut())
-            .expect("a match should have a player in it");
-        // Face +X: out to sea, the island being at the origin.
-        transform.rotation = Quat::from_rotation_y(f32::atan2(-1.0, 0.0));
+        // Out to sea, the island being at the origin.
+        face(&mut app, Vec2::X);
 
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 600);
@@ -613,6 +765,188 @@ mod tests {
         );
     }
 
+    /// Points the walker a way, as a test that cares where they are headed
+    /// rather than how long they took to come round.
+    ///
+    /// Runs no frame of its own, deliberately: [`walk`] reads the transform this
+    /// writes, so the turn is in force next frame either way, and a frame here
+    /// would be a frame of walking that the test's own clock and distance
+    /// measurements around the call knew nothing about.
+    fn face(app: &mut App, along: Vec2) {
+        let mut players = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<Player>>();
+        players
+            .single_mut(app.world_mut())
+            .expect("a match should have a player in it")
+            .rotation = Quat::from_rotation_y(f32::atan2(-along.x, -along.y));
+    }
+
+    #[test]
+    fn ground_too_steep_turns_the_walker_back() {
+        // Ashore and marched inland for a quarter of a minute: the apron is
+        // crossed and the bluff at the back of it is not, so the walk ends at
+        // its foot rather than up its face or on the top.
+        let mut app = shore_app();
+        press_board(&mut app);
+        face(&mut app, Vec2::NEG_X);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 900);
+
+        let at = player_transform(&mut app).translation;
+        assert!(
+            at.y <= SHORE_BLUFF_FOOT + 0.5,
+            "the walker climbed to {} m, up a bluff starting at {SHORE_BLUFF_FOOT} m",
+            at.y
+        );
+        // And held at the foot of it rather than stuck at the water's edge:
+        // getting this high is the whole apron walked, ankle-deep water to
+        // bluff, which is the half of the rule that has to keep working.
+        assert!(
+            at.y > SHORE_BLUFF_FOOT - 1.0,
+            "the walker stopped {} m up, nowhere near the bluff they were sent at",
+            at.y
+        );
+    }
+
+    #[test]
+    fn a_long_frame_turns_the_walker_back_in_the_same_place() {
+        // Where a walker is stopped is the ground's business and not the frame
+        // rate's, which is what the strides in `walk` are for. The engine clamps
+        // a long frame before anything sees it, so the clamp is lifted here to
+        // get one long enough to tell the difference — two seconds of walking
+        // arriving as a single step — and the answer has to be the one sixty
+        // frames a second gives above: held at the foot of the bluff.
+        //
+        // Judged end to end instead, that step is a mean taken across ground the
+        // walker never sets foot on, and it goes wrong in both directions: this
+        // one refuses two and a half metres early, and a step straddling a low
+        // ledge averages it away and climbs it.
+        let mut app = shore_app();
+        press_board(&mut app);
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(Duration::from_secs(10));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(2)));
+        face(&mut app, Vec2::NEG_X);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 40);
+
+        let at = player_transform(&mut app).translation;
+        assert!(
+            (at.y - SHORE_BLUFF_FOOT).abs() < 0.5,
+            "a two-second frame left the walker {} m up, not at the bluff's \
+             {SHORE_BLUFF_FOOT} m foot",
+            at.y
+        );
+    }
+
+    #[test]
+    fn a_bluff_may_be_crossed_along_its_contour() {
+        // The rule is about the step and not about the spot, which is what
+        // stops it pinning anybody: turned side-on at the foot of the bluff
+        // that just refused them, the same walker walks off along it.
+        let mut app = shore_app();
+        press_board(&mut app);
+        face(&mut app, Vec2::NEG_X);
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 900);
+        let held = player_transform(&mut app).translation;
+
+        // A quarter turn: across the slope rather than up it, the island being
+        // round and the walker standing due east of its middle.
+        face(&mut app, Vec2::NEG_Y);
+        let start = elapsed(&app);
+        run_frames(&mut app, 120);
+        let seconds = elapsed(&app) - start;
+
+        let at = player_transform(&mut app).translation;
+        let along = at.xz().distance(held.xz());
+        assert!(
+            (along - WALK_SPEED * seconds).abs() < WALK_SPEED * 0.1,
+            "the walker made {along} m along the contour, not the {} m they were walking",
+            WALK_SPEED * seconds
+        );
+        assert!(
+            (at.y - held.y).abs() < 1.0,
+            "walking along the contour climbed {} m",
+            at.y - held.y
+        );
+    }
+
+    #[test]
+    fn the_walker_will_not_step_off_a_drop() {
+        // The same limit from above, which is the half that keeps it honest: a
+        // walker who could step off the top of the bluff would be somewhere
+        // they could never climb back to, and the drop is refused for exactly
+        // the reason the climb was.
+        let mut app = shore_app();
+        press_board(&mut app);
+        // Three metres in from where the top gives out, so there is a little
+        // level ground to cross before the drop.
+        let brink = Vec3::new(SHORE_TOP - 3.0, 0.0, 0.0);
+        let mut players = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<Player>>();
+        players
+            .single_mut(app.world_mut())
+            .expect("a match should have a player in it")
+            .translation = brink;
+        app.update();
+        // Standing on the level top, facing out to sea and so at the drop.
+        let from = player_transform(&mut app).translation;
+        assert!(
+            (from.y - SHORE_PEAK).abs() < 1e-3,
+            "the walker was put at {} m rather than on the island's top",
+            from.y
+        );
+        face(&mut app, Vec2::X);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 300);
+
+        let at = player_transform(&mut app).translation;
+        assert!(
+            (at.y - SHORE_PEAK).abs() < 1.0,
+            "the walker went over the edge and ended {} m down",
+            from.y - at.y
+        );
+        // Held at the brink rather than never having set off: they crossed the
+        // last of the level ground and stopped at the edge of it, well short of
+        // the fourteen metres three hundred frames of walking would cover.
+        let made = at.xz().distance(from.xz());
+        assert!(
+            (1.0..8.0).contains(&made),
+            "the walker made {made} m across the top"
+        );
+    }
+
+    #[test]
+    fn a_walker_sent_no_ground_still_moves() {
+        // A client that has been told nothing about the world must not be a
+        // client whose player cannot move: with no chunk under them there is
+        // no depth to refuse a step and no slope to measure it against, and
+        // both rules stand aside rather than guessing.
+        let mut app = world_app();
+        let (player, _) = app
+            .world_mut()
+            .query_filtered::<(Entity, &Transform), With<Player>>()
+            .single(app.world())
+            .expect("a match should have a player in it");
+        app.world_mut().entity_mut(player).remove::<ChildOf>();
+        run_frames(&mut app, 1);
+        let before = player_transform(&mut app).translation;
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 60);
+        assert!(
+            player_transform(&mut app).translation.distance(before) > 1.0,
+            "the walker was pinned by ground the client never had"
+        );
+    }
+
     #[test]
     fn ashore_the_helm_is_dead_and_boarding_brings_it_back() {
         let mut app = shore_app();
@@ -620,10 +954,12 @@ mod tests {
 
         // The movement keys are the walker's now: the anchored boat holds
         // its spot on the map while they are held. (Only the map spot — the
-        // swell still bobs the hull, which is exactly the point of it.)
+        // swell still bobs the hull, which is exactly the point of it.) A short
+        // walk, because the second half of the test is boarding again and the
+        // walker steps ashore most of [`BOARD_REACH`] from the hull already.
         let before = boat_transform(&mut app).translation.xz();
         hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 30);
+        run_frames(&mut app, 20);
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .release(KeyCode::ArrowUp);
@@ -634,7 +970,15 @@ mod tests {
         );
 
         // Back aboard: within reach, so the key re-parents the player, sets
-        // them at the identity, and the helm answers again.
+        // them at the identity, and the helm answers again. Said out loud first,
+        // because the walk above only just leaves them in reach — if the shape
+        // of the shore or the landing ever moves the hull further off, this is
+        // the assertion that should fail rather than the boarding below.
+        let off = player_transform(&mut app).translation.xz().distance(before);
+        assert!(
+            off <= BOARD_REACH,
+            "the walk left the walker {off} m from the boat, past boarding reach"
+        );
         press_board(&mut app);
         let boat = aboard(&mut app).expect("the player never got back aboard");
         assert!(
