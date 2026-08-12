@@ -16,6 +16,7 @@
 //! the first time anyone approaches it, which is far too long to spend inside
 //! a read loop that also has to relay positions.
 
+pub mod beasts;
 pub mod cli;
 
 use std::collections::HashMap;
@@ -176,12 +177,12 @@ pub struct Server {
 }
 
 /// What every connection's thread shares.
-struct Shared {
+pub(crate) struct Shared {
     /// The world, generated on demand and cached. Every chunk anyone is ever
     /// sent comes out of this one, which is what makes a session one place:
     /// two clients asking for the same chunk are answered from the same
     /// island, not from two generations of it that merely ought to agree.
-    world: Arc<Archipelago>,
+    pub(crate) world: Arc<Archipelago>,
     /// Where this world is entered — [`Archipelago::spawn`]'s answer, asked
     /// once when the server binds. A client has no layout to work it out
     /// from, so this and [`Shared::facing`] are the whole of what it is told
@@ -193,11 +194,11 @@ struct Shared {
     facing: Vec2,
     /// Dealt in joining order, and never reused within a session.
     next_id: AtomicU32,
-    players: Mutex<HashMap<PlayerId, Player>>,
+    pub(crate) players: Mutex<HashMap<PlayerId, Player>>,
     /// Set once, by the end of the session, and read by every thread that
     /// might still be joining one: see [`Host::drop`], which is what makes it
     /// true, and [`serve`], which is what makes it mean something.
-    stopping: AtomicBool,
+    pub(crate) stopping: AtomicBool,
     /// When this world was opened — the zero of the weather's clock. The
     /// weather is a pure function of seed and elapsed time (see
     /// [`world::weather`]), so this is the whole of the state it needs.
@@ -224,8 +225,8 @@ struct ChunkRequest {
 }
 
 /// One connected player, as the roster sees them.
-struct Player {
-    position: Vec2,
+pub(crate) struct Player {
+    pub(crate) position: Vec2,
     /// When this player last asked for the night to be over, if they have —
     /// see [`ToServer::WantDawn`], which stands only for [`WAIT_LAPSE`].
     waiting_since: Option<Instant>,
@@ -333,6 +334,7 @@ impl Server {
         let (wanted, requests) = self.queue;
         make_ground(&self.shared, requests);
         watch_the_sky(&self.shared);
+        beasts::mind_the_beasts(&self.shared);
         accept(&self.listener, &self.shared, &wanted);
     }
 
@@ -348,6 +350,7 @@ impl Server {
         let (wanted, requests) = self.queue;
         make_ground(&self.shared, requests);
         watch_the_sky(&self.shared);
+        beasts::mind_the_beasts(&self.shared);
         let shared = self.shared.clone();
         let thread = {
             let (listener, shared) = (self.listener, self.shared);
@@ -887,9 +890,9 @@ fn post(player: &Player, message: ToClient) {
     }
 }
 
-/// Sends to the whole roster — what the weather takes, nobody having caused
-/// it the way a move or a leaving has an author to skip.
-fn broadcast_all(players: &HashMap<PlayerId, Player>, message: ToClient) {
+/// Sends to the whole roster — what the weather takes, and the beasts,
+/// nobody having caused it the way a move or a leaving has an author to skip.
+pub(crate) fn broadcast_all(players: &HashMap<PlayerId, Player>, message: ToClient) {
     for player in players.values() {
         post(player, message.clone());
     }

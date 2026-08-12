@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::window::ExitCondition;
 
 use game::ambience::AmbiencePlugin;
+use game::beasts::BeastsPlugin;
 use game::boat::BoatPlugin;
 use game::camera::MapCameraPlugin;
 use game::capture::CapturePlugin;
@@ -122,6 +123,7 @@ fn run(args: Args, session: Option<Session>) {
             SkyPlugin,
             TreesPlugin,
             WildlifePlugin,
+            BeastsPlugin,
             BoatPlugin,
             PlayerPlugin,
             MapCameraPlugin,

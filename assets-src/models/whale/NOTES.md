@@ -31,6 +31,6 @@ means shark.
 file**, which the +Y-up export turns into Bevy's -Z forward, the boat's own
 convention.
 
-Where a whale *swims* is the game's business, in
-`crates/game/src/wildlife.rs` — decorative wildlife is client-side, so
-nothing about this model or its placing crosses the wire.
+Where a whale *swims* is the server's word and the wire carries it — a
+whale is a *beast* now, one creature every player can point at — while what
+it looks like doing so stays the client's, in `crates/game/src/beasts.rs`.

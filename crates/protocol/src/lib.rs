@@ -38,7 +38,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// How long one turn of the world's day takes, in seconds — sunrise to
 /// sunrise, ten minutes of it.
@@ -100,6 +100,66 @@ pub struct PlayerId(pub u32);
 impl std::fmt::Display for PlayerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "player {}", self.0)
+    }
+}
+
+/// A beast, as the server counts them: dealt out as players are — in order of
+/// appearance, never reused within a session, meaningless across sessions.
+///
+/// A beast is the third kind of thing in a world, after the ground and the
+/// players: a creature the server *means*. It earns the wire two ways. The
+/// shark's way is consequence — a creature that will one day act on a player
+/// has to be the same creature on every machine. The whale's is company: a
+/// whale is a rare, pointable event, and "look, a whale!" only lands if the
+/// player being shown one is under the same sea. What stays off the wire is
+/// the texture nobody compares notes on — birds, which each client dreams up
+/// for itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BeastId(pub u32);
+
+impl std::fmt::Display for BeastId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "beast {}", self.0)
+    }
+}
+
+/// What a beast is, which is the whole of what a client is told beyond where
+/// it is and where it is going. What one looks like, how deep it swims, how
+/// its body moves — all drawing, and all the client's business.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BeastKind {
+    /// A shark: lives in the shallows around islands, cruises them endlessly,
+    /// and is the reason beasts exist at all — the first creature that will
+    /// one day act on a player rather than decorate their view.
+    Shark,
+    /// A pod of dolphins. One beast, several animals: the wire carries the
+    /// pod as a single position and velocity, and a client draws the members
+    /// arranged around it — how many and in what order they arc being
+    /// drawing, though a client that wants its pod to match everyone else's
+    /// can (and this workspace's does) deal those choices from the id, which
+    /// every machine was told.
+    Dolphins,
+    /// A whale: deep water, a long back that barely clears the surface, and
+    /// the sea's one event worth turning a boat for.
+    Whale,
+}
+
+impl BeastKind {
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Shark),
+            1 => Some(Self::Dolphins),
+            2 => Some(Self::Whale),
+            _ => None,
+        }
+    }
+
+    fn byte(self) -> u8 {
+        match self {
+            Self::Shark => 0,
+            Self::Dolphins => 1,
+            Self::Whale => 2,
+        }
     }
 }
 
@@ -218,6 +278,32 @@ pub enum ToClient {
     Daylight {
         phase: f32,
     },
+    /// A beast, wherever it has got to: one message is both the introduction
+    /// and every movement after it, so the first word a client hears about a
+    /// beast is enough to draw it and a later word only moves it. That is
+    /// deliberately not the players' joined-then-moved pair — a beast needs no
+    /// introducing beyond what every telling carries, so a client arriving
+    /// mid-session, or wandering into a beast's waters, is caught up by the
+    /// next beat with no one having to remember what it has been told.
+    ///
+    /// `velocity` is where it is going, as the weather gives the wind:
+    /// bearing and metres per second in one vector, no convention to agree
+    /// on. It is what a client draws between tellings — pointing the body,
+    /// carrying it forward, working the tail at the pace of the water going
+    /// by. Height is never sent, as it is not for players: how deep a shark
+    /// rides, and when its fin cuts the surface, is drawing.
+    Beast {
+        id: BeastId,
+        kind: BeastKind,
+        position: Vec2,
+        velocity: Vec2,
+    },
+    /// The server has stopped minding a beast — everyone has left its waters,
+    /// and there is nothing it could matter to. Not a death; the sea is
+    /// simply emptier by one.
+    BeastGone {
+        id: BeastId,
+    },
 }
 
 impl ToServer {
@@ -301,6 +387,22 @@ impl ToClient {
                 payload.push(7);
                 put_f32(&mut payload, *phase);
             }
+            Self::Beast {
+                id,
+                kind,
+                position,
+                velocity,
+            } => {
+                payload.push(8);
+                put_u32(&mut payload, id.0);
+                payload.push(kind.byte());
+                put_vec2(&mut payload, *position);
+                put_vec2(&mut payload, *velocity);
+            }
+            Self::BeastGone { id } => {
+                payload.push(9);
+                put_u32(&mut payload, id.0);
+            }
             Self::Chunk { chunk, ground } => {
                 payload.push(5);
                 put_ivec2(&mut payload, *chunk);
@@ -368,6 +470,20 @@ impl ToClient {
             },
             7 => Self::Daylight {
                 phase: payload.f32()?,
+            },
+            8 => Self::Beast {
+                id: BeastId(payload.u32()?),
+                // Both ends of a session speak one version, so a kind this
+                // build has never heard of is corruption, exactly as a chunk
+                // painted in unknown colours is.
+                kind: BeastKind::from_byte(payload.u8()?).ok_or_else(|| {
+                    corrupt("a beast of a kind this build has never heard of".into())
+                })?,
+                position: payload.vec2()?,
+                velocity: payload.vec2()?,
+            },
+            9 => Self::BeastGone {
+                id: BeastId(payload.u32()?),
             },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
@@ -616,6 +732,25 @@ mod tests {
                 wind: Vec2::new(-3.25, 8.5),
             },
             ToClient::Daylight { phase: 0.125 },
+            ToClient::Beast {
+                id: BeastId(12),
+                kind: BeastKind::Shark,
+                position: at,
+                velocity: Vec2::new(-1.0, 0.5),
+            },
+            ToClient::Beast {
+                id: BeastId(13),
+                kind: BeastKind::Dolphins,
+                position: at,
+                velocity: Vec2::new(2.0, -1.5),
+            },
+            ToClient::Beast {
+                id: BeastId(14),
+                kind: BeastKind::Whale,
+                position: at,
+                velocity: Vec2::new(-0.5, -1.0),
+            },
+            ToClient::BeastGone { id: BeastId(12) },
             ToClient::Chunk {
                 chunk: IVec2::new(3, -8),
                 ground: None,
@@ -754,6 +889,51 @@ mod tests {
                 5, 0, // length
                 7, // tag
                 0, 0, 0x40, 0x3F, // phase = 0.75, sunset
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::Beast {
+                id: BeastId(7),
+                kind: BeastKind::Shark,
+                position: Vec2::new(1.5, -2.0),
+                velocity: Vec2::new(-2.0, 1.5),
+            }),
+            [
+                22, 0, // length
+                8, // tag
+                7, 0, 0, 0, // id
+                0, // kind: shark
+                0, 0, 0xC0, 0x3F, // position x = 1.5
+                0, 0, 0, 0xC0, // position z = -2.0
+                0, 0, 0, 0xC0, // velocity x = -2.0 — the position's axes
+                0, 0, 0xC0, 0x3F, // velocity z = 1.5, so a confused pair shows
+            ],
+        );
+        // The other kinds differ from the shark's message in exactly the one
+        // byte that says what the beast is.
+        let shark = bytes_of_server(&ToClient::Beast {
+            id: BeastId(7),
+            kind: BeastKind::Shark,
+            position: Vec2::new(1.5, -2.0),
+            velocity: Vec2::new(-2.0, 1.5),
+        });
+        for (kind, byte) in [(BeastKind::Dolphins, 1u8), (BeastKind::Whale, 2)] {
+            let told = bytes_of_server(&ToClient::Beast {
+                id: BeastId(7),
+                kind,
+                position: Vec2::new(1.5, -2.0),
+                velocity: Vec2::new(-2.0, 1.5),
+            });
+            assert_eq!(told[7], byte, "{kind:?} is not kind byte {byte}");
+            assert_eq!(told[..7], shark[..7], "{kind:?} moved the head");
+            assert_eq!(told[8..], shark[8..], "{kind:?} moved the fields");
+        }
+        assert_eq!(
+            bytes_of_server(&ToClient::BeastGone { id: BeastId(7) }),
+            [
+                5, 0, // length
+                9, // tag
+                7, 0, 0, 0, // id
             ],
         );
 
@@ -981,6 +1161,13 @@ mod tests {
         assert!(ToServer::read(&mut short.as_slice()).is_err());
         let long = [4, 0, 0, 1, 0, 99];
         assert!(ToServer::read(&mut long.as_slice()).is_err());
+
+        // A beast of a kind this build has never heard of, in an otherwise
+        // well-formed frame — a kind is meaning, not framing, and both ends
+        // of a session speak one version.
+        let mut unknown_beast = vec![22, 0, 8, 7, 0, 0, 0, 200];
+        unknown_beast.extend([0; 16]);
+        assert!(ToClient::read(&mut unknown_beast.as_slice()).is_err());
 
         // A chunk whose flag byte is none of the three kinds of answer.
         let mut bad_flag = vec![10, 0, 5];

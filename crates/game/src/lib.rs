@@ -7,6 +7,7 @@
 //! line — are reachable from tests rather than sealed inside a `main`.
 
 pub mod ambience;
+pub mod beasts;
 pub mod bindings;
 pub mod boat;
 pub mod camera;
