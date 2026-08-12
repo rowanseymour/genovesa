@@ -457,6 +457,7 @@ impl Plugin for NetPlugin {
         app.init_resource::<sea::Forecast>()
             .init_resource::<sea::SeaConditions>()
             .init_resource::<crate::sky::Sky>()
+            .init_resource::<crate::beasts::Beasts>()
             .add_systems(
                 Update,
                 (receive, ask_for_ground, report_position, place_markers)
@@ -509,6 +510,7 @@ fn receive(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut told: SkyReport,
+    mut beasts: ResMut<crate::beasts::Beasts>,
     mut lost: Local<bool>,
 ) {
     let (messages, connected) = online.connection.drain();
@@ -594,6 +596,22 @@ fn receive(
                     told.sky.told(phase);
                 }
             }
+            ToClient::Beast {
+                id,
+                kind,
+                position,
+                velocity,
+            } => {
+                // Believed within the same reason as the sky: a beast is
+                // eased towards and drawn out of this arithmetic every
+                // frame, and one telling of a non-finite place would be a
+                // shark at NaN for good. The pace ceiling sits far above any
+                // honest beast rather than at it.
+                if position.is_finite() && velocity.is_finite() && velocity.length() < 50.0 {
+                    beasts.seen(&mut commands, id, kind, position, velocity);
+                }
+            }
+            ToClient::BeastGone { id } => beasts.gone(&mut commands, id),
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } => {}

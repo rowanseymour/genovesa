@@ -127,8 +127,13 @@ Worlds open in the morning; `--time` opens one at any hour instead, on either
 binary.
 
 Everyone enters the world in the same place — afloat just off the coast of
-the same island — and other players appear as coloured markers. The wire is
-defined once, in the [`protocol`](crates/protocol/src/lib.rs) crate, which is
+the same island — and other players appear as coloured markers. The server
+also owns the sea's creatures worth agreeing on: sharks patrol the shallows
+with their fins cutting the surface, dolphin pods and the odd whale cross
+the deeper water, and every client is told about the same animal in the
+same place — so "look, a whale!" works. Only the birds stay each client's
+own invention. The wire is defined
+once, in the [`protocol`](crates/protocol/src/lib.rs) crate, which is
 the whole of what a client has to understand: the words of a session, the grid
 a chunk of ground is drawn on, and the small palette it is painted from.
 

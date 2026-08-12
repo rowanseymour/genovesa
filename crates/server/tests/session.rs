@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{dequantize, CHUNK_METRES};
-use protocol::{PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
+use protocol::{BeastId, BeastKind, PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
 use server::{Host, Server, WorldConfig};
 use world::archipelago::Archipelago;
 
@@ -102,16 +102,45 @@ impl Client {
     }
 
     /// The next message that is *about* something. The sky is skipped — both
-    /// the weather and the time of day: each is sent on joining and again on
-    /// a clock nothing in a test controls, so any assertion about message
-    /// order would be flaky against them. The tests that *are* about the sky
-    /// read for what they want with [`Client::hear_the_time`].
+    /// the weather and the time of day — and so are the beasts: each is sent
+    /// on joining and again on a clock nothing in a test controls, so any
+    /// assertion about message order would be flaky against them. The tests
+    /// that *are* about the sky or the beasts read for what they want with
+    /// [`Client::hear_the_time`] and [`Client::hear_a_beast`].
     fn hear(&self) -> ToClient {
         loop {
             match ToClient::read(&mut &self.0).expect("read") {
-                ToClient::Weather { .. } | ToClient::Daylight { .. } => continue,
+                ToClient::Weather { .. }
+                | ToClient::Daylight { .. }
+                | ToClient::Beast { .. }
+                | ToClient::BeastGone { .. } => continue,
                 message => return message,
             }
+        }
+    }
+
+    /// The next word about a beast of the wanted kind, ignoring everything
+    /// else — bounded, because the rest of the session chatters on
+    /// regardless and a world that raises no such beast would otherwise keep
+    /// this reading forever.
+    fn hear_a_beast(&self, wanted: BeastKind) -> (BeastId, Vec2, Vec2) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let ToClient::Beast {
+                id,
+                kind,
+                position,
+                velocity,
+            } = ToClient::read(&mut &self.0).expect("read")
+            {
+                if kind == wanted {
+                    return (id, position, velocity);
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ten seconds in these waters and no {wanted:?}"
+            );
         }
     }
 
@@ -630,4 +659,110 @@ fn a_night_stops_running_off_once_the_asking_stops() {
         moved < 0.02,
         "the day moved {moved} from {before} to {after} with nobody asking"
     );
+}
+
+/// A point in the shallows a shark calls home, found by walking the line
+/// from open water to an island's middle with the test's own copy of the
+/// world — the strip where a coast shelves from the deep to the beach.
+fn shallows_between(world: &Archipelago, offshore: Vec2, ashore: Vec2) -> Option<Vec2> {
+    let span = ashore - offshore;
+    let steps = (span.length() / 2.0).ceil() as i32;
+    (0..steps).find_map(|step| {
+        let at = offshore + span * (step as f32 / steps as f32);
+        // Inside the band with a metre to spare either side, so a shark
+        // raised on a ring around this point has a strip to live in rather
+        // than a line.
+        ((-5.0..=-2.5).contains(&world.height(at.x, at.y))).then_some(at)
+    })
+}
+
+#[test]
+fn sharks_are_raised_in_the_shallows_where_the_players_are() {
+    let addr = host(7);
+    let (client, _id, spawn, facing) = Client::join(addr);
+
+    // Stand in the shallows off the entry island: the strip between the open
+    // water players spawn on and the island they face.
+    let world = behind_the_curtain(7);
+    let shallows =
+        shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
+    client.say(ToServer::Move { position: shallows });
+
+    let (_id, position, velocity) = client.hear_a_beast(BeastKind::Shark);
+
+    // Raised in water a shark lives in — judged by the test's own world,
+    // with slack for the swimming it has already done by the time the word
+    // arrives.
+    let floor = world.height(position.x, position.y);
+    assert!(
+        (-10.0..=-0.5).contains(&floor),
+        "a shark was raised over ground at {floor} m"
+    );
+
+    // And already going somewhere, at a cruise rather than a bolt: the wire
+    // carries a velocity so a client can draw the glide between tellings.
+    let pace = velocity.length();
+    assert!(
+        (0.2..=4.0).contains(&pace),
+        "a shark cruising at {pace} m/s"
+    );
+}
+
+#[test]
+fn a_shark_is_forgotten_when_everyone_leaves_its_waters() {
+    let addr = host(7);
+    let (client, _id, spawn, facing) = Client::join(addr);
+    let world = behind_the_curtain(7);
+    let shallows =
+        shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
+    client.say(ToServer::Move { position: shallows });
+    let (shark, _, _) = client.hear_a_beast(BeastKind::Shark);
+
+    // Sail straight out to sea, away from the island, further than any
+    // shark is minded.
+    let away = (spawn - facing).normalize_or(Vec2::X);
+    client.say(ToServer::Move {
+        position: shallows + away * 2_000.0,
+    });
+
+    // The word comes that the sea is emptier by one — the shark left behind,
+    // not killed, and no longer anybody's business to hear about.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match ToClient::read(&mut &client.0).expect("read") {
+            ToClient::BeastGone { id } if id == shark => break,
+            _ => assert!(
+                std::time::Instant::now() < deadline,
+                "the shark was never let go"
+            ),
+        }
+    }
+}
+
+#[test]
+fn pods_and_whales_share_the_open_water() {
+    // The spawn is open water off an island's coast, which is every kind of
+    // sea at once: shallows along the shore for sharks, depth on the seaward
+    // side for the rest. Standing still there, a player is told about all
+    // three kinds — the dolphins and the whale being the animals that were
+    // once each client's own dice roll, promoted to beasts so that two
+    // players can point at the same one.
+    let addr = host(7);
+    let (client, _id, spawn, facing) = Client::join(addr);
+    let world = behind_the_curtain(7);
+    let shallows =
+        shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
+    client.say(ToServer::Move { position: shallows });
+
+    let mut kinds = std::collections::HashSet::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while kinds != [BeastKind::Shark, BeastKind::Dolphins, BeastKind::Whale].into() {
+        if let ToClient::Beast { kind, .. } = ToClient::read(&mut &client.0).expect("read") {
+            kinds.insert(kind);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fifteen seconds at anchor and the sea only offered {kinds:?}"
+        );
+    }
 }

@@ -31,6 +31,7 @@ dolphin bends — amidships — or the nose would sweep and the tail would hang.
 **It faces +Y in this file**, which the +Y-up export turns into Bevy's -Z
 forward, the boat's own convention.
 
-Where a pod *swims* is the game's business, in `crates/game/src/wildlife.rs` —
-decorative wildlife is client-side, so nothing about this model or its placing
-crosses the wire.
+Where a pod *swims* is the server's word and the wire carries it — a pod is
+a *beast* now, one creature every player can point at — while what it looks
+like doing so stays the client's, in `crates/game/src/beasts.rs`: the member
+count, the stations and the porpoising are all drawn there from the pod's id.
