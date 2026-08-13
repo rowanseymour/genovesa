@@ -164,11 +164,40 @@ struct Beast {
 
 impl Beast {
     fn habitat(&self) -> &'static Habitat {
-        HABITATS
-            .iter()
-            .find(|habitat| habitat.kind == self.kind)
-            .expect("every kind of beast has a habitat")
+        habitat_of(self.kind)
     }
+}
+
+fn habitat_of(kind: BeastKind) -> &'static Habitat {
+    HABITATS
+        .iter()
+        .find(|habitat| habitat.kind == kind)
+        .expect("every kind of beast has a habitat")
+}
+
+/// Finds water a summoned beast could be raised in near a point — the
+/// console's `spawn`, which is what [`Shared::summoned`] carries the answers
+/// of. Unlike [`raise`], which places its newcomers on a ring outside the
+/// view so they are discovered rather than watched appearing, a summons wants
+/// the animal *seen*: this sounds outward from close by and takes the first
+/// water of the kind's own band it finds, so the reply can say how far away
+/// the animal is — and honestly say there is no such water, where there
+/// isn't.
+pub(crate) fn conjure(shared: &Shared, kind: BeastKind, near: Vec2, entropy: u32) -> Option<Vec2> {
+    let habitat = habitat_of(kind);
+    for (ring, out) in [40.0f32, 80.0, 160.0, 320.0, 480.0].into_iter().enumerate() {
+        // Eight bearings round each ring, entered somewhere different each
+        // summons so repeated sharks are not stacked on one spot.
+        let entered = unit(entropy, ring as u32) * std::f32::consts::TAU;
+        for step in 0..8 {
+            let bearing = entered + step as f32 * (std::f32::consts::TAU / 8.0);
+            let spot = near + Vec2::from_angle(bearing) * out;
+            if swimmable(shared, habitat, spot) {
+                return Some(spot);
+            }
+        }
+    }
+    None
 }
 
 /// Minds the beasts on a thread of its own: raises them where the players
@@ -221,6 +250,29 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
             }
 
             let mut news: Vec<ToClient> = Vec::new();
+
+            // What the console has summoned since last beat, raised exactly
+            // where the command already found water — see [`conjure`] — and
+            // told about by the loop at the bottom like anything else born
+            // this beat.
+            let summoned: Vec<(BeastKind, Vec2)> = shared
+                .summoned
+                .lock()
+                .expect("no poisoned lock")
+                .drain(..)
+                .collect();
+            for (kind, spot) in summoned {
+                entropy = scramble(entropy);
+                beasts.insert(
+                    BeastId(next_id),
+                    Beast {
+                        kind,
+                        position: spot,
+                        heading: Vec2::from_angle(unit(entropy, 0x5EED) * std::f32::consts::TAU),
+                    },
+                );
+                next_id += 1;
+            }
 
             // Swim, then forget, then raise — so a beast that cruised out of
             // everyone's reach this very beat is let go rather than told

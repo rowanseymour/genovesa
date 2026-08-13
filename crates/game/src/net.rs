@@ -172,12 +172,20 @@ impl Connection {
 
     /// Says that this player is at anchor and would like the night over.
     ///
-    /// Public where the other two are not, because unlike the ground and the
+    /// Public where the first two are not, because unlike the ground and the
     /// player's position this is not something this module decides to send:
     /// [`crate::sky`] owns the night and the key that waits it out, and all
     /// that belongs here is the wire.
     pub fn want_dawn(&self) {
         self.say(ToServer::WantDawn);
+    }
+
+    /// Puts a console line on the wire, verbatim — [`crate::console`] owns
+    /// the typing and decides what crosses; the answer comes back through
+    /// [`receive`] as a [`ToClient::Reply`]. Public on the same terms as
+    /// [`Connection::want_dawn`].
+    pub fn command(&self, line: String) {
+        self.say(ToServer::Command { line });
     }
 
     fn say(&self, message: ToServer) {
@@ -458,6 +466,7 @@ impl Plugin for NetPlugin {
             .init_resource::<sea::SeaConditions>()
             .init_resource::<crate::sky::Sky>()
             .init_resource::<crate::beasts::Beasts>()
+            .init_resource::<crate::console::Console>()
             .add_systems(
                 Update,
                 (receive, ask_for_ground, report_position, place_markers)
@@ -491,14 +500,17 @@ fn marker_color(id: PlayerId) -> Color {
     Color::hsl((id.0 as f32 * 137.508) % 360.0, 0.65, 0.55)
 }
 
-/// Where a server's word about the sky lands: the wind the sea is drawn
-/// under, and the hour the world is lit at. Two resources belonging to two
-/// other modules, taken together because [`receive`] is the one place either
-/// of them is written and neither is this module's to interpret.
+/// Where a server's word lands when it is not an entity: the wind the sea is
+/// drawn under, the hour the world is lit at, the beasts in its water, and
+/// the console a reply is printed on. Resources belonging to four other
+/// modules, taken together because [`receive`] is the one place any of them
+/// is written and none is this module's to interpret.
 #[derive(SystemParam)]
-struct SkyReport<'w> {
+struct Told<'w> {
     forecast: ResMut<'w, sea::Forecast>,
     sky: ResMut<'w, crate::sky::Sky>,
+    beasts: ResMut<'w, crate::beasts::Beasts>,
+    console: ResMut<'w, crate::console::Console>,
 }
 
 /// Applies what the server said since last frame: players joining, moving
@@ -509,8 +521,7 @@ fn receive(
     mut ground: Option<ResMut<Ground>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut told: SkyReport,
-    mut beasts: ResMut<crate::beasts::Beasts>,
+    mut told: Told,
     mut lost: Local<bool>,
 ) {
     let (messages, connected) = online.connection.drain();
@@ -608,10 +619,15 @@ fn receive(
                 // shark at NaN for good. The pace ceiling sits far above any
                 // honest beast rather than at it.
                 if position.is_finite() && velocity.is_finite() && velocity.length() < 50.0 {
-                    beasts.seen(&mut commands, id, kind, position, velocity);
+                    told.beasts
+                        .seen(&mut commands, id, kind, position, velocity);
                 }
             }
-            ToClient::BeastGone { id } => beasts.gone(&mut commands, id),
+            ToClient::BeastGone { id } => told.beasts.gone(&mut commands, id),
+            // Whatever the server said to a console line, said where it was
+            // typed. Only ever sent asked-for, so a quiet session pays
+            // nothing here.
+            ToClient::Reply { text } => told.console.say(&text),
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } => {}
@@ -995,6 +1011,42 @@ mod tests {
             [(PlayerId(9), Vec2::new(80.0, 0.0))],
             "the one who left is still standing there, or the move was lost"
         );
+    }
+
+    #[test]
+    fn a_console_line_crosses_the_wire_and_its_reply_lands_on_the_console() {
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+
+        // The line goes out exactly as typed — the client does not parse a
+        // word of the server's vocabulary, so nothing of it can be lost here.
+        app.world()
+            .resource::<Online>()
+            .connection
+            .command("spawn shark".to_string());
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set timeout");
+        assert_eq!(
+            ToServer::read(&mut &server).expect("the command should arrive"),
+            ToServer::Command {
+                line: "spawn shark".to_string()
+            }
+        );
+
+        // And the answer lands where the question was typed.
+        (ToClient::Reply {
+            text: "a shark rises 62 m away".to_string(),
+        })
+        .write(&mut &server)
+        .expect("reply");
+        run_until(&mut app, "the reply reaches the console", |app| {
+            app.world()
+                .resource::<crate::console::Console>()
+                .said("a shark rises 62 m away")
+        });
     }
 
     /// Pausing holds the player still; it does not hang up on anyone.

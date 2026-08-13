@@ -144,6 +144,17 @@ impl Client {
         }
     }
 
+    /// The next answer to a console line, ignoring everything else — the
+    /// session goes on introducing players and telling the sky around a
+    /// command, and none of that is what a reply is about.
+    fn hear_reply(&self) -> String {
+        loop {
+            if let ToClient::Reply { text } = ToClient::read(&mut &self.0).expect("read") {
+                return text;
+            }
+        }
+    }
+
     /// The next word on what time it is, ignoring everything else.
     fn hear_the_time(&self) -> f32 {
         loop {
@@ -736,6 +747,68 @@ fn a_shark_is_forgotten_when_everyone_leaves_its_waters() {
                 "the shark was never let go"
             ),
         }
+    }
+}
+
+#[test]
+fn console_lines_are_answered_and_a_time_command_reaches_everyone() {
+    // A world at noon, with one player typing into the console and another
+    // just sailing.
+    let addr = host_at(7, 0.5);
+    let (asker, _, spawn, facing) = Client::join(addr);
+    let (bystander, ..) = Client::join(addr);
+
+    // `help` is the vocabulary's own index, answered to the asker alone.
+    asker.say(ToServer::Command {
+        line: "help".to_string(),
+    });
+    let help = asker.hear_reply();
+    for verb in ["spawn", "time", "weather"] {
+        assert!(help.contains(verb), "`help` does not mention {verb}");
+    }
+
+    // A line the server does not know gets an answer, not a hang-up: the
+    // console is the one place a client speaks words the server never
+    // promised to understand.
+    asker.say(ToServer::Command {
+        line: "dance".to_string(),
+    });
+    let lost = asker.hear_reply();
+    assert!(lost.contains("help"), "no way out of: {lost}");
+
+    // A summons from the shallows, where there is shark water to answer it.
+    let world = behind_the_curtain(7);
+    let shallows =
+        shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
+    asker.say(ToServer::Move { position: shallows });
+    asker.say(ToServer::Command {
+        line: "spawn shark".to_string(),
+    });
+    let summons = asker.hear_reply();
+    assert!(
+        summons.starts_with("a shark rises") && summons.ends_with("m away"),
+        "the summons came to: {summons}"
+    );
+
+    // The day run on to evening: the asker hears what came of it, and the
+    // bystander's sun moves without them having asked anything — on the beat
+    // of the command, not of the sky thread's next telling. The deadline
+    // does the proving: at ten minutes to the day, the clock could not reach
+    // evening from noon on its own in under a minute.
+    asker.say(ToServer::Command {
+        line: "time 18:00".to_string(),
+    });
+    assert_eq!(asker.hear_reply(), "the day has run on to 18:00");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let heard = bystander.hear_the_time();
+        if (heard - 0.75).abs() < 0.01 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the bystander's day stands at {heard}, not the evening the console ordered"
+        );
     }
 }
 

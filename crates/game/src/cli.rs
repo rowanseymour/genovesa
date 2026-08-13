@@ -166,8 +166,10 @@ Every world is served. A run that opens one runs a server for itself, reachable
 from this machine only; a world started from the menu can be shared instead,
 which hosts it on port {DEFAULT_PORT} for others to `--join`. Either way it is
 the same session a dedicated `server` serves.
-  --debug           overlay frame rate, geometry counts and the current view
-                    on the window; ignored when capturing, so shots stay clean
+  --debug           start with the stats readout showing — frame rate,
+                    geometry counts and the current view. The same readout the
+                    console's `set stats on` shows (the console is on the key
+                    left of 1); ignored when capturing, so shots stay clean
 
 View options, applied in the order given:
   --focus <x,z>     world point to put the player down at and centre the view

@@ -38,7 +38,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// How long one turn of the world's day takes, in seconds — sunrise to
 /// sunrise, ten minutes of it.
@@ -76,9 +76,10 @@ pub const DEFAULT_PORT: u16 = 24816;
 
 /// The longest frame a server will accept from a client. Everything a client
 /// says is a couple of dozen bytes — where it is, or which chunk it wants —
-/// and the ceiling exists so that a corrupt length prefix reads as corruption
-/// instead of as a request to buffer megabytes.
-const MAX_CLIENT_FRAME: u16 = 64;
+/// except a console line, which is as long as whatever was typed and gets the
+/// room a sentence needs. The ceiling exists so that a corrupt length prefix
+/// reads as corruption instead of as a request to buffer megabytes.
+const MAX_CLIENT_FRAME: u16 = 512;
 
 /// The longest frame a client will accept from a server, which is exactly one
 /// chunk of ground and not a byte more: its tag, its coordinates, the flag
@@ -168,7 +169,7 @@ impl BeastKind {
 /// Positions are metres on the world's ground plane, as everywhere else in
 /// the workspace. Height is never sent: a player stands on the ground the
 /// server sent them, so the server can put them back on it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ToServer {
     /// The first message on any connection, and never sent again.
     Hello { version: u16 },
@@ -194,6 +195,20 @@ pub enum ToServer {
     /// somebody is still sailing keeps its night. Repeat it while the wish
     /// stands; a client that sends it once and stops has changed its mind.
     WantDawn,
+    /// A debug-console line for the server to interpret: whatever the player
+    /// typed, verbatim.
+    ///
+    /// Deliberately opaque. The vocabulary — `spawn shark`, `time 6:00` —
+    /// belongs to the *server* and may grow without this crate hearing about
+    /// it: a client has no parsing to do and nothing to know, which keeps a
+    /// client written in any language as capable as the newest server it
+    /// talks to. `help` is the vocabulary's own index, and the server
+    /// answers every line — the ones it did not understand included — with a
+    /// [`ToClient::Reply`] to the asker alone.
+    ///
+    /// On the wire the line is a u16 byte count and that many bytes of
+    /// UTF-8.
+    Command { line: String },
 }
 
 /// What a server may say.
@@ -271,10 +286,15 @@ pub enum ToClient {
     /// [`DAY_SECONDS`] to the turn, and to ease onto each new word rather
     /// than snapping to it — the tellings are a beat apart and a sun that
     /// jumped every second would be a stuttering one. It never runs
-    /// backwards: the one thing that moves it other than the clock is a
+    /// backwards: the two things that move it other than the clock are a
     /// night being waited out (see [`ToServer::WantDawn`]), which the server
-    /// serves by running the same clock fast, so the difference a client has
-    /// to make up is always a small step forwards.
+    /// serves by running the same clock fast, and a console `time` command
+    /// (see [`ToServer::Command`]), which the server serves by running the
+    /// clock forward to the *next* occurrence of the asked-for hour. So a
+    /// step may be most of a day at once, but it is always a day getting
+    /// older — and since the phase wraps at midnight even when time is only
+    /// passing, a client easing the shortest way round the circle already
+    /// draws every step there is.
     Daylight {
         phase: f32,
     },
@@ -304,6 +324,16 @@ pub enum ToClient {
     BeastGone {
         id: BeastId,
     },
+    /// The server's answer to a [`ToServer::Command`], sent to the player
+    /// who typed it and nobody else: plain text for the console the line
+    /// was typed into, whether the command was served or not understood.
+    /// Never sent unasked, so a client that types nothing never hears one.
+    ///
+    /// On the wire the text is a u16 byte count and that many bytes of
+    /// UTF-8, exactly as the command it answers travelled the other way.
+    Reply {
+        text: String,
+    },
 }
 
 impl ToServer {
@@ -324,6 +354,10 @@ impl ToServer {
                 put_ivec2(&mut payload, *chunk);
             }
             Self::WantDawn => payload.push(3),
+            Self::Command { line } => {
+                payload.push(4);
+                put_str(&mut payload, line);
+            }
         }
         write_frame(to, &payload, MAX_CLIENT_FRAME)
     }
@@ -343,6 +377,9 @@ impl ToServer {
                 chunk: payload.ivec2()?,
             },
             3 => Self::WantDawn,
+            4 => Self::Command {
+                line: payload.str()?,
+            },
             tag => return Err(corrupt(format!("unknown client message tag {tag}"))),
         };
         payload.finish()?;
@@ -402,6 +439,10 @@ impl ToClient {
             Self::BeastGone { id } => {
                 payload.push(9);
                 put_u32(&mut payload, id.0);
+            }
+            Self::Reply { text } => {
+                payload.push(10);
+                put_str(&mut payload, text);
             }
             Self::Chunk { chunk, ground } => {
                 payload.push(5);
@@ -485,6 +526,9 @@ impl ToClient {
             9 => Self::BeastGone {
                 id: BeastId(payload.u32()?),
             },
+            10 => Self::Reply {
+                text: payload.str()?,
+            },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
         payload.finish()?;
@@ -557,6 +601,15 @@ fn put_ivec2(out: &mut Vec<u8>, value: IVec2) {
     out.extend_from_slice(&value.y.to_le_bytes());
 }
 
+/// A string as a u16 byte count and its UTF-8 bytes. A count too big for the
+/// u16 wraps, but the payload it miscounts cannot leave the machine: the
+/// frame it belongs to is over its own ceiling by more, and is refused whole
+/// by [`write_frame`].
+fn put_str(out: &mut Vec<u8>, value: &str) {
+    put_u16(out, value.len() as u16);
+    out.extend_from_slice(value.as_bytes());
+}
+
 fn corrupt(what: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, what)
 }
@@ -618,6 +671,13 @@ impl<'a> Payload<'a> {
         Ok(IVec2::new(self.i32()?, self.i32()?))
     }
 
+    fn str(&mut self) -> io::Result<String> {
+        let count = self.u16()? as usize;
+        let bytes = self.take(count)?;
+        String::from_utf8(bytes.to_vec())
+            .map_err(|_| corrupt("text that is not UTF-8 is not text".into()))
+    }
+
     fn chunk_payload(&mut self, water: bool, palms: usize) -> io::Result<ChunkPayload> {
         let bytes = self.take(ground::payload_bytes(water, palms))?;
         ChunkPayload::take(bytes, water, palms).ok_or_else(|| {
@@ -641,7 +701,7 @@ mod tests {
     use super::ground::{Shade, Surface, Tone, FACET_TRIS, FACET_VERTS};
     use super::*;
 
-    fn bytes_of_client(message: ToServer) -> Vec<u8> {
+    fn bytes_of_client(message: &ToServer) -> Vec<u8> {
         let mut out = Vec::new();
         message.write(&mut out).expect("a Vec never fails to grow");
         out
@@ -707,8 +767,11 @@ mod tests {
                 chunk: IVec2::new(-9, 4),
             },
             ToServer::WantDawn,
+            ToServer::Command {
+                line: "spawn shark".to_string(),
+            },
         ] {
-            let bytes = bytes_of_client(message);
+            let bytes = bytes_of_client(&message);
             assert_eq!(ToServer::read(&mut bytes.as_slice()).unwrap(), message);
         }
 
@@ -751,6 +814,9 @@ mod tests {
                 velocity: Vec2::new(-0.5, -1.0),
             },
             ToClient::BeastGone { id: BeastId(12) },
+            ToClient::Reply {
+                text: "the clock stands at 06:00".to_string(),
+            },
             ToClient::Chunk {
                 chunk: IVec2::new(3, -8),
                 ground: None,
@@ -785,12 +851,12 @@ mod tests {
         // both halves are exact in binary, and the two differ in every byte
         // that matters, so a pair of axes that swapped places would show.
         assert_eq!(
-            bytes_of_client(ToServer::Hello { version: 3 }),
+            bytes_of_client(&ToServer::Hello { version: 3 }),
             [3, 0, 0, 3, 0],
             "hello: length 3, tag 0, version LE"
         );
         assert_eq!(
-            bytes_of_client(ToServer::Move {
+            bytes_of_client(&ToServer::Move {
                 position: Vec2::new(1.5, -2.0),
             }),
             [
@@ -801,7 +867,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            bytes_of_client(ToServer::WantChunk {
+            bytes_of_client(&ToServer::WantChunk {
                 chunk: IVec2::new(5, -3),
             }),
             [
@@ -812,9 +878,20 @@ mod tests {
             ],
         );
         assert_eq!(
-            bytes_of_client(ToServer::WantDawn),
+            bytes_of_client(&ToServer::WantDawn),
             [1, 0, 3],
             "want dawn: length 1, tag 3, and nothing to say"
+        );
+        assert_eq!(
+            bytes_of_client(&ToServer::Command {
+                line: "hi".to_string(),
+            }),
+            [
+                5, 0, // length
+                4, // tag
+                2, 0, // the line's own byte count, LE
+                0x68, 0x69, // "hi", as the UTF-8 it already was
+            ],
         );
 
         assert_eq!(
@@ -934,6 +1011,17 @@ mod tests {
                 5, 0, // length
                 9, // tag
                 7, 0, 0, 0, // id
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::Reply {
+                text: "hi".to_string(),
+            }),
+            [
+                5, 0,  // length
+                10, // tag
+                2, 0, // the text's own byte count, LE
+                0x68, 0x69, // "hi"
             ],
         );
 

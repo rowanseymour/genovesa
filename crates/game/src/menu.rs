@@ -1154,8 +1154,10 @@ fn helm_keys(
         Helm::Sailing => next.set(Helm::Paused),
         Helm::Paused => next.set(Helm::Sailing),
         // Not ours. On the controls screen Escape may mean "not that key"
-        // rather than "back", and only `settings_keys` knows which.
-        Helm::Controls => {}
+        // rather than "back", and only `settings_keys` knows which; at the
+        // console it means "close the console", which is the console's own
+        // to hear.
+        Helm::Controls | Helm::Console => {}
     }
 }
 

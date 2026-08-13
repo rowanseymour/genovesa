@@ -93,13 +93,15 @@ impl Action {
 /// The arrows are a permanent second set of movement keys, so however
 /// thoroughly the rest is rebound the player can always get about; Escape is
 /// the one step back from wherever the player is — into the pause menu, out of
-/// it again, and out of setting a key.
-pub const RESERVED: [KeyCode; 5] = [
+/// it again, and out of setting a key; and the backquote is the way into and
+/// out of the debug console — see `crate::console`.
+pub const RESERVED: [KeyCode; 6] = [
     KeyCode::Escape,
     KeyCode::ArrowUp,
     KeyCode::ArrowDown,
     KeyCode::ArrowLeft,
     KeyCode::ArrowRight,
+    KeyCode::Backquote,
 ];
 
 /// Whether a key is the player's to give away.

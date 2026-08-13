@@ -18,6 +18,7 @@
 
 pub mod beasts;
 pub mod cli;
+mod console;
 
 use std::collections::HashMap;
 use std::io;
@@ -28,7 +29,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
-use protocol::{PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
+use protocol::{BeastKind, PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
 use world::archipelago::Archipelago;
 
 pub use world::archipelago::{random_seed, WorldConfig, MAX_SEED};
@@ -207,10 +208,21 @@ pub(crate) struct Shared {
     /// [`Server::opening_at`] said otherwise.
     opening: f32,
     /// Seconds of the world's own time run off over and above the session's:
-    /// the nights its players have waited out. The only state the day has
-    /// beyond the clock, which is what keeps two askers from disagreeing
+    /// the nights its players have waited out, and the hours the console's
+    /// `time` command has asked to have over with. Only ever grows — the
+    /// world's day gets older or it gets older faster, never younger, which
+    /// is the promise [`ToClient::Daylight`] makes. The only state the day
+    /// has beyond the clock, which is what keeps two askers from disagreeing
     /// about what time it is — see [`Shared::phase`].
     skipped: Mutex<f32>,
+    /// A wind ordered from the console, outranking the world's own weather
+    /// for as long as it is set — see [`console`], where the ordering
+    /// happens, and [`Shared::wind`], which is where it takes effect.
+    commanded_wind: Mutex<Option<Vec2>>,
+    /// Beasts the console has summoned and the warden has not yet raised:
+    /// each with the spot the command already found water at, absorbed into
+    /// the flock on the next beat — see [`beasts::mind_the_beasts`].
+    pub(crate) summoned: Mutex<Vec<(BeastKind, Vec2)>>,
     report: Report,
 }
 
@@ -280,6 +292,8 @@ impl Server {
                 started: Instant::now(),
                 opening: OPENING,
                 skipped: Mutex::new(0.0),
+                commanded_wind: Mutex::new(None),
+                summoned: Mutex::new(Vec::new()),
                 report: Box::new(|_| {}),
             }),
         })
@@ -598,9 +612,42 @@ fn watch_the_sky(shared: &Arc<Shared>) {
 impl Shared {
     /// The wind over this world right now. Asked rather than kept: the
     /// weather is a pure function of the seed and the session's clock, so
-    /// there is no cached state for two askers to disagree over.
+    /// there is no cached state for two askers to disagree over — unless the
+    /// console has taken the weather in hand, which *is* state, and then its
+    /// order is the answer for everyone until it lets go.
     fn wind(&self) -> Vec2 {
-        world::weather::wind(self.world.seed(), self.started.elapsed().as_secs_f32())
+        let commanded = *self.commanded_wind.lock().expect("no poisoned lock");
+        commanded.unwrap_or_else(|| {
+            world::weather::wind(self.world.seed(), self.started.elapsed().as_secs_f32())
+        })
+    }
+
+    /// Orders the wind, or — with `None` — gives the weather back to the
+    /// world. The sky thread notices the answer to [`Shared::wind`] moving
+    /// and tells everyone, exactly as it does when the real weather turns.
+    fn command_wind(&self, wind: Option<Vec2>) {
+        *self.commanded_wind.lock().expect("no poisoned lock") = wind;
+    }
+
+    /// Runs the world's clock forward to the next time it reads `target`,
+    /// and says what the phase now is.
+    ///
+    /// Forward to the *next* occurrence, never backwards to the last one —
+    /// asking for an hour already struck means asking for tomorrow's, so the
+    /// world's overall time only ever grows and the promise
+    /// [`ToClient::Daylight`] makes holds. Asking for the very hour it is
+    /// moves nothing.
+    fn wind_forward_to(&self, target: f32) -> f32 {
+        let mut skipped = self.skipped.lock().expect("no poisoned lock");
+        // The phase worked out inline rather than asked of [`Shared::phase`],
+        // which takes this same lock — and it has to be under the lock, or a
+        // night being run off between the read and the write would be run
+        // off twice.
+        let seconds = self.started.elapsed().as_secs_f32() + *skipped;
+        let phase = (self.opening + seconds / protocol::DAY_SECONDS).rem_euclid(1.0);
+        let ahead = (target - phase).rem_euclid(1.0);
+        *skipped += ahead * protocol::DAY_SECONDS;
+        (phase + ahead).rem_euclid(1.0)
     }
 
     /// What time of day it is here, as a phase — see [`ToClient::Daylight`].
@@ -827,6 +874,19 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 let mut players = shared.players.lock().expect("no poisoned lock");
                 if let Some(player) = players.get_mut(&id) {
                     player.waiting_since = Some(Instant::now());
+                }
+            }
+            Ok(ToServer::Command { line }) => {
+                // Interpreted holding nothing: a command takes the day's or
+                // the weather's own locks, and broadcasts under the roster's,
+                // so the roster must not already be held here. Anyone in the
+                // world may command — a session is a game among people who
+                // chose each other — and the host's log says who asked what.
+                let reply = console::interpret(&shared, id, &line);
+                (shared.report)(&format!("{id}: {line}"));
+                let players = shared.players.lock().expect("no poisoned lock");
+                if let Some(player) = players.get(&id) {
+                    post(player, ToClient::Reply { text: reply });
                 }
             }
             Ok(ToServer::WantChunk { chunk }) if in_the_world(chunk) => {
