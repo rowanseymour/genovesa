@@ -20,6 +20,7 @@ use game::camera::MapCameraPlugin;
 use game::capture::CapturePlugin;
 use game::cli::{self, Args};
 use game::compass::CompassPlugin;
+use game::console::ConsolePlugin;
 use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
@@ -88,9 +89,14 @@ fn run(args: Args, session: Option<Session>) {
     }
 
     // Not while capturing: the UI renders to the captured image, so the
-    // readout would be baked into every shot.
-    if args.debug && !args.is_capture() {
-        app.add_plugins(DebugOverlayPlugin);
+    // readout — or a console left open — would be baked into every shot. In
+    // every windowed run the console is present and the readout with it,
+    // hidden until `set stats on`; `--debug` just starts with it showing.
+    if !args.is_capture() {
+        app.add_plugins((DebugOverlayPlugin, ConsolePlugin));
+        if args.debug {
+            app.world_mut().resource_mut::<game::debug::Toggles>().stats = true;
+        }
     }
 
     // Not while capturing either: a run that writes pictures and quits has no

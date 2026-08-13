@@ -1,4 +1,4 @@
-//! The `--debug` overlay: what each pass draws, and switches to change it.
+//! The debug readout: what each pass draws, and the switches that change it.
 //!
 //! A small readout pinned to a corner of the window, over whatever screen the
 //! app is on, a subject to a line. The frame rate comes from Bevy's own
@@ -16,12 +16,15 @@
 //! the whole of what it takes to stand here again, in a `--shot` run or
 //! otherwise.
 //!
-//! The number keys are switches for whoever is working on the renderer — see
-//! [`Toggles`] — and they are here rather than in their own module because
-//! reading a count and changing what is counted are one job: the reason to
-//! turn the shadows off is to watch the shadow line answer. When any of them
-//! is set the readout says so on a last line, since a doctored picture that
-//! did not admit it would be worth less than no picture at all.
+//! The switches are [`Toggles`], and they are set from the console — see
+//! [`crate::console`], whose `set` lines are their only writer. They used to
+//! be number keys; the console replaced them because a vocabulary outgrows a
+//! number row, but reading a count and changing what is counted are still one
+//! job, which is why the state stays in this module with the readout: the
+//! reason to turn the shadows off is to watch the shadow line answer. When
+//! any switch is away from the world's own state the readout says so on a
+//! last line, since a doctored picture that did not admit it would be worth
+//! less than no picture at all.
 
 use std::any::TypeId;
 
@@ -36,13 +39,10 @@ use bevy::text::FontSize;
 
 use crate::camera::{MapCamera, View};
 use crate::net::Hosting;
-use crate::sea::Forecast;
-use crate::sky::Sky;
 use crate::terrain::{Ground, Tally};
-use crate::Helm;
 
-const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
-const BACKDROP: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
+pub(crate) const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
+pub(crate) const BACKDROP: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
 
 pub struct DebugOverlayPlugin;
 
@@ -50,118 +50,77 @@ impl Plugin for DebugOverlayPlugin {
     fn build(&self, app: &mut App) {
         // Wireframes come from the renderer, and the readout's own tests run
         // an app that has none — text is text without a GPU. Asking whether
-        // the renderer is there keeps every `--debug` system in this file
+        // the renderer is there keeps every overlay system in this file
         // rather than scattering half of them into the binary to dodge that.
         if app.is_plugin_added::<bevy::render::RenderPlugin>() {
             app.add_plugins(WireframePlugin::default());
         }
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<Toggles>()
-            // Where the commanded wind and hour land — shared with the
-            // plugins that draw the sea and the sky, each initialising them
-            // for its own tests.
-            .init_resource::<Forecast>()
-            .init_resource::<Sky>()
+            // The hour the readout prints — shared with the plugin that
+            // draws the sky, each initialising it for its own tests.
+            .init_resource::<crate::sky::Sky>()
             .add_systems(Startup, spawn_overlay)
-            // Only at the helm. Digits are typed into the seed and address
-            // fields on the menus, and the controls screen binds whatever key
-            // it is given — and that screen is *inside* a world, so gating on
-            // being in one is not enough to keep a toggle out of a binding.
-            .add_systems(Update, take_toggles.run_if(in_state(Helm::Sailing)))
             .add_systems(Update, (apply_toggles, refresh_overlay).chain());
     }
 }
+
+/// Marks the overlay's panel, so showing and hiding it can find it.
+#[derive(Component)]
+struct DebugPanel;
 
 /// Marks the overlay's one text block, so the refresh can find it.
 #[derive(Component)]
 struct DebugText;
 
-/// How far the sun's cascades reach when `4` has been leaned on, in metres.
-///
-/// The first is the world's own — [`crate::HAZE_END`], where the haze has
-/// closed and nothing can be seen to lose its shadow. The rest walk in far
-/// enough to be worth looking at rather than in polite steps: the question the
-/// key exists to answer is whether a shorter reach is *visibly* worse, and
-/// halving twice puts the far edge of the shadows inside the haze and then
-/// inside plain sight, which is where the answer is.
-const REACHES: [f32; 3] = [crate::HAZE_END, 450.0, 225.0];
+/// The switches the console's `set` lines throw — see [`crate::console`],
+/// which owns the grammar, while this module owns making them true of the
+/// scene. All of them are about what *this machine* draws: nothing here
+/// reaches the world or anybody else's picture of it, which is what
+/// separates a `set` from the console's other language.
+#[derive(Resource, PartialEq, Clone, Debug)]
+pub struct Toggles {
+    /// `set stats` — whether the readout itself is on screen. The one switch
+    /// here that changes nothing about the picture, so the last line never
+    /// mentions it: a readout that is visible has already admitted to being
+    /// on.
+    pub stats: bool,
+    /// `set shadows` — off, and the sun stops casting. The shadow line
+    /// disappears with it, Bevy clearing the cascade cull when a light's
+    /// shadows are off, so the readout cannot claim work that is no longer
+    /// being done.
+    pub shadows: bool,
+    /// `set haze` — off, and the aerial haze comes away, so what the distant
+    /// ground is actually doing can be seen. Mostly worth having next to
+    /// `set reach`: judging what a shorter shadow reach costs is impossible
+    /// while the haze is hiding the far end of it.
+    pub haze: bool,
+    /// `set wireframe` — every triangle drawn as lines, which is how the
+    /// fixed 8,192 a chunk carries stops being a number and becomes a
+    /// picture.
+    pub wireframe: bool,
+    /// `set reach` — how far the sun's cascades go, in metres. The default
+    /// is [`crate::HAZE_END`], where the haze has closed and nothing can be
+    /// seen to lose its shadow; the question the switch exists to answer is
+    /// whether a shorter reach is *visibly* worse, and walking it in until
+    /// the far edge of the shadows sits in plain sight is where the answer
+    /// is.
+    pub reach: f32,
+}
 
-/// The winds `5` orders up, cycling — with [`Toggles::wind`] at zero being
-/// the server's own weather, which is not a vector to be listed here. The
-/// strengths are the sea's landmarks rather than round numbers: a flat calm,
-/// the reference breeze the wave amplitudes are written for, and the hardest
-/// gale an honest server can blow. The bearings swing wide between
-/// neighbours on purpose: cycling marches every wave train through its
-/// re-aim dance, which is half of what the key exists to watch — the other
-/// half being how the sea wears each strength, without waiting minutes for
-/// the real sky to happen to visit it.
-const WINDS: [(&str, Vec2); 3] = [
-    ("calm", Vec2::ZERO),
-    ("breeze", Vec2::new(-4.95, -4.95)),
-    ("gale", Vec2::new(11.31, -11.31)),
-];
-
-/// One hour of the world's day, as a phase of it — the step `6` moves the
-/// sky on by, and the whole of why that key exists. Ten minutes to the day
-/// means every hour comes round on its own soon enough, but not in the order
-/// or at the moment somebody comparing two of them wants: an hour a press
-/// walks the sun round the whole day in a few seconds, and stops on any hour
-/// of it for as long as it takes to look.
-const HOUR: f32 = 1.0 / 24.0;
-
-/// The switches `--debug` puts on the number keys.
-///
-/// Hard-wired rather than bound through [`crate::bindings`], and deliberately:
-/// these are for whoever is working on the renderer, they never appear on the
-/// controls screen, and a player who has rebound every key they can see still
-/// cannot reach them — the whole plugin is absent without `--debug`.
-#[derive(Resource, Default, PartialEq, Clone, Debug)]
-struct Toggles {
-    /// `1` — the sun stops casting. The shadow line disappears with it, Bevy
-    /// clearing the cascade cull when a light's shadows are off, so the
-    /// readout cannot claim work that is no longer being done.
-    no_shadows: bool,
-    /// `2` — the aerial haze comes off, so what the distant ground is actually
-    /// doing can be seen. Mostly worth having next to `4`: judging what a
-    /// shorter shadow reach costs is impossible while the haze is hiding the
-    /// far end of it.
-    no_haze: bool,
-    /// `3` — every triangle drawn as lines, which is how the fixed 8,192 a
-    /// chunk carries stops being a number and becomes a picture.
-    wireframe: bool,
-    /// `4` — index into [`REACHES`], cycling.
-    reach: usize,
-    /// `5` — the weather taken in hand: one past the index into [`WINDS`],
-    /// with `0` the server's own sky. Local, like every switch here — it
-    /// doctors this machine's sea and nothing anybody else sails on, the
-    /// world's weather staying the server's to tell.
-    wind: usize,
-    /// `6` — the sky held, and moved on by [`HOUR`] a press: `0` is the
-    /// world's own time of day, and anything else is that many hours past
-    /// [`Toggles::hour_from`]. Twenty-four states, so the key walks the day
-    /// and the last press of it lets go — leaning on this can no more strand
-    /// the sun somewhere there is no key to leave than `4` can the shadows.
-    ///
-    /// Local like the wind, and in the same way: the world's clock goes on
-    /// running underneath, and letting go returns to whatever hour it has
-    /// reached meanwhile rather than to the one it was at when the key was
-    /// first pressed.
-    hour: usize,
-    /// The hour the sky was at when `6` was first leaned on, which
-    /// [`Toggles::hour`] counts from — so the first press steps on from the
-    /// sky that is on the screen rather than jumping to a midnight nobody
-    /// asked about. Meaningless, and left where it lay, while `hour` is 0.
-    hour_from: f32,
+impl Default for Toggles {
+    fn default() -> Self {
+        Self {
+            stats: false,
+            shadows: true,
+            haze: true,
+            wireframe: false,
+            reach: crate::HAZE_END,
+        }
+    }
 }
 
 impl Toggles {
-    /// The hour `6` is holding the sky at: where it was first pressed, plus
-    /// an hour for every press since. Meaningless unless [`Toggles::hour`]
-    /// says the sky is held at all.
-    fn held_hour(&self) -> f32 {
-        (self.hour_from + self.hour as f32 * HOUR).rem_euclid(1.0)
-    }
-
     /// How the overlay owns up to being in a doctored state — `None` when
     /// nothing has been touched, which is the usual case and costs the readout
     /// no line at all.
@@ -173,72 +132,20 @@ impl Toggles {
     /// renderer should be set up.
     fn line(&self) -> Option<String> {
         let mut on = Vec::new();
-        if self.no_shadows {
+        if !self.shadows {
             on.push("no shadows".to_string());
         }
-        if self.no_haze {
+        if !self.haze {
             on.push("no haze".to_string());
         }
         if self.wireframe {
             on.push("wireframe".to_string());
         }
-        if self.reach != 0 {
-            on.push(format!("shadow reach {:.0}m", REACHES[self.reach]));
-        }
-        if let Some(i) = self.wind.checked_sub(1) {
-            on.push(format!("wind {}", WINDS[i].0));
-        }
-        if self.hour != 0 {
-            on.push(format!("sky held at {}", clock(self.held_hour())));
+        if self.reach != crate::HAZE_END {
+            on.push(format!("shadow reach {:.0}m", self.reach));
         }
         (!on.is_empty()).then(|| format!("debug: {}", on.join(" / ")))
     }
-}
-
-/// Reads the number keys. Nothing here changes the world — it only moves
-/// [`Toggles`], which [`apply_toggles`] then makes true of the scene, so that
-/// the state and the acting on it stay one thing each. The sky is *read*
-/// here, and only to know which hour the stepping starts from.
-fn take_toggles(keys: Res<ButtonInput<KeyCode>>, sky: Res<Sky>, mut toggles: ResMut<Toggles>) {
-    if keys.just_pressed(KeyCode::Digit1) {
-        toggles.no_shadows = !toggles.no_shadows;
-    }
-    if keys.just_pressed(KeyCode::Digit2) {
-        toggles.no_haze = !toggles.no_haze;
-    }
-    if keys.just_pressed(KeyCode::Digit3) {
-        toggles.wireframe = !toggles.wireframe;
-    }
-    if keys.just_pressed(KeyCode::Digit4) {
-        toggles.reach = (toggles.reach + 1) % REACHES.len();
-    }
-    if keys.just_pressed(KeyCode::Digit5) {
-        toggles.wind = (toggles.wind + 1) % (WINDS.len() + 1);
-    }
-    if keys.just_pressed(KeyCode::Digit6) {
-        // The hour to count from is grabbed on the way out of the world's own
-        // clock, before the count says anything, so the first step lands an
-        // hour past whatever was on the screen.
-        if toggles.hour == 0 {
-            toggles.hour_from = sky.phase();
-        }
-        toggles.hour = (toggles.hour + 1) % 24;
-    }
-    // Everything back, for when a session has drifted somewhere nobody can
-    // remember the way out of.
-    if keys.just_pressed(KeyCode::Digit0) {
-        *toggles = Toggles::default();
-    }
-}
-
-/// The two things a switch here orders of the world rather than of the
-/// renderer: the wind on the sea and the hour in the sky. Both are local
-/// commands over what this machine draws — the world's own weather and clock
-/// go on underneath, and letting go returns to them.
-#[derive(SystemParam)]
-struct Ordered<'w> {
-    forecast: ResMut<'w, Forecast>,
-    sky: ResMut<'w, Sky>,
 }
 
 /// What the readout can say about the world under the picture: how much of it
@@ -247,14 +154,14 @@ struct Ordered<'w> {
 #[derive(SystemParam)]
 struct WorldUnder<'w> {
     ground: Option<Res<'w, Ground>>,
-    sky: Res<'w, Sky>,
+    sky: Res<'w, crate::sky::Sky>,
 }
 
 /// Makes the scene agree with [`Toggles`].
 ///
 /// Written as "set it to what it should be" rather than "change it when the
-/// key is pressed", so that a sun or a camera spawned *after* the key was
-/// pressed — leaving a world and entering another does exactly that — comes up
+/// switch is thrown", so that a sun or a camera spawned *after* the console
+/// spoke — leaving a world and entering another does exactly that — comes up
 /// in the state the readout claims it is in. The `is_changed` guard is only to
 /// keep it from writing the same values every frame, which would have every
 /// light and camera register as changed for anything else watching.
@@ -262,7 +169,6 @@ fn apply_toggles(
     mut commands: Commands,
     toggles: Res<Toggles>,
     wireframe: Option<ResMut<WireframeConfig>>,
-    mut ordered: Ordered,
     mut suns: Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
     cameras: Query<(Entity, Has<DistanceFog>), With<MapCamera>>,
     mut lit: Local<bool>,
@@ -273,20 +179,6 @@ fn apply_toggles(
         return;
     }
 
-    // The sea eases towards this like any change of weather — see
-    // [`crate::sea::settle_conditions`] — so a preset arrives as a squall
-    // blowing in rather than as a cut between two oceans.
-    ordered.forecast.commanded = toggles.wind.checked_sub(1).map(|i| WINDS[i].1);
-
-    // The sky's twin of it, and local in the same way: an hour ordered here
-    // changes what this machine draws and not what time it is in the world.
-    // Worked out from the count rather than added to what is already there,
-    // so that this staying idempotent is not a thing to remember — every
-    // other switch has it applied afresh whenever anything changes, and an
-    // hour that stepped on each time would walk the sun round the day every
-    // time somebody reached for the wireframe.
-    ordered.sky.commanded = (toggles.hour != 0).then(|| toggles.held_hour());
-
     if let Some(mut wireframe) = wireframe {
         wireframe.global = toggles.wireframe;
         // Dark lines. The default is white, which disappears against sand and
@@ -295,16 +187,16 @@ fn apply_toggles(
     }
 
     for (mut sun, mut cascades) in &mut suns {
-        sun.shadow_maps_enabled = !toggles.no_shadows;
-        *cascades = crate::terrain::cascades(REACHES[toggles.reach]);
+        sun.shadow_maps_enabled = toggles.shadows;
+        *cascades = crate::terrain::cascades(toggles.reach);
     }
 
     for (camera, has_fog) in &cameras {
-        match (toggles.no_haze, has_fog) {
-            (true, true) => {
+        match (toggles.haze, has_fog) {
+            (false, true) => {
                 commands.entity(camera).remove::<DistanceFog>();
             }
-            (false, false) => {
+            (true, false) => {
                 commands.entity(camera).insert(crate::camera::haze());
             }
             _ => {}
@@ -316,6 +208,7 @@ fn spawn_overlay(mut commands: Commands) {
     commands
         .spawn((
             Name::new("Debug overlay"),
+            DebugPanel,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(8.0),
@@ -341,6 +234,14 @@ fn spawn_overlay(mut commands: Commands) {
         });
 }
 
+/// The overlay's two entities, as the refresh reaches them: the panel that
+/// shows or hides, and the text that says everything.
+#[derive(SystemParam)]
+struct Overlay<'w, 's> {
+    panels: Query<'w, 's, &'static mut Visibility, With<DebugPanel>>,
+    texts: Query<'w, 's, &'static mut Text, With<DebugText>>,
+}
+
 fn refresh_overlay(
     diagnostics: Res<DiagnosticsStore>,
     scene: Scene,
@@ -348,8 +249,21 @@ fn refresh_overlay(
     world: WorldUnder,
     hosting: Option<Res<Hosting>>,
     cameras: Query<&MapCamera>,
-    mut texts: Query<&mut Text, With<DebugText>>,
+    mut overlay: Overlay,
 ) {
+    for mut visibility in &mut overlay.panels {
+        *visibility = if toggles.stats {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Hidden is hidden: the counting below walks every visible mesh, and a
+    // readout nobody can see should cost what it shows — nothing.
+    if !toggles.stats {
+        return;
+    }
+
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|fps| fps.smoothed());
@@ -374,7 +288,7 @@ fn refresh_overlay(
     // and never the recipe, so there is no seed here to print.
     let seed = hosting.map(|hosting| hosting.0.seed());
 
-    for mut text in &mut texts {
+    for mut text in &mut overlay.texts {
         text.0 = overlay_text(fps, &counts, tally.as_ref(), hour, seed, view, &toggles);
     }
 }
@@ -659,6 +573,15 @@ mod tests {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32, 0.0, 0.0]; vertices])
     }
 
+    /// The switches with the readout on — what most of these tests are
+    /// looking at, and exactly what `--debug` starts a run with.
+    fn showing() -> Toggles {
+        Toggles {
+            stats: true,
+            ..default()
+        }
+    }
+
     #[test]
     fn an_unindexed_mesh_counts_by_its_vertices() {
         assert_eq!(triangles_in(&unindexed(6)), 2);
@@ -706,7 +629,7 @@ mod tests {
                 Some(0.35),
                 Some(20_040_112),
                 Some(view),
-                &Toggles::default()
+                &showing()
             ),
             "60 fps / 214 meshes / 1,234,567 triangles\n\
              3,298,112 shadow tris / 623 draws / 4 cascades\n\
@@ -727,7 +650,7 @@ mod tests {
             shadows: None,
         };
         assert_eq!(
-            overlay_text(None, &counts, None, None, None, None, &Toggles::default()),
+            overlay_text(None, &counts, None, None, None, None, &showing()),
             "-- fps / 0 meshes / 0 triangles"
         );
     }
@@ -780,7 +703,8 @@ mod tests {
             bevy::diagnostic::FrameCountPlugin,
             DebugOverlayPlugin,
         ))
-        .insert_resource(Assets::<Mesh>::default());
+        .insert_resource(Assets::<Mesh>::default())
+        .insert_resource(showing());
 
         // Two meshes of two triangles each — and only one of them in shot.
         // Both are spawned, so a readout that counted what exists rather than
@@ -873,11 +797,43 @@ mod tests {
         assert!(!text.starts_with("-- fps"), "FPS never got a value: {text}");
     }
 
+    #[test]
+    fn the_readout_hides_until_stats_is_set() {
+        // The panel exists either way — the console can turn it on at any
+        // moment — but with `stats` off it is invisible and writes nothing.
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::time::TimePlugin,
+            bevy::diagnostic::FrameCountPlugin,
+            DebugOverlayPlugin,
+        ))
+        .insert_resource(Assets::<Mesh>::default());
+        app.update();
+
+        let hidden = app
+            .world_mut()
+            .query_filtered::<&Visibility, With<DebugPanel>>()
+            .single(app.world())
+            .expect("the overlay never spawned");
+        assert_eq!(*hidden, Visibility::Hidden);
+
+        app.world_mut().resource_mut::<Toggles>().stats = true;
+        app.update();
+        let shown = app
+            .world_mut()
+            .query_filtered::<&Visibility, With<DebugPanel>>()
+            .single(app.world())
+            .expect("the overlay never spawned");
+        assert_eq!(*shown, Visibility::Inherited);
+    }
+
     /// Nothing is said when nothing has been touched — the common case must
-    /// not cost the readout a line.
+    /// not cost the readout a line. The readout being on is itself not a
+    /// doctoring: it changes nothing about the picture under it.
     #[test]
     fn an_untouched_run_admits_to_nothing() {
         assert_eq!(Toggles::default().line(), None);
+        assert_eq!(showing().line(), None);
     }
 
     #[test]
@@ -885,217 +841,24 @@ mod tests {
         // Every switch at once, to pin the order and the separator as well as
         // the wording.
         let all = Toggles {
-            no_shadows: true,
-            no_haze: true,
+            stats: true,
+            shadows: false,
+            haze: false,
             wireframe: true,
-            reach: 2,
-            wind: 3,
-            hour: 3,
-            hour_from: 0.5,
+            reach: 225.0,
         };
         assert_eq!(
             all.line().as_deref(),
-            Some(
-                "debug: no shadows / no haze / wireframe / shadow reach 225m / wind gale \
-                 / sky held at 15:00"
-            )
+            Some("debug: no shadows / no haze / wireframe / shadow reach 225m")
         );
 
         // And the reach only speaks up when it is not the world's own, since
-        // the first entry is what a normal run already has.
+        // the default is what a normal run already has.
         let default_reach = Toggles {
-            reach: 0,
+            reach: crate::HAZE_END,
             ..all.clone()
         };
         assert!(!default_reach.line().unwrap().contains("reach"));
-    }
-
-    /// `4` walks the reaches and comes back to the world's own, so leaning on
-    /// it can never strand the sun somewhere there is no key to leave.
-    #[test]
-    fn the_shadow_reach_cycles_back_to_the_worlds_own() {
-        let mut app = App::new();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<Toggles>()
-            .init_resource::<Sky>()
-            .add_systems(Update, take_toggles);
-
-        for expected in [1, 2, 0, 1] {
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .press(KeyCode::Digit4);
-            app.update();
-            assert_eq!(app.world().resource::<Toggles>().reach, expected);
-            // `clear` would only drop the just-pressed edge and leave the key
-            // held, so the next press would not read as a new one.
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .reset(KeyCode::Digit4);
-        }
-        assert_eq!(REACHES[0], crate::HAZE_END);
-    }
-
-    /// `5` walks the winds and comes back to the server's own sky, so leaning
-    /// on it can never strand the sea under weather no key can lift.
-    #[test]
-    fn the_commanded_wind_cycles_back_to_the_servers_own() {
-        let mut app = App::new();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<Toggles>()
-            .init_resource::<Sky>()
-            .add_systems(Update, take_toggles);
-
-        for expected in [1, 2, 3, 0] {
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .press(KeyCode::Digit5);
-            app.update();
-            assert_eq!(app.world().resource::<Toggles>().wind, expected);
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .reset(KeyCode::Digit5);
-        }
-    }
-
-    /// `6` steps the sky on an hour a press, from the hour that was on the
-    /// screen — and the last press of a day's worth of them gives the sky
-    /// back to the world, so leaning on it cannot strand the sun.
-    #[test]
-    fn the_held_hour_steps_on_and_comes_back_to_the_worlds_own() {
-        let mut app = App::new();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<Toggles>()
-            .init_resource::<Sky>()
-            .add_systems(Update, take_toggles);
-        // A world in the middle of its afternoon, which is what the first
-        // press has to start counting from.
-        app.world_mut().resource_mut::<Sky>().commanded = Some(0.6);
-
-        let press = |app: &mut App| {
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .press(KeyCode::Digit6);
-            app.update();
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .reset(KeyCode::Digit6);
-        };
-
-        press(&mut app);
-        let stepped = app.world().resource::<Toggles>().held_hour();
-        assert!(
-            (stepped - (0.6 + 1.0 / 24.0)).abs() < 1e-6,
-            "the first press held {stepped} rather than an hour past the afternoon"
-        );
-
-        press(&mut app);
-        let again = app.world().resource::<Toggles>().held_hour();
-        assert!(
-            (again - (stepped + 1.0 / 24.0)).abs() < 1e-6,
-            "the second press held {again} rather than another hour on"
-        );
-
-        // Round the rest of the day, and the sky is the world's again.
-        for _ in 2..24 {
-            press(&mut app);
-        }
-        assert_eq!(
-            app.world().resource::<Toggles>().hour,
-            0,
-            "a day of presses left the sky held"
-        );
-    }
-
-    /// The key has to land in the [`Forecast`] — and clearing it has to lift
-    /// the order, or the server's weather never comes back.
-    #[test]
-    fn the_commanded_wind_reaches_the_forecast_and_leaves_it() {
-        let mut app = App::new();
-        app.init_resource::<Toggles>()
-            .init_resource::<Forecast>()
-            .init_resource::<Sky>()
-            .add_systems(Update, apply_toggles);
-
-        app.world_mut().resource_mut::<Toggles>().wind = 3;
-        app.update();
-        assert_eq!(
-            app.world().resource::<Forecast>().commanded,
-            Some(WINDS[2].1)
-        );
-
-        app.world_mut().resource_mut::<Toggles>().wind = 0;
-        app.update();
-        assert_eq!(app.world().resource::<Forecast>().commanded, None);
-    }
-
-    /// And the sky's twin of that: a held hour has to reach [`Sky`], and
-    /// applying the same state twice — which happens whenever any other
-    /// switch moves — must not step it on again.
-    #[test]
-    fn a_held_hour_reaches_the_sky_and_stays_where_it_was_put() {
-        let mut app = App::new();
-        app.init_resource::<Toggles>()
-            .init_resource::<Forecast>()
-            .init_resource::<Sky>()
-            .add_systems(Update, apply_toggles);
-
-        {
-            let mut toggles = app.world_mut().resource_mut::<Toggles>();
-            toggles.hour_from = 0.5;
-            toggles.hour = 2;
-        }
-        app.update();
-        assert_eq!(
-            app.world().resource::<Sky>().commanded,
-            Some(0.5 + 2.0 / 24.0)
-        );
-
-        // Another switch moves; the hour must not move with it.
-        app.world_mut().resource_mut::<Toggles>().wireframe = true;
-        app.update();
-        assert_eq!(
-            app.world().resource::<Sky>().commanded,
-            Some(0.5 + 2.0 / 24.0),
-            "reaching for another switch walked the sun on"
-        );
-
-        app.world_mut().resource_mut::<Toggles>().hour = 0;
-        app.update();
-        assert_eq!(app.world().resource::<Sky>().commanded, None);
-    }
-
-    /// `0` is the way out of any state the other keys can reach.
-    #[test]
-    fn zero_puts_everything_back() {
-        let mut app = App::new();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<Toggles>()
-            .init_resource::<Sky>()
-            .add_systems(Update, take_toggles);
-
-        fn press(app: &mut App, key: KeyCode) {
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .press(key);
-            app.update();
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .reset(key);
-        }
-        for key in [
-            KeyCode::Digit1,
-            KeyCode::Digit2,
-            KeyCode::Digit3,
-            KeyCode::Digit4,
-            KeyCode::Digit5,
-        ] {
-            press(&mut app, key);
-        }
-        assert!(app.world().resource::<Toggles>().line().is_some());
-
-        press(&mut app, KeyCode::Digit0);
-        assert_eq!(*app.world().resource::<Toggles>(), Toggles::default());
-        assert_eq!(app.world().resource::<Toggles>().line(), None);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod camera;
 pub mod capture;
 pub mod cli;
 pub mod compass;
+pub mod console;
 pub mod debug;
 pub mod figure;
 pub mod menu;
@@ -148,4 +149,10 @@ pub enum Helm {
     /// menu with no world behind it — both are built by `spawn_controls`, and
     /// the only difference is which screen Back returns to.
     Controls,
+    /// The debug console is up over the world, taking the keyboard — see
+    /// [`console`]. A state here rather than a flag of the console's own
+    /// because that is what stops a typed `w` also driving the boat: every
+    /// system that reads the player's hands already conditions on
+    /// [`Helm::Sailing`].
+    Console,
 }

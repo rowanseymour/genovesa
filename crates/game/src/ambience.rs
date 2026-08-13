@@ -79,9 +79,11 @@ fn follow_the_screen(
     let Some(mut sea) = sea else { return };
 
     // Only the helm itself silences it: a world with the pause menu over it is
-    // a menu, and gets the sea back for as long as the player is in it.
-    let sailing =
-        *state.get() == AppState::InWorld && helm.is_none_or(|helm| *helm.get() == Helm::Sailing);
+    // a menu, and gets the sea back for as long as the player is in it. The
+    // console is the opposite — a line of typing over a world still being
+    // looked at — so it stays as quiet as the helm it opened over.
+    let sailing = *state.get() == AppState::InWorld
+        && helm.is_none_or(|helm| matches!(*helm.get(), Helm::Sailing | Helm::Console));
     let wanted = if sailing { 0.0 } else { 1.0 };
     let now = sea.volume().to_linear();
     let step = time.delta_secs() / FADE;

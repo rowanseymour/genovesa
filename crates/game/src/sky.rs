@@ -243,12 +243,11 @@ pub struct Sky {
     /// which is taken as a snap: easing onto it would animate a whole day
     /// passing in the second the world opened.
     told: Option<f32>,
-    /// An hour ordered up from the `--debug` keys, or held for a capture,
-    /// outranking the real one for as long as it is set. Local by
-    /// construction: it changes what this machine draws and nothing about
-    /// what time it is in the world. The clock keeps running underneath, so
-    /// letting go returns to the true hour rather than to the one it was
-    /// when the order was given.
+    /// An hour held still for a capture — see [`Sky::hold`] — outranking the
+    /// real one for as long as it is set. Local by construction: it changes
+    /// what this machine draws and nothing about what time it is in the
+    /// world. The clock keeps running underneath, so letting go returns to
+    /// the true hour rather than to the one it was when the order was given.
     pub commanded: Option<f32>,
 }
 
