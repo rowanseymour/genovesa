@@ -628,6 +628,10 @@ fn receive(
             // typed. Only ever sent asked-for, so a quiet session pays
             // nothing here.
             ToClient::Reply { text } => told.console.say(&text),
+            // The server's verbs, for tab at the console — see
+            // [`crate::console`], which owns what completion means and
+            // still sends every line verbatim.
+            ToClient::Vocabulary { verbs } => told.console.teach(verbs),
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } => {}
@@ -1046,6 +1050,25 @@ mod tests {
             app.world()
                 .resource::<crate::console::Console>()
                 .said("a shark rises 62 m away")
+        });
+    }
+
+    #[test]
+    fn the_taught_vocabulary_reaches_the_console() {
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+
+        (ToClient::Vocabulary {
+            verbs: vec!["spawn".to_string()],
+        })
+        .write(&mut &server)
+        .expect("vocabulary");
+        run_until(&mut app, "the console is taught", |app| {
+            app.world()
+                .resource::<crate::console::Console>()
+                .knows("spawn")
         });
     }
 
