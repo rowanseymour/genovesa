@@ -52,7 +52,7 @@ use crate::camera::MapCamera;
 use crate::player::PlayerPlace;
 use crate::sea::SeaConditions;
 use crate::terrain::{Ground, TerrainChunk};
-use crate::{eased, matte, model_mesh, AppState};
+use crate::{between, eased, matte, model_mesh, scramble, signed, unit, AppState};
 
 /// The kinds of creature. Also an index into [`WildlifeModels`], so anything
 /// that knows what it is can find what to draw it with.
@@ -460,13 +460,11 @@ fn plan_course(
     entropy: u32,
     crossing: &Crossing,
 ) -> Option<(Vec2, Vec2)> {
-    let slice = |salt: u32| scramble(entropy ^ salt) as f32 / u32::MAX as f32;
-
-    let bearing = TAU * slice(0x0B5E);
+    let bearing = TAU * unit(entropy, 0x0B5E);
     let (near, far) = crossing.ring;
-    let start = focus + Vec2::from_angle(bearing) * (near + (far - near) * slice(0x51DE));
-    let abeam = focus
-        + Vec2::from_angle(bearing + FRAC_PI_2) * crossing.abeam * (slice(0xABEA) * 2.0 - 1.0);
+    let start = focus + Vec2::from_angle(bearing) * (near + (far - near) * unit(entropy, 0x51DE));
+    let abeam =
+        focus + Vec2::from_angle(bearing + FRAC_PI_2) * crossing.abeam * signed(entropy, 0xABEA);
     let heading = (abeam - start).normalize_or_zero();
     if heading == Vec2::ZERO {
         return None;
@@ -574,25 +572,6 @@ fn advance(time: Res<Time>, mut formations: Query<(&Formation, &mut Transform)>)
     }
 }
 
-/// Where a member of a formation stands on the map, and where the water is
-/// there — the opening move of [`skim`].
-///
-/// The station is read out of the member's own transform in the plane and
-/// carried into the world through the formation's, so a member flies where
-/// its station says however the group is headed. The swell is the wrapped
-/// clock's, the same one the water is drawn on, so an undulation crests a
-/// wave rather than some flat remembered ocean.
-fn over_the_water(
-    ground: &Ground,
-    conditions: &SeaConditions,
-    carrier: &Transform,
-    station: &Transform,
-    elapsed: f32,
-) -> (Vec3, f32) {
-    let at = carrier.transform_point(Vec3::new(station.translation.x, 0.0, station.translation.z));
-    (at, conditions.water_over(Some(ground), at.xz(), elapsed))
-}
-
 /// Flies every seabird along its line: a fixed height over the swell, the
 /// line's own undulation on top, and the whole line lifting while the
 /// formation is shy — birds give way upward, being the one direction the
@@ -614,7 +593,10 @@ fn skim(
         let Ok((formation, shy, carrier)) = formations.get(of.parent()) else {
             continue;
         };
-        let (at, water) = over_the_water(&ground, &conditions, carrier, &transform, elapsed);
+        // The swell is the wrapped clock's, the same one the water is drawn
+        // on, so an undulation crests a wave rather than some flat remembered
+        // ocean.
+        let (at, water) = conditions.under_station(Some(&ground), carrier, &transform, elapsed);
 
         let along =
             TAU / UNDULATION_LENGTH * formation.speed * (time.elapsed_secs() - formation.born);
@@ -700,38 +682,6 @@ fn load_the_models(
     })));
 }
 
-/// Stirs bits until they stop resembling what they were — SplitMix's mixing
-/// rounds, without its sequence. Decorative randomness only: nothing fed
-/// through this may ever need to agree with another machine, and the one
-/// caller that wants agreement anyway (the eagles) gets it by feeding in
-/// chunk coordinates, which already agree.
-fn scramble(mut x: u32) -> u32 {
-    x = x.wrapping_add(0x9E37_79B9);
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x85EB_CA6B);
-    x ^= x >> 13;
-    x = x.wrapping_mul(0xC2B2_AE35);
-    x ^ (x >> 16)
-}
-
-/// A decorative number in `0.0..1.0` from some bits and a salt — the one way
-/// this module turns entropy into a quantity, so a bearing, a jitter and a
-/// speed are all drawn the same way.
-fn unit(entropy: u32, salt: u32) -> f32 {
-    scramble(entropy ^ salt) as f32 / u32::MAX as f32
-}
-
-/// The same, in `-1.0..1.0`: a wobble either way about whatever it is added
-/// to.
-fn signed(entropy: u32, salt: u32) -> f32 {
-    unit(entropy, salt) * 2.0 - 1.0
-}
-
-/// One of `range.0..=range.1`, evenly.
-fn between(entropy: u32, salt: u32, range: (usize, usize)) -> usize {
-    range.0 + scramble(entropy ^ salt) as usize % (range.1 + 1 - range.0)
-}
-
 pub struct WildlifePlugin;
 
 impl Plugin for WildlifePlugin {
@@ -765,7 +715,7 @@ mod tests {
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
     use protocol::ground::{quantize, ChunkPayload, Surface, Tone, FACET_TRIS, FACET_VERTS};
 
-    use crate::testing::{assert_model_draws, test_ground, triangles};
+    use crate::testing::{assert_model_draws, creature_named_by, span, test_ground};
 
     /// Every course this entropy can lay for a kind, tried until one is
     /// found. Which bits fit is nobody's business, so a claim about the water
@@ -984,11 +934,7 @@ mod tests {
         // and it is the animal the file is named for — which is the one thing
         // about them the game cannot see for itself.
         for (file, _) in KINDS {
-            let creature = file
-                .strip_prefix("models/")
-                .and_then(|name| name.strip_suffix(".glb"))
-                .expect("a glTF binary under assets/models/");
-            assert_model_draws(file, &[(0, creature)]);
+            assert_model_draws(file, &[(0, creature_named_by(file))]);
         }
     }
 
@@ -996,25 +942,15 @@ mod tests {
     fn the_wildlife_is_built_to_scale() {
         // What the spawners assume when they place the models unscaled: a
         // remodel that came through in centimetres — or with the exporter's
-        // axes wrong — would fly a hundred-metre bird. Wingspans lie along X;
-        // nose-to-tail lengths along Z, the forward axis.
-        let span = |kind: Kind, axis: usize| -> f32 {
-            let corners: Vec<f32> = triangles(KINDS[kind as usize].0, 0, "POSITION")
-                .into_iter()
-                .flatten()
-                .map(|corner| corner[axis])
-                .collect();
-            corners.iter().fold(f32::MIN, |a, b| a.max(*b))
-                - corners.iter().fold(f32::MAX, |a, b| a.min(*b))
-        };
+        // axes wrong — would fly a hundred-metre bird. Wingspans lie along X.
         // The swimming kinds' pins moved to the beasts' tests with the
         // animals themselves.
         for (kind, axis, wanted) in [(Kind::Eagle, 0, 3.0..4.5), (Kind::Seabird, 0, 1.6..2.6)] {
-            let measured = span(kind, axis);
+            let file = KINDS[kind as usize].0;
+            let measured = span(file, 0, axis);
             assert!(
                 wanted.contains(&measured),
-                "{} measures {measured}m across axis {axis}, not {wanted:?}",
-                KINDS[kind as usize].0
+                "{file} measures {measured}m across axis {axis}, not {wanted:?}"
             );
         }
     }

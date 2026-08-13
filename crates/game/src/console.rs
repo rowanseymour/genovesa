@@ -37,7 +37,7 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::debug::{Toggles, BACKDROP, TEXT};
+use crate::debug::{Toggles, BACKDROP, REACH, SWITCHES, TEXT};
 use crate::net::Online;
 use crate::Helm;
 
@@ -67,7 +67,20 @@ impl Plugin for ConsolePlugin {
             // pressed on the way in.
             .add_systems(Update, console_keys)
             .add_systems(OnEnter(Helm::Console), spawn_console)
-            .add_systems(Update, refresh_console.run_if(in_state(Helm::Console)));
+            // Only when there is something new to show, and after the keys
+            // that would be the new thing. The text is rebuilt and assigned
+            // wholesale, which marks it changed and puts the whole panel back
+            // through text layout — that was happening at frame rate for the
+            // whole time a player sat with the console open, to say what it
+            // already said. What it says changes on a keystroke or an
+            // arriving reply and at no other time; the panel is spawned
+            // holding its first line, so there is no blank frame to cover.
+            .add_systems(
+                Update,
+                refresh_console
+                    .after(console_keys)
+                    .run_if(in_state(Helm::Console).and_then(resource_changed::<Console>)),
+            );
     }
 }
 
@@ -163,7 +176,7 @@ impl Console {
             (None, _) => std::iter::once("set")
                 .chain(self.verbs.iter().map(String::as_str))
                 .collect(),
-            (Some("set"), None) => VARIABLES.to_vec(),
+            (Some("set"), None) => variables(),
             _ => Vec::new(),
         }
     }
@@ -221,9 +234,18 @@ fn dispatch(line: &str, toggles: &mut Toggles) -> Dispatch {
 }
 
 /// The `set` variables, in the order a bare `set` lists them — what tab
-/// completes after `set`, and what a miss is told to try instead, this
-/// being the half of the grammar that lives on this machine.
-const VARIABLES: [&str; 5] = ["stats", "shadows", "haze", "wireframe", "reach"];
+/// completes after `set`, and what a miss is told to try instead, this being
+/// the half of the grammar that lives on this machine.
+///
+/// Read off [`SWITCHES`] rather than listed again here, so the words this
+/// offers are the words [`set`] serves, always.
+fn variables() -> Vec<&'static str> {
+    SWITCHES
+        .iter()
+        .map(|switch| switch.name)
+        .chain(std::iter::once(REACH))
+        .collect()
+}
 
 /// The longest lead every word here shares — at least what was typed, each
 /// already starting with that.
@@ -244,32 +266,33 @@ fn shared_lead<'a>(words: &[&'a str]) -> &'a str {
 /// nothing back reads as a console that heard nothing.
 fn set(args: &[&str], toggles: &mut Toggles) -> String {
     match args {
-        [] => [
-            onoff("stats", toggles.stats),
-            onoff("shadows", toggles.shadows),
-            onoff("haze", toggles.haze),
-            onoff("wireframe", toggles.wireframe),
-            format!("reach {:.0}m", toggles.reach),
-        ]
-        .join(" / "),
-        [var] => match *var {
-            "stats" => onoff(var, toggles.stats),
-            "shadows" => onoff(var, toggles.shadows),
-            "haze" => onoff(var, toggles.haze),
-            "wireframe" => onoff(var, toggles.wireframe),
-            "reach" => format!("reach {:.0}m", toggles.reach),
-            _ => no_such(var),
-        },
-        [var, value] => match *var {
-            "stats" => switch(var, value, &mut toggles.stats),
-            "shadows" => switch(var, value, &mut toggles.shadows),
-            "haze" => switch(var, value, &mut toggles.haze),
-            "wireframe" => switch(var, value, &mut toggles.wireframe),
-            "reach" => reach(value, &mut toggles.reach),
-            _ => no_such(var),
+        [] => {
+            let mut said = Vec::new();
+            for var in variables() {
+                if let Some(reading) = read(var, toggles) {
+                    said.push(reading);
+                }
+            }
+            said.join(" / ")
+        }
+        [var] => read(var, toggles).unwrap_or_else(|| no_such(var)),
+        [var, value] if *var == REACH => reach(value, &mut toggles.reach),
+        [var, value] => match toggles.switch(var) {
+            Some(state) => switch(var, value, state),
+            None => no_such(var),
         },
         _ => "one variable, one value — `set reach 450`".to_string(),
     }
+}
+
+/// What one variable reads as — the same words a write answers with, so the
+/// answer to setting is the proof it took. `None` for a name that is not a
+/// variable at all.
+fn read(var: &str, toggles: &mut Toggles) -> Option<String> {
+    if var == REACH {
+        return Some(format!("{REACH} {:.0}m", toggles.reach));
+    }
+    toggles.switch(var).map(|on| onoff(var, *on))
 }
 
 fn onoff(var: &str, on: bool) -> String {
@@ -277,7 +300,8 @@ fn onoff(var: &str, on: bool) -> String {
 }
 
 fn no_such(var: &str) -> String {
-    let (last, rest) = VARIABLES.split_last().expect("variables to offer");
+    let offered = variables();
+    let (last, rest) = offered.split_last().expect("variables to offer");
     format!(
         "nothing here called `{var}` — {} or {last}",
         rest.join(", ")
@@ -434,7 +458,7 @@ fn submit(console: &mut Console, toggles: &mut Toggles, online: Option<&Online>)
 #[derive(Component)]
 struct ConsoleText;
 
-fn spawn_console(mut commands: Commands) {
+fn spawn_console(mut commands: Commands, console: Res<Console>) {
     commands
         .spawn((
             Name::new("Console"),
@@ -456,7 +480,9 @@ fn spawn_console(mut commands: Commands) {
         .with_children(|panel| {
             panel.spawn((
                 ConsoleText,
-                Text::new(""),
+                // Holding what the console already has to say — the prompt,
+                // and whatever was said while it was shut.
+                Text::new(console.text()),
                 TextFont {
                     font_size: FontSize::Px(14.0),
                     ..default()
@@ -581,8 +607,10 @@ mod tests {
         app.update();
     }
 
-    fn type_line(app: &mut App, line: &str) {
-        for character in line.chars() {
+    /// Types text without submitting it — which key each character came off
+    /// hardly matters, except that a space has to arrive as the spacebar.
+    fn type_word(app: &mut App, text: &str) {
+        for character in text.chars() {
             let key = if character == ' ' {
                 KeyCode::Space
             } else {
@@ -590,6 +618,10 @@ mod tests {
             };
             type_key(app, key, &character.to_string());
         }
+    }
+
+    fn type_line(app: &mut App, line: &str) {
+        type_word(app, line);
         type_key(app, KeyCode::Enter, "\r");
     }
 
@@ -712,9 +744,7 @@ mod tests {
 
         // And the local grammar's variable, after the word that names it.
         type_key(&mut app, KeyCode::Enter, "\r");
-        for character in "set w".chars() {
-            type_key(&mut app, KeyCode::KeyA, &character.to_string());
-        }
+        type_word(&mut app, "set w");
         type_key(&mut app, KeyCode::Tab, "");
         assert_eq!(input(&app), "set wireframe ");
     }
@@ -757,14 +787,7 @@ mod tests {
             .said("set  help  spawn  time  weather"));
 
         // After `set `: every variable.
-        for character in "set ".chars() {
-            let key = if character == ' ' {
-                KeyCode::Space
-            } else {
-                KeyCode::KeyA
-            };
-            type_key(&mut app, key, &character.to_string());
-        }
+        type_word(&mut app, "set ");
         type_key(&mut app, KeyCode::Tab, "");
         assert_eq!(input(&app), "set ");
         assert!(app
@@ -781,14 +804,7 @@ mod tests {
 
         // What follows `spawn` is the server's vocabulary, not taught and
         // not guessed: tab does nothing, quietly.
-        for character in "spawn sh".chars() {
-            let key = if character == ' ' {
-                KeyCode::Space
-            } else {
-                KeyCode::KeyA
-            };
-            type_key(&mut app, key, &character.to_string());
-        }
+        type_word(&mut app, "spawn sh");
         type_key(&mut app, KeyCode::Tab, "");
         assert_eq!(input(&app), "spawn sh");
         assert!(app.world().resource::<Console>().lines.is_empty());

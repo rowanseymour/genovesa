@@ -430,6 +430,120 @@ pub fn assert_model_draws(file: &str, meshes: &[(usize, &str)]) {
     }
 }
 
+/// The creature a model file is named for: `models/whale.glb` is a whale.
+///
+/// The one-mesh models are all named this way — the master names the object
+/// for the animal it is — so a test can ask that the file contains what its
+/// name claims without repeating either.
+pub fn creature_named_by(file: &str) -> &str {
+    file.strip_prefix("models/")
+        .and_then(|name| name.strip_suffix(".glb"))
+        .expect("a glTF binary under assets/models/")
+}
+
+/// What the meshes in a file are called, in the order the file holds them.
+pub fn mesh_names(file: &str) -> Vec<String> {
+    named(file, "meshes")
+}
+
+/// What the animation clips in a file are called, likewise — the game asks
+/// for a clip by its position and holds it to its name here, exactly as it
+/// does with meshes.
+pub fn clip_names(file: &str) -> Vec<String> {
+    named(file, "animations")
+}
+
+fn named(file: &str, kind: &str) -> Vec<String> {
+    model(file).0[kind]
+        .as_array()
+        .unwrap_or_else(|| panic!("{file} has no {kind}"))
+        .iter()
+        .map(|thing| {
+            thing["name"]
+                .as_str()
+                .unwrap_or_else(|| panic!("an unnamed thing among {file}'s {kind}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+/// How far one mesh reaches along an axis — `0` for X and across a wingspan,
+/// `1` for Y and how tall a thing stands, `2` for Z and nose to tail.
+///
+/// Every model test asks this of something, and each of them used to fold its
+/// own min and max, in four spellings of the same thing. What they are all
+/// guarding against is one mistake: a remodel that came through in
+/// centimetres, or with the exporter's axes wrong, which draws a
+/// hundred-metre whale.
+pub fn extent(file: &str, mesh: usize, axis: usize) -> (f32, f32) {
+    triangles(file, mesh, "POSITION")
+        .into_iter()
+        .flatten()
+        .fold((f32::MAX, f32::MIN), |(low, high), corner| {
+            (low.min(corner[axis]), high.max(corner[axis]))
+        })
+}
+
+/// The same, as one number: how much of that axis the mesh occupies.
+pub fn span(file: &str, mesh: usize, axis: usize) -> f32 {
+    let (low, high) = extent(file, mesh, axis);
+    high - low
+}
+
+/// Holds a model whose meshes are asked for *by name* to the palette that
+/// names them — the sibling of [`assert_model_draws`], which pins meshes by
+/// their position in the file instead.
+///
+/// Every mesh in the file must be one the palette has a tone for and every
+/// tone must have a mesh, because a mesh outside the pairing keeps whatever
+/// Blender last gave it: it arrives wearing a PBR material, which is a
+/// highlight, in a world that has none anywhere. The winding and the shading
+/// are held to the same conditions everything else here is.
+pub fn assert_model_paints(file: &str, tones: &[(&str, Color)]) {
+    let mut named = mesh_names(file);
+    named.sort();
+    let mut wanted: Vec<String> = tones.iter().map(|(name, _)| (*name).to_owned()).collect();
+    wanted.sort();
+    assert_eq!(named, wanted, "{file}'s meshes are not the palette's");
+
+    for (index, name) in mesh_names(file).iter().enumerate() {
+        let faces = triangles(file, index, "POSITION");
+        assert!(
+            winds_outwards(&faces),
+            "the {name} of {file} is wound inside-out"
+        );
+        assert!(
+            is_flat_shaded(&faces, &triangles(file, index, "NORMAL")),
+            "the {name} of {file} is smooth-shaded"
+        );
+    }
+}
+
+/// The rule every rigged model here lives by: each vertex carried by exactly
+/// one bone, at full weight.
+///
+/// Weight-paint a shoulder smoothly in Blender and the facets round off as
+/// the model moves — gradients across faces, in a look built out of flat
+/// tones that has none. It is a modelling decision nothing at runtime would
+/// catch, and the one thing CLAUDE.md's Models section calls out, so it is
+/// asserted from one place rather than copied per rigged model.
+pub fn assert_rigid_skin(file: &str) {
+    let names = mesh_names(file);
+    for (mesh, name) in names.iter().enumerate() {
+        for weights in skin_weights(file, mesh) {
+            let carrying = weights.iter().filter(|w| **w > 0.0).count();
+            assert_eq!(
+                carrying, 1,
+                "a vertex of {file}'s {name} is shared between bones: {weights:?}"
+            );
+            assert!(
+                weights.iter().any(|w| (*w - 1.0).abs() < 1e-3),
+                "a vertex of {file}'s {name} is carried at {weights:?}"
+            );
+        }
+    }
+}
+
 /// Whether every face of a mesh is wound to look outwards, by the volume the
 /// winding implies.
 ///

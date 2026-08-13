@@ -47,10 +47,11 @@ use crate::{AppState, Helm};
 /// being a chore. Backing up is half of it: nobody reverses at marching
 /// speed.
 ///
-/// Public because the figure drawn walking is scaled against it: full stride
-/// is a player making this, and anything much faster is a teleport rather
-/// than a step.
-pub const WALK_SPEED: f32 = 3.0;
+/// The figure drawn walking knows nothing about it. A gait scaled against
+/// this pace is what [`crate::figure`]'s `STIRRING` explains the removal of:
+/// the cycle advances by ground covered, so a slow walk is the same swing
+/// taken slowly, and the walker owes the drawing no number at all.
+const WALK_SPEED: f32 = 3.0;
 
 /// Radians per second the walker turns — brisker than any hull, because a
 /// body pivots and seven metres of timber does not.
@@ -445,21 +446,8 @@ fn walk(
         return;
     }
 
-    // Opposed keys cancel outright, exactly as at the helm.
-    let mut drive = 0.0;
-    if bindings.held(&keys, Action::MoveForward, KeyCode::ArrowUp) {
-        drive += 1.0;
-    }
-    if bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown) {
-        drive -= 1.0;
-    }
-    let mut turn = 0.0;
-    if bindings.held(&keys, Action::SteerLeft, KeyCode::ArrowLeft) {
-        turn += 1.0;
-    }
-    if bindings.held(&keys, Action::SteerRight, KeyCode::ArrowRight) {
-        turn -= 1.0;
-    }
+    // The very keys the helm answers to — see [`KeyBindings::driving`].
+    let (drive, turn) = bindings.driving(&keys);
 
     if turn != 0.0 {
         transform.rotate_y(turn * WALK_TURN_RATE * time.delta_secs());

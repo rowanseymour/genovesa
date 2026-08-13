@@ -120,7 +120,59 @@ impl Default for Toggles {
     }
 }
 
+/// One of the boolean switches, as everything that needs to know about them
+/// reads it: what it is called, how to reach it in [`Toggles`], and whether a
+/// departure from its default is worth confessing on the readout.
+///
+/// A table because the alternative was five copies of the same list of names
+/// — the console's completion, its listing, its reader, its writer and the
+/// line below — with nothing keeping them in step, so a switch added to one
+/// of them tab-completed to a variable that did not exist, or existed and
+/// could not be completed. A switch is now a row.
+pub struct Switch {
+    pub name: &'static str,
+    pub of: fn(&mut Toggles) -> &mut bool,
+    /// `stats` is the one that says no: it changes nothing about the picture,
+    /// and a readout that is visible has already admitted to being on.
+    confessed: bool,
+}
+
+pub const SWITCHES: [Switch; 4] = [
+    Switch {
+        name: "stats",
+        of: |toggles| &mut toggles.stats,
+        confessed: false,
+    },
+    Switch {
+        name: "shadows",
+        of: |toggles| &mut toggles.shadows,
+        confessed: true,
+    },
+    Switch {
+        name: "haze",
+        of: |toggles| &mut toggles.haze,
+        confessed: true,
+    },
+    Switch {
+        name: "wireframe",
+        of: |toggles| &mut toggles.wireframe,
+        confessed: true,
+    },
+];
+
+/// The one variable that is not a switch — metres rather than on and off, so
+/// it is a special case wherever the switches are walked rather than a row
+/// that would have to carry a second kind of value.
+pub const REACH: &str = "reach";
+
 impl Toggles {
+    /// The boolean switch a name asks for, or `None` where the name is not
+    /// one of them.
+    pub fn switch(&mut self, name: &str) -> Option<&mut bool> {
+        let switch = SWITCHES.iter().find(|switch| switch.name == name)?;
+        Some((switch.of)(self))
+    }
+
     /// How the overlay owns up to being in a doctored state — `None` when
     /// nothing has been touched, which is the usual case and costs the readout
     /// no line at all.
@@ -130,19 +182,26 @@ impl Toggles {
     /// picture taken with the sun switched off would quietly break that
     /// promise in exactly the place it gets used: an argument about how the
     /// renderer should be set up.
+    ///
+    /// What it says is the *departure*, which each switch's own default
+    /// decides the wording of: one that is normally on reads as "no shadows"
+    /// when it is off, one that is normally off reads as its own name when it
+    /// is on.
     fn line(&self) -> Option<String> {
+        let (mut mine, mut usual) = (self.clone(), Self::default());
         let mut on = Vec::new();
-        if !self.shadows {
-            on.push("no shadows".to_string());
+        for switch in &SWITCHES {
+            let (set, default) = (*(switch.of)(&mut mine), *(switch.of)(&mut usual));
+            if switch.confessed && set != default {
+                on.push(if set {
+                    switch.name.to_string()
+                } else {
+                    format!("no {}", switch.name)
+                });
+            }
         }
-        if !self.haze {
-            on.push("no haze".to_string());
-        }
-        if self.wireframe {
-            on.push("wireframe".to_string());
-        }
-        if self.reach != crate::HAZE_END {
-            on.push(format!("shadow reach {:.0}m", self.reach));
+        if self.reach != Self::default().reach {
+            on.push(format!("shadow {REACH} {:.0}m", self.reach));
         }
         (!on.is_empty()).then(|| format!("debug: {}", on.join(" / ")))
     }
@@ -485,7 +544,7 @@ fn overlay_text(
     if let Some(hour) = hour {
         // As a clock rather than as the fraction the wire carries: what the
         // eye is checking this against is a sky, and a sky reads as an hour.
-        lines.push(format!("sky {}", clock(hour)));
+        lines.push(format!("sky {}", protocol::clock(hour)));
     }
     if let Some(view) = view {
         lines.push(view_line(seed, view));
@@ -496,17 +555,6 @@ fn overlay_text(
         lines.push(doctored);
     }
     lines.join("\n")
-}
-
-/// A phase of the day as a time on a twenty-four hour clock — 0.0 midnight,
-/// 0.25 six in the morning. Rounded down to the minute, so a day that turns
-/// in ten minutes moves the readout every second and a bit.
-fn clock(phase: f32) -> String {
-    // Rounded rather than truncated, and folded back into the day after: an
-    // hour that is a hair under the minute it means — which is what a phase
-    // written as a decimal usually is — should read as that minute.
-    let minutes = (phase.rem_euclid(1.0) * 24.0 * 60.0).round() as u32 % (24 * 60);
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// The world and the view in the terms `--seed`, `--focus`, `--yaw` and

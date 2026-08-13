@@ -36,23 +36,24 @@
 //! player's gait inverted, and deliberately so: feet on ground have contact
 //! to keep, where a tail in water only has to look like the thing pushing,
 //! so a clip at roughly the right rate reads perfectly and costs no
-//! bookkeeping. The figure's `conduct` already leaves other rigged models
-//! alone for exactly this day; this module's own conductor takes only the
-//! players hung under a beast.
+//! bookkeeping. Both conductors climb out of an arriving model to see what
+//! it is part of — see [`crate::models::above`] — so the figure's takes only
+//! walkers and this one only the players hung under a beast.
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
 use bevy::animation::AnimationPlayer;
-use bevy::gltf::{GltfAssetLabel, GltfMeshName};
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
 use protocol::{BeastId, BeastKind};
 
+use crate::models::{above, Tones};
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
-use crate::{eased, matte, AppState};
+use crate::{between, eased, matte, signed, unit, AppState};
 
 /// The shark, rigged and with its one clip in it. The other kinds are rigid
 /// meshes whose whole-body motion is computed here, as it was when they were
@@ -68,7 +69,8 @@ const WHALE_MODEL: &str = "models/whale.glb";
 const SWIM: usize = 0;
 
 /// What each mesh in the file is painted, by the name it carries there —
-/// the same arrangement as the player's figure, one entry per tone.
+/// the same arrangement as the player's figure, one entry per tone, and
+/// registered with [`crate::models::Tones`] alongside it.
 const TONES: [(&str, Color); 1] = [("hide", HIDE_COLOR)];
 
 /// Sand-grey. A shark here is seen through a metre of sunlit shallow water
@@ -129,7 +131,7 @@ const TURNING: f32 = 3.0;
 /// draws is the pod every client draws.
 const POD_STATIONS: [(f32, f32); 5] =
     [(0.0, 0.0), (-1.7, 2.1), (1.7, 2.4), (-3.3, 4.6), (3.4, 4.9)];
-const POD_SIZE: (u32, u32) = (2, 5);
+const POD_SIZE: (usize, usize) = (2, 5);
 
 /// Radians between neighbours in the porpoising cycle — enough that a pod
 /// surfaces as a run of arcs rather than a synchronised display team — and
@@ -289,11 +291,18 @@ impl Plugin for BeastsPlugin {
         // it alone.
         app.init_resource::<Beasts>()
             .init_resource::<SeaConditions>()
+            // Also initialised by ModelsPlugin, which owns the painting;
+            // this is for the tests, which run this plugin alone.
+            .init_resource::<Tones>()
             .add_systems(Startup, school)
-            // None of this is the player's hands, so none of it pauses: the
-            // sharks are the server's, and the server does not stop swimming
-            // them because somebody opened a menu.
-            .add_systems(Update, (dress, conduct, paint, glide, porpoise, swish))
+            .add_systems(
+                Update,
+                // Nothing outside a match has beasts in it. Inside one, none
+                // of this is the player's hands, so none of it pauses: the
+                // sharks are the server's, and the server does not stop
+                // swimming them because somebody opened a menu.
+                (dress, conduct, glide, porpoise, swish).run_if(in_state(AppState::InWorld)),
+            )
             .add_systems(OnExit(AppState::InWorld), forget);
     }
 }
@@ -307,7 +316,10 @@ fn school(
     assets: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut tones: ResMut<Tones>,
 ) {
+    tones.register(&mut materials, &TONES);
+
     let mut graph = AnimationGraph::new();
     let root = graph.root;
     let node = graph.add_clip(
@@ -392,13 +404,13 @@ fn dress(
 /// seed, which is the point — see the module doc — and starting under the
 /// water's own opacity, so however a pod first appears it *surfaces*.
 fn pod_members(seed: u32) -> Vec<(usize, Vec3, Porpoising)> {
-    let count = POD_SIZE.0 + scramble(seed ^ 0x90D5) % (POD_SIZE.1 + 1 - POD_SIZE.0);
+    let count = between(seed, 0x90D5, POD_SIZE);
     POD_STATIONS
         .iter()
         .enumerate()
-        .take(count as usize)
+        .take(count)
         .map(|(member, (side, lag))| {
-            let jitter = |salt: u32| (unit(seed ^ ((member as u32) << 8), salt) - 0.5) * 2.0;
+            let jitter = |salt: u32| signed(seed ^ ((member as u32) << 8), salt);
             let swimming = Porpoising {
                 phase: member as f32 * POD_STAGGER + 0.12 * jitter(0xD01),
                 ..DOLPHIN_SWIM
@@ -429,16 +441,10 @@ fn conduct(
     mut arrivals: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
 ) {
     for (entity, mut player) in &mut arrivals {
-        if !hierarchy
-            .iter_ancestors(entity)
-            .any(|above| figures.contains(above))
-        {
+        if above(&hierarchy, &figures, entity).is_none() {
             continue;
         }
-        let Some(beast) = hierarchy
-            .iter_ancestors(entity)
-            .find(|above| beasts.contains(*above))
-        else {
+        let Some(beast) = above(&hierarchy, &beasts, entity) else {
             continue;
         };
 
@@ -448,23 +454,6 @@ fn conduct(
         // Repeating at its own pace, where the walker's run is paused and
         // seeked: a tail in water has no footfalls to keep honest.
         player.play(swim.node).repeat();
-    }
-}
-
-/// Paints the model in the world's tones as its meshes arrive, throwing away
-/// what came out of the file — the same undoing the figure does, against
-/// this module's own palette.
-fn paint(
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut arrivals: Query<
-        (&GltfMeshName, &mut MeshMaterial3d<StandardMaterial>),
-        Added<GltfMeshName>,
-    >,
-) {
-    for (mesh, mut material) in &mut arrivals {
-        if let Some((_, tone)) = TONES.iter().find(|(named, _)| *named == mesh.0) {
-            *material = MeshMaterial3d(materials.add(matte(*tone)));
-        }
     }
 }
 
@@ -531,12 +520,7 @@ fn porpoise(
         let Ok((told, carrier)) = beasts.get(of.parent()) else {
             continue;
         };
-        let station = carrier.transform_point(Vec3::new(
-            transform.translation.x,
-            0.0,
-            transform.translation.z,
-        ));
-        let water = sea.water_over(ground.as_deref(), station.xz(), elapsed);
+        let (_, water) = sea.under_station(ground.as_deref(), carrier, &transform, elapsed);
 
         let (rise, run) = (TAU / swimming.period * elapsed + swimming.phase).sin_cos();
         transform.translation.y = water - swimming.cruise + swimming.leap * rise;
@@ -571,25 +555,6 @@ fn forget(mut beasts: ResMut<Beasts>) {
     beasts.seen.clear();
 }
 
-/// Stirs bits until they stop resembling what they were — SplitMix's mixing
-/// rounds, without its sequence. Everything this module invents about a
-/// beast comes through here, seeded from the beast's id — which is how the
-/// inventions *agree* across machines: same bits in, same pod out. The
-/// eagles play the same trick with chunk coordinates.
-fn scramble(mut x: u32) -> u32 {
-    x = x.wrapping_add(0x9E37_79B9);
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x85EB_CA6B);
-    x ^= x >> 13;
-    x = x.wrapping_mul(0xC2B2_AE35);
-    x ^ (x >> 16)
-}
-
-/// A number in `0.0..1.0` from some bits and a salt.
-fn unit(seed: u32, salt: u32) -> f32 {
-    scramble(seed ^ salt) as f32 / u32::MAX as f32
-}
-
 #[cfg(test)]
 mod tests {
     use bevy::state::app::StatesPlugin;
@@ -598,69 +563,20 @@ mod tests {
     use super::*;
     use crate::net::{fake_server, NetPlugin, Online};
     use crate::testing::{
-        is_flat_shaded, model, run_frames, run_until, skin_weights, triangles, winds_outwards,
+        assert_model_draws, assert_model_paints, assert_rigid_skin, clip_names, creature_named_by,
+        extent, run_frames, run_until, span, triangles,
     };
     use crate::Helm;
     use protocol::ToClient;
 
-    /// The corners of every mesh in the model, in the file's own frame.
-    fn corners() -> Vec<Vec3> {
-        (0..TONES.len())
-            .flat_map(|mesh| triangles(SHARK_MODEL, mesh, "POSITION"))
-            .flatten()
-            .collect()
-    }
-
-    fn meshes() -> Vec<String> {
-        model(SHARK_MODEL).0["meshes"]
-            .as_array()
-            .expect("the model has meshes")
-            .iter()
-            .map(|mesh| mesh["name"].as_str().expect("a named mesh").to_owned())
-            .collect()
-    }
-
     #[test]
     fn the_model_is_the_shark_the_game_paints() {
-        // Every mesh in the file is one the palette has a tone for, and every
-        // tone has a mesh — a mesh outside the pairing arrives wearing
-        // whatever Blender last gave it.
-        let mut named = meshes();
-        named.sort();
-        let mut wanted: Vec<String> = TONES.iter().map(|(name, _)| (*name).to_owned()).collect();
-        wanted.sort();
-        assert_eq!(named, wanted, "the model's meshes are not the palette's");
-
-        for (index, name) in meshes().iter().enumerate() {
-            let faces = triangles(SHARK_MODEL, index, "POSITION");
-            assert!(winds_outwards(&faces), "the {name} is wound inside-out");
-            assert!(
-                is_flat_shaded(&faces, &triangles(SHARK_MODEL, index, "NORMAL")),
-                "the {name} is smooth-shaded"
-            );
-        }
+        assert_model_paints(SHARK_MODEL, &TONES);
     }
 
     #[test]
     fn the_skin_is_rigid_so_the_facets_stay_flat() {
-        // The rule every rigged model here lives by: one bone per vertex at
-        // full weight, or facets bend as the tail swishes.
-        for mesh in 0..TONES.len() {
-            for weights in skin_weights(SHARK_MODEL, mesh) {
-                let carrying = weights.iter().filter(|w| **w > 0.0).count();
-                assert_eq!(
-                    carrying,
-                    1,
-                    "a vertex of {} is shared between bones: {weights:?}",
-                    meshes()[mesh]
-                );
-                assert!(
-                    weights.iter().any(|w| (*w - 1.0).abs() < 1e-3),
-                    "a vertex of {} is carried at {weights:?}",
-                    meshes()[mesh]
-                );
-            }
-        }
+        assert_rigid_skin(SHARK_MODEL);
     }
 
     #[test]
@@ -668,23 +584,23 @@ mod tests {
         // Shark-sized — a reef shark, not a whale and not a minnow — with
         // the girth forward of amidships, which is what points it: the file
         // faces -Z like everything here, so the fat end must lean that way.
-        let corners = corners();
-        let (nose, tail) = corners
-            .iter()
-            .fold((f32::MAX, f32::MIN), |(n, t), c| (n.min(c.z), t.max(c.z)));
+        let (nose, tail) = extent(SHARK_MODEL, 0, 2);
         let length = tail - nose;
         assert!(
             (2.2..=3.2).contains(&length),
             "nose to tail is {length} m, which is not this game's shark"
         );
 
-        let girth = corners.iter().fold((0.0_f32, 0.0_f32), |(widest, at), c| {
-            if c.x.abs() > widest {
-                (c.x.abs(), c.z)
-            } else {
-                (widest, at)
-            }
-        });
+        let girth = triangles(SHARK_MODEL, 0, "POSITION")
+            .into_iter()
+            .flatten()
+            .fold((0.0_f32, 0.0_f32), |(widest, at), c| {
+                if c.x.abs() > widest {
+                    (c.x.abs(), c.z)
+                } else {
+                    (widest, at)
+                }
+            });
         assert!(
             girth.1 < (nose + tail) / 2.0,
             "the girth peaks at z {} — the shark is swimming backwards",
@@ -694,27 +610,23 @@ mod tests {
         // The dorsal fin is the shark for most of its screen life, so the
         // model must hold it high enough to cut the surface at the depth
         // `glide` rides it: taller than AWASH, or no fin would ever show.
-        let fin = corners.iter().fold(f32::MIN, |f, c| f.max(c.y));
+        // And nothing hangs deep enough to plough the sand of the shallow
+        // band it patrols.
+        let (keel, fin) = extent(SHARK_MODEL, 0, 1);
         assert!(
             fin > AWASH && fin < 1.0,
             "the fin tops out {fin} m over the spine"
         );
-        // And nothing hangs deep enough to plough the sand of the shallow
-        // band it patrols.
-        let keel = corners.iter().fold(f32::MAX, |k, c| k.min(c.y));
         assert!(keel > -0.6, "the shark draws {} m", -keel);
     }
 
     #[test]
     fn the_model_carries_the_swim_the_game_plays() {
         // Asked for by position, held to its name — the figure's own rule.
-        let clips: Vec<String> = model(SHARK_MODEL).0["animations"]
-            .as_array()
-            .expect("the model has animations")
-            .iter()
-            .map(|clip| clip["name"].as_str().expect("a named clip").to_owned())
-            .collect();
-        assert_eq!(clips.get(SWIM).map(String::as_str), Some("swim"));
+        assert_eq!(
+            clip_names(SHARK_MODEL).get(SWIM).map(String::as_str),
+            Some("swim")
+        );
     }
 
     #[test]
@@ -725,19 +637,8 @@ mod tests {
         // along Z, the forward axis. These pins lived in the wildlife's
         // tests while these animals were wildlife.
         for (file, wanted) in [(DOLPHIN_MODEL, 2.0..3.0), (WHALE_MODEL, 9.0..13.0)] {
-            let creature = file
-                .strip_prefix("models/")
-                .and_then(|name| name.strip_suffix(".glb"))
-                .expect("a glTF binary under assets/models/");
-            crate::testing::assert_model_draws(file, &[(0, creature)]);
-
-            let lengths: Vec<f32> = triangles(file, 0, "POSITION")
-                .into_iter()
-                .flatten()
-                .map(|corner| corner.z)
-                .collect();
-            let measured = lengths.iter().fold(f32::MIN, |a, b| a.max(*b))
-                - lengths.iter().fold(f32::MAX, |a, b| a.min(*b));
+            assert_model_draws(file, &[(0, creature_named_by(file))]);
+            let measured = span(file, 0, 2);
             assert!(
                 wanted.contains(&measured),
                 "{file} measures {measured}m nose to tail, not {wanted:?}"
@@ -758,7 +659,7 @@ mod tests {
                 pod_members(seed).len(),
                 "one id dealt two pods"
             );
-            assert!((POD_SIZE.0 as usize..=POD_SIZE.1 as usize).contains(&dealt.len()));
+            assert!((POD_SIZE.0..=POD_SIZE.1).contains(&dealt.len()));
             for ((member, station, _), again) in dealt.iter().zip(pod_members(seed)) {
                 assert_eq!(*station, again.1, "member {member} moved between deals");
                 // On station give or take the slop, under water to start.
@@ -936,7 +837,7 @@ mod tests {
             .copied()
             .collect();
         assert!(
-            (POD_SIZE.0 as usize..=POD_SIZE.1 as usize).contains(&members.len()),
+            (POD_SIZE.0..=POD_SIZE.1).contains(&members.len()),
             "a pod of {}",
             members.len()
         );

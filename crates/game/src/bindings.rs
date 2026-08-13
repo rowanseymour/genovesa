@@ -151,6 +151,39 @@ impl KeyBindings {
         keys.any_pressed([self.key(action), arrow])
     }
 
+    /// What the movement keys are saying: how hard ahead — negative for
+    /// astern — and which way to turn, port being positive, the same way
+    /// round as the camera's own Q.
+    ///
+    /// Direction first, speed second, so opposed keys cancel outright rather
+    /// than the faster gear winning by the difference.
+    ///
+    /// One answer for the helm and for a walker, because they are one set of
+    /// controls: a player ashore steers themself with the keys that steered
+    /// the boat they stepped off. Written twice, the two could drift — a
+    /// fifth movement action, or a change to the arrow-key floor, would have
+    /// to be found in both — and a walker whose keys had quietly stopped
+    /// matching the helm's is exactly the bug nobody thinks to look for.
+    pub fn driving(&self, keys: &ButtonInput<KeyCode>) -> (f32, f32) {
+        let mut ahead = 0.0;
+        if self.held(keys, Action::MoveForward, KeyCode::ArrowUp) {
+            ahead += 1.0;
+        }
+        if self.held(keys, Action::MoveBack, KeyCode::ArrowDown) {
+            ahead -= 1.0;
+        }
+
+        let mut turn = 0.0;
+        if self.held(keys, Action::SteerLeft, KeyCode::ArrowLeft) {
+            turn += 1.0;
+        }
+        if self.held(keys, Action::SteerRight, KeyCode::ArrowRight) {
+            turn -= 1.0;
+        }
+
+        (ahead, turn)
+    }
+
     /// What to call that key on screen — what it typed if it was set by
     /// pressing it, and otherwise the name of the position it sits at.
     pub fn name(&self, action: Action) -> String {

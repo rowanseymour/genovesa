@@ -248,7 +248,9 @@ pub struct Sky {
     /// what this machine draws and nothing about what time it is in the
     /// world. The clock keeps running underneath, so letting go returns to
     /// the true hour rather than to the one it was when the order was given.
-    pub commanded: Option<f32>,
+    /// Set through [`Sky::hold`] alone, which is the one thing entitled to
+    /// decide there is an hour worth freezing.
+    commanded: Option<f32>,
 }
 
 impl Default for Sky {
@@ -625,19 +627,30 @@ fn offer_the_night(
     }
 
     let waiting = waiting_out_the_night(&keys, &bindings, &sky, &boats);
+    // The key is named by what it typed when it was chosen, so a rebound or
+    // foreign keyboard is offered its own key rather than a US one — see
+    // [`KeyBindings::name`].
+    let wanted = if waiting {
+        "Waiting for dawn…".to_string()
+    } else {
+        format!(
+            "Hold {} to wait out the night",
+            bindings.name(Action::WaitOutNight)
+        )
+    };
+
     for child in children.iter() {
         if let Ok(mut line) = lines.get_mut(child) {
-            // The key is named by what it typed when it was chosen, so a
-            // rebound or foreign keyboard is offered its own key rather than
-            // a US one — see [`KeyBindings::name`].
-            line.0 = if waiting {
-                "Waiting for dawn…".to_string()
-            } else {
-                format!(
-                    "Hold {} to wait out the night",
-                    bindings.name(Action::WaitOutNight)
-                )
-            };
+            // Written only when it turns over, which is at most twice a
+            // night. Assigning the same words again marks the text changed
+            // and puts the line back through layout, every frame, all night,
+            // to say what it already said. Judged against the text itself
+            // rather than remembered, because what is on screen is a fresh
+            // entity in every world entered and a memory of the last one
+            // would leave the second world's line blank.
+            if line.0 != wanted {
+                line.0 = wanted.clone();
+            }
         }
     }
 }

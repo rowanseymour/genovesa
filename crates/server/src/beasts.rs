@@ -151,21 +151,19 @@ const HABITATS: [Habitat; 3] = [
     },
 ];
 
-/// One beast, as the server minds it. The kind is carried rather than
-/// implied because the map holds every beast there is, whatever it is, and
-/// the tick reads each one's [`Habitat`] off what it finds.
+/// One beast, as the server minds it.
+///
+/// It carries its [`Habitat`] rather than its kind, the habitat holding the
+/// kind: the map holds every beast there is, whatever it is, and every beat
+/// asks each of them where it lives — to swim it, to decide whether anyone
+/// is still near enough to mind it, and to say how fast it is going. Looking
+/// that up by kind each time was a scan of the table per beast per question.
 struct Beast {
-    kind: BeastKind,
+    habitat: &'static Habitat,
     position: Vec2,
     /// Which way it is swimming, as a unit vector. Pace is the habitat's
     /// business, so bearing is the whole of the state a cruise needs.
     heading: Vec2,
-}
-
-impl Beast {
-    fn habitat(&self) -> &'static Habitat {
-        habitat_of(self.kind)
-    }
 }
 
 fn habitat_of(kind: BeastKind) -> &'static Habitat {
@@ -266,7 +264,7 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
                 beasts.insert(
                     BeastId(next_id),
                     Beast {
-                        kind,
+                        habitat: habitat_of(kind),
                         position: spot,
                         heading: Vec2::from_angle(unit(entropy, 0x5EED) * std::f32::consts::TAU),
                     },
@@ -286,7 +284,7 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
             beasts.retain(|id, beast| {
                 let minded = players
                     .iter()
-                    .any(|player| player.distance(beast.position) <= beast.habitat().forgotten);
+                    .any(|player| player.distance(beast.position) <= beast.habitat.forgotten);
                 if !minded {
                     news.push(ToClient::BeastGone { id: *id });
                 }
@@ -297,7 +295,7 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
                 for habitat in &HABITATS {
                     let about = beasts
                         .values()
-                        .filter(|beast| beast.kind == habitat.kind)
+                        .filter(|beast| beast.habitat.kind == habitat.kind)
                         .filter(|beast| beast.position.distance(*player) <= habitat.waters)
                         .count();
                     for _ in about..habitat.about {
@@ -313,9 +311,9 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
             for (id, beast) in &beasts {
                 news.push(ToClient::Beast {
                     id: *id,
-                    kind: beast.kind,
+                    kind: beast.habitat.kind,
                     position: beast.position,
-                    velocity: beast.heading * beast.habitat().cruise,
+                    velocity: beast.heading * beast.habitat.cruise,
                 });
             }
 
@@ -342,7 +340,7 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
 /// not a whale's — it will pass close by a hull sooner than beach itself
 /// dodging one.
 fn cruise(beast: &mut Beast, shared: &Shared, players: &[Vec2], entropy: u32) {
-    let habitat = beast.habitat();
+    let habitat = beast.habitat;
 
     // The wander: a few degrees a beat, either way, always applied — it is
     // what keeps a long straight reach from reading as a bearing being held.
@@ -414,7 +412,7 @@ fn raise(habitat: &'static Habitat, shared: &Shared, player: Vec2, entropy: u32)
         let spot = player + Vec2::from_angle(bearing) * out;
         if swimmable(shared, habitat, spot) {
             return Some(Beast {
-                kind: habitat.kind,
+                habitat,
                 position: spot,
                 heading: Vec2::from_angle(unit(entropy, 0xF1_5B) * std::f32::consts::TAU),
             });
@@ -431,7 +429,15 @@ fn turned(heading: Vec2, angle: f32) -> Vec2 {
 
 /// Stirs bits until they stop resembling what they were — SplitMix's mixing
 /// rounds, without its sequence. Everything random the beasts do comes
-/// through here; none of it ever needs to agree with another machine.
+/// through here.
+///
+/// The game crate has these same rounds, and this is deliberately not shared
+/// with them: the only crate both sides could reach for is `protocol`, and
+/// nothing here belongs on the wire. None of what this decides ever needs to
+/// agree with another machine — where a shark is raised is *told*, not
+/// re-derived — so the two copies answering differently would cost nothing.
+/// The client's copy is the one where sameness matters, because it deals a
+/// pod's shape from an id every machine was given.
 fn scramble(mut x: u32) -> u32 {
     x = x.wrapping_add(0x9E37_79B9);
     x ^= x >> 16;

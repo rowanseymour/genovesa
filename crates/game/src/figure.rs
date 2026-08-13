@@ -46,11 +46,12 @@ use std::f32::consts::TAU;
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
 use bevy::animation::{AnimationClip, AnimationPlayer};
 use bevy::asset::AssetPath;
-use bevy::gltf::{GltfAssetLabel, GltfMeshName};
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
+use crate::models::{above, Tones};
 use crate::player::{Afoot, Player};
-use crate::{eased, matte};
+use crate::{eased, AppState};
 
 /// The figure, rigged and with its two clips in it.
 const MODEL: &str = "models/player.glb";
@@ -72,6 +73,8 @@ const RUN: usize = 1;
 /// A mesh whose name is not here keeps the file's own PBR material and arrives
 /// looking like nothing else in the world, so
 /// `the_model_is_the_person_the_game_paints` holds the file to exactly these.
+/// Registered with [`crate::models::Tones`] at startup, which is what makes
+/// the materials and paints the meshes as they arrive.
 const TONES: [(&str, Color); 3] = [
     ("coat", COAT_COLOR),
     ("canvas", CANVAS_COLOR),
@@ -153,12 +156,19 @@ struct Gaits {
 #[derive(Component)]
 struct Figure;
 
-/// An animation player that is a figure's: the entity the loader put one on,
-/// found to be under a [`Figure`] and handed the graph. Only these are seeked
-/// by the gait, so the day an eagle arrives with a wingbeat in it, its own
-/// clip is not driven by how far the player has walked.
+/// An animation player that is a figure's, and whose figure it is: the entity
+/// the loader put one on, found to be under a [`Figure`] and handed the
+/// graph. Only these are seeked by the gait, so the day an eagle arrives with
+/// a wingbeat in it, its own clip is not driven by how far the player has
+/// walked.
+///
+/// It names the walker rather than being a bare marker so that [`animate`]
+/// reads *that* walker's [`Stride`]. Asking for the only one in the world
+/// would make a second figure — a remote player drawn as a person rather than
+/// a capsule, which is where this is going — quietly stop the system for
+/// everybody.
 #[derive(Component)]
-struct Dancer;
+struct Dancer(Entity);
 
 /// How the player's own walk stands at the moment, carried on the player.
 ///
@@ -179,22 +189,28 @@ pub struct FigurePlugin;
 
 impl Plugin for FigurePlugin {
     fn build(&self, app: &mut App) {
-        // None of this is the player's hands, so none of it stops with the
-        // pause menu up: a paused player is not moving, which the gait reads
-        // as standing still and settles into on its own.
-        app.add_systems(Startup, rig).add_systems(
-            Update,
-            (
-                dress,
-                conduct,
-                paint,
-                // After the walking itself: this reads the transform the
-                // player's own systems write, and reading it a frame late
-                // — or, worse, a frame late every other frame — is what
-                // makes a steady walk look like a stutter.
-                (stride, animate).chain().after(Afoot),
-            ),
-        );
+        // Also initialised by ModelsPlugin, which owns the painting; this is
+        // for the tests, which run this plugin alone. Initialising a resource
+        // twice is free.
+        app.init_resource::<Tones>()
+            .add_systems(Startup, rig)
+            .add_systems(
+                Update,
+                (
+                    dress,
+                    conduct,
+                    // After the walking itself: this reads the transform the
+                    // player's own systems write, and reading it a frame late
+                    // — or, worse, a frame late every other frame — is what
+                    // makes a steady walk look like a stutter.
+                    (stride, animate).chain().after(Afoot),
+                )
+                    // There is no figure outside a match, so none of this has
+                    // anything to do on a menu screen. Within one it all runs
+                    // through a pause: a paused player is not moving, which the
+                    // gait reads as standing still and settles into on its own.
+                    .run_if(in_state(AppState::InWorld)),
+            );
     }
 }
 
@@ -211,7 +227,11 @@ fn rig(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut tones: ResMut<Tones>,
 ) {
+    tones.register(&mut materials, &TONES);
+
     let mut graph = AnimationGraph::new();
     let root = graph.root;
     let blend = graph.add_blend(1.0, root);
@@ -279,46 +299,27 @@ fn conduct(
     gaits: Res<Gaits>,
     hierarchy: Query<&ChildOf>,
     figures: Query<(), With<Figure>>,
+    walkers: Query<(), With<Player>>,
     mut arrivals: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
 ) {
     for (entity, mut player) in &mut arrivals {
-        // Somebody else's model, if the world ever grows a rigged one: the
-        // loader puts a player on anything it finds animated, and this gait
-        // is the walking figure's alone.
-        if !hierarchy
-            .iter_ancestors(entity)
-            .any(|above| figures.contains(above))
-        {
+        // Somebody else's model: the loader puts a player on anything it
+        // finds animated — a shark's tail, most of all — and this gait is a
+        // walking figure's alone.
+        if above(&hierarchy, &figures, entity).is_none() {
             continue;
         }
+        // And whose walk it is, so the gait seeks to that walker's own
+        // stride rather than to the only one in the world.
+        let Some(walker) = above(&hierarchy, &walkers, entity) else {
+            continue;
+        };
 
         commands
             .entity(entity)
-            .insert((AnimationGraphHandle(gaits.graph.clone()), Dancer));
+            .insert((AnimationGraphHandle(gaits.graph.clone()), Dancer(walker)));
         player.play(gaits.idle).repeat();
         player.play(gaits.run).repeat().pause();
-    }
-}
-
-/// Paints the figure in the world's own tones as its meshes arrive, throwing
-/// away the materials that came out of the file.
-///
-/// The same rule the rest of the game's models are drawn by, arriving here a
-/// different way: glTF materials are PBR — a roughness, a metalness, a
-/// specular response — and the look here is a small fixed palette under
-/// [`matte`], so a person lit the way the file asked for would be the one
-/// surface in the world with a highlight on it.
-fn paint(
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut arrivals: Query<
-        (&GltfMeshName, &mut MeshMaterial3d<StandardMaterial>),
-        Added<GltfMeshName>,
-    >,
-) {
-    for (mesh, mut material) in &mut arrivals {
-        if let Some((_, tone)) = TONES.iter().find(|(named, _)| *named == mesh.0) {
-            *material = MeshMaterial3d(materials.add(matte(*tone)));
-        }
     }
 }
 
@@ -373,16 +374,16 @@ fn animate(
     gaits: Res<Gaits>,
     clips: Res<Assets<AnimationClip>>,
     strides: Query<&Stride>,
-    mut players: Query<&mut AnimationPlayer, With<Dancer>>,
+    mut players: Query<(&Dancer, &mut AnimationPlayer)>,
 ) {
-    let Ok(stride) = strides.single() else {
-        return;
-    };
     let Some(cycle) = clips.get(&gaits.cycle).map(AnimationClip::duration) else {
         return;
     };
 
-    for mut player in &mut players {
+    for (Dancer(walker), mut player) in &mut players {
+        let Ok(stride) = strides.get(*walker) else {
+            continue;
+        };
         if let Some(run) = player.animation_mut(gaits.run) {
             run.set_weight(stride.amount);
             run.seek_to(stride.phase / TAU * cycle);
@@ -402,78 +403,18 @@ mod tests {
     use super::*;
     use crate::terrain::Ground;
     use crate::testing::{
-        hold, is_flat_shaded, model, run_frames, skin_weights, test_ground, triangles,
-        winds_outwards, world_app, TEST_ISLAND_REACH,
+        assert_model_paints, assert_rigid_skin, clip_names, extent, hold, mesh_names, run_frames,
+        test_ground, world_app, TEST_ISLAND_REACH,
     };
-
-    /// The corners of every mesh in the model, in the file's own frame.
-    fn corners() -> Vec<Vec3> {
-        (0..TONES.len())
-            .flat_map(|mesh| triangles(MODEL, mesh, "POSITION"))
-            .flatten()
-            .collect()
-    }
-
-    /// Where each mesh sits in the file, by name — the game asks by name, so
-    /// the tests do too.
-    fn meshes() -> Vec<String> {
-        model(MODEL).0["meshes"]
-            .as_array()
-            .expect("the model has meshes")
-            .iter()
-            .map(|mesh| mesh["name"].as_str().expect("a named mesh").to_owned())
-            .collect()
-    }
 
     #[test]
     fn the_model_is_the_person_the_game_paints() {
-        // Every mesh in the file is one the palette has a tone for, and every
-        // tone has a mesh: one that has drifted out of the pairing arrives
-        // wearing whatever Blender last gave it, which is a shine nothing
-        // else in the world has.
-        let mut named = meshes();
-        named.sort();
-        let mut wanted: Vec<String> = TONES.iter().map(|(name, _)| (*name).to_owned()).collect();
-        wanted.sort();
-        assert_eq!(named, wanted, "the model's meshes are not the palette's");
-
-        // And the conditions every model here is held to — see
-        // `testing::assert_model_draws`, which cannot be used directly
-        // because it pins meshes to positions and these are asked for by
-        // name.
-        for (index, name) in meshes().iter().enumerate() {
-            let faces = triangles(MODEL, index, "POSITION");
-            assert!(winds_outwards(&faces), "the {name} is wound inside-out");
-            assert!(
-                is_flat_shaded(&faces, &triangles(MODEL, index, "NORMAL")),
-                "the {name} is smooth-shaded"
-            );
-        }
+        assert_model_paints(MODEL, &TONES);
     }
 
     #[test]
     fn the_skin_is_rigid_so_the_facets_stay_flat() {
-        // What holds the look together once the model moves: each vertex is
-        // carried by exactly one bone, so a facet is turned rather than bent.
-        // Weight-paint a shoulder smoothly in Blender and the boxes round off
-        // as the figure walks — gradients across facets, in a world that has
-        // none anywhere.
-        for mesh in 0..TONES.len() {
-            for weights in skin_weights(MODEL, mesh) {
-                let carrying = weights.iter().filter(|w| **w > 0.0).count();
-                assert_eq!(
-                    carrying,
-                    1,
-                    "a vertex of {} is shared between bones: {weights:?}",
-                    meshes()[mesh]
-                );
-                assert!(
-                    weights.iter().any(|w| (*w - 1.0).abs() < 1e-3),
-                    "a vertex of {} is carried at {weights:?}",
-                    meshes()[mesh]
-                );
-            }
-        }
+        assert_rigid_skin(MODEL);
     }
 
     #[test]
@@ -481,10 +422,13 @@ mod tests {
         // Person-sized, and standing on its own soles: the master puts the
         // feet at the origin because that is the point the walk holds on the
         // ground and the deck holds a passenger at. A figure modelled about
-        // its middle would walk knee-deep in the sand.
-        let (low, high) = corners()
-            .iter()
-            .fold((f32::MAX, f32::MIN), |(l, h), c| (l.min(c.y), h.max(c.y)));
+        // its middle would walk knee-deep in the sand. Taken across every
+        // mesh, the soles being on one of them and the hat on another.
+        let (low, high) = (0..TONES.len())
+            .map(|mesh| extent(MODEL, mesh, 1))
+            .fold((f32::MAX, f32::MIN), |(l, h), (low, high)| {
+                (l.min(low), h.max(high))
+            });
         assert!(low.abs() < 1e-4, "the figure's soles are at {low}, not 0");
         assert!(
             (1.6..=2.0).contains(&high),
@@ -498,14 +442,11 @@ mod tests {
         // overhead, where a body is nearly symmetric: the brim reaches
         // further ahead — -Z, the way everything here faces — than the whole
         // rest of the coat reaches astern.
-        let coat = meshes()
+        let coat = mesh_names(MODEL)
             .iter()
             .position(|name| name == "coat")
             .expect("coat");
-        let (ahead, astern) = triangles(MODEL, coat, "POSITION")
-            .into_iter()
-            .flatten()
-            .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
+        let (ahead, astern) = extent(MODEL, coat, 2);
         assert!(
             -ahead > astern,
             "the coat reaches {} ahead and {astern} astern, so it has no point",
@@ -519,12 +460,7 @@ mod tests {
         // meshes elsewhere; an afternoon in Blender that renamed or reordered
         // the actions would have the figure standing to attention while it
         // ran.
-        let clips: Vec<String> = model(MODEL).0["animations"]
-            .as_array()
-            .expect("the model has animations")
-            .iter()
-            .map(|clip| clip["name"].as_str().expect("a named clip").to_owned())
-            .collect();
+        let clips = clip_names(MODEL);
         assert_eq!(clips.get(IDLE).map(String::as_str), Some("idle"));
         assert_eq!(clips.get(RUN).map(String::as_str), Some("run"));
     }

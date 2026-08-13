@@ -26,7 +26,7 @@
 use bevy::math::Vec3Swizzles;
 use bevy::prelude::*;
 
-use crate::bindings::{Action, KeyBindings};
+use crate::bindings::KeyBindings;
 use crate::camera::View;
 use crate::player::Player;
 use crate::sea;
@@ -624,25 +624,7 @@ fn steer(
         return;
     };
 
-    // Direction first, speed second, so opposed keys cancel outright rather
-    // than the faster gear winning by the difference.
-    let mut drive = 0.0;
-    if bindings.held(&keys, Action::MoveForward, KeyCode::ArrowUp) {
-        drive += 1.0;
-    }
-    if bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown) {
-        drive -= 1.0;
-    }
-
-    // Port is a positive turn about the vertical, the same way round as the
-    // camera's own Q.
-    let mut helm = 0.0;
-    if bindings.held(&keys, Action::SteerLeft, KeyCode::ArrowLeft) {
-        helm += 1.0;
-    }
-    if bindings.held(&keys, Action::SteerRight, KeyCode::ArrowRight) {
-        helm -= 1.0;
-    }
+    let (drive, helm) = bindings.driving(&keys);
 
     let ground = ground.as_deref();
 
@@ -711,6 +693,7 @@ mod tests {
     use protocol::ground::FACET_METRES;
 
     use super::*;
+    use crate::bindings::Action;
     use crate::testing::{
         assert_model_draws, elapsed, hold, rebind, run_frames, test_ground, triangles, world_app,
         TEST_ISLAND_REACH,

@@ -23,6 +23,7 @@ use game::compass::CompassPlugin;
 use game::console::ConsolePlugin;
 use game::debug::DebugOverlayPlugin;
 use game::menu::MenuPlugin;
+use game::models::ModelsPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
 use game::player::PlayerPlugin;
 use game::sky::SkyPlugin;
@@ -122,6 +123,9 @@ fn run(args: Args, session: Option<Session>) {
         .insert_resource(NextState::Pending(args.helm))
         .insert_resource(args.starting_view())
         .add_plugins((
+            // Before anything that draws a model: it owns the world's tones,
+            // which the modules dressing rigged models register into.
+            ModelsPlugin,
             TerrainPlugin,
             // Before the terrain and the rest only by convention; what it
             // owns — the clear colour, the ambient light and the one light in

@@ -69,6 +69,23 @@ pub fn is_night(phase: f32) -> bool {
     !(DAYBREAK..NIGHTFALL).contains(&phase)
 }
 
+/// A phase of the day as a time on a twenty-four hour clock — `0.0` midnight,
+/// `0.25` six in the morning.
+///
+/// Here rather than on either side because both ends say the hour out loud —
+/// a server answering `time 18:00` at its console, a client's own readout —
+/// and two spellings of it would have one session disagreeing with itself
+/// about what time it is. What a phase *means* is this crate's, the same way
+/// [`is_night`] is.
+///
+/// Rounded to the minute rather than truncated, and folded back into the day
+/// after: an hour that is a hair under the minute it means — which is what a
+/// phase written as a decimal usually is — should read as that minute.
+pub fn clock(phase: f32) -> String {
+    let minutes = (phase.rem_euclid(1.0) * 24.0 * 60.0).round() as u32 % (24 * 60);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
 /// The port a server listens on, and a client joins on, unless told
 /// otherwise. Nothing else claims it, and it is easily remembered as the
 /// powers of two run together.

@@ -14,7 +14,7 @@
 //! has somewhere to stand, and the host's log names the asker either way.
 
 use glam::Vec2;
-use protocol::{BeastKind, PlayerId, ToClient};
+use protocol::{clock, BeastKind, PlayerId, ToClient};
 
 use crate::{beasts, broadcast_all, Shared};
 
@@ -154,14 +154,6 @@ fn parse_clock(given: &str) -> Option<f32> {
         None => (given.parse::<u32>().ok()?, 0),
     };
     (hours < 24 && minutes < 60).then(|| (hours * 60 + minutes) as f32 / (24.0 * 60.0))
-}
-
-/// A phase of the day back as the clock the command took it in — the game's
-/// overlay has the same few lines, each side of the wire spelling the hour
-/// for itself.
-fn clock(phase: f32) -> String {
-    let minutes = (phase.rem_euclid(1.0) * 24.0 * 60.0).round() as u32 % (24 * 60);
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 #[cfg(test)]

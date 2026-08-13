@@ -18,6 +18,7 @@ pub mod console;
 pub mod debug;
 pub mod figure;
 pub mod menu;
+pub mod models;
 pub mod net;
 pub mod player;
 pub mod sea;
@@ -102,6 +103,51 @@ pub fn model_mesh(file: &str, mesh: usize) -> AssetPath<'static> {
 /// snap the tail, as the boat's way does.
 pub fn eased(rate: f32, dt: f32) -> f32 {
     1.0 - (-rate * dt).exp()
+}
+
+/// Stirs bits until they stop resembling what they were — SplitMix's mixing
+/// rounds, without its sequence.
+///
+/// Everything this crate invents out of thin air comes through here, and it
+/// is deliberately one function rather than one per module, because the two
+/// jobs it does are the same arithmetic wearing different hats. Most callers
+/// only want a number that does not look patterned — which bearing a
+/// crossing is laid on, how much a bird sits off its station — and could
+/// have used anything.
+///
+/// The rest want *agreement*: they feed in bits every machine was dealt
+/// alike — a chunk's coordinates, a [`protocol::BeastId`] — so that what is
+/// dealt from them comes out the same on every client without a byte
+/// crossing the wire. That is the eagles' trick over a summit and the
+/// beasts' over a pod, and it only holds while there is one mixer to be
+/// dealt by. Two copies of these rounds are two ways for two builds to
+/// disagree about what a pod looks like, with nothing to say so.
+pub fn scramble(mut x: u32) -> u32 {
+    x = x.wrapping_add(0x9E37_79B9);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x85EB_CA6B);
+    x ^= x >> 13;
+    x = x.wrapping_mul(0xC2B2_AE35);
+    x ^ (x >> 16)
+}
+
+/// A number in `0.0..1.0` from some bits and a salt — the one way this crate
+/// turns entropy into a quantity, so a bearing, a jitter and a speed are all
+/// drawn the same way. The salt is what lets one seed answer several
+/// questions without the answers being the same answer.
+pub fn unit(bits: u32, salt: u32) -> f32 {
+    scramble(bits ^ salt) as f32 / u32::MAX as f32
+}
+
+/// The same, in `-1.0..1.0`: a wobble either way about whatever it is added
+/// to.
+pub fn signed(bits: u32, salt: u32) -> f32 {
+    unit(bits, salt) * 2.0 - 1.0
+}
+
+/// One of `range.0..=range.1`, evenly.
+pub fn between(bits: u32, salt: u32, range: (usize, usize)) -> usize {
+    range.0 + scramble(bits ^ salt) as usize % (range.1 + 1 - range.0)
 }
 
 /// Top-level screen the app is on.

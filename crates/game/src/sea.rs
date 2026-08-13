@@ -488,6 +488,28 @@ impl SeaConditions {
             .map_or(protocol::ground::OCEAN_DEPTH, |height| -height);
         self.swell(at, elapsed, depth)
     }
+
+    /// Where a thing riding a carrier stands on the map, and where the water
+    /// is under it — the opening move of anything drawn as a formation.
+    ///
+    /// The station is read out of the rider's own transform *in the plane*
+    /// and carried into the world through the carrier's, so a member keeps
+    /// its place in the group however the group is headed, and its own height
+    /// is left entirely to whatever is about to set it. Both the flying and
+    /// the swimming formations begin here — a line of seabirds over the
+    /// shallows and a pod of dolphins under them are the same question asked
+    /// of the same swell.
+    pub fn under_station(
+        &self,
+        ground: Option<&Ground>,
+        carrier: &Transform,
+        station: &Transform,
+        elapsed: f32,
+    ) -> (Vec3, f32) {
+        let at =
+            carrier.transform_point(Vec3::new(station.translation.x, 0.0, station.translation.z));
+        (at, self.water_over(ground, at.xz(), elapsed))
+    }
 }
 
 /// Brings the drawn sea to the forecast: the wind eases over, each wave
