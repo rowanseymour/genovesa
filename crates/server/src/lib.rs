@@ -837,6 +837,15 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         // from midday to a night already half gone would be a worse opening
         // than a moment's wait.
         post(newcomer, ToClient::Daylight { phase });
+        // And the words this console answers to, so a client's console can
+        // offer them as the player types. Hints only: lines cross verbatim
+        // and are answered whether or not they start with any of these.
+        post(
+            newcomer,
+            ToClient::Vocabulary {
+                verbs: console::VERBS.iter().map(|verb| verb.to_string()).collect(),
+            },
+        );
         for (other, existing) in players.iter() {
             if *other != id {
                 post(

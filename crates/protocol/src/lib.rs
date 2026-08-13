@@ -38,7 +38,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 
 /// How long one turn of the world's day takes, in seconds — sunrise to
 /// sunrise, ten minutes of it.
@@ -334,6 +334,21 @@ pub enum ToClient {
     Reply {
         text: String,
     },
+    /// The server's console vocabulary: the first word of every line its
+    /// console serves, sent once after [`ToClient::Welcome`].
+    ///
+    /// Hints, not grammar. A console can offer these while a player types —
+    /// completion is what this exists for — but a line still crosses the wire
+    /// verbatim as [`ToServer::Command`] whether it starts with one of these
+    /// or not, and the server still answers every line either way. A client
+    /// that ignores this message loses nothing but the hinting, which is how
+    /// the vocabulary stays the server's to grow.
+    ///
+    /// On the wire: a u8 count of verbs, then each verb as a u16 byte count
+    /// and that many bytes of UTF-8.
+    Vocabulary {
+        verbs: Vec<String>,
+    },
 }
 
 impl ToServer {
@@ -444,6 +459,13 @@ impl ToClient {
                 payload.push(10);
                 put_str(&mut payload, text);
             }
+            Self::Vocabulary { verbs } => {
+                payload.push(11);
+                payload.push(verbs.len() as u8);
+                for verb in verbs {
+                    put_str(&mut payload, verb);
+                }
+            }
             Self::Chunk { chunk, ground } => {
                 payload.push(5);
                 put_ivec2(&mut payload, *chunk);
@@ -528,6 +550,11 @@ impl ToClient {
             },
             10 => Self::Reply {
                 text: payload.str()?,
+            },
+            11 => Self::Vocabulary {
+                verbs: (0..payload.u8()?)
+                    .map(|_| payload.str())
+                    .collect::<io::Result<_>>()?,
             },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
@@ -817,6 +844,10 @@ mod tests {
             ToClient::Reply {
                 text: "the clock stands at 06:00".to_string(),
             },
+            ToClient::Vocabulary {
+                verbs: vec!["help".to_string(), "spawn".to_string()],
+            },
+            ToClient::Vocabulary { verbs: Vec::new() },
             ToClient::Chunk {
                 chunk: IVec2::new(3, -8),
                 ground: None,
@@ -1022,6 +1053,18 @@ mod tests {
                 10, // tag
                 2, 0, // the text's own byte count, LE
                 0x68, 0x69, // "hi"
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::Vocabulary {
+                verbs: vec!["hi".to_string(), "yo".to_string()],
+            }),
+            [
+                10, 0,  // length
+                11, // tag
+                2,  // two verbs
+                2, 0, 0x68, 0x69, // "hi", counted then spelled
+                2, 0, 0x79, 0x6F, // "yo"
             ],
         );
 

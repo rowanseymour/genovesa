@@ -23,6 +23,12 @@
 //! left of 1, whatever a layout prints on it — and reserved from rebinding,
 //! for the reason the arrows are: it is the way in and out of a mode, and a
 //! key that could be given away could strand whoever gave it.
+//!
+//! Tab completes, but only the words this client can *know*: `set` and its
+//! variables, which are this module's own grammar, and the server's verbs —
+//! which are not guessed at but taught, arriving on joining as
+//! [`protocol::ToClient::Vocabulary`], so completion grows with the server
+//! the way the vocabulary itself does.
 
 use std::collections::VecDeque;
 
@@ -82,6 +88,10 @@ pub struct Console {
     /// Where the up arrow has got to in that history, `None` when the input
     /// is the player's own fresh line.
     recall: Option<usize>,
+    /// The server's verbs, as taught on joining — what tab offers for a
+    /// line's first word alongside `set`. Empty until the teaching arrives,
+    /// when tab knows only the local grammar.
+    verbs: Vec<String>,
 }
 
 impl Console {
@@ -96,11 +106,80 @@ impl Console {
         }
     }
 
+    /// Takes the server's word list — see [`crate::net::receive`], which is
+    /// where a [`protocol::ToClient::Vocabulary`] lands.
+    pub fn teach(&mut self, verbs: Vec<String>) {
+        self.verbs = verbs;
+    }
+
+    /// What tab does to the line being typed: grows the last word to the
+    /// longest lead every matching word shares, finishes it — trailing space
+    /// and all — when one word alone matches, and says the choices when
+    /// several do and no growing is possible. On an empty word that makes
+    /// tab the index: it offers everything that could stand there.
+    fn complete(&mut self) {
+        let (before, partial) = match self.input.rsplit_once(char::is_whitespace) {
+            Some(split) => split,
+            None => ("", self.input.as_str()),
+        };
+        let matches: Vec<&str> = self
+            .completions(before)
+            .into_iter()
+            .filter(|word| word.starts_with(partial))
+            .collect();
+
+        let keep = self.input.len() - partial.len();
+        let grown = match matches.as_slice() {
+            [] => return,
+            // One word left: the whole of it, and the space after — the only
+            // thing left to type is the next word.
+            [word] => format!("{word} "),
+            words => {
+                let lead = shared_lead(words);
+                if lead.len() == partial.len() {
+                    // Nothing grows: the choices themselves are the answer,
+                    // said where the replies land.
+                    let choices = words.join("  ");
+                    self.say(&choices);
+                    return;
+                }
+                lead.to_string()
+            }
+        };
+        if keep + grown.len() <= MAX_LINE {
+            self.input.truncate(keep);
+            self.input.push_str(&grown);
+            self.recall = None;
+        }
+    }
+
+    /// The words that could stand after `before`, which are the ones this
+    /// client can know: for a line's first word, `set` and whatever verbs
+    /// the server taught; after a lone `set`, the variables. Anything deeper
+    /// is the server's business, unknowable here and not guessed at.
+    fn completions(&self, before: &str) -> Vec<&str> {
+        let mut earlier = before.split_whitespace();
+        match (earlier.next(), earlier.next()) {
+            (None, _) => std::iter::once("set")
+                .chain(self.verbs.iter().map(String::as_str))
+                .collect(),
+            (Some("set"), None) => VARIABLES.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether a line has been said, word for word — for the tests, which
     /// otherwise could only reach the scrollback through the drawn text.
     #[cfg(test)]
     pub(crate) fn said(&self, line: &str) -> bool {
         self.lines.iter().any(|said| said == line)
+    }
+
+    /// Whether a verb has been taught — for the net tests, which otherwise
+    /// could only see the vocabulary through tab.
+    #[cfg(test)]
+    pub(crate) fn knows(&self, verb: &str) -> bool {
+        self.verbs.iter().any(|known| known == verb)
     }
 
     /// What the console shows: the last few lines said, and the prompt with
@@ -141,6 +220,25 @@ fn dispatch(line: &str, toggles: &mut Toggles) -> Dispatch {
     }
 }
 
+/// The `set` variables, in the order a bare `set` lists them — what tab
+/// completes after `set`, and what a miss is told to try instead, this
+/// being the half of the grammar that lives on this machine.
+const VARIABLES: [&str; 5] = ["stats", "shadows", "haze", "wireframe", "reach"];
+
+/// The longest lead every word here shares — at least what was typed, each
+/// already starting with that.
+fn shared_lead<'a>(words: &[&'a str]) -> &'a str {
+    let mut lead = words[0];
+    for word in &words[1..] {
+        while !word.starts_with(lead) {
+            let mut shorter = lead.chars();
+            shorter.next_back();
+            lead = shorter.as_str();
+        }
+    }
+    lead
+}
+
 /// The `set` grammar: `set` lists every variable, `set <var>` reads one,
 /// `set <var> <value>` writes one. Always answered — a console that says
 /// nothing back reads as a console that heard nothing.
@@ -179,7 +277,11 @@ fn onoff(var: &str, on: bool) -> String {
 }
 
 fn no_such(var: &str) -> String {
-    format!("nothing here called `{var}` — stats, shadows, haze, wireframe or reach")
+    let (last, rest) = VARIABLES.split_last().expect("variables to offer");
+    format!(
+        "nothing here called `{var}` — {} or {last}",
+        rest.join(", ")
+    )
 }
 
 /// Throws a boolean switch, answering with the state it is now in — the same
@@ -279,6 +381,7 @@ fn console_keys(
                     console.input.clear();
                 }
             }
+            KeyCode::Tab => console.complete(),
             _ => {
                 // What the press *typed* — with the space named rather than
                 // read off it, because a space arrives as [`Key::Space`] and
@@ -579,6 +682,126 @@ mod tests {
         // And past the newest is the fresh prompt again.
         type_key(&mut app, KeyCode::ArrowDown, "");
         assert_eq!(app.world().resource::<Console>().input, "");
+    }
+
+    /// What the real server teaches, as the completion tests' vocabulary —
+    /// the teaching itself is the net module's to test.
+    fn taught(app: &mut App) {
+        app.world_mut().resource_mut::<Console>().teach(
+            ["help", "spawn", "time", "weather"]
+                .map(String::from)
+                .to_vec(),
+        );
+    }
+
+    fn input(app: &App) -> String {
+        app.world().resource::<Console>().input.clone()
+    }
+
+    #[test]
+    fn tab_finishes_a_lone_match_with_the_space_after() {
+        let mut app = test_app();
+        taught(&mut app);
+        press_backquote(&mut app);
+
+        // The server's verb, taught rather than known.
+        type_key(&mut app, KeyCode::KeyA, "s");
+        type_key(&mut app, KeyCode::KeyA, "p");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "spawn ");
+
+        // And the local grammar's variable, after the word that names it.
+        type_key(&mut app, KeyCode::Enter, "\r");
+        for character in "set w".chars() {
+            type_key(&mut app, KeyCode::KeyA, &character.to_string());
+        }
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "set wireframe ");
+    }
+
+    #[test]
+    fn tab_grows_what_it_can_and_offers_what_it_cannot() {
+        let mut app = test_app();
+        taught(&mut app);
+        press_backquote(&mut app);
+
+        // `s` could still be `set` or `spawn`: nothing grows, so the choices
+        // are said and the line stands.
+        type_key(&mut app, KeyCode::KeyA, "s");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "s");
+        assert!(app.world().resource::<Console>().said("set  spawn"));
+
+        // `t` grows to the `ti` that `time` and `tide` share, and no further.
+        app.world_mut()
+            .resource_mut::<Console>()
+            .teach(["time", "tide"].map(String::from).to_vec());
+        type_key(&mut app, KeyCode::Backspace, "");
+        type_key(&mut app, KeyCode::KeyA, "t");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "ti");
+    }
+
+    #[test]
+    fn tab_on_an_empty_word_is_the_index() {
+        let mut app = test_app();
+        taught(&mut app);
+        press_backquote(&mut app);
+
+        // An empty line: everything a first word could be.
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "");
+        assert!(app
+            .world()
+            .resource::<Console>()
+            .said("set  help  spawn  time  weather"));
+
+        // After `set `: every variable.
+        for character in "set ".chars() {
+            let key = if character == ' ' {
+                KeyCode::Space
+            } else {
+                KeyCode::KeyA
+            };
+            type_key(&mut app, key, &character.to_string());
+        }
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "set ");
+        assert!(app
+            .world()
+            .resource::<Console>()
+            .said("stats  shadows  haze  wireframe  reach"));
+    }
+
+    #[test]
+    fn tab_never_guesses_at_the_servers_arguments() {
+        let mut app = test_app();
+        taught(&mut app);
+        press_backquote(&mut app);
+
+        // What follows `spawn` is the server's vocabulary, not taught and
+        // not guessed: tab does nothing, quietly.
+        for character in "spawn sh".chars() {
+            let key = if character == ' ' {
+                KeyCode::Space
+            } else {
+                KeyCode::KeyA
+            };
+            type_key(&mut app, key, &character.to_string());
+        }
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "spawn sh");
+        assert!(app.world().resource::<Console>().lines.is_empty());
+    }
+
+    #[test]
+    fn before_the_teaching_tab_knows_only_the_local_grammar() {
+        let mut app = test_app();
+        press_backquote(&mut app);
+
+        type_key(&mut app, KeyCode::KeyA, "s");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "set ");
     }
 
     #[test]

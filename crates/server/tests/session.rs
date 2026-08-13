@@ -106,14 +106,17 @@ impl Client {
     /// on joining and again on a clock nothing in a test controls, so any
     /// assertion about message order would be flaky against them. The tests
     /// that *are* about the sky or the beasts read for what they want with
-    /// [`Client::hear_the_time`] and [`Client::hear_a_beast`].
+    /// [`Client::hear_the_time`] and [`Client::hear_a_beast`]. The console
+    /// vocabulary is skipped with them, being part of the same joining
+    /// chatter; the newcomer test reads it raw.
     fn hear(&self) -> ToClient {
         loop {
             match ToClient::read(&mut &self.0).expect("read") {
                 ToClient::Weather { .. }
                 | ToClient::Daylight { .. }
                 | ToClient::Beast { .. }
-                | ToClient::BeastGone { .. } => continue,
+                | ToClient::BeastGone { .. }
+                | ToClient::Vocabulary { .. } => continue,
                 message => return message,
             }
         }
@@ -239,6 +242,17 @@ fn a_newcomer_is_told_the_sky_before_anything_else_happens() {
             "a world seconds old opened at {phase} rather than its morning"
         ),
         other => panic!("expected the time of day, heard {other:?}"),
+    }
+    // Then the console's words, before the client has asked anything —
+    // completion is only worth having from the first line typed.
+    match ToClient::read(&mut &client.0).expect("read") {
+        ToClient::Vocabulary { verbs } => {
+            assert!(
+                verbs.iter().any(|verb| verb == "help"),
+                "no `help` among {verbs:?}"
+            );
+        }
+        other => panic!("expected the vocabulary, heard {other:?}"),
     }
 }
 

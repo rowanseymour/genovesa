@@ -24,6 +24,12 @@ const HELP: &str = "spawn shark|dolphins|whale — raise a beast in your waters\
                     time <hh:mm> — run the world's clock forward to that hour\n\
                     weather calm|breeze|gale|natural — order the wind, or give it back";
 
+/// The first word of every line [`interpret`] serves — taught to each client
+/// on joining as [`ToClient::Vocabulary`], so a console can complete them as
+/// a player types. The grammar's index, not the grammar: `interpret` never
+/// reads this, and a test holds the two to agreement.
+pub(crate) const VERBS: [&str; 4] = ["help", "spawn", "time", "weather"];
+
 /// The winds the console can order up. The strengths are the sea's landmarks
 /// rather than round numbers: a flat calm, the reference breeze the wave
 /// amplitudes are written for, and the hardest gale an honest sky can blow.
@@ -249,6 +255,22 @@ mod tests {
             shared.summoned.lock().expect("no poisoned lock").is_empty(),
             "something was summoned anyway"
         );
+    }
+
+    #[test]
+    fn the_vocabulary_is_the_grammar_it_advertises() {
+        // Every advertised verb is served: alone it may earn a usage
+        // complaint, but never the not-a-command answer — a client is going
+        // to complete these under players' fingers, and a taught word the
+        // server then disowns would make the completion a lie.
+        let shared = a_world(0.5);
+        for verb in VERBS {
+            let reply = interpret(&shared, PlayerId(1), verb);
+            assert!(
+                !reply.contains("is not a command"),
+                "`{verb}` is advertised but not served: {reply}"
+            );
+        }
     }
 
     #[test]
