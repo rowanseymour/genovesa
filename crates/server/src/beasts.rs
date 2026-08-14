@@ -68,11 +68,30 @@
 //!   to leave, and leaves like anything else, because "nobody is near it" is
 //!   a statement about a radius and not about whether anyone is looking.
 //!
-//! What a player *does* to any of this is deliberately almost nothing: these
+//! # What one makes of another
+//!
+//! What an animal does about anything else in the water is one entry in a
+//! table — [`REGARDS`], a row per kind and a column per thing there is to meet
+//! — and the entry carries its own reach, because how far off a whale starts
+//! caring is a fact about a whale *and a hull* rather than a fact about
+//! whales. A single "how wary is this kind" number was the first shape of this
+//! and it was one column of the table wearing the whole thing's clothes: it
+//! cannot say that dolphins drive a shark off while a shark gives a pod room,
+//! which is two different answers to one pairing and the interesting half of
+//! what these animals are.
+//!
+//! A stance is about *steering*, and never about the life. Whatever an animal
+//! makes of a boat, it is still bound where it was bound and it still ends
+//! where it was always going to end: a regard slots into [`swim`] between
+//! wanting to be somewhere and holding to water it can be in, which is to say
+//! it outranks the journey and the ground outranks it.
+//!
+//! What a player gets out of that today is deliberately almost nothing: these
 //! animals are going somewhere and a boat is a thing in the way, so what they
-//! do about one is give it a berth ([`skirt`]) or, for a whale, go under it
-//! and stay under while it is there. Neither is minding a player, and that is
-//! the point — see [`Habitat::wary`].
+//! do about one is give it a berth ([`skirt`]) or, for a whale, go under it and
+//! stay under while it is there. Neither is minding a player, and that is the
+//! point. The beasts cannot yet see *each other* at all — see [`REGARDS`] for
+//! what that would take and why it is not built.
 //!
 //! The one thing the server cannot yet see is whether a player is *in the
 //! water*: a client reports a position, not whether its player is afoot,
@@ -237,18 +256,6 @@ struct Habitat {
     /// is where a traveller is *born* and where a shark's home is looked for
     /// — see [`raise`], which is the one place that difference lives.
     ring: (f32, f32),
-    /// How wide a berth this kind gives a player, in metres — zero for a kind
-    /// that gives none.
-    ///
-    /// Not shyness, and the difference decides the steering: these animals
-    /// are going somewhere and a boat is in the way, so what they do about
-    /// one is *avoid contact* — hold the course and pass it wide, which is
-    /// [`skirt`] — rather than break off and flee, which is what turning
-    /// straight away from a hull would read as and did. The whale's other
-    /// answer is to go under, and this is that reach too: near enough to be
-    /// worth avoiding is near enough to go down for. The shark's is zero and
-    /// pointedly so, which is the first thing a player learns about sharks.
-    wary: f32,
     /// How far this kind's one journey runs, in metres — `None` for a kind
     /// that is not passing through.
     ///
@@ -304,7 +311,6 @@ const HABITATS: [Habitat; 3] = [
         about: 2,
         waters: 450.0,
         ring: (350.0, 450.0),
-        wary: 0.0,
         journey: None,
         life: (1_400, 2_400),
         meander: 0.05,
@@ -317,10 +323,6 @@ const HABITATS: [Habitat; 3] = [
         about: 1,
         waters: 900.0,
         ring: (400.0, 650.0),
-        // A pod's berth is a few boat lengths: enough that the arcs pass by
-        // rather than through, and not so much that a hull half a field away
-        // bends a course that was never about it.
-        wary: 25.0,
         // Comfortably past the ring it is born on, so the course runs by the
         // player it was raised for and out the other side, and short enough of
         // the waters above that the far end is still inside them. At a pod's
@@ -338,10 +340,6 @@ const HABITATS: [Habitat; 3] = [
         about: 1,
         waters: 1_300.0,
         ring: (500.0, 900.0),
-        // Wider than the pod's, being a wider animal on a longer turn — and
-        // it is the reach a hull has to go down for, so it wants to be the
-        // distance at which a whale would rather not find out.
-        wary: 45.0,
         journey: Some((1_000.0, 1_500.0)),
         // Twice what the longest crossing takes a whale, which is the slowest
         // traveller here: fifteen hundred metres at 2.2 m/s is the better part
@@ -352,6 +350,205 @@ const HABITATS: [Habitat; 3] = [
         meander: 0.004,
     },
 ];
+
+/// What one kind of beast makes of one thing it has met.
+///
+/// The reach lives in the stance rather than on the kind, and that is the
+/// whole reason this is not a number on [`Habitat`]: a whale gives a hull
+/// forty-five metres and another whale nothing at all, so "how far off does
+/// this animal start caring" has no one answer per kind. It has one per
+/// pairing, which is what [`REGARDS`] is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Regard {
+    /// Nothing at all: as far as this animal is concerned that is water, and
+    /// the course it was already swimming is the course it swims.
+    Ignore,
+    /// Pass it wide, noticing it this many metres off — [`skirt`], which holds
+    /// the course and bends it round rather than breaking off.
+    ///
+    /// Not shyness, and the difference decides the steering: these animals are
+    /// going somewhere and a boat is in the way, so what they do about one is
+    /// *avoid contact* — hold the course and pass it wide — rather than break
+    /// off and flee, which is what turning straight away from a hull would read
+    /// as and did. The pass is aimed to clear [`BERTH`] of the reach, the gap
+    /// between the two being what buys the turn room to be gradual.
+    Berth(f32),
+    /// Go under while it is inside this many metres, and pass wide of it as
+    /// well — the whale's answer, and [`breathe`]'s business.
+    ///
+    /// Both halves, and deliberately: the dive is what is *characteristic* of a
+    /// whale meeting a hull but it is not the whole of what a whale does about
+    /// one. A stance that only sounded would be a whale going down and then
+    /// swimming its line straight at the boat on top of it, which is not a
+    /// whale minding a boat less — it is a whale that has stopped being a body
+    /// in the water. Near enough to be worth avoiding is near enough to go down
+    /// for, so it is one reach and not two.
+    Sound(f32),
+    /// Close on it and stay with it while it is inside this many metres: a pod
+    /// running a shark out of its water, and one day a shark working a swimmer.
+    ///
+    /// Not written, because nothing in [`REGARDS`] asks for it yet — see there
+    /// for what standing it up needs.
+    #[allow(dead_code)]
+    Harry(f32),
+    /// Come *to* it and keep company with it while it is inside this many
+    /// metres: dolphins on a bow wave, which is the one thing in this table
+    /// that closes the range for fun.
+    ///
+    /// Not written either, and for the same reason.
+    #[allow(dead_code)]
+    Play(f32),
+}
+
+/// Something a beast can meet: a column of [`REGARDS`].
+///
+/// The three kinds come first and in [`HABITATS`] order, so the top-left block
+/// of the table is what the beasts make of each other and a kind's row lines up
+/// with its own column.
+///
+/// `Afloat` and `Swimming` are one player in two states rather than two things,
+/// and the wire cannot yet tell them apart: `ToServer::Move` carries a position
+/// and nothing else, and a boat has never crossed it at all. They are kept
+/// apart here regardless, because what a shark makes of a swimmer is most of
+/// why beasts are on the server in the first place, and a table that could not
+/// even write the distinction down would be the wrong table to be waiting with.
+/// Until a client says how its player is travelling, every player is read as
+/// [`A_PLAYER`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Met {
+    Shark,
+    Dolphins,
+    Whale,
+    /// A player on a hull.
+    Afloat,
+    /// A player in the water.
+    Swimming,
+}
+
+impl Met {
+    /// Everything there is to meet, in column order: what sets the table's
+    /// width, and what the totality test walks.
+    const ALL: [Met; 5] = [
+        Met::Shark,
+        Met::Dolphins,
+        Met::Whale,
+        Met::Afloat,
+        Met::Swimming,
+    ];
+
+    /// Which column of [`REGARDS`] holds what a beast makes of this.
+    fn column(self) -> usize {
+        match self {
+            Met::Shark => 0,
+            Met::Dolphins => 1,
+            Met::Whale => 2,
+            Met::Afloat => 3,
+            Met::Swimming => 4,
+        }
+    }
+}
+
+/// What a player is taken to be, until the wire can say which they are — see
+/// [`Met`]. The one place that pretence lives, so the day a client reports how
+/// its player is travelling is a change here rather than to the table.
+const A_PLAYER: Met = Met::Afloat;
+
+/// What each kind of beast makes of each kind of thing it can meet: a row per
+/// kind in [`HABITATS`] order, a column per [`Met`]. The row is who is
+/// deciding; the column is what they have come across.
+///
+/// It is asymmetric on purpose and has to stay so. Dolphins run a shark out of
+/// their water while a shark gives a pod a wide berth, and that is two answers
+/// to one pairing — a single number held *between* two kinds could not say it,
+/// and neither could the one number per kind this replaced, which was this
+/// table with the player column and nothing else.
+///
+/// The reaches here are the ones the kinds already kept, in metres. A pod's is
+/// a few boat lengths: enough that the arcs pass by rather than through, and
+/// not so much that a hull half a field away bends a course that was never
+/// about it. A whale's is wider, being a wider animal on a longer turn, and it
+/// is also the range it goes down at, so it wants to be the distance at which a
+/// whale would rather not find out. The shark's is `Ignore` and pointedly so:
+/// that a shark gives you no room is the first thing a player learns about one.
+///
+/// # What is not filled in
+///
+/// The nine cells of the top-left block are what one beast makes of another,
+/// and every one of them is `Ignore`, because the beasts have never seen each
+/// other. Standing them up is not a matter of writing stances in:
+///
+/// - There is no still picture of what is *in* the water the way [`Flock::beat`]
+///   takes one of where the players are. It would have to be that same pattern
+///   widened to everything, and a beast finds itself in such a list unless it
+///   is skipped by id.
+/// - `Harry` and `Play` both close the range, and two animals with stances on
+///   each other make a chase. A chase drags both of them across the map, which
+///   is a quiet way of subverting the journey that is a traveller's whole life,
+///   so an engagement has to be bounded before either is safe to write.
+///
+/// None of that is worth building until a cell asks for it, so the cells that
+/// would ask are the ones left saying nothing. What they are for, when they
+/// come: a pod harrying a shark off its water, a shark standing well clear of
+/// a pod that would, and the travellers with nothing to say to each other.
+///
+/// The pod's own answer to a boat is the other unfinished business, and it is
+/// unfinished in the opposite direction — the cell is live and it is the wrong
+/// stance. Bow-riding is what dolphins and a hull are *for*, and this game has
+/// a boat with a bow wave to ride; `Berth` is what a pod does until `Play`
+/// exists to say so.
+#[rustfmt::skip]
+const REGARDS: [[Regard; Met::ALL.len()]; HABITATS.len()] = {
+    use Regard::{Berth, Ignore, Sound};
+    [
+        //              shark    pod      whale    afloat       swimming
+        /* shark */   [ Ignore,  Ignore,  Ignore,  Ignore,      Ignore      ],
+        /* pod   */   [ Ignore,  Ignore,  Ignore,  Berth(25.0), Berth(25.0) ],
+        /* whale */   [ Ignore,  Ignore,  Ignore,  Sound(45.0), Sound(45.0) ],
+    ]
+};
+
+impl Regard {
+    /// What a beast of a kind makes of something it has met.
+    fn of(kind: BeastKind, met: Met) -> Self {
+        REGARDS[Self::row(kind)][met.column()]
+    }
+
+    /// Which row of [`REGARDS`] holds a kind's opinions. A match rather than a
+    /// scan of [`HABITATS`], so that a fourth kind of beast is a compile error
+    /// here rather than a row somebody has to notice is missing — and the
+    /// totality test is what holds the two orders together.
+    fn row(kind: BeastKind) -> usize {
+        match kind {
+            BeastKind::Shark => 0,
+            BeastKind::Dolphins => 1,
+            BeastKind::Whale => 2,
+        }
+    }
+
+    /// How far off this stance starts passing wide, in metres — `None` where it
+    /// does no such thing. `Sound` answers here as well as `Berth`; the reason
+    /// is written where `Sound` is.
+    fn berth(self) -> Option<f32> {
+        match self {
+            Self::Berth(reach) | Self::Sound(reach) => Some(reach),
+            Self::Ignore => None,
+            // Neither of these is a berth — both close the range rather than
+            // open it — and neither is written. Nothing in the table asks for
+            // one, and a test says so, which is what keeps this arm from being
+            // a stance that quietly does nothing.
+            Self::Harry(_) | Self::Play(_) => None,
+        }
+    }
+
+    /// How far off this stance answers by going under, in metres — `None` for
+    /// every stance that does not, which is every stance but the whale's.
+    fn sounding(self) -> Option<f32> {
+        match self {
+            Self::Sound(reach) => Some(reach),
+            Self::Ignore | Self::Berth(_) | Self::Harry(_) | Self::Play(_) => None,
+        }
+    }
+}
 
 /// Which part of its life a beast is in — see the module's opening, where
 /// what each means is set out.
@@ -819,13 +1016,19 @@ fn swim(beast: &mut Beast, shared: &Shared, players: &[Vec2], entropy: u32) {
         beast.heading = turned(beast.heading, off.clamp(-0.25, 0.25));
     }
 
-    // The berth: pass a boat wide rather than break off from one — see
-    // [`skirt`], and [`Habitat::wary`] for why those are different animals.
+    // The stance: what this kind makes of what it has met, which for now is a
+    // player and nothing else — see [`REGARDS`]. This is where a regard goes,
+    // whatever the regard turns out to be: after the want, so that what an
+    // animal has come across outranks where it was going, and before the ground
+    // below, so that nothing dodges onto a beach.
+    //
+    // A berth is passing a boat wide rather than breaking off from one — see
+    // [`skirt`], and [`Regard::Berth`] for why those are different animals.
     // Bounded to the same turn per beat as everything else, so an avoidance
     // reads as deciding rather than as deflection.
-    if habitat.wary > 0.0 {
-        if let Some(boat) = nearest_player(players, beast.position, habitat.wary) {
-            let round = skirt(beast, boat, habitat.wary);
+    if let Some(reach) = Regard::of(habitat.kind, A_PLAYER).berth() {
+        if let Some(boat) = nearest_player(players, beast.position, reach) {
+            let round = skirt(beast, boat, reach);
             let off = beast.heading.angle_to(round);
             beast.heading = turned(beast.heading, off.clamp(-0.25, 0.25));
         }
@@ -929,18 +1132,20 @@ fn mind(beast: &mut Beast, shared: &Shared, players: &[Vec2], entropy: u32) -> b
 /// longer stretches down, and the one answer a whale has to a boat that is
 /// not simply steering round it: go under, and stay under while it is there.
 ///
-/// Nothing else here has anything to say. A shark is a fin whenever it is
+/// Nothing else here has anything to say, and it is [`REGARDS`] that says so
+/// rather than a kind named here: a stance that answers by going under is the
+/// only thing this has any business with. A shark is a fin whenever it is
 /// alive, and a pod arcs the whole way across the map; both of those are
 /// drawing, and this is deliberately the only thing that is not.
 fn breathe(beast: &mut Beast, players: &[Vec2], entropy: u32) {
-    if beast.habitat.kind != BeastKind::Whale {
+    let Some(reach) = Regard::of(beast.habitat.kind, A_PLAYER).sounding() else {
         return;
-    }
+    };
 
-    // A hull inside the berth it is already bending its course round — see
-    // [`Habitat::wary`] — is also what puts it down, so a boat closing on a
-    // whale gets one long back and then nothing.
-    let boat = nearest_player(players, beast.position, beast.habitat.wary).is_some();
+    // The reach it sounds at is the reach it is already bending its course
+    // round — one number, for the reason written on [`Regard::Sound`] — so a
+    // boat closing on a whale gets one long back and then nothing.
+    let boat = nearest_player(players, beast.position, reach).is_some();
     beast.bout = beast.bout.saturating_sub(1);
 
     if beast.surfaced {
@@ -1011,16 +1216,31 @@ fn journey(
 /// bearing they had, the first because there is no room left to make and the
 /// second because the boat is a thing it has already passed.
 ///
-/// `wary` is the reach a boat is noticed at, and the pass is aimed to clear it
-/// by [`BERTH`] of that — noticing further out than it insists on passing is
-/// what leaves room for the turn to be gradual. The swing is capped at a
-/// quarter turn off the hull's own bearing, which is the widest a *pass* can
-/// be: anything beyond it is closing the range no more, and so is not passing
-/// the boat but running from it.
-fn skirt(beast: &Beast, boat: Vec2, wary: f32) -> Vec2 {
+/// `reach` is the range the stance noticed the boat at — [`Regard::Berth`]'s
+/// number, or [`Regard::Sound`]'s — and the pass is aimed to clear it by
+/// [`BERTH`] of that. Noticing further out than it insists on passing is what
+/// leaves room for the turn to be gradual. The swing is capped at a quarter
+/// turn off the hull's own bearing, which is the widest a *pass* can be:
+/// anything beyond it is closing the range no more, and so is not passing the
+/// boat but running from it.
+///
+/// What comes back is a bearing to *want*, not one the animal takes: [`swim`]
+/// clamps the swing towards it to a quarter radian a beat, the same clamp the
+/// goal want gets. So the clearance above is what the pass aims at rather than
+/// what it always makes, and the one course where it falls short is the one
+/// laid dead through the hull — there the two swings are equal and opposite
+/// every beat and mostly cancel, and a pod that aims to clear by twelve and a
+/// half metres clears by six. Any course at all off the line clears it and
+/// more. Left alone rather than fixed by unclamping the berth: a swing that
+/// outranks the want at every range is an animal that abandons its journey for
+/// a boat, which is the one thing these stances are written not to be — see
+/// [`Regard::Berth`]. Fixing it properly means suspending the want while
+/// giving way rather than out-turning it, which is also what a stance that
+/// *closes* the range will need.
+fn skirt(beast: &Beast, boat: Vec2, reach: f32) -> Vec2 {
     let to = boat - beast.position;
     let range = to.length();
-    let clearance = wary * BERTH;
+    let clearance = reach * BERTH;
     if range <= clearance || beast.heading.dot(to) <= 0.0 {
         return beast.heading;
     }
@@ -1427,6 +1647,85 @@ mod tests {
     }
 
     #[test]
+    fn a_pod_passes_a_boat_instead_of_fleeing_it() {
+        let (shared, spawn, _) = a_sea();
+        let habitat = habitat_of(BeastKind::Dolphins);
+        let Regard::Berth(reach) = Regard::of(BeastKind::Dolphins, A_PLAYER) else {
+            panic!(
+                "a pod's answer to a boat is {:?}",
+                Regard::of(BeastKind::Dolphins, A_PLAYER)
+            );
+        };
+
+        // A pod on a crossing that would take it a few metres off a boat: born,
+        // the hull and the far end all but on one line, out where the floor is
+        // open and there is nothing else in the way. Whatever room it ends up
+        // with beyond those few metres, it made.
+        //
+        // A few metres and not none, because a course laid *exactly* over the
+        // hull is degenerate twice over and neither half is about the berth.
+        // The goal want and the berth are both clamped to the same quarter
+        // radian a beat and, dead in line, they are the same size and opposite,
+        // so the pass is whatever is left over rather than what `skirt` asked
+        // for — a shade over six metres of the twelve and a half it aims at.
+        // And `skirt` takes the side the animal is already leaning, which head
+        // on is no side at all, so the wander picks it. Every course that is
+        // not the exact one clears the berth and then some.
+        let born = spawn + Vec2::new(-1_000.0, 0.0);
+        let boat = spawn + Vec2::new(-800.0, 5.0);
+        let goal = spawn + Vec2::new(-600.0, 0.0);
+        for at in [born, boat, goal] {
+            assert!(
+                floor_in(&shared, at, habitat.band),
+                "{at:?} is not open sea"
+            );
+        }
+
+        let mut flock = Flock::new(11);
+        let id = flock.keep(Beast::born(habitat, born, Some(goal), 12));
+
+        // Swum until it is abeam of the hull and past it, watching how close it
+        // came and whether it ever gave up on where it was going.
+        let along = (goal - born).normalize();
+        let mut nearest = f32::INFINITY;
+        let mut past = false;
+        for _ in 0..600 {
+            flock.beat(&shared, &[boat], &[]);
+            let pod = beast(&flock, id);
+            nearest = nearest.min(pod.position.distance(boat));
+            assert_eq!(
+                pod.doing,
+                Doing::Bound,
+                "the pod stopped being on its way somewhere over a boat"
+            );
+            // The whole difference between passing and fleeing, and the one
+            // thing a berth may never do: turn the animal back down its own
+            // course. `skirt` caps the swing at a quarter turn off the hull's
+            // bearing for exactly this reason.
+            assert!(
+                pod.heading.dot(along) > 0.0,
+                "the pod turned back the way it came {:.0} m off the boat",
+                pod.position.distance(boat),
+            );
+            if (pod.position - boat).dot(along) > 0.0 {
+                past = true;
+                break;
+            }
+        }
+
+        assert!(past, "the pod never got past the boat");
+        // And it kept the clearance the berth promises, which is more than
+        // twice the room the course it was swimming would have given it: the
+        // difference between the two is the bend, and the bend is the whole
+        // behaviour.
+        assert!(
+            nearest >= reach * BERTH,
+            "the pod passed {nearest:.1} m off a boat it clears by {:.1}",
+            reach * BERTH,
+        );
+    }
+
+    #[test]
     fn a_pod_is_passing_through_and_its_journey_is_its_whole_life() {
         let (shared, spawn, _) = a_sea();
         // Open water off the entry island, where a pod would be.
@@ -1588,6 +1887,81 @@ mod tests {
         let beast = Beast::summoned(habitat_of(BeastKind::Dolphins), Vec2::ZERO, 9);
         assert_eq!(beast.doing, Doing::Dwelling);
         assert!(beast.surfaced);
+    }
+
+    #[test]
+    fn every_beast_has_an_opinion_on_everything_it_could_meet() {
+        // `REGARDS` is a grid rather than a lookup, so what it can fail to be
+        // total about is not a missing cell — the shape of the array sees to
+        // that — but the two axes agreeing with what there actually is. A row
+        // per habitat, in habitat order, and a column per thing there is to
+        // meet: get either of those out of step and every cell still exists and
+        // holds the opinion belonging to somebody else.
+        assert_eq!(
+            REGARDS.len(),
+            HABITATS.len(),
+            "the table has {} rows for {} kinds of beast",
+            REGARDS.len(),
+            HABITATS.len(),
+        );
+        for (index, habitat) in HABITATS.iter().enumerate() {
+            assert_eq!(
+                Regard::row(habitat.kind),
+                index,
+                "{:?} lives on row {index} of the habitats and row {} of the table",
+                habitat.kind,
+                Regard::row(habitat.kind),
+            );
+        }
+        for (index, met) in Met::ALL.iter().enumerate() {
+            assert_eq!(
+                met.column(),
+                index,
+                "{met:?} is column {} of the table and {index} of everything there is to meet",
+                met.column(),
+            );
+        }
+
+        // And then the totality itself, asked for rather than reasoned about: a
+        // variant added to `Met` and given a column without being added to
+        // `ALL` leaves the table a column narrow, which is this indexing and
+        // nothing else.
+        for habitat in &HABITATS {
+            for met in Met::ALL {
+                let _ = Regard::of(habitat.kind, met);
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_in_the_table_asks_for_a_stance_that_is_not_written() {
+        // `Harry` and `Play` are in `Regard` because the table is the place
+        // this design gets written down, and they are not in any cell because
+        // neither has an implementation — a cell holding one would be an animal
+        // that says it does something and does nothing, which is the one way a
+        // table of stances can be quietly wrong. So this is the tripwire for
+        // filling one in: the day a cell wants `Harry`, this fails, and what it
+        // is asking for is the steering to be written before the cell is.
+        for (row, habitat) in HABITATS.iter().enumerate() {
+            for met in Met::ALL {
+                let regard = Regard::of(habitat.kind, met);
+                assert!(
+                    matches!(regard, Regard::Ignore | Regard::Berth(_) | Regard::Sound(_)),
+                    "{:?} answers {met:?} with {regard:?}, which nothing swims yet",
+                    habitat.kind,
+                );
+                // Every stance that carries a reach has to carry a real one:
+                // zero would be a cell that reads as an opinion and behaves as
+                // `Ignore`, which is the other way round from the above and
+                // just as quiet.
+                if let Some(reach) = regard.berth().or(regard.sounding()) {
+                    assert!(
+                        reach > 0.0,
+                        "row {row} answers {met:?} at {reach} m, which is not a reach",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
