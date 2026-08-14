@@ -114,6 +114,27 @@ const SOUNDED: f32 = 0.88;
 /// minute of watching a coast catches one.
 const RISE_PERIOD: f32 = 9.0;
 
+/// How far under the surface a beast rides once the server says it is no
+/// longer showing itself, in metres — see [`protocol::ToClient::Beast`]'s
+/// `surfaced`, which is a decision rather than a depth, this being the depth.
+/// Deep enough that a body at it is a shadow in the blue and then nothing,
+/// which is what makes it worth the wire: a whale that has been driven down
+/// by a boat has *gone*, and so has one that has come to the end of its life.
+const SOUNDED_DEEP: f32 = 7.0;
+
+/// The least water a diving beast keeps under it, in metres. A shark leaving
+/// the shallows is over sand for as long as the shelf runs, and would put
+/// itself through it at the depth above; hugging the bottom until the floor
+/// falls away is both what it can do and what the animal would.
+const KEEL: f32 = 0.8;
+
+/// How quickly a dive is drawn, in e-foldings per second. Slower than the
+/// easing of a position below, and much slower than a breath: sounding is the
+/// one thing these animals do that is meant to be *watched* happening, and a
+/// body that sank at the pace it glides would have popped out of existence
+/// with extra steps.
+const DIVING: f32 = 0.55;
+
 /// How quickly a beast closes on where the server last put it, in
 /// e-foldings per second — see [`eased`]. Tellings come a few times a
 /// second and the easing is what turns them back into a glide.
@@ -180,10 +201,12 @@ impl Beasts {
         kind: BeastKind,
         position: Vec2,
         velocity: Vec2,
+        surfaced: bool,
     ) {
         let told = Told {
             target: position,
             velocity,
+            surfaced,
         };
         if let Some(&beast) = self.seen.get(&id) {
             // Overwriting is the whole of the update, exactly as it is for a
@@ -197,6 +220,11 @@ impl Beasts {
                 Name::new(id.to_string()),
                 Beast { kind, seed: id.0 },
                 told,
+                // At the depth the first telling implies rather than eased
+                // into it: a beast heard of for the first time is simply
+                // where it is, and the easing below is for a beast that
+                // *changes* — which is a dive, and is meant to be watched.
+                Sounding(f32::from(!surfaced)),
                 DespawnOnExit(AppState::InWorld),
                 Transform::from_xyz(position.x, 0.0, position.y).looking_to(
                     Vec3::new(velocity.x, 0.0, velocity.y).normalize_or(Vec3::NEG_Z),
@@ -230,12 +258,22 @@ struct Beast {
     seed: u32,
 }
 
-/// Where the server last put a beast, and where it said it was going.
+/// Where the server last put a beast, where it said it was going, and whether
+/// it said the animal is showing itself.
 #[derive(Component, Clone, Copy)]
 struct Told {
     target: Vec2,
     velocity: Vec2,
+    surfaced: bool,
 }
+
+/// How far into a dive a beast is *drawn*, from `0.0` up to `1.0` down —
+/// eased towards what the last telling said, exactly as its place is eased
+/// towards where the last telling put it. The server decides that an animal
+/// has gone down; how long that takes to look like, and how far down "down"
+/// is, are this side's.
+#[derive(Component)]
+struct Sounding(f32);
 
 /// The model hung under a beast — what [`conduct`] looks for above an
 /// animation player, so the walker's own figure and any rigged thing the
@@ -458,22 +496,25 @@ fn conduct(
 }
 
 /// Swims each beast towards where the server last put it: eased over the
-/// ground plane, swung gradually onto its bearing, and — for the shark —
-/// ridden at the depth its breath has reached, just under the swell, fin out
-/// for a while in every cycle. The porpoising kinds keep their root on the
-/// waterline and let [`porpoise`] give every member its own depth.
+/// ground plane, swung gradually onto its bearing, sunk or raised as the
+/// telling says it is showing itself or not, and — for the shark — ridden at
+/// the depth its breath has reached, just under the swell, fin out for a
+/// while in every cycle. The porpoising kinds keep their root on the
+/// waterline and let [`porpoise`] give every member its own depth, the dive
+/// included.
 fn glide(
     time: Res<Time>,
     ground: Option<Res<Ground>>,
     sea: Res<SeaConditions>,
-    mut beasts: Query<(&Beast, &Told, &mut Transform)>,
+    mut beasts: Query<(&Beast, &Told, &mut Sounding, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs_wrapped();
 
-    for (beast, told, mut transform) in &mut beasts {
+    for (beast, told, mut sounding, mut transform) in &mut beasts {
         let at = Vec2::new(transform.translation.x, transform.translation.z);
         let at = at.lerp(told.target, eased(SMOOTHING, dt));
+        sounding.0 += (f32::from(!told.surfaced) - sounding.0) * eased(DIVING, dt);
 
         let ride = match beast.kind {
             // The water surface here, swell and all: the ride is measured
@@ -486,7 +527,8 @@ fn glide(
                 let breath = unit(beast.seed, 0xB0B) * TAU;
                 let surface = sea.water_over(ground.as_deref(), at, elapsed);
                 let breathing = 0.5 - 0.5 * ((elapsed / RISE_PERIOD * TAU) + breath).cos();
-                surface - AWASH - (SOUNDED - AWASH) * breathing
+                let riding = surface - AWASH - (SOUNDED - AWASH) * breathing;
+                sunk(ground.as_deref(), at, riding, sounding.0)
             }
             BeastKind::Dolphins | BeastKind::Whale => 0.0,
         };
@@ -508,24 +550,55 @@ fn glide(
 /// ocean; when that clock wraps, once an hour, every arc skips to another
 /// point of its cycle — the same shrug the swell gives, and as unlikely to
 /// be watched.
+///
+/// A sounding animal loses the arc as it goes down, rather than carrying on
+/// porpoising invisibly a few metres lower: the leap is scaled away by how
+/// far into the dive it is, which takes the pitch flat with it, so a whale
+/// that has been driven under levels off and sinks — one last back, and then
+/// the blue.
 fn porpoise(
     time: Res<Time>,
     ground: Option<Res<Ground>>,
     sea: Res<SeaConditions>,
-    beasts: Query<(&Told, &Transform), With<Beast>>,
+    beasts: Query<(&Told, &Sounding, &Transform), With<Beast>>,
     mut members: Query<(&Porpoising, &ChildOf, &mut Transform), Without<Beast>>,
 ) {
     let elapsed = time.elapsed_secs_wrapped();
     for (swimming, of, mut transform) in &mut members {
-        let Ok((told, carrier)) = beasts.get(of.parent()) else {
+        let Ok((told, sounding, carrier)) = beasts.get(of.parent()) else {
             continue;
         };
-        let (_, water) = sea.under_station(ground.as_deref(), carrier, &transform, elapsed);
+        let (at, water) = sea.under_station(ground.as_deref(), carrier, &transform, elapsed);
 
         let (rise, run) = (TAU / swimming.period * elapsed + swimming.phase).sin_cos();
-        transform.translation.y = water - swimming.cruise + swimming.leap * rise;
-        let pitch = (swimming.leap * TAU / swimming.period * run).atan2(told.velocity.length());
+        let leap = swimming.leap * (1.0 - sounding.0);
+        let riding = water - swimming.cruise + leap * rise;
+        transform.translation.y = sunk(ground.as_deref(), at.xz(), riding, sounding.0);
+        let pitch = (leap * TAU / swimming.period * run).atan2(told.velocity.length());
         transform.rotation = Quat::from_rotation_x(pitch);
+    }
+}
+
+/// A ride taken down by how far into a dive the animal is, but never through
+/// the bottom: over a shelf it hugs the sand at [`KEEL`] and only truly
+/// disappears where the floor falls away, which is where the server sends
+/// anything that is leaving for good. Ground this client has not been sent
+/// counts as no floor at all — it is beyond the haze by construction, and a
+/// beast out there is nothing to look at either way.
+///
+/// The two limits are applied in this order because they are not equals. The
+/// dive may not lift a body *above* where it was riding, which would be a
+/// sounding animal jumping; and it may not put one through the sand, which is
+/// worse, so the floor gets the last word. Taking them the other way about
+/// discards the floor wherever a body already rides below the keel line — the
+/// trough of a dolphin's own porpoising over the shallowest floor its band
+/// allows is exactly that — and a swell then walks the tail through the
+/// bottom.
+fn sunk(ground: Option<&Ground>, at: Vec2, riding: f32, sounding: f32) -> f32 {
+    let deep = riding - SOUNDED_DEEP * sounding;
+    match ground.and_then(|ground| ground.height(at.x, at.y)) {
+        Some(floor) => deep.min(riding).max(floor + KEEL),
+        None => deep,
     }
 }
 
@@ -557,8 +630,10 @@ fn forget(mut beasts: ResMut<Beasts>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use bevy::state::app::StatesPlugin;
-    use bevy::time::TimePlugin;
+    use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
     use super::*;
     use crate::net::{fake_server, NetPlugin, Online};
@@ -693,6 +768,13 @@ mod tests {
         .init_asset::<bevy::world_serialization::WorldAsset>()
         .init_resource::<Assets<StandardMaterial>>()
         .init_resource::<ButtonInput<KeyCode>>()
+        // Headless frames take next to no real time, and half of what this
+        // module does is eased *per second* — a dive most of all. The clock
+        // is stepped by hand so that a frame here is worth what a frame is
+        // worth on a screen.
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            16,
+        )))
         .insert_resource(Online::new(connection));
         app.update();
         app.world_mut()
@@ -700,6 +782,17 @@ mod tests {
             .set(AppState::InWorld);
         app.update();
         app
+    }
+
+    /// How deep the one beast in the world is riding — the whole of what a
+    /// dive is, from outside.
+    fn riding(app: &mut App) -> f32 {
+        app.world_mut()
+            .query_filtered::<&Transform, With<Beast>>()
+            .single(app.world())
+            .expect("one beast")
+            .translation
+            .y
     }
 
     fn beasts_afoot(app: &mut App) -> Vec<(Vec2, Vec2)> {
@@ -723,6 +816,7 @@ mod tests {
             kind: BeastKind::Shark,
             position: Vec2::new(40.0, -20.0),
             velocity: Vec2::new(1.0, 0.5),
+            surfaced: true,
         })
         .write(&mut &server)
         .expect("beast");
@@ -740,6 +834,7 @@ mod tests {
             kind: BeastKind::Shark,
             position: Vec2::new(42.0, -19.0),
             velocity: Vec2::new(0.5, 1.0),
+            surfaced: true,
         })
         .write(&mut &server)
         .expect("beast again");
@@ -776,6 +871,7 @@ mod tests {
             kind: BeastKind::Shark,
             position: Vec2::new(10.0, 0.0),
             velocity: Vec2::new(1.4, 0.0),
+            surfaced: true,
         })
         .write(&mut &server)
         .expect("beast");
@@ -809,6 +905,71 @@ mod tests {
     }
 
     #[test]
+    fn a_beast_told_to_have_sounded_goes_down_and_takes_its_time() {
+        // The one thing about depth the server has an opinion on — see
+        // `protocol::ToClient::Beast`. A whale driven under by a boat, and a
+        // beast at the end of its life, are both told the same way, and this
+        // is where that becomes a body going out of sight.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = crate::net::Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = beast_app(connection);
+
+        let told = |surfaced: bool| {
+            (ToClient::Beast {
+                id: BeastId(2),
+                kind: BeastKind::Shark,
+                position: Vec2::new(6.0, 0.0),
+                velocity: Vec2::new(1.4, 0.0),
+                surfaced,
+            })
+            .write(&mut &server)
+            .expect("beast");
+        };
+
+        // Up: riding awash, where a fin has something to cut.
+        told(true);
+        run_until(&mut app, "the beast appears", |app| {
+            !beasts_afoot(app).is_empty()
+        });
+        run_frames(&mut app, 120);
+        let awash = riding(&mut app);
+        assert!(
+            (-2.0..=0.0).contains(&awash),
+            "a shark on the surface riding at {awash} m"
+        );
+
+        // Told it has gone down, it goes — but over a second or two, not
+        // between frames. A body that fell to depth in one frame would read
+        // as the animal being deleted, which is the whole thing this exists
+        // to avoid.
+        told(false);
+        run_frames(&mut app, 6);
+        let starting = riding(&mut app);
+        assert!(
+            starting < awash && starting > awash - SOUNDED_DEEP / 2.0,
+            "a tenth of a second took it from {awash} m to {starting} m"
+        );
+
+        run_frames(&mut app, 500);
+        let sounded = riding(&mut app);
+        assert!(
+            sounded < awash - SOUNDED_DEEP * 0.8,
+            "several seconds of diving only reached {sounded} m"
+        );
+
+        // And it comes back up when it is told it has: a dive is a state the
+        // server holds, not a one-way trip this side remembers.
+        told(true);
+        run_frames(&mut app, 500);
+        let up = riding(&mut app);
+        assert!(
+            up > sounded + SOUNDED_DEEP * 0.8,
+            "it stayed down at {up} m"
+        );
+    }
+
+    #[test]
     fn a_pod_told_once_is_several_dolphins_swimming() {
         let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
         let connection = crate::net::Connection::join(&addr).expect("join");
@@ -820,6 +981,7 @@ mod tests {
             kind: BeastKind::Dolphins,
             position: Vec2::new(30.0, -10.0),
             velocity: Vec2::new(2.0, 0.0),
+            surfaced: true,
         })
         .write(&mut &server)
         .expect("pod");

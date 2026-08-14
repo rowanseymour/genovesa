@@ -38,7 +38,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 
 /// How long one turn of the world's day takes, in seconds — sunrise to
 /// sunrise, ten minutes of it.
@@ -327,13 +327,24 @@ pub enum ToClient {
     /// bearing and metres per second in one vector, no convention to agree
     /// on. It is what a client draws between tellings — pointing the body,
     /// carrying it forward, working the tail at the pace of the water going
-    /// by. Height is never sent, as it is not for players: how deep a shark
-    /// rides, and when its fin cuts the surface, is drawing.
+    /// by.
+    ///
+    /// A height is still never sent, as it is not for players: how deep a
+    /// shark rides, and when its fin cuts the surface, is drawing. What
+    /// `surfaced` carries is not a depth but a *decision* — whether this
+    /// animal is currently showing itself. A whale that has gone down because
+    /// a boat came near did that about a player, and behaviour about a player
+    /// is the server's or it is a thing one client saw and another did not;
+    /// the same flag is how a beast that has finished its life is under the
+    /// water before it stops being told of, so nothing is ever watched
+    /// blinking out. How far down "not showing" is, and how the animal gets
+    /// there, remain a client's own business entirely.
     Beast {
         id: BeastId,
         kind: BeastKind,
         position: Vec2,
         velocity: Vec2,
+        surfaced: bool,
     },
     /// The server has stopped minding a beast — everyone has left its waters,
     /// and there is nothing it could matter to. Not a death; the sea is
@@ -461,10 +472,12 @@ impl ToClient {
                 kind,
                 position,
                 velocity,
+                surfaced,
             } => {
                 payload.push(8);
                 put_u32(&mut payload, id.0);
                 payload.push(kind.byte());
+                payload.push(u8::from(*surfaced));
                 put_vec2(&mut payload, *position);
                 put_vec2(&mut payload, *velocity);
             }
@@ -559,6 +572,7 @@ impl ToClient {
                 kind: BeastKind::from_byte(payload.u8()?).ok_or_else(|| {
                     corrupt("a beast of a kind this build has never heard of".into())
                 })?,
+                surfaced: payload.u8()? != 0,
                 position: payload.vec2()?,
                 velocity: payload.vec2()?,
             },
@@ -844,18 +858,21 @@ mod tests {
                 kind: BeastKind::Shark,
                 position: at,
                 velocity: Vec2::new(-1.0, 0.5),
+                surfaced: true,
             },
             ToClient::Beast {
                 id: BeastId(13),
                 kind: BeastKind::Dolphins,
                 position: at,
                 velocity: Vec2::new(2.0, -1.5),
+                surfaced: true,
             },
             ToClient::Beast {
                 id: BeastId(14),
                 kind: BeastKind::Whale,
                 position: at,
                 velocity: Vec2::new(-0.5, -1.0),
+                surfaced: false,
             },
             ToClient::BeastGone { id: BeastId(12) },
             ToClient::Reply {
@@ -1022,12 +1039,14 @@ mod tests {
                 kind: BeastKind::Shark,
                 position: Vec2::new(1.5, -2.0),
                 velocity: Vec2::new(-2.0, 1.5),
+                surfaced: true,
             }),
             [
-                22, 0, // length
+                23, 0, // length
                 8, // tag
                 7, 0, 0, 0, // id
                 0, // kind: shark
+                1, // surfaced
                 0, 0, 0xC0, 0x3F, // position x = 1.5
                 0, 0, 0, 0xC0, // position z = -2.0
                 0, 0, 0, 0xC0, // velocity x = -2.0 — the position's axes
@@ -1035,12 +1054,14 @@ mod tests {
             ],
         );
         // The other kinds differ from the shark's message in exactly the one
-        // byte that says what the beast is.
+        // byte that says what the beast is, and a sounded one in exactly the
+        // byte after it.
         let shark = bytes_of_server(&ToClient::Beast {
             id: BeastId(7),
             kind: BeastKind::Shark,
             position: Vec2::new(1.5, -2.0),
             velocity: Vec2::new(-2.0, 1.5),
+            surfaced: true,
         });
         for (kind, byte) in [(BeastKind::Dolphins, 1u8), (BeastKind::Whale, 2)] {
             let told = bytes_of_server(&ToClient::Beast {
@@ -1048,11 +1069,22 @@ mod tests {
                 kind,
                 position: Vec2::new(1.5, -2.0),
                 velocity: Vec2::new(-2.0, 1.5),
+                surfaced: true,
             });
             assert_eq!(told[7], byte, "{kind:?} is not kind byte {byte}");
             assert_eq!(told[..7], shark[..7], "{kind:?} moved the head");
             assert_eq!(told[8..], shark[8..], "{kind:?} moved the fields");
         }
+        let sounded = bytes_of_server(&ToClient::Beast {
+            id: BeastId(7),
+            kind: BeastKind::Shark,
+            position: Vec2::new(1.5, -2.0),
+            velocity: Vec2::new(-2.0, 1.5),
+            surfaced: false,
+        });
+        assert_eq!(sounded[8], 0, "a sounded beast is not flagged 0");
+        assert_eq!(sounded[..8], shark[..8], "sounding moved the head");
+        assert_eq!(sounded[9..], shark[9..], "sounding moved the fields");
         assert_eq!(
             bytes_of_server(&ToClient::BeastGone { id: BeastId(7) }),
             [

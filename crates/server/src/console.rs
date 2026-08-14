@@ -20,7 +20,7 @@ use crate::{beasts, broadcast_all, Shared};
 
 /// What `help` says. One line per command, in the imperative the commands
 /// themselves are written in.
-const HELP: &str = "spawn shark|dolphins|whale — raise a beast in your waters\n\
+const HELP: &str = "spawn shark|dolphins|whale [count] — raise beasts in your waters\n\
                     time <hh:mm> — run the world's clock forward to that hour\n\
                     weather calm|breeze|gale|natural — order the wind, or give it back";
 
@@ -57,12 +57,33 @@ pub(crate) fn interpret(shared: &Shared, from: PlayerId, line: &str) -> String {
     }
 }
 
-/// `spawn <kind>`: a beast raised in the asker's waters, where there is
-/// water of its kind to raise it in — and a plain no where there is not,
-/// which open ocean is for a shark and a shallow lagoon is for a whale.
+/// The most beasts one `spawn` will raise. High enough to be a silly number
+/// of animals on one screen, which is what it is for: the beasts are the only
+/// thing in the world drawn per-creature and told about per-beat, so a hundred
+/// of them at once is the measurement neither the wire nor the client gets
+/// asked for by ordinary play.
+const MOST: usize = 100;
+
+/// `spawn <kind> [count]`: beasts raised in the asker's waters, near enough to
+/// be seen — the summoning is meant to put the animal in front of whoever
+/// typed it, unlike the warden's own raising, which sends everything in from
+/// deep water precisely so it is never watched appearing.
+///
+/// It is deliberately generous about *where*. The kind's own water is
+/// preferred and any water will do, so `spawn whale` in a lagoon gives you a
+/// whale rather than a refusal: what the command is for is putting something
+/// on the screen — one to look at, or a hundred to time the frame with — and
+/// an animal in the wrong water sorts itself out within a few beats anyway,
+/// its dwelling being to hold to its own band. Only water it could not be in
+/// at all is refused, which is a summons on dry land.
 fn spawn(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
-    let [named] = args else {
-        return "`spawn` wants a kind of beast — shark, dolphins or whale".to_string();
+    let (named, count) = match args {
+        [named] => (named, 1usize),
+        [named, count] => match count.parse::<usize>() {
+            Ok(count) if (1..=MOST).contains(&count) => (named, count),
+            _ => return format!("`spawn` will raise 1 to {MOST} of a kind, not `{count}`"),
+        },
+        _ => return "`spawn` wants a kind of beast — shark, dolphins or whale".to_string(),
     };
     let kind = match *named {
         "shark" => BeastKind::Shark,
@@ -84,24 +105,46 @@ fn spawn(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
 
     // Decorative randomness, exactly as the beasts' own: nothing about a
     // summons needs to agree with anything, so the clock's leftover nanos
-    // are entropy enough to keep repeated summonses off one spot.
+    // are entropy enough to keep repeated summonses off one spot — and each
+    // of a batch is dealt its own, so a hundred whales are a hundred places
+    // rather than one place a hundred times.
     let entropy = shared.started.elapsed().subsec_nanos();
-    match beasts::conjure(shared, kind, near, entropy) {
-        Some(spot) => {
-            shared
-                .summoned
-                .lock()
-                .expect("no poisoned lock")
-                .push((kind, spot));
-            let announced = match kind {
-                BeastKind::Shark => "a shark rises",
-                BeastKind::Dolphins => "dolphins surface",
-                BeastKind::Whale => "a whale surfaces",
-            };
-            format!("{announced} {:.0} m away", near.distance(spot))
-        }
-        None => format!("no water a {named} would live in near here"),
+    let raised: Vec<(BeastKind, Vec2)> = (0..count)
+        .filter_map(|which| {
+            beasts::conjure(
+                shared,
+                kind,
+                near,
+                entropy.wrapping_add(which as u32 * 0x9E37),
+            )
+            .map(|spot| (kind, spot))
+        })
+        .collect();
+    if raised.is_empty() {
+        return format!("no water a {named} could be in near here");
     }
+
+    let nearest = raised
+        .iter()
+        .map(|(_, spot)| near.distance(*spot))
+        .fold(f32::INFINITY, f32::min);
+    // Said in the words a player would use for what is now out there, which is
+    // not the word they typed: `dolphins` is one pod of them, so several are
+    // pods rather than "3 dolphins".
+    let announced = match (kind, raised.len()) {
+        (BeastKind::Shark, 1) => "a shark rises".to_string(),
+        (BeastKind::Dolphins, 1) => "dolphins surface".to_string(),
+        (BeastKind::Whale, 1) => "a whale surfaces".to_string(),
+        (BeastKind::Shark, many) => format!("{many} sharks rise"),
+        (BeastKind::Dolphins, many) => format!("{many} pods surface"),
+        (BeastKind::Whale, many) => format!("{many} whales surface"),
+    };
+    shared
+        .summoned
+        .lock()
+        .expect("no poisoned lock")
+        .extend(raised);
+    format!("{announced}, the nearest {nearest:.0} m away")
 }
 
 /// `time <hh:mm>`: the world's clock run forward to the next time it reads
@@ -246,6 +289,28 @@ mod tests {
         assert!(
             shared.summoned.lock().expect("no poisoned lock").is_empty(),
             "something was summoned anyway"
+        );
+    }
+
+    #[test]
+    fn a_summons_will_raise_a_silly_number_but_not_a_nonsense_one() {
+        // The count is what makes this command a way of measuring the client
+        // rather than only a way of looking at an animal — see `MOST`. What
+        // it will not do is guess at a count it cannot read, since a typo
+        // that quietly raised one beast would be a measurement of nothing.
+        let shared = a_world(0.5);
+        for asked in ["spawn shark 0", "spawn shark 101", "spawn shark lots"] {
+            let refused = interpret(&shared, PlayerId(1), asked);
+            assert!(
+                refused.contains(&MOST.to_string()),
+                "`{asked}` was answered `{refused}`, which says nothing about the range"
+            );
+        }
+        // A count it can read gets as far as looking for the player, which is
+        // where the nobody-by-that-id answer comes from.
+        assert_eq!(
+            interpret(&shared, PlayerId(9), "spawn shark 40"),
+            "you are nowhere a beast could join you"
         );
     }
 

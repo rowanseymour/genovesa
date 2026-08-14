@@ -612,6 +612,7 @@ fn receive(
                 kind,
                 position,
                 velocity,
+                surfaced,
             } => {
                 // Believed within the same reason as the sky: a beast is
                 // eased towards and drawn out of this arithmetic every
@@ -620,7 +621,7 @@ fn receive(
                 // honest beast rather than at it.
                 if position.is_finite() && velocity.is_finite() && velocity.length() < 50.0 {
                     told.beasts
-                        .seen(&mut commands, id, kind, position, velocity);
+                        .seen(&mut commands, id, kind, position, velocity, surfaced);
                 }
             }
             ToClient::BeastGone { id } => told.beasts.gone(&mut commands, id),

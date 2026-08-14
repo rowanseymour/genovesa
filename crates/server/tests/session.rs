@@ -134,6 +134,7 @@ impl Client {
                 kind,
                 position,
                 velocity,
+                ..
             } = ToClient::read(&mut &self.0).expect("read")
             {
                 if kind == wanted {
@@ -702,12 +703,13 @@ fn shallows_between(world: &Archipelago, offshore: Vec2, ashore: Vec2) -> Option
 }
 
 #[test]
-fn sharks_are_raised_in_the_shallows_where_the_players_are() {
+fn a_shark_is_raised_out_in_the_deep_water_and_swims_in() {
     let addr = host(7);
     let (client, _id, spawn, facing) = Client::join(addr);
 
     // Stand in the shallows off the entry island: the strip between the open
-    // water players spawn on and the island they face.
+    // water players spawn on and the island they face. That is the water a
+    // shark lives in, so standing here is what puts one in these waters.
     let world = behind_the_curtain(7);
     let shallows =
         shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
@@ -715,21 +717,24 @@ fn sharks_are_raised_in_the_shallows_where_the_players_are() {
 
     let (_id, position, velocity) = client.hear_a_beast(BeastKind::Shark);
 
-    // Raised in water a shark lives in — judged by the test's own world,
-    // with slack for the swimming it has already done by the time the word
-    // arrives.
+    // But it is not raised there: the first anyone hears of a beast, it is
+    // out in deep water swimming in — nothing is ever watched appearing, and
+    // the swim in is what the shallows get instead. Judged by the test's own
+    // world, with slack for the swimming it has already done by the time the
+    // word arrives. That it arrives is the beasts' own tests' business, a
+    // crossing being minutes of swimming.
     let floor = world.height(position.x, position.y);
     assert!(
-        (-10.0..=-0.5).contains(&floor),
-        "a shark was raised over ground at {floor} m"
+        floor <= -7.0,
+        "a shark was raised over ground at {floor} m, which is not the deep"
     );
 
-    // And already going somewhere, at a cruise rather than a bolt: the wire
+    // And already going somewhere, at a swim rather than a bolt: the wire
     // carries a velocity so a client can draw the glide between tellings.
     let pace = velocity.length();
     assert!(
         (0.2..=4.0).contains(&pace),
-        "a shark cruising at {pace} m/s"
+        "a shark swimming in at {pace} m/s"
     );
 }
 
@@ -751,8 +756,10 @@ fn a_shark_is_forgotten_when_everyone_leaves_its_waters() {
     });
 
     // The word comes that the sea is emptier by one — the shark left behind,
-    // not killed, and no longer anybody's business to hear about.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // not killed, and no longer anybody's business to hear about. Not at
+    // once, though: leaving an animal's waters is given a few seconds to turn
+    // out to have been a tack rather than a departure.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         match ToClient::read(&mut &client.0).expect("read") {
             ToClient::BeastGone { id } if id == shark => break,
@@ -850,6 +857,46 @@ fn pods_and_whales_share_the_open_water() {
         assert!(
             std::time::Instant::now() < deadline,
             "fifteen seconds at anchor and the sea only offered {kinds:?}"
+        );
+    }
+}
+
+#[test]
+fn a_summons_can_raise_a_crowd_worth_timing_the_client_with() {
+    // `spawn <kind> <count>` exists to put more animals on one screen than
+    // play ever will, which is how the drawing and the beat's own telling get
+    // measured. So the thing worth pinning is that the count is honoured all
+    // the way onto the wire: a batch that quietly became one beast would make
+    // every measurement taken with it a measurement of nothing.
+    const CROWD: usize = 25;
+
+    let addr = host(7);
+    let (client, ..) = Client::join(addr);
+    client.say(ToServer::Command {
+        line: format!("spawn dolphins {CROWD}"),
+    });
+    let reply = client.hear_reply();
+    assert!(
+        reply.starts_with(&format!("{CROWD} pods surface")),
+        "the console answered `{reply}`"
+    );
+
+    // And they are all told of, each as its own beast: the ids are what a
+    // client keeps its entities under, so distinct ids are the whole of the
+    // claim. Counted over a couple of beats, since one beat's worth of
+    // tellings is exactly what a client is redrawing from.
+    let mut pods = std::collections::HashSet::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while pods.len() < CROWD {
+        if let ToClient::Beast { id, kind, .. } = ToClient::read(&mut &client.0).expect("read") {
+            if kind == BeastKind::Dolphins {
+                pods.insert(id);
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fifteen seconds after summoning {CROWD} pods, {} had been told of",
+            pods.len()
         );
     }
 }
