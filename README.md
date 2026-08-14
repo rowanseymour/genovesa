@@ -211,8 +211,9 @@ cargo test --release island_shape -- --ignored --nocapture
 
 Everything the game draws that is not ground is a glTF file under
 `assets/models/`, built from a Blender master. What ships is filed by kind —
-`models/`, `audio/`, `shaders/` — and `assets-src/` mirrors that, a directory
-per asset holding what the shipped file was made from. Those directories carry
+`models/`, `audio/`, `shaders/`, with the application's icon the one loose file
+among them — and `assets-src/` mirrors that, a directory per asset holding what
+the shipped file was made from. Those directories carry
 the asset's name and not its extension: a name is unique across the tree on its
 own, and which format the thing ships as is the build script's business rather
 than part of what it is called. One shared `assets-src/models/export.sh` builds
