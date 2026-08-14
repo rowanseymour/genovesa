@@ -99,3 +99,13 @@ to end so that it loops.
 rather than as the WAV Freesound serves, and the script that cuts it, which is
 where the numbers live. Freesound hands the master out only to an account, so a
 clone could not fetch it back on its own — hence carrying it here.
+
+## icon
+
+Original to this project, and under the same licence as the rest of it. A
+compass rose over open water with two islands in the corners, drawn in the
+ground palette out of `protocol` so that the icon is painted in the colours of
+the thing it opens.
+
+`assets-src/icon/` holds the script that draws it and the notes on why it is
+this picture and not a render of the game. Nothing third-party went into it.
