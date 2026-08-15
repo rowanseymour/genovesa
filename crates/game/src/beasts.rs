@@ -50,7 +50,7 @@ use bevy::prelude::*;
 
 use protocol::{BeastId, BeastKind};
 
-use crate::models::{above, Tones};
+use crate::models::above;
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
 use crate::{between, eased, matte, signed, unit, AppState, Size};
@@ -95,16 +95,6 @@ const WHALE_SIZE: Size = Size {
 /// `the_model_carries_the_swim_the_game_plays`. Swimming is the whole
 /// vocabulary: a shark that stopped swimming would be a drowning shark.
 const SWIM: usize = 0;
-
-/// What each mesh in the file is painted, by the name it carries there — the
-/// same arrangement as the player's figure, and registered with
-/// [`crate::models::Tones`] alongside it.
-///
-/// White, because a shark carries its own colours: a back and a paler belly,
-/// on its vertices, where the client used to hold one flat grey. What this
-/// entry does now is stop the file's own PBR material — with a highlight on
-/// it that nothing else in this world has — from reaching the water.
-const TONES: [(&str, Color); 1] = [("hide", Color::WHITE)];
 
 /// Metres per second of water the swim cycle was drawn against: at this
 /// pace the clip plays at exactly the rate the master keyed. Not in the
@@ -350,9 +340,6 @@ impl Plugin for BeastsPlugin {
         // it alone.
         app.init_resource::<Beasts>()
             .init_resource::<SeaConditions>()
-            // Also initialised by ModelsPlugin, which owns the painting;
-            // this is for the tests, which run this plugin alone.
-            .init_resource::<Tones>()
             .add_systems(Startup, school)
             .add_systems(
                 Update,
@@ -375,10 +362,7 @@ fn school(
     assets: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    mut tones: ResMut<Tones>,
 ) {
-    tones.register(&mut materials, &TONES);
-
     let mut graph = AnimationGraph::new();
     let root = graph.root;
     let node = graph.add_clip(
@@ -693,15 +677,15 @@ mod tests {
     use super::*;
     use crate::net::{fake_server, NetPlugin, Online};
     use crate::testing::{
-        assert_model_draws, assert_model_is_painted, assert_model_paints, assert_rigid_skin,
-        clip_names, creature_named_by, extent, run_frames, run_until, span, triangles,
+        assert_model_draws, assert_model_is_painted, assert_rigid_skin, clip_names,
+        creature_named_by, extent, run_frames, run_until, span, triangles,
     };
     use crate::Helm;
     use protocol::ToClient;
 
     #[test]
-    fn the_model_is_the_shark_the_game_paints() {
-        assert_model_paints(SHARK_MODEL, &TONES);
+    fn the_model_is_a_shark_fit_to_draw() {
+        assert_model_draws(SHARK_MODEL, &[(0, "hide")]);
         assert_model_is_painted(SHARK_MODEL, 0);
     }
 

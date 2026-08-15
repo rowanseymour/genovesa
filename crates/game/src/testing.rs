@@ -526,35 +526,6 @@ pub fn span(file: &str, mesh: usize, axis: usize) -> f32 {
     high - low
 }
 
-/// Holds a model whose meshes are asked for *by name* to the palette that
-/// names them — the sibling of [`assert_model_draws`], which pins meshes by
-/// their position in the file instead.
-///
-/// Every mesh in the file must be one the palette has a tone for and every
-/// tone must have a mesh, because a mesh outside the pairing keeps whatever
-/// Blender last gave it: it arrives wearing a PBR material, which is a
-/// highlight, in a world that has none anywhere. The winding and the shading
-/// are held to the same conditions everything else here is.
-pub fn assert_model_paints(file: &str, tones: &[(&str, Color)]) {
-    let mut named = mesh_names(file);
-    named.sort();
-    let mut wanted: Vec<String> = tones.iter().map(|(name, _)| (*name).to_owned()).collect();
-    wanted.sort();
-    assert_eq!(named, wanted, "{file}'s meshes are not the palette's");
-
-    for (index, name) in mesh_names(file).iter().enumerate() {
-        let faces = triangles(file, index, "POSITION");
-        assert!(
-            winds_outwards(&faces),
-            "the {name} of {file} is wound inside-out"
-        );
-        assert!(
-            is_flat_shaded(&faces, &triangles(file, index, "NORMAL")),
-            "the {name} of {file} is smooth-shaded"
-        );
-    }
-}
-
 /// The rule every rigged model here lives by: each vertex carried by exactly
 /// one bone, at full weight.
 ///

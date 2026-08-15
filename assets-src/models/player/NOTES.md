@@ -13,10 +13,9 @@ under its own power — `export.sh` carries skins and animations for its sake.
   of a compromise than a beach built of facets. Nothing here needs a bevel.
 - **One mesh, carrying its own colours on its facets.** It was three meshes
   once, one per tone, when the client painted by name; with the colour on the
-  corners the split had no job left. The mesh name `player` is still
-  load-bearing — the game paints it white, through `TONES` in
-  `crates/game/src/figure.rs`, to keep the file's PBR material out of the
-  world.
+  corners the split had no job left. The game repaints every arriving mesh
+  with one white matte — `crates/game/src/models.rs` — to keep the file's PBR
+  material out of the world.
 - **Charcoal coat and hat.** A silhouette rather than a colour: findable on
   sand, grass and deck alike, and out of the way of the hues the remote
   players' markers are dealt from.

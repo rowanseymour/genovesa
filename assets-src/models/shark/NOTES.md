@@ -24,8 +24,6 @@ the tests.
   through, which lightens it further. The belly was argued away too — the
   camera sees a shark from above, so an underside is a view that barely
   exists — but banking in clear water is exactly when one is looked at.
-- **The mesh name `hide` is load-bearing**: the game paints by name, through
-  `TONES` in `crates/game/src/beasts.rs`.
 - **Origin amidships between the pectorals**, where a shark turns, since the
   game yaws the whole body about it.
 

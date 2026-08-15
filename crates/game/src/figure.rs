@@ -50,7 +50,7 @@ use bevy::asset::AssetPath;
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
-use crate::models::{above, Tones};
+use crate::models::above;
 use crate::player::{Afoot, Player};
 use crate::{eased, AppState};
 
@@ -62,17 +62,6 @@ const MODEL: &str = "models/player.glb";
 /// whole vocabulary for now; a third would be a third node on the blend.
 const IDLE: usize = 0;
 const RUN: usize = 1;
-
-/// What the file's one mesh is painted, by the name it carries there —
-/// registered with [`crate::models::Tones`] at startup, which is what paints
-/// it as it arrives.
-///
-/// White, because the figure carries its own colours: coat, canvas and skin,
-/// on its facets, where the client used to hold three meshes with a tone
-/// each — see the master's NOTES for what each tone is doing. What this entry
-/// does is stop the file's own PBR material — with a highlight on it that
-/// nothing else in this world has — from reaching the sand.
-const TONES: [(&str, Color); 1] = [("player", Color::WHITE)];
 
 /// Ground covered by one turn of the run cycle, in metres — a stride being
 /// two steps, left and right.
@@ -170,28 +159,23 @@ pub struct FigurePlugin;
 
 impl Plugin for FigurePlugin {
     fn build(&self, app: &mut App) {
-        // Also initialised by ModelsPlugin, which owns the painting; this is
-        // for the tests, which run this plugin alone. Initialising a resource
-        // twice is free.
-        app.init_resource::<Tones>()
-            .add_systems(Startup, rig)
-            .add_systems(
-                Update,
-                (
-                    dress,
-                    conduct,
-                    // After the walking itself: this reads the transform the
-                    // player's own systems write, and reading it a frame late
-                    // — or, worse, a frame late every other frame — is what
-                    // makes a steady walk look like a stutter.
-                    (stride, animate).chain().after(Afoot),
-                )
-                    // There is no figure outside a match, so none of this has
-                    // anything to do on a menu screen. Within one it all runs
-                    // through a pause: a paused player is not moving, which the
-                    // gait reads as standing still and settles into on its own.
-                    .run_if(in_state(AppState::InWorld)),
-            );
+        app.add_systems(Startup, rig).add_systems(
+            Update,
+            (
+                dress,
+                conduct,
+                // After the walking itself: this reads the transform the
+                // player's own systems write, and reading it a frame late
+                // — or, worse, a frame late every other frame — is what
+                // makes a steady walk look like a stutter.
+                (stride, animate).chain().after(Afoot),
+            )
+                // There is no figure outside a match, so none of this has
+                // anything to do on a menu screen. Within one it all runs
+                // through a pause: a paused player is not moving, which the
+                // gait reads as standing still and settles into on its own.
+                .run_if(in_state(AppState::InWorld)),
+        );
     }
 }
 
@@ -208,11 +192,7 @@ fn rig(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut tones: ResMut<Tones>,
 ) {
-    tones.register(&mut materials, &TONES);
-
     let mut graph = AnimationGraph::new();
     let root = graph.root;
     let blend = graph.add_blend(1.0, root);
@@ -384,13 +364,13 @@ mod tests {
     use super::*;
     use crate::terrain::Ground;
     use crate::testing::{
-        assert_model_is_painted, assert_model_paints, assert_rigid_skin, clip_names, extent, hold,
+        assert_model_draws, assert_model_is_painted, assert_rigid_skin, clip_names, extent, hold,
         run_frames, set_wind, test_ground, world_app, TEST_ISLAND_REACH,
     };
 
     #[test]
-    fn the_model_is_the_person_the_game_paints() {
-        assert_model_paints(MODEL, &TONES);
+    fn the_model_is_a_person_fit_to_draw() {
+        assert_model_draws(MODEL, &[(0, "player")]);
         assert_model_is_painted(MODEL, 0);
     }
 
