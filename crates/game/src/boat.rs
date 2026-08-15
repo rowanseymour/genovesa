@@ -23,7 +23,9 @@
 //! the waterline rather than at the keel or the deck, which is what lets
 //! [`float`] put it down by simply setting the height of the surface it is on.
 
+use bevy::asset::RenderAssetUsages;
 use bevy::math::Vec3Swizzles;
+use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 
 use crate::bindings::KeyBindings;
@@ -77,6 +79,14 @@ struct Hull {
     /// along these, so what runs aground is the line that is drawn.
     forefoot_station: f32,
     heel_station: f32,
+    /// The masthead: metres above the waterline, and metres from amidships on
+    /// the same axis as the keel's stations. The pennant is tied on here, so
+    /// like the deck and the draft these are the model's numbers rather than
+    /// the game's to choose — a mast re-cut in Blender and not re-measured
+    /// here would fly its pennant in mid-air beside the spar, which is what
+    /// `the_model_flies_a_pennant_from_its_masthead` is for.
+    masthead: f32,
+    masthead_station: f32,
     /// Metres per second under way.
     speed: f32,
     /// Metres per second going astern.
@@ -144,6 +154,10 @@ const SHIP: Hull = Hull {
     // rake; the heel runs right aft to the transom.
     forefoot_station: -7.0 * 0.5 * 0.7,
     heel_station: 7.0 * 0.5,
+    // Six metres of mast, stepped forward of amidships — the model's, not a
+    // choice made here.
+    masthead: 6.9,
+    masthead_station: -1.05,
     // Brisk beyond honesty for a seven-metre hull, but the ship is how the
     // world is crossed: at this speed the ground in view at the default zoom
     // slides by in a few seconds, and the next island is minutes away rather
@@ -229,6 +243,37 @@ const HEEL_SETTLED: f32 = 0.005;
 const HULL_COLOR: Color = Color::srgb(0.62, 0.28, 0.22);
 /// Bare spar, pale enough to stand off both the water and the hull.
 const SPAR_COLOR: Color = Color::srgb(0.86, 0.80, 0.68);
+/// The pennant. Hotter and lighter than the hull's timber, which is the only
+/// other warm thing in a world of greens and blues: at the far end of the zoom
+/// the boat is a mark on the water and this is the mark on the mark.
+const PENNANT_COLOR: Color = Color::srgb(0.87, 0.35, 0.18);
+
+/// The pennant, as a shape: how far it flies from the mast and how deep it is
+/// at the hoist, in metres. A long thin burgee rather than a square flag —
+/// the length is what carries the bearing at the distance the boat is watched
+/// from, and the narrow hoist is what lets a triangle stand in for a hanging
+/// flag when the wind drops (see [`pennant_mesh`]).
+const PENNANT: (f32, f32) = (1.2, 0.3);
+
+/// The apparent wind that flies the pennant out, in metres per second, and
+/// how far it still sags at that wind, in radians. Both are the drawing's to
+/// pick rather than the weather's: a flag that only lifted in the gales would
+/// be a limp rag through most of a day, and one that ever came out perfectly
+/// straight would read as a signboard rather than as cloth.
+const PENNANT_FLIES: (f32, f32) = (8.0, 0.14);
+
+/// Below this apparent wind, in metres per second, the pennant keeps the
+/// bearing it had and simply hangs. The same problem the compass's arm has —
+/// a dying wind's direction is noise — and the same answer, except that here
+/// the hanging *is* the reading: a flag straight down is how a calm looks.
+const PENNANT_CALM: f32 = 0.3;
+
+/// The flutter: how far the pennant swings either side of its bearing at full
+/// wind, in radians, and how fast, in radians per second. It is scaled by the
+/// wind like everything else about the flag, so a calm hangs dead still and a
+/// blow snaps — cloth being the one thing in view that says how hard it is
+/// blowing without being asked.
+const FLUTTER: (f32, f32) = (0.16, 7.0);
 
 /// A boat in the world: what kind it is, and what it is doing.
 ///
@@ -284,6 +329,15 @@ impl Boat {
     }
 }
 
+/// The pennant flying at the masthead, and the bearing it is streaming on —
+/// its own, kept here rather than read back off the transform because the
+/// transform holds the boat's rotation taken out again, and because a calm
+/// has to leave the bearing where it was rather than invent a new one.
+#[derive(Component)]
+struct Pennant {
+    bearing: f32,
+}
+
 pub struct BoatPlugin;
 
 impl Plugin for BoatPlugin {
@@ -302,7 +356,15 @@ impl Plugin for BoatPlugin {
                 // under it — so leaving it running means a chunk arriving
                 // while the pause menu is up is settled on before the player
                 // looks again, rather than snapping under them on resume.
-                (steer.run_if(in_state(Helm::Sailing)), float)
+                // The pennant last, and outside the pause like the floating:
+                // it flies off the hull's rotation and the wind, so reading
+                // either before this frame's steering had written it would
+                // leave the flag a frame behind the mast it is tied to.
+                (
+                    steer.run_if(in_state(Helm::Sailing)),
+                    float,
+                    fly_the_pennant,
+                )
                     .chain()
                     .run_if(in_state(AppState::InWorld)),
             );
@@ -328,6 +390,7 @@ impl Plugin for BoatPlugin {
 /// down with the ship when the world is left.
 fn launch(
     mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     assets: Res<AssetServer>,
     view: Res<View>,
@@ -341,6 +404,15 @@ fn launch(
     // which is the comparison that matters when either is picked.
     let hull_material = materials.add(matte(HULL_COLOR));
     let spar_material = materials.add(matte(SPAR_COLOR));
+    // Cloth is the one thing aboard with no inside, so it is the one material
+    // here that is drawn from both faces. Left single-sided the pennant would
+    // wink out every time the wind put its back to the camera, which happens
+    // several times a minute at a flutter.
+    let pennant_material = materials.add(StandardMaterial {
+        double_sided: true,
+        cull_mode: None,
+        ..matte(PENNANT_COLOR)
+    });
 
     commands.spawn((
         Name::new("Boat"),
@@ -366,6 +438,22 @@ fn launch(
                 Mesh3d(assets.load(model_mesh(MODEL, SPAR_MESH))),
                 MeshMaterial3d(spar_material),
             ),
+            // Tied to the masthead and pointed by [`fly_the_pennant`]. The
+            // one piece of the boat that is not in the file: a flag is a
+            // shape that has to be *aimed*, and aiming it means knowing where
+            // its tie is, which a mesh out of Blender does not say.
+            (
+                Name::new("Pennant"),
+                Pennant {
+                    // Astern until the first frame says otherwise, which is
+                    // where a flag on a boat at rest in still air would lie
+                    // anyway.
+                    bearing: 0.0,
+                },
+                Mesh3d(meshes.add(pennant_mesh())),
+                MeshMaterial3d(pennant_material),
+                Transform::from_xyz(0.0, SHIP.masthead, SHIP.masthead_station),
+            ),
             // The figure itself is hung under this by `figure::dress`, which
             // is the player's own business rather than the boat's; what the
             // boat says is where a person aboard stands, which is on its
@@ -384,6 +472,121 @@ fn launch(
     // it picked: a placeholder nobody can find is indistinguishable from one
     // that never spawned, and `--focus` takes exactly these two numbers.
     info!("boat launched at {}, {}", view.focus.x, view.focus.z);
+}
+
+/// The pennant, as a shape: a burgee tied at the origin, so that everything
+/// [`fly_the_pennant`] does is a rotation about the point the flag is actually
+/// made fast at.
+///
+/// It flies along -Z at rest, the way the boat itself faces, so a bearing
+/// becomes a rotation about the vertical with no axis convention of its own.
+/// The hoist hangs *below* the tie rather than straddling it, because a flag
+/// is tied at its top corner and swings from there.
+///
+/// The one thing it is not is flat, and that is the whole reason it is three
+/// triangles instead of one. A flat pennant vanishes whenever the wind lines
+/// up with the camera — which at a fixed camera bearing is several times an
+/// hour, and looks exactly like the flag having been deleted. Pushing a
+/// single interior point out to one side puts a shallow belly in the cloth,
+/// which is both what a real flag does and enough to keep some part of it
+/// facing the viewer from any direction. It costs two triangles.
+///
+/// Rigid cloth is still a lie in a calm — real canvas folds down the mast
+/// rather than swinging round like a boom — and [`PENNANT`]'s narrow hoist is
+/// what makes the lie cheap: at three tenths of a metre the missing fold is a
+/// hand's width, watched from forty metres up, while the length that carries
+/// the reading is the part that behaves.
+fn pennant_mesh() -> Mesh {
+    let (length, hoist) = PENNANT;
+    let tie = Vec3::ZERO;
+    let foot = Vec3::new(0.0, -hoist, 0.0);
+    let fly = Vec3::new(0.0, -hoist * 0.5, -length);
+    // The belly: inside the outline, nearer the hoist than the fly, and out
+    // to starboard by a tenth of the flag's length. Deep enough to catch the
+    // light differently from its neighbours, shallow enough that the pennant
+    // still reads as one shape rather than as a paper aeroplane.
+    let belly = Vec3::new(length * 0.1, -hoist * 0.5, -length * 0.4);
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    // Unindexed, so that each facet can carry its own normal — the flat
+    // shading the whole world is drawn in, and the reason the belly is worth
+    // having at all.
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![tie, foot, belly, foot, fly, belly, fly, tie, belly],
+    )
+    .with_computed_flat_normals()
+}
+
+/// How the pennant lies under an apparent wind: the bearing it streams on and
+/// how far it hangs off the horizontal, in radians. `flying` is the bearing it
+/// is on now, which a wind too slack to have a direction leaves alone.
+///
+/// The bearing is where the air is *going*, which needs no defending here the
+/// way it does on the compass: a flag is blown, and the eye reads it as blown.
+/// The droop is the whole of the strength reading — flat out in a blow, dead
+/// down in a calm, and everything between — so a player who never looks at
+/// the corner of the screen still knows what the wind is doing.
+fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
+    let (full, sag) = PENNANT_FLIES;
+    let hard = (apparent.length() / full).clamp(0.0, 1.0);
+    let bearing = if apparent.length() > PENNANT_CALM {
+        // The map's x and y are the world's x and z, and the flag is drawn
+        // down -Z: the same turn a boat's own heading is read as.
+        f32::atan2(-apparent.x, -apparent.y)
+    } else {
+        flying
+    };
+    (
+        bearing,
+        sag + (std::f32::consts::FRAC_PI_2 - sag) * (1.0 - hard),
+    )
+}
+
+/// Flies the pennant on the wind the masthead feels.
+///
+/// Which is the *apparent* wind — the world's wind less the boat's own way
+/// through it — and that is the difference between this and the compass, on
+/// purpose. An instrument wants the true wind, because a bearing that changed
+/// as the player accelerated would be useless for steering by; a flag has no
+/// such duty and every reason to be honest, so a boat driving into a light
+/// air blows its own pennant astern, and one running before a breeze at
+/// nearly the speed of it flies limp. The two disagreeing is not a fault to
+/// be reconciled — it is the same thing sailors get from a burgee and a
+/// masthead instrument, and a player who notices has learned something true
+/// about sailing.
+///
+/// The boat's rotation is taken back out of the flag's, so heel, pitch and
+/// heading move where the pennant *is* without touching where it points: the
+/// masthead swings through a turn and the cloth stays on the wind.
+fn fly_the_pennant(
+    time: Res<Time>,
+    conditions: Res<sea::SeaConditions>,
+    boats: Query<(&Boat, &Transform), Without<Pennant>>,
+    mut pennants: Query<(&mut Pennant, &ChildOf, &mut Transform)>,
+) {
+    for (mut pennant, of, mut transform) in &mut pennants {
+        let Ok((boat, hull)) = boats.get(of.parent()) else {
+            continue;
+        };
+        let apparent = conditions.wind() - hull.forward().xz() * boat.way;
+        let (bearing, droop) = pennant_pose(apparent, pennant.bearing);
+        pennant.bearing = bearing;
+
+        // The flutter rides on top of the bearing rather than replacing it,
+        // and is scaled by the same wind that lifted the flag: cloth that
+        // snapped as hard in an air as in a blow would be a flag with a motor
+        // in it.
+        let (throw, rate) = FLUTTER;
+        let hard = (apparent.length() / PENNANT_FLIES.0).clamp(0.0, 1.0);
+        let flutter = throw * hard * (time.elapsed_secs_wrapped() * rate).sin();
+
+        let flying = Quat::from_rotation_y(bearing + flutter) * Quat::from_rotation_x(-droop);
+        transform.rotation = hull.rotation.inverse() * flying;
+    }
 }
 
 /// Keeps the boat on the surface it is over: the ground where the ground
@@ -722,6 +925,20 @@ mod tests {
         f32::atan2(-forward.x, -forward.z)
     }
 
+    /// Which way the pennant is flying, in the world and in the same terms as
+    /// a heading — the flag's own rotation carried back out through the hull's,
+    /// which is the reverse of what [`fly_the_pennant`] does to get it.
+    fn pennant_bearing(app: &mut App) -> f32 {
+        let hull = boat(app).rotation;
+        let flag = *app
+            .world_mut()
+            .query_filtered::<&Transform, With<Pennant>>()
+            .single(app.world())
+            .expect("a boat should be flying a pennant");
+        let flying = hull * flag.rotation * Vec3::NEG_Z;
+        f32::atan2(-flying.x, -flying.z)
+    }
+
     /// Radians per second the bow comes round at while `key` is held. A rate
     /// rather than an angle — proportionality to how long the key was held is
     /// what makes a turn the same on any machine.
@@ -798,6 +1015,99 @@ mod tests {
             "the keel runs {forefoot}..{heel}, not {}..{}",
             SHIP.forefoot_station,
             SHIP.heel_station
+        );
+    }
+
+    #[test]
+    fn the_model_flies_a_pennant_from_its_masthead() {
+        // The spar's own top, which is where the flag is tied. A mast re-cut
+        // in Blender and not re-measured here would leave the pennant flying
+        // in mid-air beside it, and nothing else in the game looks at the
+        // spar at all.
+        let corners: Vec<Vec3> = triangles(MODEL, SPAR_MESH, "POSITION")
+            .into_iter()
+            .flatten()
+            .collect();
+        let top = corners.iter().map(|c| c.y).fold(f32::MIN, f32::max);
+        assert!(
+            (top - SHIP.masthead).abs() < 1e-4,
+            "the model's masthead is {top} above the waterline, not {}",
+            SHIP.masthead
+        );
+
+        let (forward, aft) = corners
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
+        let stepped = (forward + aft) * 0.5;
+        assert!(
+            (stepped - SHIP.masthead_station).abs() < 1e-4,
+            "the mast stands at {stepped}, not {}",
+            SHIP.masthead_station
+        );
+    }
+
+    #[test]
+    fn the_pennant_blows_downwind_and_hangs_in_a_calm() {
+        // Where the air is going, not where it came from, and the whole of
+        // the strength reading in the droop.
+        let (flat, sag) = PENNANT_FLIES;
+        // A wind blowing due north — towards -Z — lays the flag along -Z,
+        // which is the boat's own zero.
+        let (bearing, droop) = pennant_pose(Vec2::new(0.0, -flat), 0.0);
+        assert!(
+            bearing.abs() < 1e-5,
+            "a northward wind flew it to {bearing}"
+        );
+        assert!(
+            (droop - sag).abs() < 1e-5,
+            "a full wind left it {droop} down"
+        );
+
+        // And one blowing east swings it a quarter turn — the sign the game's
+        // own headings use, so port helm and a veering wind agree.
+        let (east, _) = pennant_pose(Vec2::new(flat, 0.0), 0.0);
+        assert!(
+            (east + std::f32::consts::FRAC_PI_2).abs() < 1e-5,
+            "an eastward wind flew it to {east}"
+        );
+
+        // A calm hangs it straight down and leaves the bearing it had, rather
+        // than snapping to whatever direction the last breath of air took.
+        let (held, hanging) = pennant_pose(Vec2::new(0.05, -0.05), 1.234);
+        assert_eq!(held, 1.234);
+        // Within a degree of straight down: the breath of air still in the
+        // numbers is allowed to lift it by that much and no more.
+        assert!(hanging > std::f32::consts::FRAC_PI_2 - 0.02);
+
+        // Half the wind is most of the way down: the flag lifts through the
+        // airs and only the last of it is spent on the blows, which is what
+        // makes a light day readable at all.
+        let (_, half) = pennant_pose(Vec2::new(0.0, -flat * 0.5), 0.0);
+        assert!(half > droop && half < std::f32::consts::FRAC_PI_2);
+    }
+
+    #[test]
+    fn the_pennant_stays_on_the_wind_through_a_turn() {
+        // The reading is the world's, not the boat's: putting the helm over
+        // swings the masthead through a right angle and must leave the cloth
+        // pointing where it was. Only the helm — with no way on, the apparent
+        // wind is the true one throughout, so anything that moved here moved
+        // for the wrong reason.
+        let mut app = test_app();
+        run_frames(&mut app, 2);
+        let before = pennant_bearing(&mut app);
+        let bow = heading_yaw(&mut app);
+
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, 40);
+
+        let turned = (heading_yaw(&mut app) - bow).abs();
+        assert!(turned > 1.0, "the bow only came round {turned} radians");
+
+        let swung = (pennant_bearing(&mut app) - before).abs();
+        assert!(
+            swung < 2.0 * FLUTTER.0,
+            "the pennant followed the bow round by {swung} radians"
         );
     }
 
