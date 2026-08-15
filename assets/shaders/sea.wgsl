@@ -1,5 +1,6 @@
 // The sea's surface: the swell as vertex displacement, flat-shaded facets
-// on the result, and foam where the shallows break it.
+// on the result, and foam — where the shallows break a wave, and where the
+// open sea breaks its own.
 //
 // This extends the standard PBR material rather than replacing it — the
 // fragment half runs the ordinary standard-material path (colour, alpha,
@@ -17,7 +18,7 @@
 #import bevy_pbr::{
     forward_io::{Vertex, VertexOutput, FragmentOutput},
     mesh_functions,
-    mesh_view_bindings::globals,
+    mesh_view_bindings::{globals, view},
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     view_transformations::position_world_to_clip,
@@ -29,7 +30,8 @@ struct SeaParams {
     waves: array<vec4<f32>, 3>,
     // x is where the swell starts fading with distance from the mesh's
     // centre, y where it has fully gone; z is how much the lit slope is
-    // exaggerated over the real one (`sea::SHADING_TILT`); w padding.
+    // exaggerated over the real one (`sea::SHADING_TILT`); w how far the
+    // crests are bent off straight (`sea::BEND`).
     fade: vec4<f32>,
     // The shore wave: x its wavenumber down the depth, y its angular
     // frequency, z its unbroken amplitude, w the breaking slope.
@@ -45,6 +47,13 @@ struct SeaParams {
     // What must lie behind a breaker for it to be one: x metres to look
     // down the bottom's slope, y the depth that must be found there.
     feed: vec4<f32>,
+    // The open sea's whitecaps: x how far up the swell's leading face one
+    // starts, y the height the sea must be heaping under it, z how far that
+    // height wanders about; w padding.
+    caps: vec4<f32>,
+    // The field that wandering is read off: x the size of its coarsest cell
+    // in metres, y how fast it drifts downwind; zw padding.
+    breaking: vec4<f32>,
     // The depth window: xy the world coordinates of its corner, z one over
     // its extent, w the depth a full texel encodes.
     window: vec4<f32>,
@@ -81,18 +90,128 @@ fn shore_cap(depth: f32) -> f32 {
     return min(sea.shore.z, max(depth, 0.0) * sea.shore.w + sea.surf.z);
 }
 
+// The bend the swell is read through — the twin of `sea::bend`, which is
+// where the reasoning lives. Unit-ish, in metres once the amplitude out of
+// the uniform has scaled it.
+fn bend(at: vec2<f32>) -> vec2<f32> {
+    let field = vec2(
+        sin(dot(at, vec2(0.01079, -0.00917))) + 0.5 * sin(dot(at, vec2(-0.02347, 0.01768))),
+        sin(dot(at, vec2(0.00774, 0.01209))) + 0.5 * sin(dot(at, vec2(0.01918, 0.02236))),
+    );
+    return field * sea.fade.w;
+}
+
+// The open sea's own swell: the three deep trains, summed. Written out of
+// `swell` because the whitecaps want the deep water's crests on their own —
+// the shore wave has its own foam and its own reasons for it, and adding the
+// two before asking how tall a crest is would put caps on the shallows.
+// Where in its own cycle one train stands at a point — its phase, with the
+// bend in it.
+//
+// Everything that asks a train *anything* has to come through here, or it is
+// asking about a wave that is not the one being drawn. The whitecaps learned
+// that the hard way: they read the leading face off the raw phase for a
+// while, and painted dead straight ribbons across a sea whose crests had long
+// since stopped being straight.
+fn train_phase(index: i32, at: vec2<f32>, time: f32) -> f32 {
+    // The bend the whole swell is read through — the twin of `sea::bend`, and
+    // see `sea::BEND` for what it is for. Scaled by the longest train's
+    // wavenumber, so every train is bent by the same fraction of its own
+    // wavelength rather than by the same number of metres.
+    let bent = bend(at) * length(sea.waves[0].xy);
+    let wave = sea.waves[index];
+    return dot(wave.xy, at) + dot(normalize(wave.xy), bent) - wave.z * time;
+}
+
+fn deep(at: vec2<f32>, time: f32) -> f32 {
+    var height = 0.0;
+    for (var i = 0; i < 3; i++) {
+        height += sea.waves[i].w * sin(train_phase(i, at, time));
+    }
+    return height;
+}
+
+// How high the sea has to be heaping here before it breaks — the bar, with a
+// wandering field added to it.
+//
+// The bar alone is a constant, and a constant bar over three sines is a
+// lattice: the crests beat against each other in a pattern, and thresholding
+// a pattern draws it. Close up that passes for water; from a boat looking out
+// over a kilometre of it, the whole ocean is stamped with rows of identical
+// commas, which is worse than having no caps at all.
+//
+// So the bar wanders, on the one field in this file that is not made of
+// sines. Sines were tried and are the reason this comment is long: any sum of
+// them is periodic, so a bar built that way trades one lattice for a slower
+// lattice, and the eye finds the beat about as fast either way. Noise has no
+// beat to find.
+//
+// The swing is a fraction of the sea's own full height rather than a fixed
+// number of metres, and that is what makes it work at every wind. To take
+// caps off a patch of water the bar has to climb past what the swell there
+// can reach, and what it can reach is the wind's business: a swing in metres
+// big enough to leave bare patches in a blow would sit above the whole sea in
+// a breeze and leave no caps anywhere. The floor it swings about stays
+// absolute, though, which is what still keeps a calm clean — see `WHITECAP`.
+fn cap_bar(at: vec2<f32>, time: f32) -> f32 {
+    var ceiling = 0.0;
+    for (var i = 0; i < 3; i++) {
+        ceiling += sea.waves[i].w;
+    }
+    // Downwind, because that is what gusts do — and the first train runs with
+    // the wind by construction, so its heading is the wind's without the
+    // shader being told the wind at all.
+    let drift = normalize(sea.waves[0].xy) * sea.breaking.y * time;
+    return sea.caps.y + sea.caps.z * ceiling * gustiness(at - drift);
+}
+
+// One integer lattice point's own number, in 0..1. An ordinary integer hash:
+// multiply by odd constants, fold the high bits down over the low ones, and
+// what comes out has no relation to what went in that any pattern survives.
+fn lattice(cell: vec2<i32>) -> f32 {
+    var h = u32(cell.x) * 374761393u + u32(cell.y) * 668265263u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    return f32(h ^ (h >> 16u)) * (1.0 / 4294967295.0);
+}
+
+// Value noise: the lattice's numbers, smoothly interpolated across each cell.
+// The weights are the same smoothstep the fades here use, which is what makes
+// the field's slope continuous across a cell boundary — with straight
+// bilinear weights the seams show as creases wherever the bar crosses the
+// heaping, and a grid of creases is the lattice all over again.
+fn value_noise(at: vec2<f32>) -> f32 {
+    let cell = floor(at);
+    let corner = vec2<i32>(cell);
+    let f = at - cell;
+    let w = f * f * (3.0 - 2.0 * f);
+    let along_bottom = mix(lattice(corner), lattice(corner + vec2(1, 0)), w.x);
+    let along_top = mix(lattice(corner + vec2(0, 1)), lattice(corner + vec2(1, 1)), w.x);
+    return mix(along_bottom, along_top, w.y);
+}
+
+// How prone to breaking the water here is, in -1..1: three octaves of value
+// noise, the coarsest a couple of hundred metres across.
+//
+// The coarsest octave is the one that matters — it decides whether a stretch
+// of sea is breaking at all, which is what leaves bare water between the
+// patches — and the finer two are what keep the caps inside a patch from
+// coming out all the same size. Three is where adding more stopped changing
+// the picture, the fourth being finer than a cap.
+fn gustiness(at: vec2<f32>) -> f32 {
+    let cell = sea.breaking.x;
+    var field = 0.45 * value_noise(at / cell);
+    field += 0.33 * value_noise(at / (cell * 0.4) + 31.7);
+    field += 0.22 * value_noise(at / (cell * 0.15) + 78.3);
+    return field * 2.0 - 1.0;
+}
+
 // Height of the swell above the flat waterline — the twin of `sea::swell`.
 // `globals.time` is `Time::elapsed_secs_wrapped`, the clock the Rust side
 // samples too.
 fn swell(at: vec2<f32>, time: f32, depth: f32) -> f32 {
-    var deep = 0.0;
-    for (var i = 0; i < 3; i++) {
-        let wave = sea.waves[i];
-        deep += wave.w * sin(dot(wave.xy, at) - wave.z * time);
-    }
     let shore = shore_cap(depth) * sin(shore_phase(at, time, depth));
     let w = shore_weight(depth);
-    return deep * (1.0 - w) + shore * w;
+    return deep(at, time) * (1.0 - w) + shore * w;
 }
 
 @vertex
@@ -172,11 +291,52 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         * step(sea.stagger.z, steepness)
         * step(sea.feed.y, fed)
         * shore_weight(depth);
-    // Not quite white, and nearly opaque — surf hides the bed under it.
+
+    // Whitecaps: the open sea's own foam, and two conditions rather than
+    // one, because they answer different halves of what a whitecap is.
+    //
+    // Where — the swell has to be heaping. Nothing here is told how hard it
+    // is blowing; the wind is already in the amplitudes, so a fixed height
+    // in metres is a bar the sea clears more often the harder it blows, and
+    // never in a calm, when the whole swell is a few centimetres. The three
+    // trains beating against each other are what keep that from being a
+    // pattern: the sum only clears the bar where they happen to agree, and
+    // where that is drifts.
+    //
+    // What shape — a band down the leading face of the longest train, which
+    // is the wave the eye reads the sea by. `WAVES` is ordered longest
+    // first, and `the_waves_run_long_to_short` holds it that way.
+    //
+    // The order of the two conditions is the whole of how this looks. The
+    // band is the shape and the heaping only cuts it up, so a cap comes out
+    // as a sliver lying along a crest, broken where the sea is not heaping
+    // enough to carry it. Done the other way about — heaping for the shape,
+    // the wave to trim it — every cap is a round blob a few metres across,
+    // because the heap is the smaller of the two, and a sea of round white
+    // blobs reads as spots of paint rather than as water falling over.
+    //
+    // `-cos` is the leading face: the height's rate for one train, which
+    // peaks a quarter wave ahead of the crest, so the white sits where the
+    // water is climbing towards breaking rather than symmetrically on top.
+    let leading = -cos(train_phase(0, at, globals.time));
+    // And only where the mesh is still waving. Past the fade the surface is
+    // flat however tall the sum says the swell is, and foam painted out
+    // there would be white lying on glass. Measured from the camera rather
+    // than from the mesh's own centre, which is the same point to within the
+    // cell the mesh is snapped to, and hundreds of metres inside this fade.
+    let waving = 1.0 - smoothstep(sea.fade.x, sea.fade.y, distance(at, view.world_position.xz));
+    let cap = step(sea.caps.x, leading)
+        * step(cap_bar(at, globals.time), deep(at, globals.time))
+        * (1.0 - shore_weight(depth))
+        * waving;
+
+    // One white for both, the shallows' and the open sea's: they are the same
+    // water doing the same thing, and two whites would read as two materials.
+    // Not quite white, and nearly opaque — foam hides what is under it.
     pbr_input.material.base_color = mix(
         pbr_input.material.base_color,
         vec4(0.82, 0.87, 0.88, 0.97),
-        foam,
+        max(foam, cap),
     );
 
     pbr_input.material.base_color =
