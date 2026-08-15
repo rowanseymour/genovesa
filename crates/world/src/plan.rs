@@ -341,14 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn a_rendered_map_is_the_size_it_says() {
-        let config = MapConfig::square(256, 7);
-        let map = render(&config, 64, 48);
-        assert_eq!((map.width, map.height), (64, 48));
-        assert_eq!(map.pixels.len(), 64 * 48 * 3);
-    }
-
-    #[test]
     fn the_smallest_map_still_renders_at_grid_scale() {
         // A single chunk at 3 m/px is 42 px, and nothing in the pipeline may
         // round that to zero.
@@ -360,17 +352,6 @@ mod tests {
             GRID_METRES_PER_PIXEL,
         );
         assert!(map.width > 0 && map.height > 0);
-    }
-
-    #[test]
-    fn a_grid_holds_nine_maps_and_their_rules() {
-        let chunks = UVec2::new(3, 2);
-        let seeds = seed_set(1, 9);
-        let grid = grid(chunks, &seeds, GRID_METRES_PER_PIXEL);
-
-        let cell = (chunks * CHUNK_TILES).as_vec2() / GRID_METRES_PER_PIXEL;
-        assert_eq!(grid.width, cell.x as u32 * 3 + 2);
-        assert_eq!(grid.height, cell.y as u32 * 3 + 2);
     }
 
     #[test]

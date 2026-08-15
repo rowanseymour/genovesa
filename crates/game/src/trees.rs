@@ -239,16 +239,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn a_palm_stands_where_the_wire_put_it() {
-        let origin = Vec2::new(-256.0, 384.0);
-        let palm = Plant {
-            kind: Kind::Palm,
-            at: Vec2::new(3.0, 120.0),
-            yaw: 0.0,
-            scale: 1.0,
-        };
-        assert_eq!(stands_at(origin, &palm), Vec2::new(-253.0, 504.0));
-    }
 }

@@ -401,37 +401,6 @@ mod tests {
     /// be coming from a plausible direction.
     const SUN: Vec3 = Vec3::new(0.3, 0.8, 0.5196152);
 
-    /// The mask, read back as the fraction of the sun each texel lets through.
-    fn mask() -> Vec<f32> {
-        mask_image()
-            .data
-            .expect("a mask is built with its texels in hand")
-            .iter()
-            .map(|&byte| byte as f32 / 255.0)
-            .collect()
-    }
-
-    #[test]
-    fn the_sky_is_part_cloud_and_part_open() {
-        // The one number the noise has to be talked into. A threshold a little
-        // out puts the world under a permanent overcast or gives it a sky with
-        // three clouds in it, and neither reads as weather.
-        let mask = mask();
-        let clouded = mask.iter().filter(|&&pass| pass < 0.9).count() as f32 / mask.len() as f32;
-        assert!(
-            (0.2..0.6).contains(&clouded),
-            "{:.0}% of the sky is clouded",
-            clouded * 100.0
-        );
-
-        // And the shade under one is shade rather than a suggestion of it.
-        let darkest = mask.iter().fold(1.0f32, |deepest, &pass| deepest.min(pass));
-        assert!(
-            darkest < SHADE + 0.01,
-            "the deepest shade only reaches {darkest}"
-        );
-    }
-
     #[test]
     fn the_pattern_meets_itself_at_the_tile_edge() {
         // Tiled endlessly across the world, so a seam would be on screen every

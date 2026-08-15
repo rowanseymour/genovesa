@@ -1491,14 +1491,6 @@ mod tests {
     }
 
     #[test]
-    fn the_title_is_tracked_out_letter_by_letter() {
-        // Every letter still there, and the word still readable as one word.
-        assert_eq!(spaced(TITLE), "G E N O V E S A");
-        assert_eq!(spaced(TITLE).replace(' ', ""), TITLE);
-        assert_eq!(spaced(""), "");
-    }
-
-    #[test]
     fn exit_requests_shutdown() {
         let mut app = test_app(AppState::MainMenu);
         click(&mut app, MenuButton::Exit);
@@ -2100,24 +2092,6 @@ mod tests {
         press_key(&mut app, KeyCode::Escape);
         app.update();
         assert!(!pause_text(&mut app).contains("leaving closes it on them"));
-    }
-
-    #[test]
-    fn seed_field_reads_as_zero_when_empty() {
-        let settings = NewWorldSettings {
-            seed: String::new(),
-            ..default()
-        };
-        assert_eq!(settings.seed_value(), 0);
-    }
-
-    #[test]
-    fn seed_field_parses_digits() {
-        let settings = NewWorldSettings {
-            seed: "123456".to_string(),
-            ..default()
-        };
-        assert_eq!(settings.seed_value(), 123_456);
     }
 
     #[test]

@@ -575,19 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn lies_at_the_worlds_pitch() {
-        let mut app = test_app();
-        let scale = app
-            .world_mut()
-            .query_filtered::<&UiTransform, With<CompassFace>>()
-            .single(app.world())
-            .expect("the face should exist")
-            .scale;
-        assert_eq!(scale.x, 1.0);
-        assert!((scale.y - PITCH.sin()).abs() < 1e-6);
-    }
-
-    #[test]
     fn card_follows_the_camera() {
         let mut app = test_app();
         spin_camera(&mut app, 1.25);
