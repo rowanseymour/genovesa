@@ -788,7 +788,7 @@ mod tests {
                             Tone::Sand,
                             Tone::Forest,
                             Tone::Fell,
-                            Tone::Snow,
+                            Tone::Marsh,
                         ][i % 5],
                         [Shade::Dark, Shade::Plain, Shade::Light][i % 3],
                     )

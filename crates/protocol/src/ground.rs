@@ -131,15 +131,15 @@ pub fn dequantize(stored: u16) -> f32 {
 // --- The palette ------------------------------------------------------------
 
 /// The ground palette. Small and flat on purpose — every triangle gets exactly
-/// one of these, so the whole world is drawn in nineteen colours plus three
+/// one of these, so the whole world is drawn in eighteen colours plus three
 /// shade steps. Saturated well past anything natural, because flat shading has
 /// no texture or gradient to carry the picture; the colour has to do that work
 /// on its own.
 ///
-/// The order is the wire's: a tone travels as its own number, so the only
-/// shape a change to this may take is another entry on the end — anything
-/// shuffled repaints the world of every build that disagrees. Either way it is
-/// a change to the format and bumps [`crate::PROTOCOL_VERSION`], because a
+/// The order is the wire's: a tone travels as its own number, so adding to the
+/// end is the cheap change and anything shuffled or removed repaints the world
+/// of every build that disagrees. Either way it is a change to the format —
+/// re-record `the_wire_is_a_format` and rebuild both ends together, because a
 /// client that has never heard of a tone cannot draw the triangle it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -168,32 +168,27 @@ pub enum Tone {
     Fell = 11,
     Rock = 12,
     RockDark = 13,
-    /// Bare stone bleached by the weather, the last step before the snow.
+    /// Bare stone bleached by the weather — the palest the summits get.
     Scree = 14,
-    /// Snow on the summits. Off-white and slightly blue: a pure white would be
-    /// the only fully saturated thing in the world and would pull the eye off
-    /// everything else, and it has to stay clearly apart from [`Tone::Rock`]
-    /// in shadow.
-    Snow = 15,
     /// The bed of standing fresh water, deep enough to be dark. Green where
     /// [`Tone::Seabed`] is blue, and darker than it: a lake bottoms out in
     /// silt and drowned vegetation rather than in sand, and it is what a lake
     /// is *seen through* that has to say fresh water rather than sea.
-    Silt = 16,
+    Silt = 15,
     /// The weedy shallows of a lake — what [`Tone::Shallow`] is to the sea,
     /// except that it deliberately refuses the turquoise. A ring of bright
     /// water is the strongest thing that says *coast* in this palette, so a
     /// lake wearing one reads as an arm of the sea that happens to be inland.
-    Shoal = 17,
+    Shoal = 16,
     /// The margin a lake leaves around itself: reed, mud and wet ground, from
     /// just under the waterline to just above it. Takes the place a beach
     /// holds on the sea coast, and is dull and dark where sand is bright —
     /// fresh water has no surf to wash a shore clean.
-    Marsh = 18,
+    Marsh = 17,
 }
 
 /// The sRGB the tones stand for, in the order they are numbered.
-const TONES: [Vec3; 19] = [
+const TONES: [Vec3; 18] = [
     Vec3::new(0.16, 0.34, 0.38), // Seabed
     Vec3::new(0.46, 0.68, 0.62), // Shallow
     // A step darker than it once was (0.90, 0.83, 0.58): the surf paints
@@ -212,7 +207,6 @@ const TONES: [Vec3; 19] = [
     Vec3::new(0.55, 0.53, 0.50), // Rock
     Vec3::new(0.40, 0.38, 0.37), // RockDark
     Vec3::new(0.68, 0.65, 0.60), // Scree
-    Vec3::new(0.90, 0.92, 0.95), // Snow
     Vec3::new(0.13, 0.24, 0.20), // Silt
     Vec3::new(0.33, 0.48, 0.32), // Shoal
     Vec3::new(0.42, 0.42, 0.25), // Marsh
@@ -262,9 +256,8 @@ impl Tone {
             12 => Self::Rock,
             13 => Self::RockDark,
             14 => Self::Scree,
-            15 => Self::Snow,
-            16 => Self::Silt,
-            17 => Self::Shoal,
+            15 => Self::Silt,
+            16 => Self::Shoal,
             _ => Self::Marsh,
         })
     }
@@ -324,19 +317,18 @@ impl Surface {
 
     /// The sRGB this surface is drawn in.
     ///
-    /// Clamped because a light cut of an already bright tone leaves the range
-    /// — [`Tone::Snow`] does, and would come out of a renderer as whatever
-    /// that renderer does with a colour past white. Nothing that paints the
-    /// world ever shades the snow, so the clamp is a guard on the arithmetic
-    /// rather than a thing anyone sees; the tones that *are* shaded all have
-    /// room for it, which the tests hold them to.
+    /// Clamped so that a light cut of a bright tone can never hand a renderer
+    /// a colour past white, whatever that renderer would do with one. No tone
+    /// in the current palette actually reaches the clamp — the tests hold
+    /// them all inside it — so this is a guard on the arithmetic rather than
+    /// a thing anyone sees.
     pub fn color(self) -> Vec3 {
         (self.tone.color() * self.shade.factor()).clamp(Vec3::ZERO, Vec3::ONE)
     }
 
     /// The byte this travels as: the tone in the high bits, the shade in the
-    /// low two. Nineteen tones and three shades, so a valid surface is always
-    /// under 80 and a good part of the byte is spare.
+    /// low two. Eighteen tones and three shades, so a valid surface is always
+    /// under 76 and a good part of the byte is spare.
     fn to_byte(self) -> u8 {
         ((self.tone as u8) << 2) | self.shade as u8
     }
@@ -793,15 +785,14 @@ mod tests {
             }
         }
 
-        // And only the snow reaches the clamp, which is why nothing shades
-        // it: a lighter cut of any other tone still moves the colour by the
-        // full step, so a shaded parcel really does break into three.
+        // And nothing reaches the clamp: a lighter cut of every tone still
+        // moves the colour by the full step, so a shaded parcel really does
+        // break into three.
         for tone in 0..TONES.len() as u8 {
             let tone = Tone::from_byte(tone).expect("a tone");
             let lit = tone.color() * Shade::Light.factor();
-            assert_eq!(
+            assert!(
                 lit.cmple(Vec3::ONE).all(),
-                tone != Tone::Snow,
                 "{tone:?} is the wrong side of white when lightened"
             );
         }
