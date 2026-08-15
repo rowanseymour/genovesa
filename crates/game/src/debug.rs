@@ -38,6 +38,7 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::camera::{MapCamera, View};
+use crate::chart::{Chart, ChartTally};
 use crate::net::Hosting;
 use crate::terrain::{Ground, Tally};
 
@@ -213,7 +214,20 @@ impl Toggles {
 #[derive(SystemParam)]
 struct WorldUnder<'w> {
     ground: Option<Res<'w, Ground>>,
+    chart: Option<Res<'w, Chart>>,
     sky: Res<'w, crate::sky::Sky>,
+}
+
+/// What this machine holds of the world: the ground a server has sent it, and
+/// the coast it has drawn out of that ground.
+///
+/// One argument rather than two because they are one subject — how much world
+/// is in hand — and because the readout's own line is long enough already.
+#[derive(Clone, Copy, Default)]
+struct Held<'a> {
+    ground: Option<&'a Tally>,
+    /// What the chart holds, counted — see [`Chart::tally`].
+    charted: Option<ChartTally>,
 }
 
 /// Makes the scene agree with [`Toggles`].
@@ -347,8 +361,13 @@ fn refresh_overlay(
     // and never the recipe, so there is no seed here to print.
     let seed = hosting.map(|hosting| hosting.0.seed());
 
+    let held = Held {
+        ground: tally.as_ref(),
+        charted: world.chart.as_ref().map(|chart| chart.tally()),
+    };
+
     for mut text in &mut overlay.texts {
-        text.0 = overlay_text(fps, &counts, tally.as_ref(), hour, seed, view, &toggles);
+        text.0 = overlay_text(fps, &counts, held, hour, seed, view, &toggles);
     }
 }
 
@@ -513,7 +532,7 @@ fn triangles_in(mesh: &Mesh) -> usize {
 fn overlay_text(
     fps: Option<f64>,
     counts: &Counts,
-    tally: Option<&Tally>,
+    held: Held<'_>,
     hour: Option<f32>,
     seed: Option<u32>,
     view: Option<View>,
@@ -533,12 +552,21 @@ fn overlay_text(
             shadows.cascades
         ));
     }
-    if let Some(tally) = tally {
+    if let Some(tally) = held.ground {
         lines.push(format!(
             "{} chunks / {} ocean / {} requested",
             tally.ground + tally.ocean,
             tally.ocean,
             tally.requested
+        ));
+    }
+    // Under the chunks, because it is drawn out of them and grows behind them.
+    // The last number is the one gameplay will hang off: coastlines the player
+    // has been all the way round.
+    if let Some(chart) = held.charted {
+        lines.push(format!(
+            "{} surveyed / {} with coast / {} closed",
+            chart.surveyed, chart.coastal, chart.complete
         ));
     }
     if let Some(hour) = hour {
@@ -673,7 +701,15 @@ mod tests {
             overlay_text(
                 Some(59.6),
                 &counts,
-                Some(&tally),
+                Held {
+                    ground: Some(&tally),
+                    charted: Some(ChartTally {
+                        surveyed: 96,
+                        coastal: 21,
+                        complete: 2,
+                        open: 3,
+                    }),
+                },
                 Some(0.35),
                 Some(20_040_112),
                 Some(view),
@@ -682,6 +718,7 @@ mod tests {
             "60 fps / 214 meshes / 1,234,567 triangles\n\
              3,298,112 shadow tris / 623 draws / 4 cascades\n\
              231 chunks / 58 ocean / 12 requested\n\
+             96 surveyed / 21 with coast / 2 closed\n\
              sky 08:24\n\
              seed 20040112 / focus 98,-317 / yaw 45 / zoom 42"
         );
@@ -698,7 +735,7 @@ mod tests {
             shadows: None,
         };
         assert_eq!(
-            overlay_text(None, &counts, None, None, None, None, &showing()),
+            overlay_text(None, &counts, Held::default(), None, None, None, &showing()),
             "-- fps / 0 meshes / 0 triangles"
         );
     }

@@ -12,6 +12,7 @@ pub mod bindings;
 pub mod boat;
 pub mod camera;
 pub mod capture;
+pub mod chart;
 pub mod cli;
 pub mod clouds;
 pub mod compass;
@@ -245,4 +246,11 @@ pub enum Helm {
     /// system that reads the player's hands already conditions on
     /// [`Helm::Sailing`].
     Console,
+    /// The chart is up over the world — see [`chart`]. A state beside the
+    /// pause menu and for the same reason: reading a chart must not cost
+    /// anyone else their world, so the ground keeps arriving and the other
+    /// boats keep moving behind the paper. What it does hold is the player's
+    /// own hands, which is why it is a state rather than a flag — the helm
+    /// stops while the sheet is being read, and the boat carries its way.
+    Chart,
 }

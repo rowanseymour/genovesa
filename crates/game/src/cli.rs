@@ -150,8 +150,9 @@ Usage: game [options]
 
 Options:
   --state <screen>  start on `mainmenu`, `newworld`, `joinworld`, `settings`,
-                    `inworld`, `paused` or `pausedcontrols` [default: mainmenu,
-                    or inworld when shots or a server are asked for]
+                    `inworld`, `paused`, `pausedcontrols` or `chart`
+                    [default: mainmenu, or inworld when shots or a server are
+                    asked for]
   --seed <n>        the world to open [default: a new one every run, and the
                     run says which so it can be asked for again]
   --time <h>        the hour the world opens at, from 0 to 24 [default:
@@ -335,9 +336,10 @@ fn state(value: &str) -> Result<(AppState, Helm), String> {
         "inworld" => Ok((AppState::InWorld, Helm::Sailing)),
         "paused" => Ok((AppState::InWorld, Helm::Paused)),
         "pausedcontrols" => Ok((AppState::InWorld, Helm::Controls)),
+        "chart" => Ok((AppState::InWorld, Helm::Chart)),
         other => Err(format!(
             "`{other}` is not a screen — try mainmenu, newworld, joinworld, \
-             settings, inworld, paused or pausedcontrols"
+             settings, inworld, paused, pausedcontrols or chart"
         )),
     }
 }
