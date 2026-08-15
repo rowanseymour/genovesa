@@ -20,6 +20,12 @@
 //! sake of a moment nobody can see, the light at the swap being a twentieth
 //! of noon's with the sky doing most of the work.
 //!
+//! That one light carries the weather as well as the hour. The cloud shadows
+//! are a mask on it, and where they fall is decided by where the light is put
+//! — so [`crate::clouds`] hangs the mask and says where the light stands,
+//! while everything here goes on being about which way it faces and what
+//! colour it burns.
+//!
 //! The night is dark on purpose — dark enough that sailing on through it is a
 //! bad idea, which is what makes anchoring for it a decision rather than a
 //! formality. What it costs the player is a few real minutes, so a boat with
@@ -37,6 +43,7 @@ use std::f32::consts::TAU;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
+use crate::clouds::{Clouds, CloudsPlugin};
 use crate::net::Online;
 use crate::{eased, AppState, Helm};
 
@@ -290,17 +297,21 @@ impl Sky {
     }
 
     /// Whether it is night as drawn — which is what decides whether there is
-    /// a night to offer to wait out.
-    fn is_night(&self) -> bool {
+    /// a night to offer to wait out, and, in [`crate::clouds`], whether the
+    /// light is carrying any weather. One answer for both: the clouds may
+    /// only go on and off at the moment the light changes bodies, so a second
+    /// spelling of this would be a second opinion about when that is.
+    pub fn is_night(&self) -> bool {
         protocol::is_night(self.phase())
     }
 }
 
 /// Marks the one light in the sky, so the systems that aim and colour it can
 /// find it again. It is the sun for most of the day and the moon for the rest
-/// — see the module doc for why that is one entity and not two.
+/// — see the module doc for why that is one entity and not two. Public
+/// because [`crate::clouds`] hangs its shadows on this same light.
 #[derive(Component)]
-struct SkyLight;
+pub struct SkyLight;
 
 /// Marks the line of text the night offers itself with.
 #[derive(Component)]
@@ -318,7 +329,12 @@ pub struct SkyPlugin;
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
         let day = light_at(NO_HOUR);
-        app.init_resource::<Sky>()
+        app
+            // The clouds are a mask on the light this module hangs, and are
+            // drawn by putting that light in the right place — so they come
+            // with the sky rather than standing beside it in the binary.
+            .add_plugins(CloudsPlugin)
+            .init_resource::<Sky>()
             .insert_resource(ClearColor(day.sky))
             .insert_resource(GlobalAmbientLight {
                 color: day.fill,
@@ -331,6 +347,11 @@ impl Plugin for SkyPlugin {
                 Update,
                 (advance_the_day, light_the_world, offer_the_night)
                     .chain()
+                    // After the clouds have moved, since where this puts the
+                    // light is where they are: the two read and write one
+                    // resource in one schedule, and which frame's weather the
+                    // light stands in is not the executor's to choose.
+                    .after(crate::clouds::drift_downwind)
                     .run_if(in_state(AppState::InWorld)),
             )
             // Only with the helm: a paused game is a player who is not
@@ -489,6 +510,7 @@ fn advance_the_day(time: Res<Time>, mut sky: ResMut<Sky>) {
 /// darkness, and at night it is most of what there is to see by.
 fn light_the_world(
     sky: Res<Sky>,
+    clouds: Res<Clouds>,
     mut lights: Query<(&mut Transform, &mut DirectionalLight), With<SkyLight>>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut clear: ResMut<ClearColor>,
@@ -498,10 +520,12 @@ fn light_the_world(
     let from = light_from(hour.at);
 
     for (mut transform, mut light) in &mut lights {
-        // Placed out along the direction and pointed back at the origin: a
-        // directional light has no position, only the way it faces, and this
-        // is the readable way to say which way that is.
-        *transform = Transform::from_translation(from * 100.0).looking_at(Vec3::ZERO, Vec3::Y);
+        // Facing down the direction the light comes from, and standing
+        // wherever the clouds want it to. A directional light shines the same
+        // way from anywhere, so only its facing is this module's business —
+        // and that is exactly what leaves its position and scale free for
+        // [`crate::clouds`] to hang the cloud shadows off.
+        *transform = clouds.stand_the_light(from);
         light.color = hour.light;
         light.illuminance = hour.lux;
     }
@@ -715,6 +739,8 @@ mod tests {
         .init_resource::<KeyBindings>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_asset::<Mesh>()
+        // What the clouds' mask is put into, the sky bringing them with it.
+        .init_asset::<Image>()
         .init_resource::<Assets<StandardMaterial>>();
         app.update();
         app.world_mut()
@@ -823,6 +849,38 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    #[test]
+    fn the_clouds_move_the_light_without_moving_where_it_shines_from() {
+        // The cloud shadows are carried by walking the light itself downwind —
+        // see [`crate::clouds`] — which is only safe because a directional
+        // light's position means nothing. What would undo that is aiming it at
+        // the middle of the world instead of down its own bearing: the sun
+        // would then swing round as the weather blew past, by more the longer
+        // anybody played.
+        let mut app = sky_app();
+        app.world_mut().resource_mut::<crate::sea::Forecast>().wind = Some(Vec2::new(30.0, -18.0));
+        run_frames(&mut app, 60);
+
+        let phase = phase(&app);
+        let light = app
+            .world_mut()
+            .query_filtered::<&Transform, With<SkyLight>>()
+            .single(app.world())
+            .expect("a world has one light in it")
+            .to_owned();
+        assert!(
+            light.translation.xz().length() > 1.0,
+            "the clouds have not gone anywhere: {}",
+            light.translation
+        );
+        assert!(
+            light.forward().dot(-light_from(phase)) > 0.9999,
+            "the drift has aimed the light at {} rather than down {}",
+            light.forward().as_vec3(),
+            -light_from(phase)
+        );
     }
 
     #[test]
