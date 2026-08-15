@@ -3,6 +3,7 @@
 #
 #   assets-src/icon/build.py             # the shipped 1024px icon
 #   assets-src/icon/build.py --size 64   # somewhere else to look at it
+#   assets-src/icon/build.py --icns X    # the same picture as a macOS .icns
 #
 # The icon is *drawn* rather than screenshotted, and that is the whole reason
 # this file exists. A render of the real thing — a frame of the game, or a
@@ -16,9 +17,18 @@
 # picture is this picture.
 #
 # Rendering the SVG needs one of two things. `rsvg-convert` (librsvg) is the
-# portable one and is what a Linux machine will have; `qlmanage` is on every
-# Mac and draws through the same WebKit that previews the file in Finder. They
-# agree on everything this drawing uses, which is flat fills and strokes.
+# portable one and is what a Linux machine will have; `sips` is on every Mac
+# and draws through Image I/O. They agree on everything this drawing uses,
+# which is flat fills and strokes — and the drawing stays inside that on
+# purpose, because the two disagree about anything richer. Image I/O ignores
+# SVG filters silently rather than failing, so a drop shadow would exist on
+# whichever machine happened to have librsvg and nowhere else.
+#
+# `qlmanage` was here and drew the same picture through WebKit, filters and
+# all, but it flattens what it renders onto white. That is invisible in a
+# picture with no transparency in it and ruins the macOS icon below, which is
+# mostly margin — so it went, rather than sit here as the renderer that works
+# until the day it doesn't.
 
 import argparse
 import math
@@ -52,6 +62,32 @@ S = 1024
 # else rounds less, so this sits at the generous end and looks deliberate
 # rather than clipped on a platform that would have rounded it anyway.
 RADIUS = 224
+
+# --- The macOS grid ---------------------------------------------------------
+#
+# macOS draws an icon smaller than the picture it arrives in. Apple's grid puts
+# the rounded square on about 824 of a 1024 canvas and hangs a soft shadow
+# under it, so the margin is a fifth of the frame and is not optional: an icon
+# drawn edge to edge sits a quarter larger than everything beside it in the
+# dock and reads as the one that got the sizing wrong.
+#
+# The numbers are measured off the system's own rather than taken from the
+# guidelines, because what ships is what a dock actually puts side by side.
+# Notes and Reminders come out at 83% of their canvas, Sublime Text at 81% and
+# Claude at 83%, and every one of them has a few pixels more room below the
+# shape than above — which is the shadow, not the shape being off centre.
+#
+# None of this applies to `assets/icon.png`, which is the picture itself and
+# has no platform's furniture on it. This is the frame it is put in on the way
+# into a bundle.
+#
+# Apple's template hangs a soft shadow under the shape as well, and this does
+# not. Partly because a shadow is a filter and the renderers do not agree about
+# those, but mostly because it would be the one soft edge in a drawing whose
+# whole rule is a flat tone per face. The margin is what makes an icon the
+# right size beside its neighbours; the shadow only makes it the same kind of
+# picture as theirs, and this one is deliberately not.
+GRID = 824
 
 # --- An island, in plan -----------------------------------------------------
 #
@@ -164,8 +200,13 @@ def ring(cx, cy, R, width, dash=None):
     )
 
 
-def draw(px):
-    """The whole icon, as an SVG document rendered at `px` pixels square."""
+def scene():
+    """The whole picture on the 1024 grid, clipped to its own corners.
+
+    Everything a frame puts around it — the size it is rendered at, and on
+    macOS the margin — is somebody else's business, so that the two outputs
+    cannot drift into being two different drawings.
+    """
     R = 392  # the rim, which sets the scale of everything inside it
     body = [
         # The sea, and two facets of it. They are a hair either side of the
@@ -189,12 +230,39 @@ def draw(px):
         island(0.21, 150, 158),
     ]
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{px}" height="{px}"'
-        f' viewBox="0 0 {S} {S}">\n'
         f'<clipPath id="corners">'
         f'<rect width="{S}" height="{S}" rx="{RADIUS}" ry="{RADIUS}"/>'
         f"</clipPath>\n"
-        f'<g clip-path="url(#corners)">\n' + "\n".join(body) + "\n</g>\n</svg>\n"
+        f'<g clip-path="url(#corners)">\n' + "\n".join(body) + "\n</g>"
+    )
+
+
+def document(px, inner):
+    """An SVG document `px` pixels square, on the 1024 grid."""
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{px}" height="{px}"'
+        f' viewBox="0 0 {S} {S}">\n{inner}\n</svg>\n'
+    )
+
+
+def draw(px):
+    """The icon as its own picture, filling the frame edge to edge."""
+    return document(px, scene())
+
+
+def draw_macos(px):
+    """The icon as macOS wants it: inset on Apple's grid, on a clear canvas.
+
+    The shape is the same drawing scaled down about its own centre rather than
+    redrawn smaller, so the corner radius comes down with it — 224 of 1024
+    becomes 180 of 824, which is within a couple of pixels of the 185 Apple's
+    template uses and closer than the eye can tell at any size this is seen at.
+    """
+    edge = (S - GRID) / 2
+    return document(
+        px,
+        f'<g transform="translate({edge},{edge}) scale({GRID / S:.6f})">\n'
+        f"{scene()}\n</g>",
     )
 
 
@@ -206,31 +274,72 @@ def render(svg, out, px):
             check=True,
         )
         return
-    if shutil.which("qlmanage"):
-        # qlmanage names its output after the input and will not be told
-        # otherwise, so it writes into a directory of its own and the result
-        # is moved into place.
-        with tempfile.TemporaryDirectory() as tmp:
-            subprocess.run(
-                ["qlmanage", "-t", "-s", str(px), str(svg), "-o", tmp],
-                check=True,
-                capture_output=True,
-            )
-            written = Path(tmp) / f"{svg.name}.png"
-            if not written.exists():
-                sys.exit(f"{sys.argv[0]}: qlmanage rendered nothing")
-            # Only once it is whole, so a killed run cannot leave a torn file
-            # committed.
-            written.replace(out)
+    if shutil.which("sips"):
+        # sips has no size flag that rasterises rather than resamples, so the
+        # size it draws at is the document's own `width` and `height` — which
+        # `document` has already set to `px`. Asking for it twice here would
+        # only be a chance for the two answers to differ.
+        subprocess.run(
+            ["sips", "-s", "format", "png", str(svg), "--out", str(out)],
+            check=True,
+            capture_output=True,
+        )
         return
-    sys.exit(f"{sys.argv[0]}: neither rsvg-convert nor qlmanage is installed")
+    sys.exit(f"{sys.argv[0]}: neither rsvg-convert nor sips is installed")
+
+
+# The ten pictures a `.icns` holds, keyed by the size each is drawn at and
+# named the way `iconutil` insists on. Seven renders rather than ten: a name
+# and the next size down's `@2x` are the same number of pixels, and drawing the
+# same picture twice at the same size would only produce the same file.
+#
+# Every one is rendered from the drawing rather than sampled down from the
+# 1024, which is the whole reason the icon is vector in the first place. A
+# resampled 16 is the compass turned to porridge; a drawn one still has the
+# waterline as an actual line.
+ICONSET = {
+    16: ["icon_16x16.png"],
+    32: ["icon_16x16@2x.png", "icon_32x32.png"],
+    64: ["icon_32x32@2x.png"],
+    128: ["icon_128x128.png"],
+    256: ["icon_128x128@2x.png", "icon_256x256.png"],
+    512: ["icon_256x256@2x.png", "icon_512x512.png"],
+    1024: ["icon_512x512@2x.png"],
+}
+
+
+def build_icns(out):
+    """The ten sizes, packed by `iconutil` into one file a bundle can carry."""
+    if not shutil.which("iconutil"):
+        sys.exit(f"{sys.argv[0]}: iconutil is macOS only, and this is not one")
+    with tempfile.TemporaryDirectory() as tmp:
+        iconset = Path(tmp) / "icon.iconset"
+        iconset.mkdir()
+        svg = Path(tmp) / "icon.svg"
+        for px, names in ICONSET.items():
+            svg.write_text(draw_macos(px))
+            drawn = iconset / names[0]
+            render(svg, drawn, px)
+            for also in names[1:]:
+                shutil.copyfile(drawn, iconset / also)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["iconutil", "--convert", "icns", str(iconset), "--output", str(out)],
+            check=True,
+        )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Build the application icon.")
     parser.add_argument("--size", type=int, default=1024, help="pixels square")
     parser.add_argument("--out", type=Path, help="where to write the PNG")
+    parser.add_argument("--icns", type=Path, help="write a macOS .icns instead")
     args = parser.parse_args()
+
+    if args.icns:
+        build_icns(args.icns)
+        print(f"{Path(sys.argv[0]).name}: {args.icns} ({len(ICONSET)} sizes)")
+        return
 
     out = args.out or ROOT / "assets" / "icon.png"
     with tempfile.TemporaryDirectory() as tmp:
