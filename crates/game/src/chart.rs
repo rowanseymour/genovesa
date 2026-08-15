@@ -96,8 +96,11 @@
 //! tones with no texture and no gradient anywhere in it, and a mottled sheet
 //! would be the only one of either. So the hand is in the line instead — a
 //! coast weighted heavier than the graticule under it, ticked on its landward
-//! side the way an engraved chart hatches its shores, lettered in the same
-//! serif the menus are set in, and laid on one flat tone of parchment.
+//! side the way an engraved chart hatches its shores, and laid on one flat
+//! tone of parchment. The furniture is lettered in the serif the menus are
+//! set in; the islands are named in an italic of the Fell types (see
+//! [`NAME_FONT`]), which is the nearest a flat sheet comes to an engraver's
+//! hand.
 //!
 //! A coast that has not been closed is not closed on the sheet either. Half an
 //! island is drawn as half an island, the line simply stopping where the survey
@@ -110,7 +113,7 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseSc
 use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
-use bevy::text::{FontSize, FontSource};
+use bevy::text::{Font, FontSize, FontSource};
 
 use protocol::ground::{chunk_at, CHUNK_METRES, FACET_METRES, FACET_QUADS, FACET_VERTS};
 
@@ -287,6 +290,16 @@ pub struct ChartTally {
     pub islands: usize,
 }
 
+/// An island the chart has closed — the nameable unit, see the module docs —
+/// measured for the lettering that goes on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Island {
+    /// The middle of its bounding box, on the sheet (see [`on_the_sheet`]).
+    pub centre: Vec2,
+    /// How far it reaches: the longer side of that box, in metres.
+    pub extent: f32,
+}
+
 impl Chart {
     /// Whether this chunk has been surveyed at all.
     pub fn surveyed(&self, chunk: IVec2) -> bool {
@@ -295,6 +308,42 @@ impl Chart {
 
     /// Counts what the chart holds — including, in [`ChartTally::islands`],
     /// the closed coastlines that are islands to claim.
+    pub fn tally(&self) -> ChartTally {
+        let surveyed = self.coasts.len();
+        let coastal = self.coasts.values().filter(|runs| !runs.is_empty()).count();
+        let mut islands = 0;
+        let (complete, open) = self.coastlines(&mut |ring| {
+            if measure(ring).is_island() {
+                islands += 1;
+            }
+        });
+        ChartTally {
+            surveyed,
+            coastal,
+            complete,
+            open,
+            islands,
+        }
+    }
+
+    /// The islands the chart has closed, each measured for its lettering.
+    pub fn islands(&self) -> Vec<Island> {
+        let mut islands = Vec::new();
+        self.coastlines(&mut |ring| {
+            let measured = measure(ring);
+            if measured.is_island() {
+                islands.push(Island {
+                    centre: measured.centre,
+                    extent: measured.extent,
+                });
+            }
+        });
+        islands
+    }
+
+    /// Follows every coastline the chart holds, handing each closed one to
+    /// `close` — whole, in the order the shore is walked — and counting what
+    /// it found: coastlines that close, and chains still hanging open.
     ///
     /// Whether a coastline closes is integer bookkeeping, not geometry: a
     /// [`Mark`] lands exactly on the chunk boundary, so a run's end and its
@@ -302,20 +351,8 @@ impl Chart {
     /// following a shore is a lookup. The walk is the survey's own two-pass
     /// one a scale up — chains first from every run nothing links into, then
     /// whatever is left, which can only be loops.
-    pub fn tally(&self) -> ChartTally {
-        let surveyed = self.coasts.len();
-        let coastal = self.coasts.values().filter(|runs| !runs.is_empty()).count();
+    fn coastlines(&self, close: &mut dyn FnMut(&mut dyn Iterator<Item = Vec2>)) -> (usize, usize) {
         let mut complete = 0;
-        let mut islands = 0;
-        let mut close = |ring: &mut dyn Iterator<Item = Vec2>| {
-            complete += 1;
-            let (extent, area) = measure(ring);
-            // Positive area is land inside — see [`measure`]. A lagoon fails
-            // the sign however big it is, a skerry the reach.
-            if area > 0.0 && extent >= LEAST_ISLAND {
-                islands += 1;
-            }
-        };
 
         // Where each open run starts and ends, in whole steps of the mark
         // lattice — exact, so equality is equality.
@@ -325,6 +362,7 @@ impl Chart {
             for (at, run) in runs.iter().enumerate() {
                 if run.closed {
                     // A ring inside one chunk closed the moment it was drawn.
+                    complete += 1;
                     close(&mut run.points(chunk));
                     continue;
                 }
@@ -375,6 +413,7 @@ impl Chart {
                 continue;
             }
             let chain = walk(key, &mut walked);
+            complete += 1;
             close(
                 &mut chain
                     .iter()
@@ -382,13 +421,7 @@ impl Chart {
             );
         }
 
-        ChartTally {
-            surveyed,
-            coastal,
-            complete,
-            open,
-            islands,
-        }
+        (complete, open)
     }
 
     /// Every run of coast within a rectangle of the world.
@@ -421,8 +454,26 @@ fn run_steps(chunk: IVec2, mark: Mark) -> IVec2 {
     chunk * u8::MAX as i32 + IVec2::new(mark.x as i32, mark.z as i32)
 }
 
-/// A closed ring measured: how far it reaches — the longer side of its
-/// bounding box, in metres — and its signed area on the sheet.
+/// A closed ring, measured on the sheet.
+struct Ring {
+    /// How far it reaches: the longer side of its bounding box, in metres.
+    extent: f32,
+    /// Its signed area. Positive is land inside — see [`measure`].
+    area: f32,
+    /// The middle of its bounding box.
+    centre: Vec2,
+}
+
+impl Ring {
+    /// Whether this coastline is an island: land inside, and enough of it. A
+    /// lagoon fails the sign however big it is, a skerry the reach.
+    fn is_island(&self) -> bool {
+        self.area > 0.0 && self.extent >= LEAST_ISLAND
+    }
+}
+
+/// A closed ring measured: its reach, its signed area on the sheet, and where
+/// the middle of it falls.
 ///
 /// The sign is what tells an island from a lagoon, and it is the survey's
 /// land-on-the-left convention paying out a second time: a ring walked with
@@ -432,9 +483,9 @@ fn run_steps(chunk: IVec2, mark: Mark) -> IVec2 {
 /// direction of travel *is* the answer.
 ///
 /// Consecutive duplicate points — the joins, where one run's end is the next
-/// run's identical start — contribute nothing to either measure, so a chain
-/// can be fed through whole without trimming them.
-fn measure(ring: &mut dyn Iterator<Item = Vec2>) -> (f32, f32) {
+/// run's identical start — contribute nothing to any measure, so a chain can
+/// be fed through whole without trimming them.
+fn measure(ring: &mut dyn Iterator<Item = Vec2>) -> Ring {
     let mut least = Vec2::splat(f32::INFINITY);
     let mut most = Vec2::splat(f32::NEG_INFINITY);
     let mut area = 0.0;
@@ -454,7 +505,11 @@ fn measure(ring: &mut dyn Iterator<Item = Vec2>) -> (f32, f32) {
     if let (Some(first), Some(last)) = (first, previous) {
         area += last.perp_dot(first);
     }
-    ((most - least).max_element(), area / 2.0)
+    Ring {
+        extent: (most - least).max_element(),
+        area: area / 2.0,
+        centre: (least + most) / 2.0,
+    }
 }
 
 /// Which grid edge a contour crosses — named by the edge rather than by where
@@ -839,6 +894,19 @@ const GRATICULE_WEIGHT: f32 = 1.0;
 const TICK_SPACING: f32 = 9.0;
 const TICK_LENGTH: f32 = 4.5;
 
+/// The hand the islands are named in: an italic cut of the Fell types, the
+/// letterforms of the seventeenth-century press — the nearest a flat sheet
+/// comes to the lettering on an engraved chart. Not the menus' serif, which
+/// is the machine's own hand and does the furniture; a name written *on* the
+/// paper should look written on the paper. Where the file came from, and
+/// under what terms, is in `assets/CREDITS.md`.
+const NAME_FONT: &str = "fonts/IMFellEnglish-Italic.ttf";
+
+/// How large the names are lettered, in pixels — pixels for the reason the
+/// line weights are: lettering belongs to the engraver, not to the world, so
+/// it holds its size on the paper however far the sheet is zoomed.
+const NAME_SIZE: f32 = 17.0;
+
 /// Metres of world to a pixel of sheet, at either end of the zoom and where it
 /// opens.
 ///
@@ -950,6 +1018,12 @@ struct Inks {
     mark: Handle<ColorMaterial>,
 }
 
+/// The lettering hand, asked for once when the sheet is unrolled — the asset
+/// server hands back the same font every time, but the handle belongs with
+/// the inks: it is part of what the sheet is drawn with.
+#[derive(Resource)]
+struct Lettering(Handle<Font>);
+
 /// What the drawn sheet was built for, so that a change can be noticed.
 ///
 /// A rebuild is wanted when the zoom has changed — the line weights are in
@@ -1057,6 +1131,7 @@ fn no_sheet_yet(sheets: Query<(), With<ChartSheet>>) -> bool {
 fn unroll(
     mut commands: Commands,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    assets: Res<AssetServer>,
     mut view: ResMut<ChartView>,
     place: PlayerPlace,
     mut world_camera: Query<(&mut Camera, &RenderTarget), With<MapCamera>>,
@@ -1078,6 +1153,7 @@ fn unroll(
         ruling: materials.add(ColorMaterial::from_color(INK_FAINT)),
         mark: materials.add(ColorMaterial::from_color(MARK_INK)),
     });
+    commands.insert_resource(Lettering(assets.load(NAME_FONT)));
 
     let sheet = commands
         .spawn((
@@ -1117,6 +1193,7 @@ fn roll_up(mut commands: Commands, mut world_camera: Query<&mut Camera, With<Map
         camera.is_active = true;
     }
     commands.remove_resource::<Inks>();
+    commands.remove_resource::<Lettering>();
     // The engraving goes with the sheet, so the next opening draws one for
     // wherever the reader has got to rather than trusting a window from before.
     commands.remove_resource::<Engraved>();
@@ -1226,6 +1303,7 @@ struct Engraver<'w, 's> {
     commands: Commands<'w, 's>,
     meshes: ResMut<'w, Assets<Mesh>>,
     inks: Res<'w, Inks>,
+    lettering: Res<'w, Lettering>,
     drawn: Query<'w, 's, Entity, With<Engraving>>,
 }
 
@@ -1303,6 +1381,35 @@ fn engrave(
         engraver
             .commands
             .spawn(engraving("Chart coastline", mesh, ink, 1.0));
+    }
+
+    // The names, over the ink. Every island the survey has closed carries
+    // one, and until players can give their own, every one reads the same.
+    // The walk is over the whole chart rather than the window — a chain can
+    // cross any number of chunks, so a ring cannot be closed from a window's
+    // worth — and only the lettering that lands on the paper is spawned.
+    let on_paper = Rect::from_corners(on_the_sheet(covered.min), on_the_sheet(covered.max));
+    for island in chart.islands() {
+        if !on_paper.contains(island.centre) {
+            continue;
+        }
+        engraver.commands.spawn((
+            Name::new("Chart lettering"),
+            Engraving,
+            ChartSheet,
+            Text2d::new("Unnamed island"),
+            TextFont {
+                font: FontSource::Handle(engraver.lettering.0.clone()),
+                font_size: FontSize::Px(NAME_SIZE),
+                ..default()
+            },
+            TextColor(INK),
+            // Between the coast and the reader's own mark, scaled like the
+            // line weights so the name keeps its size on the paper.
+            Transform::from_translation(island.centre.extend(1.5))
+                .with_scale(Vec3::splat(metres_per_pixel)),
+            DespawnOnExit(Helm::Chart),
+        ));
     }
 
     engraver.commands.insert_resource(Engraved {
@@ -2093,6 +2200,46 @@ mod tests {
     }
 
     #[test]
+    fn an_island_is_lettered_in_the_middle_of_itself() {
+        // Where the name goes: an island astride two chunks, and its measured
+        // centre landing where the cone was put down — on the sheet, so the
+        // world's z is flipped.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+        chart.record(
+            IVec2::new(1, 0),
+            survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
+        );
+
+        let islands = chart.islands();
+        assert_eq!(islands.len(), 1);
+        assert!(
+            (islands[0].centre - on_the_sheet(middle)).length() < TOLERANCE + MARK_STEP,
+            "the name sits at {:?}, off the island at {:?}",
+            islands[0].centre,
+            on_the_sheet(middle)
+        );
+        assert!(
+            (islands[0].extent - 120.0).abs() < 2.0 * (TOLERANCE + MARK_STEP),
+            "a 120 m island measured {} m",
+            islands[0].extent
+        );
+    }
+
+    #[test]
+    fn half_an_island_carries_no_name_yet() {
+        // The other half of the promise: nothing is lettered until the player
+        // has been all the way round. Half a shore is an open chain, and an
+        // open chain is not an island however big it is.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+
+        assert!(chart.islands().is_empty());
+    }
+
+    #[test]
     fn an_islet_ringed_in_one_chunk_is_already_closed() {
         // Big enough to close, and — at sixty metres across — too small to be
         // an island anybody names.
@@ -2165,7 +2312,11 @@ mod tests {
         .init_resource::<AccumulatedMouseMotion>()
         .init_resource::<AccumulatedMouseScroll>()
         .init_asset::<Mesh>()
-        .init_asset::<ColorMaterial>();
+        .init_asset::<ColorMaterial>()
+        // The lettering hand: unrolling the sheet asks the asset server for
+        // it, and a server without the asset type registered panics. No
+        // loader is registered, so nothing is read from disk.
+        .init_asset::<Font>();
         app.update();
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
