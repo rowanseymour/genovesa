@@ -1,20 +1,24 @@
 """Draws every model in the game onto one page, to be looked at.
 
-    tools/model-sheet.sh              # screenshots/models.html
+    tools/model-sheet.sh              # docs/models.html
     tools/model-sheet.sh /tmp/m.html  # somewhere else
-
-Not documentation. Nothing has to keep it up to date and nothing reads it but
-a person wondering how the models are looking — run it when that is the
-question, throw the answer away afterwards. It goes to `screenshots/`, which
-git ignores, and it is one self-contained file so it can be sent to somebody.
 
 Three views of each: from the tilt the game's own camera holds, from the side,
 and from below, which is where a countershaded belly is. Beside them, what the
 shipped `.glb` actually contains — triangles, size in metres, and the colours
 the model carries, since a swatch says more than a triple does.
+
+The page is committed, as `docs/maps.png` is, and re-run when the models
+change. It is nobody's contract: a stale one shows an old model rather than
+telling a lie about a current one, which is the whole reason a picture is
+worth keeping where a paragraph is not.
+
+The renders go beside it as files rather than inlined, so that regenerating
+after changing one model writes one small blob into the history instead of
+several megabytes of base64. `model-sheet.sh` quantises them afterwards, the
+way the README's collage is quantised.
 """
 
-import base64
 import json
 import math
 import os
@@ -29,14 +33,18 @@ MASTERS = os.path.join(HERE, 'assets-src', 'models')
 SHIPPED = os.path.join(HERE, 'assets', 'models')
 
 argv = sys.argv[sys.argv.index('--') + 1:]
-OUT = argv[0] if argv else os.path.join(HERE, 'screenshots', 'models.html')
+OUT = argv[0] if argv else os.path.join(HERE, 'docs', 'models.html')
+SHOTS_DIR = os.path.splitext(OUT)[0]
 
 #: The game's own downward tilt — `camera::PITCH`. Duplicated rather than read,
 #: because this is a picture rather than a promise: if it drifts, the page is a
 #: few degrees off and nobody is misled.
 PITCH = math.radians(51.75)
+#: Steeply from below rather than a little: at a shallow angle an animal shows
+#: its flank, which is painted as its back, and the belly the shot is for never
+#: appears.
 SHOTS = (('from the camera', PITCH), ('from the side', math.radians(8)),
-         ('from below', math.radians(-40)))
+         ('from below', math.radians(-72)))
 
 
 def linear_to_srgb(c):
@@ -98,25 +106,23 @@ def stage():
     scene.render.image_settings.color_mode = 'RGBA'
     scene.render.resolution_x = scene.render.resolution_y = 560
 
+    # Lit like a specimen rather than like the game. The sun goes with the
+    # camera — see `render` — because a fixed one leaves every underside in
+    # shadow, and an underside is the whole reason the third column is there.
+    # The ambient carries the rest, so a facet turned away is still its own
+    # colour rather than black.
     world = bpy.data.worlds.new('sky')
-    world.node_tree.nodes['Background'].inputs[1].default_value = 0.45
+    world.node_tree.nodes['Background'].inputs[1].default_value = 0.85
     scene.world = world
 
-    key = bpy.data.objects.new('key', bpy.data.lights.new('key', 'SUN'))
-    key.data.energy = 3.0
-    key.data.angle = math.radians(3)
-    key.rotation_euler = Euler((math.radians(50), 0, math.radians(40)))
-    scene.collection.objects.link(key)
-    # A second, weaker sun from underneath, or every from-below shot is a
-    # silhouette and the belly the shot is *for* is a black shape.
-    fill = bpy.data.objects.new('fill', bpy.data.lights.new('fill', 'SUN'))
-    fill.data.energy = 1.4
-    fill.rotation_euler = Euler((math.radians(-125), 0, math.radians(-30)))
-    scene.collection.objects.link(fill)
+    sun = bpy.data.objects.new('sun', bpy.data.lights.new('sun', 'SUN'))
+    sun.data.energy = 2.2
+    sun.data.angle = math.radians(4)
+    scene.collection.objects.link(sun)
     return scene
 
 
-def render(scene, name, elevation):
+def render(scene, name, label, elevation):
     """One view of the master, framed to whatever it happens to measure."""
     for old in [o for o in bpy.data.objects if o.type == 'MESH']:
         bpy.data.objects.remove(old, do_unlink=True)
@@ -152,12 +158,18 @@ def render(scene, name, elevation):
     scene.collection.objects.link(cam)
     scene.camera = cam
 
-    path = os.path.join(bpy.app.tempdir, f'{name}.png')
+    # The sun looks from where the camera does, turned a little off its
+    # shoulder so that facets still shade differently from one another. Dead
+    # along the view they would flatten into one tone.
+    sun = bpy.data.objects['sun']
+    over = Euler((0, 0, math.radians(28))).to_matrix() @ (middle - eye).normalized()
+    sun.rotation_euler = over.to_track_quat('-Z', 'Y').to_euler()
+
+    path = os.path.join(SHOTS_DIR, f'{name}-{label}.png')
     scene.render.filepath = path
     bpy.ops.render.render(write_still=True)
     bpy.data.objects.remove(cam, do_unlink=True)
-    with open(path, 'rb') as f:
-        return base64.b64encode(f.read()).decode()
+    return os.path.join(os.path.basename(SHOTS_DIR), f'{name}-{label}.png')
 
 
 PAGE = """<!doctype html>
@@ -182,9 +194,9 @@ PAGE = """<!doctype html>
 </style>
 <h1>Models</h1>
 <p class="note">Every master under <code>assets-src/models/</code>, drawn from the
-game's own camera tilt, from the side, and from below. Generated by
-<code>tools/model-sheet.sh</code> — a look at how things are, not a document
-anything has to keep true.</p>
+game's own camera tilt, from the side, and from below, beside what its shipped
+<code>.glb</code> holds. Generated by <code>tools/model-sheet.sh</code>; re-run
+it when the models change.</p>
 {sections}
 """
 
@@ -207,12 +219,13 @@ SECTION = """<section>
 
 names = sorted(d for d in os.listdir(MASTERS)
                if os.path.isdir(os.path.join(MASTERS, d)))
+os.makedirs(SHOTS_DIR, exist_ok=True)
 scene = stage()
 sections = []
 for name in names:
     facts = shipped(name)
     figures = ''.join(
-        f'<figure><img src="data:image/png;base64,{render(scene, name, tilt)}">'
+        f'<figure><img src="{render(scene, name, label.split()[-1], tilt)}" alt="{name}, {label}">'
         f'<figcaption>{label}</figcaption></figure>'
         for label, tilt in SHOTS)
     if facts['colours']:
@@ -237,7 +250,7 @@ for name in names:
     ))
     print(f'{name}: {facts["tris"]} tris, {len(facts["colours"])} colours')
 
-os.makedirs(os.path.dirname(OUT), exist_ok=True)
+os.makedirs(SHOTS_DIR, exist_ok=True)
 with open(OUT, 'w') as f:
     f.write(PAGE.format(sections='\n'.join(sections)))
 print(f'wrote {OUT} ({os.path.getsize(OUT) // 1024} kB)')
