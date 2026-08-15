@@ -2,12 +2,13 @@
 //! can see.
 //!
 //! There are no clouds in this world, and there is no room for any. The eye
-//! looks down at the ground from three hundred metres, and anything hung in
-//! the air between the two would spend its life covering the picture rather
-//! than decorating it. What a player would see of a real sky from up there is
-//! its *shadow* — patches of shade wandering across the sea and up the
-//! hillsides — so that is the whole of what is drawn, and the clouds
-//! themselves are never modelled at all.
+//! looks down at the ground from somewhere between thirty metres and three
+//! hundred, wherever the wheel has left it, and anything hung in the air
+//! between the two would spend its life covering the picture rather than
+//! decorating it. What a player would see of a real sky from up there is its
+//! *shadow* — patches of shade wandering across the sea and up the hillsides
+//! — so that is the whole of what is drawn, and the clouds themselves are
+//! never modelled at all.
 //!
 //! Which means this is not a thing in the world so much as a thing done to the
 //! light. Bevy will mask a directional light with a texture — the trick a film
@@ -43,17 +44,21 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::sea::Forecast;
 use crate::sky::{Sky, SkyLight};
-use crate::{unit, AppState};
+use crate::{scramble, unit, AppState};
 
 /// How far the pattern goes before it repeats, in metres, measured on flat
 /// ground under a high sun.
 ///
-/// It has to beat what the eye can take in or the repeat is the thing you
-/// notice: [`crate::HAZE_END`] closes the view at 900 m, so a tile wider than
-/// that puts its own copy out in the haze. Wider still would hide the repeat
-/// better and cost nothing to draw — but every cloud is a feature of one tile,
-/// so a tile of several kilometres either holds continents of shade or is
-/// mostly empty sky.
+/// It has to beat what the eye can take in, or the repeat is what you notice
+/// about the weather. What the eye can take in is [`crate::HAZE_END`] — 900 m
+/// in every direction — and a tile of 1.4 km does not quite banish the twin:
+/// two points a tile apart can both stand inside a circle that wide, so a
+/// repeat can show along the far edge of the widest view. What it buys is that
+/// when one does, it is out where the haze has most of it.
+///
+/// Wider would hide the repeat outright and cost nothing to draw. What stops
+/// it is that every cloud is a feature of one tile, so a tile of several
+/// kilometres holds either continents of shade or nothing at all.
 const TILE: f32 = 1_400.0;
 
 /// Texels along each side of the mask. Over [`TILE`] that is a texel every
@@ -65,12 +70,17 @@ const TEXELS: usize = 512;
 /// Cells across the tile in the coarsest octave of the noise, and how many
 /// octaves are laid over it.
 ///
-/// Eight cells puts a cloud every 175 m, which at this camera's height is a
-/// shadow a good part of the view across: big enough that sailing into shade
-/// is an event, small enough that two or three of them share the picture and
-/// the sun is never gone for long. Three octaves take the detail down to 44 m,
-/// which is where the ragged edge of a shadow comes from; a fourth only adds
-/// wobble finer than the ground's own facets.
+/// Eight cells puts a cloud every 175 m or so, and that size has to work at
+/// both ends of the wheel. Zoomed out it is a shadow a good part of the view
+/// across, with two or three of them sharing the picture; zoomed in it is
+/// wider than the whole view, and what a player sees there is not a shape at
+/// all but the light going and coming back every few tens of seconds as an
+/// edge sweeps over them. Both of those read as weather. A cloud small enough
+/// to be a shape at the near end of the wheel would be stipple at the far one.
+///
+/// Three octaves take the detail down to 44 m, which is where the ragged edge
+/// of a shadow comes from; a fourth only adds wobble finer than the ground's
+/// own facets.
 const CELLS: usize = 8;
 const OCTAVES: usize = 3;
 
@@ -111,18 +121,23 @@ const ALOFT: f32 = 1.6;
 const LONGEST: f32 = 2.5;
 
 /// The clouds, as they stand: the mask itself, and how far downwind the
-/// weather has carried it since the world was entered.
+/// weather has carried it.
+///
+/// The app's, rather than any one world's, exactly as the mask is — a world
+/// left and another entered goes on from the sky the first one had, which is
+/// no more arbitrary than starting from zero would be and is one less thing
+/// to remember to do.
 #[derive(Resource, Default)]
 pub struct Clouds {
     /// Woven once, at startup by [`weave_the_mask`], and never written to
     /// again — the weather is all in where the mask is put, not in what it
     /// says.
     mask: Handle<Image>,
-    /// Where the pattern has got to, in metres of world. Only ever added to,
-    /// so an afternoon's sailing leaves it tens of kilometres from zero; that
-    /// is fine to a hair at `f32` for far longer than anyone plays, and
-    /// wrapping it would be a jump the moment the sun was low enough to have
-    /// stretched the tile.
+    /// Where the pattern has got to, in metres of world, since the app opened.
+    /// Only ever added to, so a session leaves it tens of kilometres from
+    /// zero; that is fine to a hair at `f32` for far longer than anyone plays
+    /// in one sitting, and wrapping it would be a jump the moment the sun was
+    /// low enough to have stretched the tile.
     drift: Vec2,
 }
 
@@ -136,6 +151,11 @@ impl Clouds {
     /// a metre north walks every cloud shadow a metre north. The scale is the
     /// mask's size in the plane facing the sun, squeezed once the sun is low
     /// enough for [`LONGEST`] to bite.
+    ///
+    /// `from` has to be a light the sky has aimed, which is never allowed
+    /// below `sky::GRAZE`. A light exactly on the horizon would squeeze the
+    /// mask to nothing, and a transform that cannot be inverted hands the
+    /// shader NaN for every coordinate it asks for.
     pub fn stand_the_light(&self, from: Vec3) -> Transform {
         // Standing on the waterline, downwind of where it began. The height is
         // nothing to argue about — sliding the mask along the light's own
@@ -187,7 +207,10 @@ fn weave_the_mask(mut clouds: ResMut<Clouds>, mut images: ResMut<Assets<Image>>)
 /// the air *is* the change, so the clouds simply go at whatever is blowing.
 /// Nothing shows at the moment a new forecast lands, either — what steps is
 /// the speed, and where the clouds are goes on from where they were.
-fn drift_downwind(time: Res<Time>, forecast: Res<Forecast>, mut clouds: ResMut<Clouds>) {
+///
+/// Named beyond this module only so that [`crate::sky`] can put its light
+/// after it, the light being where the clouds are drawn from.
+pub fn drift_downwind(time: Res<Time>, forecast: Res<Forecast>, mut clouds: ResMut<Clouds>) {
     // Before the first forecast — the first fraction of a second of a session
     // — the sky simply stands still. There is no assumed wind worth inventing
     // for it, the way the sea needs one to have any waves at all.
@@ -206,13 +229,13 @@ fn drift_downwind(time: Res<Time>, forecast: Res<Forecast>, mut clouds: ResMut<C
 /// clouds can only arrive and leave whole.
 ///
 /// Which is why the moment chosen is the one the light itself changes bodies
-/// at — [`protocol::is_night`], and see [`crate::sky`] for why that is a few
-/// tenths of an hour into the dark rather than at the horizon. The
-/// sun is under the world by then and its light is held grazing along the
-/// water, so it lands on almost nothing: whatever the mask says at that
-/// instant, it is saying it about a light that has stopped reaching the
-/// ground. The clouds go out with the day, and nothing on screen moves as they
-/// do.
+/// at, asked of the sky rather than worked out here — see [`Sky::is_night`],
+/// and [`crate::sky`] for why that is a few tenths of an hour into the dark
+/// rather than at the horizon. The sun is under the world by then and its
+/// light is held grazing along the water, so it lands on almost nothing:
+/// whatever the mask says at that instant, it is saying it about a light that
+/// has stopped reaching the ground. The clouds go out with the day, and
+/// nothing on screen moves as they do.
 fn clouds_by_day(
     mut commands: Commands,
     sky: Res<Sky>,
@@ -220,7 +243,7 @@ fn clouds_by_day(
     light: Single<(Entity, Has<DirectionalLightTexture>), With<SkyLight>>,
 ) {
     let (light, masked) = light.into_inner();
-    match (!protocol::is_night(sky.phase()), masked) {
+    match (!sky.is_night(), masked) {
         (true, false) => {
             commands.entity(light).insert(DirectionalLightTexture {
                 image: clouds.mask.clone(),
@@ -288,7 +311,13 @@ fn clouds_at(at: Vec2) -> f32 {
     let mut total = 0.0;
     for octave in 0..OCTAVES {
         let amplitude = 0.5f32.powi(octave as i32);
-        sum += amplitude * lumps(at, (CELLS << octave) as i32, octave as u32);
+        // Scrambled rather than handed the octave's own number, which is the
+        // difference between three noise fields and one field read three
+        // times: a salt is exclusive-ored into the cell coordinate, and the
+        // small numbers 0, 1, 2 land in the very bits the coordinate's x sits
+        // in — so octave 1 would be octave 0 with every cell swapped with its
+        // neighbour, and the sum of the three would have a grain to it.
+        sum += amplitude * lumps(at, (CELLS << octave) as i32, scramble(octave as u32));
         total += amplitude;
     }
     sum / total
@@ -368,6 +397,10 @@ mod tests {
             .is_ok()
     }
 
+    /// A sun somewhere up the sky, for the tests that only need the light to
+    /// be coming from a plausible direction.
+    const SUN: Vec3 = Vec3::new(0.3, 0.8, 0.5196152);
+
     /// The mask, read back as the fraction of the sun each texel lets through.
     fn mask() -> Vec<f32> {
         mask_image()
@@ -409,6 +442,49 @@ mod tests {
             let across = (clouds_at(Vec2::new(0.0, at)) - clouds_at(Vec2::new(1.0, at))).abs();
             let down = (clouds_at(Vec2::new(at, 0.0)) - clouds_at(Vec2::new(at, 1.0))).abs();
             assert!(across < 1e-5 && down < 1e-5, "the tile has a seam at {at}");
+        }
+
+        // And the sampler has to wrap, which is the half of it a seamless
+        // pattern cannot do on its own: Bevy reads a light's mask with
+        // whatever sampler the image itself carries, and one clamping at the
+        // edge would smear a single row of texels over every metre of world
+        // beyond the first tile.
+        let ImageSampler::Descriptor(sampler) = mask_image().sampler else {
+            panic!("the mask goes to the GPU with a sampler of its own");
+        };
+        assert_eq!(sampler.address_mode_u, ImageAddressMode::Repeat);
+        assert_eq!(sampler.address_mode_v, ImageAddressMode::Repeat);
+    }
+
+    #[test]
+    fn the_shadows_walk_the_ground_by_exactly_the_drift() {
+        // What the module rests on, read through Bevy's own arithmetic rather
+        // than restated: the mask's coordinates are the light's transform
+        // inverted, applied to a world point — so a light walked `d` has to
+        // put the shadow that was over a point over the point `d` beyond it.
+        // Nothing else here would notice a drift laid into the wrong axis, or
+        // one carrying the weather upwind.
+        let drift = Vec2::new(37.0, -64.0);
+        let still = Clouds::default().stand_the_light(SUN);
+        let blown = Clouds {
+            mask: Handle::default(),
+            drift,
+        }
+        .stand_the_light(SUN);
+
+        let onto_the_mask =
+            |stand: &Transform, at: Vec3| stand.compute_affine().inverse().transform_point3(at);
+        for ground in [
+            Vec3::ZERO,
+            Vec3::new(120.0, 0.0, -80.0),
+            Vec3::new(-900.0, 30.0, 400.0),
+        ] {
+            let walked = ground + Vec3::new(drift.x, 0.0, drift.y);
+            let gap = onto_the_mask(&blown, walked) - onto_the_mask(&still, ground);
+            assert!(
+                gap.length() < 1e-4,
+                "the shade over {ground} did not walk to {walked}: {gap}"
+            );
         }
     }
 

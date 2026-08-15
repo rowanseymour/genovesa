@@ -70,9 +70,9 @@ same sky, and a shared world's night only runs off while all of them are at
 anchor waiting it out.
 
 While the sun is up, cloud shadows wander across the water and up the
-hillsides. They are the only part of a sky this camera can see — there is no
-room for clouds themselves between an eye three hundred metres up and the
-ground it is looking at — and they go with the wind, so a blow getting up
+hillsides. They are the only part of a sky this camera can see — it looks
+down, and clouds hung between it and the ground would cover the picture
+rather than decorate it — and they go with the wind, so a blow getting up
 shows on the ground as shade hurrying over it.
 
 The look is flat-shaded facets in a small fixed palette — no textures and no

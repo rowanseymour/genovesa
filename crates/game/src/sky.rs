@@ -297,8 +297,11 @@ impl Sky {
     }
 
     /// Whether it is night as drawn — which is what decides whether there is
-    /// a night to offer to wait out.
-    fn is_night(&self) -> bool {
+    /// a night to offer to wait out, and, in [`crate::clouds`], whether the
+    /// light is carrying any weather. One answer for both: the clouds may
+    /// only go on and off at the moment the light changes bodies, so a second
+    /// spelling of this would be a second opinion about when that is.
+    pub fn is_night(&self) -> bool {
         protocol::is_night(self.phase())
     }
 }
@@ -344,6 +347,11 @@ impl Plugin for SkyPlugin {
                 Update,
                 (advance_the_day, light_the_world, offer_the_night)
                     .chain()
+                    // After the clouds have moved, since where this puts the
+                    // light is where they are: the two read and write one
+                    // resource in one schedule, and which frame's weather the
+                    // light stands in is not the executor's to choose.
+                    .after(crate::clouds::drift_downwind)
                     .run_if(in_state(AppState::InWorld)),
             )
             // Only with the helm: a paused game is a player who is not

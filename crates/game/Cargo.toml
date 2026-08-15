@@ -31,6 +31,12 @@ args = { path = "../args" }
 # the whole of how the clouds reach the ground — see `clouds`. Off by default
 # in Bevy because it costs every lit surface a texture lookup; here that buys
 # the one piece of weather a camera pointed downwards can see.
+#
+# It is built on clustered decals, which want texture binding arrays, so an
+# adapter without them draws the world with no clouds on it at all — the
+# shader is compiled without the lookup and every surface reads full sun. That
+# is a graceful way to lose them and a silent one: nothing logs, and a machine
+# with no weather looks exactly like a machine having a clear day.
 bevy = { workspace = true, features = [
     "system_font_discovery",
     "pbr_light_textures",
