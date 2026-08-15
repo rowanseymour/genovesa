@@ -12,12 +12,15 @@
 use bevy::input::keyboard::Key;
 use bevy::prelude::*;
 
-/// A control the player can put on a key of their choosing: driving their
-/// boat — ahead, astern, helm over — stepping ashore and back aboard, or
-/// turning the view around them.
+/// A control the player can put on a key of their choosing: working their
+/// boat — making sail, furling, backing off, helm over — stepping ashore and
+/// back aboard, or turning the view around them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
+    /// Ashore this walks; at the helm it makes sail — see `boat::steer`.
     MoveForward,
+    /// Ashore this walks; at the helm it furls, and held with the sails
+    /// already furled it backs the boat astern.
     MoveBack,
     SteerLeft,
     SteerRight,
@@ -54,8 +57,8 @@ impl Action {
     /// leave the player to guess which is which.
     pub fn label(self) -> &'static str {
         match self {
-            Action::MoveForward => "Forward",
-            Action::MoveBack => "Back",
+            Action::MoveForward => "Forward / make sail",
+            Action::MoveBack => "Back / furl",
             Action::SteerLeft => "Steer left",
             Action::SteerRight => "Steer right",
             Action::Board => "Go ashore / board",
@@ -156,6 +159,16 @@ impl KeyBindings {
     /// bindings, however muddled, can leave the player unable to move.
     pub fn held(&self, keys: &ButtonInput<KeyCode>, action: Action, arrow: KeyCode) -> bool {
         keys.any_pressed([self.key(action), arrow])
+    }
+
+    /// True on the frame an action's key — or the arrow that permanently
+    /// shadows it — goes down. [`held`]'s edge-triggered twin, for controls
+    /// that are a press rather than a hold, so they read the floor and the
+    /// bindings through the same door.
+    ///
+    /// [`held`]: KeyBindings::held
+    pub fn tapped(&self, keys: &ButtonInput<KeyCode>, action: Action, arrow: KeyCode) -> bool {
+        keys.any_just_pressed([self.key(action), arrow])
     }
 
     /// What the movement keys are saying: how hard ahead — negative for
@@ -332,6 +345,29 @@ mod tests {
             keys.dedup();
             assert_eq!(keys.len(), Action::ALL.len(), "after binding {action:?}");
         }
+    }
+
+    #[test]
+    fn tapped_fires_once_on_the_binding_and_on_the_arrow_floor() {
+        let mut bindings = KeyBindings::default();
+        bindings.bind(Action::MoveForward, KeyCode::KeyJ, None);
+        let mut keys = ButtonInput::<KeyCode>::default();
+
+        // The bound key, on the frame it goes down and never again while it
+        // stays down — a tap is an edge, not a state.
+        keys.press(KeyCode::KeyJ);
+        assert!(bindings.tapped(&keys, Action::MoveForward, KeyCode::ArrowUp));
+        keys.clear();
+        assert!(!bindings.tapped(&keys, Action::MoveForward, KeyCode::ArrowUp));
+
+        // And the arrow floor answers even with the letter rebound away.
+        keys.press(KeyCode::ArrowUp);
+        assert!(bindings.tapped(&keys, Action::MoveForward, KeyCode::ArrowUp));
+
+        // The key the binding left has nothing.
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyW);
+        assert!(!bindings.tapped(&keys, Action::MoveForward, KeyCode::ArrowUp));
     }
 
     #[test]

@@ -140,6 +140,18 @@ pub fn rebind(app: &mut App, action: Action, key: KeyCode) {
         .bind(action, key, None);
 }
 
+/// Sets the wind the frozen test sea blows. A [`world_app`] never settles the
+/// conditions — no forecast, no easing — so this holds until the test says
+/// otherwise, and without it every test runs under the assumed day's wind,
+/// under which the default boat lies *in irons*: a driving test that forgets
+/// to set a wind is testing a boat that never moves, so assert way or
+/// movement, never only where the hull ended up. The other direction bites
+/// too: tests that compare heights against `SeaConditions::default().swell`
+/// must not call this — a different wind is a different sea.
+pub fn set_wind(app: &mut App, wind: Vec2) {
+    app.insert_resource(crate::sea::SeaConditions::blowing(wind));
+}
+
 /// How far the test island reaches from the origin, in metres — the radius at
 /// which its ground has fallen all the way to the ocean floor.
 pub const TEST_ISLAND_REACH: f32 = 200.0;
