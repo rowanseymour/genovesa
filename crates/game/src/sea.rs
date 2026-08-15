@@ -539,6 +539,25 @@ impl Default for SeaConditions {
 }
 
 impl SeaConditions {
+    /// A sea already settled under a given wind — no forecast, no easing, the
+    /// slots aimed as [`settle_conditions`] would have left them after the
+    /// veer was over. What a test that cares which way the wind blows starts
+    /// from: `world_app` never runs the settle system, so a sea inserted this
+    /// way blows its wind for good.
+    #[cfg(test)]
+    pub(crate) fn blowing(wind: Vec2) -> Self {
+        Self {
+            wind,
+            slots: WAVES.map(|(bearing, ..)| Slot {
+                // A calm names no bearing, so like the settle system the
+                // slots fall back to *a* heading rather than a NaN one.
+                heading: Vec2::from_angle(bearing).rotate(wind.normalize_or(Vec2::X)),
+                dim: 1.0,
+            }),
+            assumed: true,
+        }
+    }
+
     /// The wave trains, worked into the terms both copies of the formula run
     /// on: `xy` heading times wavenumber, `z` angular frequency, `w`
     /// amplitude — the reference amplitude scaled by the wind and by the
@@ -1016,6 +1035,28 @@ mod tests {
     fn ceiling(sea: &SeaConditions) -> f32 {
         let deep: f32 = sea.components().iter().map(|wave| wave.w).sum();
         deep.max(sea.shore_amplitude())
+    }
+
+    #[test]
+    fn a_test_wind_blows_settled() {
+        // What the sailing tests build on: the wind reads back exactly, and
+        // the primary train runs downwind at full strength — the sea a real
+        // forecast would have left once the easing was over.
+        let wind = Vec2::new(-3.0, 4.0);
+        let sea = SeaConditions::blowing(wind);
+        assert_eq!(sea.wind(), wind);
+        let heading = sea.slots[0].heading;
+        assert!(
+            (heading - wind.normalize()).length() < 1e-6,
+            "the primary train runs {heading:?} under a wind toward {:?}",
+            wind.normalize()
+        );
+        assert_eq!(sea.slots[0].dim, 1.0);
+
+        // And a calm is allowed: no direction to aim by must not mean NaN in
+        // the headings the swell is summed over.
+        let calm = SeaConditions::blowing(Vec2::ZERO);
+        assert!(calm.swell(Vec2::new(5.0, 5.0), 1.0, DEEP).is_finite());
     }
 
     #[test]

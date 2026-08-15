@@ -404,7 +404,7 @@ mod tests {
     use crate::terrain::Ground;
     use crate::testing::{
         assert_model_paints, assert_rigid_skin, clip_names, extent, hold, mesh_names, run_frames,
-        test_ground, world_app, TEST_ISLAND_REACH,
+        set_wind, test_ground, world_app, TEST_ISLAND_REACH,
     };
 
     #[test]
@@ -724,6 +724,9 @@ mod tests {
         app.insert_resource(test_ground());
         let dancer = with_a_dancer(&mut app);
 
+        // Dead astern of the default heading, so the boat is honestly
+        // sailing rather than lying in irons under the assumed wind.
+        set_wind(&mut app, Vec2::new(-5.0, -5.0));
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 120);
 
