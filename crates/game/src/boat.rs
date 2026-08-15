@@ -67,13 +67,16 @@ struct Hull {
     /// but what makes it the game's business rather than the model's is
     /// [`Hull::grounding_draft`], which is measured from it.
     draft: f32,
-    /// Deck height above the waterline — the freeboard, the model's own
-    /// sheer. The game's business because somebody stands on it: a player
-    /// aboard is put down here rather than at the hull's origin, which is the
-    /// waterline and so is knee-deep in the bilges. Held to the model by
-    /// `the_model_is_the_hull_the_keel_is_probed_along`, like the draft it is
-    /// measured against.
-    deck: f32,
+    /// The quarterdeck: the raised deck aft, in metres above the waterline,
+    /// and the helm's station on it — where somebody aboard stands, beside
+    /// the tiller. A player is put down here rather than at the hull's
+    /// origin, which is the waterline and so is knee-deep in the bilges.
+    /// The model's numbers rather than the game's to choose, like the draft:
+    /// held to the file by `the_model_is_the_hull_the_keel_is_probed_along`.
+    /// The main deck's own height is *not* here — nothing below the sail's
+    /// corners reads it, so it belongs to the model alone.
+    quarterdeck: f32,
+    helm_station: f32,
     /// Where the keel begins and ends, in metres from amidships — negative
     /// forward, the same axis the hull is modelled on. [`grounding`] probes
     /// along these, so what runs aground is the line that is drawn.
@@ -138,6 +141,12 @@ impl Hull {
     fn grounding_draft(&self) -> f32 {
         self.draft - KEEL_BITE
     }
+
+    /// Where somebody aboard stands, in the hull's own frame: at the helm,
+    /// on the quarterdeck, forward of the tiller.
+    fn helm(&self) -> Vec3 {
+        Vec3::new(0.0, self.quarterdeck, self.helm_station)
+    }
 }
 
 /// The ship: the boat a world is entered aboard, and [`MODEL`]'s subject.
@@ -149,7 +158,11 @@ const SHIP: Hull = Hull {
     length: 7.0,
     beam: 2.4,
     draft: 0.8,
-    deck: 0.9,
+    // The step up aft and the spot on it just forward of the tiller's grip —
+    // the model's numbers. The station keeps the helmsman clear of the boom,
+    // which sweeps the main deck and nothing abaft the step.
+    quarterdeck: 1.2,
+    helm_station: 2.6,
     // The forefoot stops short of the bow, which is what gives the stem its
     // rake; the heel runs right aft to the transom.
     forefoot_station: -7.0 * 0.5 * 0.7,
@@ -323,12 +336,6 @@ fn sail_drive(bow: Vec2, wind: Vec2) -> f32 {
     strength(blowing) * polar(bow.angle_to(-wind).abs())
 }
 
-/// Timber. Nothing on an island or in the sea is anywhere near this hue, so the
-/// boat is findable in a landscape of greens and blues without being lit any
-/// differently from them.
-const HULL_COLOR: Color = Color::srgb(0.62, 0.28, 0.22);
-/// Bare spar, pale enough to stand off both the water and the hull.
-const SPAR_COLOR: Color = Color::srgb(0.86, 0.80, 0.68);
 /// The pennant. Hotter and lighter than the hull's timber, which is the only
 /// other warm thing in a world of greens and blues: at the far end of the zoom
 /// the boat is a mark on the water and this is the mark on the mark.
@@ -467,11 +474,11 @@ impl Boat {
         self.way == 0.0
     }
 
-    /// Where somebody aboard stands, in metres above the hull's origin — see
-    /// [`Hull::deck`]. What a player boarding is put down at, so that they
-    /// stand on the deck rather than in it.
-    pub fn deck(&self) -> f32 {
-        self.hull.deck
+    /// Where somebody aboard stands, in the hull's own frame — see
+    /// [`Hull::quarterdeck`]. What a player boarding is put down at, so that
+    /// they stand at the helm rather than in the bilges.
+    pub fn helm(&self) -> Vec3 {
+        self.hull.helm()
     }
 }
 
@@ -535,14 +542,15 @@ impl Plugin for BoatPlugin {
 /// point — open water the layout keeps just off the first island's coast —
 /// so the boat starts afloat with land dead ahead; a `--focus` can still put
 /// it down inland, aground until the movement keys drive it back to the sea.
-/// The meshes hang off the boat as children rather than on it: a mesh carries
-/// one material, and the hull and the spar are two colours. Their geometry is
-/// already in the boat's own frame — the modeller places the mast on the deck,
-/// not the game — so the children sit at the identity and the only transform
-/// anything writes is the boat's own. The player is one more child, at the
-/// identity like the meshes: aboard *is* being in the hierarchy — see
-/// [`crate::player`] — so they stand wherever the hull carries them and go
-/// down with the ship when the world is left.
+/// The meshes hang off the boat as children rather than on it: the hull and
+/// the spar stay two meshes not for their colours — both carry their own now —
+/// but because the game measures them separately, the keel probed along one
+/// and the pennant tied to the other. Their geometry is already in the boat's
+/// own frame — the modeller places the mast on the deck, not the game — so the
+/// children sit at the identity and the only transform anything writes is the
+/// boat's own. The player is one more child: aboard *is* being in the
+/// hierarchy — see [`crate::player`] — so they stand wherever the hull carries
+/// them and go down with the ship when the world is left.
 fn launch(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -550,15 +558,12 @@ fn launch(
     assets: Res<AssetServer>,
     view: Res<View>,
 ) {
-    // The file's own materials are ignored, and the meshes are pulled out of it
-    // one at a time rather than the whole scene being spawned. glTF materials
-    // are PBR — a roughness, a metalness, a specular response — and the look
-    // here is a small fixed palette under `matte`, so a hull lit the way the
-    // file asked for would be the one surface in the world with a highlight on
-    // it. Leaving the colours in Rust also keeps them beside the ground's,
-    // which is the comparison that matters when either is picked.
-    let hull_material = materials.add(matte(HULL_COLOR));
-    let spar_material = materials.add(matte(SPAR_COLOR));
+    // The model carries its own colours on its facets — see the master's
+    // NOTES — so the timber is drawn with one white matte that does nothing
+    // but let them through, the same way every painted model here is. The
+    // file's PBR materials are still ignored: lit the way the file asked for,
+    // the hull would be the one surface in the world with a highlight on it.
+    let painted = materials.add(matte(Color::WHITE));
     // Cloth is the one thing aboard with no inside, so it is the one material
     // here that is drawn from both faces. Left single-sided the pennant would
     // wink out every time the wind put its back to the camera, which happens
@@ -592,12 +597,12 @@ fn launch(
             (
                 Name::new("Hull"),
                 Mesh3d(assets.load(model_mesh(MODEL, HULL_MESH))),
-                MeshMaterial3d(hull_material),
+                MeshMaterial3d(painted.clone()),
             ),
             (
                 Name::new("Spar"),
                 Mesh3d(assets.load(model_mesh(MODEL, SPAR_MESH))),
-                MeshMaterial3d(spar_material),
+                MeshMaterial3d(painted),
             ),
             // Tied to the masthead and pointed by [`fly_the_pennant`]. The
             // one piece of the boat that is not in the file: a flag is a
@@ -629,13 +634,13 @@ fn launch(
             ),
             // The figure itself is hung under this by `figure::dress`, which
             // is the player's own business rather than the boat's; what the
-            // boat says is where a person aboard stands, which is on its
-            // deck. The visibility is so that figure inherits cleanly from
+            // boat says is where a person aboard stands, which is at the
+            // helm. The visibility is so that figure inherits cleanly from
             // its siblings.
             (
                 Name::new("Player"),
                 Player,
-                Transform::from_xyz(0.0, SHIP.deck, 0.0),
+                Transform::from_translation(SHIP.helm()),
                 Visibility::default(),
             )
         ],
@@ -1194,8 +1199,8 @@ mod tests {
     use super::*;
     use crate::bindings::Action;
     use crate::testing::{
-        assert_model_draws, elapsed, hold, rebind, run_frames, set_wind, test_ground, triangles,
-        world_app, TEST_ISLAND_REACH,
+        assert_model_draws, assert_model_is_painted, elapsed, hold, rebind, run_frames, set_wind,
+        test_ground, triangles, world_app, TEST_ISLAND_REACH,
     };
 
     /// Frames enough for the ease to be indistinguishable from settled —
@@ -1296,6 +1301,10 @@ mod tests {
         // bare-spar cream and stand a seven-metre plank of timber where the
         // mast should be.
         assert_model_draws(MODEL, &[(HULL_MESH, "hull"), (SPAR_MESH, "spar")]);
+        // And both carry their own colours — drawn with a white material, a
+        // mesh that lost them would arrive as a white boat, not a broken one.
+        assert_model_is_painted(MODEL, HULL_MESH);
+        assert_model_is_painted(MODEL, SPAR_MESH);
     }
 
     #[test]
@@ -1311,7 +1320,6 @@ mod tests {
             .flatten()
             .collect();
         let lowest = corners.iter().map(|c| c.y).fold(f32::MAX, f32::min);
-        let highest = corners.iter().map(|c| c.y).fold(f32::MIN, f32::max);
         let (bow, transom) = corners
             .iter()
             .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
@@ -1320,13 +1328,6 @@ mod tests {
             (lowest + SHIP.draft).abs() < 1e-4,
             "the model's keel is {lowest} below the waterline, not {}",
             -SHIP.draft
-        );
-        // And the sheer, which is where a player aboard is stood: remodel the
-        // hull with more freeboard and they would be shin-deep in the deck.
-        assert!(
-            (highest - SHIP.deck).abs() < 1e-4,
-            "the model's deck is {highest} above the waterline, not {}",
-            SHIP.deck
         );
         let half = SHIP.length * 0.5;
         assert!(
@@ -1351,6 +1352,37 @@ mod tests {
             SHIP.forefoot_station,
             SHIP.heel_station
         );
+
+        // The quarterdeck, the same way as the keel: a plane of corners at
+        // exactly its height, spanning the helm's station — where a player
+        // aboard is stood. Remodel it without re-measuring and they are
+        // shin-deep in timber, or walking on air.
+        let plane: Vec<&Vec3> = corners
+            .iter()
+            .filter(|c| (c.y - SHIP.quarterdeck).abs() < 1e-4)
+            .collect();
+        let fore = plane.iter().map(|c| c.z).fold(f32::MAX, f32::min);
+        let aft = plane.iter().map(|c| c.z).fold(f32::MIN, f32::max);
+        assert!(
+            (fore..=aft).contains(&SHIP.helm_station),
+            "no quarterdeck at {} under the helm at {}",
+            SHIP.quarterdeck,
+            SHIP.helm_station
+        );
+
+        // And the boom's sweep: the sail's foot turns about the mast at the
+        // tack's height, out to the clew, so whatever the hull raises inside
+        // that circle has to stay under it or the canvas drags through the
+        // deck furniture. The companionway lives with this rule; the
+        // quarterdeck, the tiller and the stem head stand outside the circle
+        // or under the cloth instead.
+        for corner in &corners {
+            let reach = Vec2::new(corner.x, corner.z - SHIP.masthead_station).length();
+            assert!(
+                reach >= SAIL_CLEW.z || corner.y < SAIL_TACK.y,
+                "{corner} stands into the boom's sweep, {reach} m from the mast"
+            );
+        }
     }
 
     #[test]

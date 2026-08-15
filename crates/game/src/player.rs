@@ -382,12 +382,12 @@ fn embark_or_land(
             else {
                 return;
             };
-            // Standing on the deck, not at the hull's origin: that origin is
+            // Standing at the helm, not at the hull's origin: that origin is
             // the waterline, which is most of a metre down inside the boat.
             commands
                 .entity(player)
                 .remove::<DespawnOnExit<AppState>>()
-                .insert((ChildOf(boat), Transform::from_xyz(0.0, hull.deck(), 0.0)));
+                .insert((ChildOf(boat), Transform::from_translation(hull.helm())));
         }
     }
 }
@@ -1029,16 +1029,16 @@ mod tests {
             app.world().entity(boat).get::<Boat>().is_some(),
             "the player boarded something that is not a boat"
         );
-        // Aboard at the boat's own heading, standing on its deck.
-        let deck = app
+        // Aboard at the boat's own heading, standing at the helm.
+        let helm = app
             .world()
             .entity(boat)
             .get::<Boat>()
             .expect("a boat")
-            .deck();
+            .helm();
         assert_eq!(
             player_transform(&mut app),
-            Transform::from_xyz(0.0, deck, 0.0)
+            Transform::from_translation(helm)
         );
 
         // Back at the helm: making sail moves the boat again. The wind is

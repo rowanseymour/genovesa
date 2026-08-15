@@ -561,8 +561,8 @@ pub fn assert_model_paints(file: &str, tones: &[(&str, Color)]) {
 /// Weight-paint a shoulder smoothly in Blender and the facets round off as
 /// the model moves — gradients across faces, in a look built out of flat
 /// tones that has none. It is a modelling decision nothing at runtime would
-/// catch, and the one thing CLAUDE.md's Models section calls out, so it is
-/// asserted from one place rather than copied per rigged model.
+/// catch, and one of the rules `assets-src/models/NOTES.md` calls out, so it
+/// is asserted from one place rather than copied per rigged model.
 pub fn assert_rigid_skin(file: &str) {
     let names = mesh_names(file);
     for (mesh, name) in names.iter().enumerate() {

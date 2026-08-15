@@ -282,9 +282,12 @@ export, and the running world has the new shape a moment later. There is no
 editor, and this is the substitute — a hull is a thing to be looked at from a
 camera forty metres up while it is being moved, not a set of numbers.
 
-Materials in the file are ignored. The look is a small fixed palette of flat
-tones, and the game assigns those itself, so a model carries shape and motion
-and nothing else. What it *must* carry is checked: `boat.rs` holds the file to
+A model carries its own colours, one flat tone per facet on its vertices, and
+the game draws it with a white matte material that does nothing but let them
+through — what a thing is painted is settled in its master, beside its shape.
+The files' *materials* are still ignored: glTF materials are PBR, and a hull
+lit the way Blender asked would be the one surface in the world with a
+highlight on it. What a model *must* carry is checked: `boat.rs` holds the file to
 the dimensions the collision code assumes of it, to the order its meshes are
 in, and to being flat-shaded and wound outwards — the failures a modelling
 program makes easy and the eye lets through.
