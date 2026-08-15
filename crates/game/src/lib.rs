@@ -13,6 +13,7 @@ pub mod boat;
 pub mod camera;
 pub mod capture;
 pub mod cli;
+pub mod clouds;
 pub mod compass;
 pub mod console;
 pub mod debug;
