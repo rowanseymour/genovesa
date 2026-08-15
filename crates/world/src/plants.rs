@@ -1,11 +1,11 @@
 //! What grows on a chunk, and the one budget every kind of it spends.
 //!
 //! A kind knows where its own sort grows — [`crate::palms`] at the back of a
-//! beach, [`crate::bananas`] on a wet valley floor — and this is where their
-//! answers are put together. The gathering is here rather than in any of them
-//! because the wire carries one list under one ceiling: whoever spends the
-//! last of it has to be somewhere that can see every claim, not whichever
-//! module happened to be asked first.
+//! beach, [`crate::bananas`] on a wet valley floor, [`crate::mangroves`] in the
+//! shallows of a lake — and this is where their answers are put together. The
+//! gathering is here rather than in any of them because the wire carries one
+//! list under one ceiling: whoever spends the last of it has to be somewhere
+//! that can see every claim, not whichever module happened to be asked first.
 //!
 //! The hash the scatters are drawn from lives here too, for the same reason a
 //! palette does: two kinds drawing from two hashes would be two answers to
@@ -24,9 +24,11 @@ use crate::archipelago::Island;
 pub fn plants(island: &Island, chunk: IVec2) -> Vec<Plant> {
     let mut found = crate::palms::palms(island, chunk);
     found.extend(crate::bananas::bananas(island, chunk));
+    found.extend(crate::mangroves::mangroves(island, chunk));
 
     // The ceiling is what a chunk's count byte can say, and nothing here comes
-    // anywhere near it: the fullest chunk yet measured carries a handful. So
+    // anywhere near it: the fullest chunk yet measured is a mangrove thicket
+    // and carries a third of it, where a beach carries single figures. So
     // this is a backstop against a rule gone wrong rather than a policy for
     // sharing anything out — and if it ever does start biting, the answer is
     // not to keep truncating in the order the kinds are listed above, which

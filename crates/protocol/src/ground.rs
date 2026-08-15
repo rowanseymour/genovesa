@@ -459,6 +459,7 @@ pub struct Plant {
 pub enum Kind {
     Palm = 0,
     Banana = 1,
+    Mangrove = 2,
 }
 
 impl Kind {
@@ -468,6 +469,7 @@ impl Kind {
         match byte {
             0 => Some(Self::Palm),
             1 => Some(Self::Banana),
+            2 => Some(Self::Mangrove),
             _ => None,
         }
     }
@@ -492,6 +494,14 @@ impl Kind {
             // half the old ones. A row of identically sized clumps reads as
             // planted, which is the one thing a jungle must not.
             Self::Banana => (0.68, 1.34),
+            // Narrower than either, and for the opposite reason to the
+            // banana's. Mangroves grow in a thicket, close enough to touch, so
+            // two neighbours a couple of metres apart are seen against each
+            // other rather than each against open ground — and at the banana's
+            // spread that reads as one of them being wrong rather than as
+            // variety. They also all raced the same water in, so a stand of
+            // them really is much of an age.
+            Self::Mangrove => (0.82, 1.14),
         }
     }
 }
@@ -502,8 +512,9 @@ impl Kind {
 /// [`crate::ToClient::Chunk`], so this is simply what that byte can say, and
 /// raising it further is a change to the frame rather than to a number here.
 /// It is a ceiling and nowhere near a target — plants of a kind stand where
-/// that kind grows, which is a band or a margin rather than a whole chunk,
-/// and the fullest chunk of palms yet measured carried seven.
+/// that kind grows, which is a band or a margin rather than a whole chunk.
+/// The fullest chunk yet measured is a lake with a mangrove thicket standing
+/// in it, at a third of this; a beach of palms carries single figures.
 ///
 /// It exists so that "how much can one answer cost" keeps having an answer:
 /// it is what [`crate::ToClient`]'s frame ceiling is derived against, and a
