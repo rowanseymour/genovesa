@@ -31,6 +31,14 @@
 //! caps a real one, and the fragment shader paints foam where the cap is
 //! biting on a crest.
 //!
+//! The open sea breaks too, once it is blowing hard enough: [`WHITECAP`] puts
+//! white down the leading faces of the swell wherever the three trains heap
+//! high enough together, in patches, with bare water between them. That is the
+//! same fragment shader and the same white as the surf, and it is deliberately
+//! never told what the wind is doing — the wind is in the amplitudes already,
+//! so a height to clear is all it takes for caps to arrive with the weather
+//! and go with it.
+//!
 //! Depth reaches the shader through [`DepthWindow`]: a coarse byte-per-texel
 //! picture of the water depth around the camera, refilled a few rows a frame
 //! from the ground chunks the server has sent. The client is not generating
@@ -206,6 +214,107 @@ const FOAM_SLOPE: f32 = 0.02;
 /// water that must be found there.
 const FOAM_FEED: (f32, f32) = (24.0, 1.2);
 
+/// How far the open sea's crests wander off straight, in metres of sideways
+/// displacement — the amplitude of [`bend`].
+///
+/// Three sines summed have dead straight parallel crests, because that is
+/// what a sum of plane waves is. On the water itself it half passes, the
+/// facets being subtle; the moment anything draws a hard line on the surface
+/// — a whitecap, a foam edge — the ocean turns into graph paper. Adding a
+/// fourth and a fifth train does not help: more plane waves are still plane
+/// waves, and all it buys is a busier lattice.
+///
+/// So the swell is read through a slowly bending picture of the plane instead
+/// — a domain warp, the same trick that stops the islands' coastlines coming
+/// out as smooth noise blobs. The crests meander, cross each other at angles
+/// that change along their length, and no two stretches of the same wave look
+/// alike, all without a single extra train being summed.
+///
+/// The size is bounded by the mesh rather than by taste: the bend adds to
+/// every train's phase gradient, which compresses wavelengths, and a train
+/// compressed under three vertices to a crest aliases into shimmer. What
+/// keeps this well clear of that is bending each train by a fraction of its
+/// own wavelength rather than by metres — see [`SeaConditions::swell`] — and
+/// `the_bend_leaves_the_waves_sampled` holds the arithmetic to it.
+const BEND: f32 = 8.0;
+
+/// The field the whitecaps' bar wanders on: how big its coarsest cell is, in
+/// metres, and how fast it drifts downwind, in metres per second.
+///
+/// Value noise rather than more sines — `cap_bar` in the shader carries that
+/// argument. The cell is what sets how big a patch of breaking sea is, and a
+/// couple of hundred metres is a few boat-lengths of white and then a stretch
+/// of clean water, which is what a blow looks like from above. The drift is
+/// slow next to the wind that causes it: a gust patch is a place where the
+/// sea is rougher, and places move at nothing like the speed of the air over
+/// them.
+const BREAKING_FIELD: (f32, f32) = (220.0, 2.5);
+
+/// The bend the swell is read through: a unit-ish vector field over the
+/// plane, in metres once [`BEND`] has scaled it.
+///
+/// Two sines per component, at wavelengths of a few hundred metres — long
+/// compared to any wave, so what they do is bend crests rather than add
+/// ripples of their own — and at angles unrelated to the trains', so the
+/// bending never lines up with what it is bending. Stationary in the world:
+/// the waves travel through it, so the crests are always changing shape,
+/// while the place where the water is doing that stays put the way a current
+/// would.
+///
+/// This is the other copy of `bend` in `assets/shaders/sea.wgsl` and the two
+/// must agree, exactly as [`SeaConditions::swell`] and its twin must.
+fn bend(at: Vec2) -> Vec2 {
+    let component = |sines: &[(Vec2, f32)]| -> f32 {
+        sines
+            .iter()
+            .map(|(k, weight)| weight * at.dot(*k).sin())
+            .sum()
+    };
+    Vec2::new(component(&BENDS[..2]), component(&BENDS[2..])) * BEND
+}
+
+/// The sines [`bend`] is made of: a wave vector in radians per metre, and a
+/// weight. The first two are its x, the last two its y — written out here
+/// rather than inline so that `the_bend_leaves_the_waves_sampled` can do the
+/// arithmetic on the same numbers the field is built from.
+const BENDS: [(Vec2, f32); 4] = [
+    (Vec2::new(0.01079, -0.00917), 1.0),
+    (Vec2::new(-0.02347, 0.01768), 0.5),
+    (Vec2::new(0.00774, 0.01209), 1.0),
+    (Vec2::new(0.01918, 0.02236), 0.5),
+];
+
+/// When the open sea goes white: how far up the leading face of the swell a
+/// whitecap starts, as a cosine, and how high the sea must be heaping under
+/// it, in metres.
+///
+/// The first number is the *shape* of a cap and the second only cuts it up,
+/// which is the way round that matters. A band down the leading face of the
+/// longest wave train is a sliver lying along a crest — the shape water makes
+/// falling over — and the heaping breaks that band into caps wherever the
+/// three trains stop agreeing. Done the other way about, with the heaping for
+/// the shape and the wave to trim it, every cap comes out a round blob a few
+/// metres across, because the heap is the smaller of the two: a sea of white
+/// spots that read as paint rather than as water.
+///
+/// The heaping is a height rather than a wind, and that is what makes caps
+/// weather. [`WAVES`] are written for [`REFERENCE_WIND`] and
+/// [`amplitude_scale`] raises them from there, so a fixed height is a bar the
+/// sea clears never in a calm, seldom in a moderate breeze and all over the
+/// place in a blow — without the shader being told anything at all about the
+/// wind. Above the sum of the three amplitudes nothing can break: at a third
+/// of the reference sea's height, the caps arrive at about the wind real ones
+/// do, which is a coincidence worth keeping rather than a calculation.
+/// The third number is what stops the caps being a lattice: how far the
+/// heaping bar wanders about, as a fraction of the sea's own full height.
+/// Thresholding three sines at a constant draws the pattern they beat in —
+/// rows of identical commas over the whole ocean — and a bar that wanders
+/// instead leaves patches breaking and patches bare. A fraction rather than a
+/// height because the swing has to be able to climb past what the swell can
+/// reach in order to take the caps off a patch at all, and what it can reach
+/// is the wind's business; `cap_bar` in the shader carries the rest of it.
+const WHITECAP: (f32, f32, f32) = (0.60, 0.23, 0.45);
+
 /// Wavelength, in metres, of a slow drift the shore wave's phase picks up
 /// along the coast. Without it the phase at the waterline is `ω·t` alone
 /// and every beach in the world breaks in unison, like lights on one
@@ -281,7 +390,7 @@ pub struct SeaExtension {
     /// [`swell`], so the shader adds them up rather than deriving anything.
     #[uniform(100)]
     waves: [Vec4; WAVES.len()],
-    /// `x` and `y` are [`FADE`], `z` is [`SHADING_TILT`]; `w` is padding.
+    /// `x` and `y` are [`FADE`], `z` is [`SHADING_TILT`], `w` is [`BEND`].
     #[uniform(100)]
     fade: Vec4,
     /// The shore wave: `x` its wavenumber down the depth, `y` its angular
@@ -301,6 +410,12 @@ pub struct SeaExtension {
     /// `xy` is [`FOAM_FEED`]; `zw` is padding.
     #[uniform(100)]
     feed: Vec4,
+    /// `xyz` is [`WHITECAP`]; `w` is padding.
+    #[uniform(100)]
+    caps: Vec4,
+    /// `xy` is [`BREAKING_FIELD`]; `zw` is padding.
+    #[uniform(100)]
+    breaking: Vec4,
     /// The depth window's place in the world: `xy` the world coordinates of
     /// its corner texel's corner, `z` `1 / DEPTH_EXTENT`, `w`
     /// [`DEPTH_RANGE`]. Rewritten whenever the window scrolls.
@@ -323,7 +438,7 @@ impl SeaExtension {
         let conditions = SeaConditions::default();
         Self {
             waves: conditions.components(),
-            fade: Vec4::new(FADE.0, FADE.1, SHADING_TILT, 0.0),
+            fade: Vec4::new(FADE.0, FADE.1, SHADING_TILT, BEND),
             shore: Vec4::new(
                 TAU / CREST_EVERY,
                 TAU / SHORE_PERIOD,
@@ -333,6 +448,8 @@ impl SeaExtension {
             surf: Vec4::new(SHOAL.0, SHOAL.1, RUNUP, FOAM_CREST),
             stagger: Vec4::new(stagger_vector().x, stagger_vector().y, FOAM_SLOPE, SPACING),
             feed: Vec4::new(FOAM_FEED.0, FOAM_FEED.1, 0.0, 0.0),
+            caps: Vec4::new(WHITECAP.0, WHITECAP.1, WHITECAP.2, 0.0),
+            breaking: Vec4::new(BREAKING_FIELD.0, BREAKING_FIELD.1, 0.0, 0.0),
             window: Self::window_uniform(origin),
             depth,
         }
@@ -469,10 +586,22 @@ impl SeaConditions {
     /// the two must agree or the boat stops sitting on the water it is
     /// drawn in.
     pub fn swell(&self, at: Vec2, elapsed: f32, depth: f32) -> f32 {
-        let deep: f32 = self
-            .components()
+        let components = self.components();
+        // Every train is read through the same bend — see [`bend`] — and each
+        // is bent by the same fraction of its own wavelength, which is what
+        // the longest train's wavenumber out front does: a train's phase
+        // shift is its heading against the bend, in units of the longest
+        // train's waves. Bending them all by the same number of *metres*
+        // would swing the chop's phase three times as far as the swell's and
+        // fold it over itself.
+        let bend = bend(at) * components[0].xy().length();
+        let deep: f32 = components
             .iter()
-            .map(|wave| wave.w * (wave.xy().dot(at) - wave.z * elapsed).sin())
+            .map(|wave| {
+                let heading = wave.xy().normalize();
+                let phase = wave.xy().dot(at) + heading.dot(bend) - wave.z * elapsed;
+                wave.w * phase.sin()
+            })
             .sum();
         let w = shore_weight(depth);
         deep * (1.0 - w) + self.shore(at, elapsed, depth) * w
@@ -950,10 +1079,14 @@ mod tests {
         let sea = assumed();
         let at = Vec2::new(517.0, -212.0);
         let elapsed = 12.3;
-        let deep: f32 = sea
-            .components()
+        let components = sea.components();
+        let bend = bend(at) * components[0].xy().length();
+        let deep: f32 = components
             .iter()
-            .map(|wave| wave.w * (wave.xy().dot(at) - wave.z * elapsed).sin())
+            .map(|wave| {
+                let heading = wave.xy().normalize();
+                wave.w * (wave.xy().dot(at) + heading.dot(bend) - wave.z * elapsed).sin()
+            })
             .sum();
         assert_eq!(sea.swell(at, elapsed, DEEP), deep);
     }
@@ -1132,6 +1265,83 @@ mod tests {
                 "a {wavelength} m wave is under-sampled at {SPACING} m spacing"
             );
         }
+    }
+
+    #[test]
+    fn the_bend_leaves_the_waves_sampled() {
+        // The bend buys its meander by varying every train's phase gradient,
+        // which is to say by stretching and squeezing wavelengths. Squeezed
+        // too far and the shortest train falls under three vertices to a
+        // crest and aliases into the shimmer the whole file is written to
+        // avoid — so the bend's steepness is not a free parameter, and this
+        // is the arithmetic that bounds it.
+        //
+        // A train's phase shift is the longest train's wavenumber times its
+        // heading against the bend, so the worst the gradient can be pushed
+        // is that wavenumber times the bend's own steepest slope.
+        // Every sine at its steepest at once, and the bend's two components
+        // pulling the same way — neither ever happens, which is what makes
+        // this a bound rather than a measurement.
+        let steepest: f32 = BEND
+            * BENDS
+                .iter()
+                .map(|(k, weight)| weight * k.length())
+                .sum::<f32>();
+        let longest = TAU / WAVES[0].1;
+
+        for (_, wavelength, _) in WAVES {
+            let squeezed = TAU / (TAU / wavelength + longest * steepest);
+            assert!(
+                squeezed >= 3.0 * SPACING,
+                "the bend squeezes a {wavelength} m wave to {squeezed} m, \
+                 under the {} m the mesh can draw",
+                3.0 * SPACING
+            );
+        }
+    }
+
+    #[test]
+    fn the_waves_run_long_to_short() {
+        // The shader reads `waves[0]` as *the* wave — the one whose leading
+        // face the whitecaps lie along — and that is only the sea's own
+        // reading of itself while the longest train is first. Reorder these
+        // and the caps would quietly start following the chop instead, which
+        // is a change nothing else in either file would notice.
+        let lengths: Vec<f32> = WAVES.iter().map(|(_, wavelength, _)| *wavelength).collect();
+        assert!(
+            lengths.windows(2).all(|pair| pair[0] > pair[1]),
+            "the trains run {lengths:?}, not longest first"
+        );
+    }
+
+    #[test]
+    fn a_calm_sea_wears_no_whitecaps() {
+        // The caps' bar is a height, so what keeps a calm clean is simply
+        // that the whole swell is shorter than it. Nothing anywhere says
+        // "no wind, no foam" — this is where that comes from, and it holds
+        // for every wind up to the one the bar is written for.
+        // The bar wanders, so what has to clear the sea is its *lowest*
+        // reach — the floor less the swing, which is itself a fraction of
+        // the sea's own height. A light air has to be under that too, or a
+        // day nobody would call windy would still be flecked with white.
+        for wind in [0.4, 3.0] {
+            let light = SeaConditions {
+                wind: Vec2::new(wind, 0.0),
+                ..assumed()
+            };
+            let heaps = ceiling(&light);
+            assert!(
+                heaps < WHITECAP.1 - WHITECAP.2 * heaps,
+                "a {wind} m/s sea heaps to {heaps}, over the bar's lowest reach"
+            );
+        }
+        // And a blow has to be able to clear it, or the caps would be
+        // scenery that never appears.
+        let blow = SeaConditions {
+            wind: Vec2::new(14.0, 0.0),
+            ..assumed()
+        };
+        assert!(ceiling(&blow) > WHITECAP.1 * 2.0);
     }
 
     #[test]

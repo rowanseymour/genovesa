@@ -75,6 +75,10 @@ down, and clouds hung between it and the ground would cover the picture
 rather than decorate it — and they go with the wind, so a blow getting up
 shows on the ground as shade hurrying over it.
 
+Once it is blowing hard enough the open sea breaks as well, whitecaps going
+down the faces of the swell — thicker the harder it blows, and gone by the
+time the water is calm.
+
 The shade says the wind is up; a pennant at the masthead says which way it is
 going. It streams on the wind the boat itself feels — hanging dead in a calm,
 snapping in a blow, blown astern by a boat driving into a light air — so what
