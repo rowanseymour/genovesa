@@ -157,7 +157,7 @@ pub fn between(bits: u32, salt: u32, range: (usize, usize)) -> usize {
 /// hung at.
 ///
 /// Every animal here is drawn at a size dealt from bits, the way palms are
-/// (see [`protocol::ground::PALM_SCALE_MIN`]) and for the same reason: one
+/// (see [`protocol::ground::Kind::scale`]) and for the same reason: one
 /// model stamped at one size reads as one animal repeated, which is what a
 /// row of identical palms taught. The sea's kinds deal from the
 /// [`protocol::BeastId`] and the sky's from the chunk or the crossing, so

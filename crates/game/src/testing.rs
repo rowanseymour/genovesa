@@ -282,7 +282,7 @@ fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
                     // enclose a basin, so there is no lake on either to draw.
                     water: None,
                     // Nor anything the palm rule would call a beach.
-                    palms: Vec::new(),
+                    plants: Vec::new(),
                 });
             ground.deliver(chunk, payload);
         }

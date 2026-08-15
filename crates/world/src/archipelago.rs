@@ -855,7 +855,7 @@ impl Archipelago {
             }),
             heights: heights.iter().copied().map(quantize).collect(),
             water: facet_water(base, &heights, |wx, wz| island.lake_level(wx, wz)),
-            palms: crate::palms::palms(&island, chunk),
+            plants: crate::palms::palms(&island, chunk),
         })
     }
 
@@ -1279,7 +1279,7 @@ mod tests {
                             lakes += payload.water.is_some() as u32;
                             bytes += protocol::ground::payload_bytes(
                                 payload.water.is_some(),
-                                payload.palms.len(),
+                                payload.plants.len(),
                             );
                             std::hint::black_box(&payload);
                         }

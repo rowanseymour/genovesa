@@ -12,9 +12,9 @@
 //! when it is wanted.
 
 use bevy::prelude::*;
-use protocol::ground::{Palm, CHUNK_METRES};
+use protocol::ground::{Kind, Plant, CHUNK_METRES};
 
-use crate::terrain::{Ground, PendingPalms, TerrainChunk};
+use crate::terrain::{Ground, PendingPlants, TerrainChunk};
 use crate::{matte, model_mesh, AppState};
 
 /// The palm, as a file. Built from `assets-src/models/palm/palm.blend` by
@@ -84,16 +84,28 @@ fn plant(
     mut commands: Commands,
     model: Res<PalmModel>,
     ground: Res<Ground>,
-    pending: Query<(Entity, &PendingPalms, &TerrainChunk)>,
+    pending: Query<(Entity, &PendingPlants, &TerrainChunk)>,
 ) {
-    for (chunk, palms, at_chunk) in &pending {
+    for (chunk, plants, at_chunk) in &pending {
         // Taken off the entity whether or not every tree on it stood up, so a
         // chunk is never planted twice.
-        commands.entity(chunk).remove::<PendingPalms>();
+        commands.entity(chunk).remove::<PendingPlants>();
 
         let origin = at_chunk.coords.as_vec2() * CHUNK_METRES;
-        for palm in &palms.0 {
-            let at = stands_at(origin, palm);
+        for plant in &plants.0 {
+            // What each kind is made of. A match rather than a table lookup so
+            // that a kind added to the wire cannot compile until this module
+            // has decided what it looks like — the alternative is a client
+            // that quietly stands nothing where a mangrove was sent.
+            let (trunk, crown, trunk_material, crown_material) = match plant.kind {
+                Kind::Palm => (
+                    &model.trunk,
+                    &model.fronds,
+                    &model.trunk_material,
+                    &model.frond_material,
+                ),
+            };
+            let at = stands_at(origin, plant);
             let Some(surface) = ground.surface(at.x, at.y) else {
                 continue;
             };
@@ -104,36 +116,36 @@ fn plant(
             // stand there is nothing left for a third entity to hold. A tree
             // is a hundred-odd triangles either way, and it is entities a
             // world full of plants runs out of first.
-            let stands = Transform::from_xyz(palm.at.x, surface, palm.at.y)
-                .with_rotation(Quat::from_rotation_y(palm.yaw))
-                .with_scale(Vec3::splat(palm.scale));
+            let stands = Transform::from_xyz(plant.at.x, surface, plant.at.y)
+                .with_rotation(Quat::from_rotation_y(plant.yaw))
+                .with_scale(Vec3::splat(plant.scale));
             // Placed under the chunk they belong to, so they are despawned
             // with the ground rather than needing a lifetime of their own.
             commands.entity(chunk).with_children(|under| {
                 under.spawn((
-                    Name::new("Palm trunk"),
+                    Name::new("Trunk"),
                     stands,
-                    Mesh3d(model.trunk.clone()),
-                    MeshMaterial3d(model.trunk_material.clone()),
+                    Mesh3d(trunk.clone()),
+                    MeshMaterial3d(trunk_material.clone()),
                 ));
                 under.spawn((
-                    Name::new("Palm crown"),
+                    Name::new("Crown"),
                     stands,
-                    Mesh3d(model.fronds.clone()),
-                    MeshMaterial3d(model.frond_material.clone()),
+                    Mesh3d(crown.clone()),
+                    MeshMaterial3d(crown_material.clone()),
                 ));
             });
         }
     }
 }
 
-/// Where a palm's foot stands in the world, for a chunk at `origin`.
+/// Where a plant's foot stands in the world, for a chunk at `origin`.
 ///
 /// Here rather than inline so the tests can say the same thing the drawing
-/// does — a palm's position is chunk-local on the wire and world-absolute on
+/// does — a plant's position is chunk-local on the wire and world-absolute on
 /// the ground, and the two differ by exactly the chunk's own corner.
-pub fn stands_at(origin: Vec2, palm: &Palm) -> Vec2 {
-    origin + palm.at
+pub fn stands_at(origin: Vec2, plant: &Plant) -> Vec2 {
+    origin + plant.at
 }
 
 #[cfg(test)]
@@ -220,7 +232,8 @@ mod tests {
     #[test]
     fn a_palm_stands_where_the_wire_put_it() {
         let origin = Vec2::new(-256.0, 384.0);
-        let palm = Palm {
+        let palm = Plant {
+            kind: Kind::Palm,
             at: Vec2::new(3.0, 120.0),
             yaw: 0.0,
             scale: 1.0,

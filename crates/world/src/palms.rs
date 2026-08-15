@@ -20,7 +20,7 @@
 //! lose one between them.
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{Palm, Tone, CHUNK_METRES, MAX_PALMS, PALM_SCALE_MAX, PALM_SCALE_MIN};
+use protocol::ground::{Kind, Plant, Tone, CHUNK_METRES, MAX_PLANTS};
 
 use crate::archipelago::Island;
 
@@ -83,10 +83,16 @@ const FOOTING: f32 = 1.4;
 ///
 /// Walks the lattice cells whose centres fall inside the chunk, in a fixed
 /// order, and asks each in turn. The order is what makes the truncation at
-/// [`MAX_PALMS`] deterministic — a chunk with more candidates than the wire
+/// [`MAX_PLANTS`] deterministic — a chunk with more candidates than the wire
 /// will carry keeps the first of them, and keeps the same first every time,
 /// on every machine that generates it.
-pub fn palms(island: &Island, chunk: IVec2) -> Vec<Palm> {
+///
+/// The budget it truncates against belongs to every kind of plant together,
+/// not to palms. With palms the only kind there is, spending it here is the
+/// same thing as spending it anywhere; the second kind will want the
+/// truncation moved to wherever a chunk's kinds are gathered, so that a beach
+/// cannot eat a swamp's allowance by being asked first.
+pub fn palms(island: &Island, chunk: IVec2) -> Vec<Plant> {
     let base = chunk.as_vec2() * CHUNK_METRES;
     let cells = (CHUNK_METRES / CELL) as i32;
     // The lattice cell the chunk's own corner falls in. CELL divides
@@ -97,7 +103,7 @@ pub fn palms(island: &Island, chunk: IVec2) -> Vec<Palm> {
     let mut found = Vec::new();
     for cz in 0..cells {
         for cx in 0..cells {
-            if found.len() == MAX_PALMS {
+            if found.len() == MAX_PLANTS {
                 return found;
             }
             let cell = origin + IVec2::new(cx, cz);
@@ -116,7 +122,7 @@ pub fn palms(island: &Island, chunk: IVec2) -> Vec<Palm> {
 /// the seed. Four draws off one hash rather than four hashes, because the
 /// draws are independent enough for a scatter and one multiply is cheaper than
 /// four.
-fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Palm> {
+fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
     let seed = mix(cell, island.spec.seed);
 
     // The density draw first, so that most cells cost one multiply and no
@@ -162,10 +168,12 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Palm> {
         return None;
     }
 
-    Some(Palm {
+    let (small, large) = Kind::Palm.scale();
+    Some(Plant {
+        kind: Kind::Palm,
         at: at - base,
         yaw: draw(seed, 3) * std::f32::consts::TAU,
-        scale: PALM_SCALE_MIN + draw(seed, 4) * (PALM_SCALE_MAX - PALM_SCALE_MIN),
+        scale: small + draw(seed, 4) * (large - small),
     })
 }
 
@@ -233,13 +241,13 @@ mod tests {
     }
 
     /// Every palm in the window, with the chunk that carried it.
-    fn all_palms(world: &Archipelago) -> Vec<(IVec2, Palm)> {
+    fn all_palms(world: &Archipelago) -> Vec<(IVec2, Plant)> {
         let mut found = Vec::new();
         for cz in -WINDOW..WINDOW {
             for cx in -WINDOW..WINDOW {
                 let chunk = IVec2::new(cx, cz);
                 if let Some(payload) = world.chunk_payload(chunk) {
-                    found.extend(payload.palms.into_iter().map(|palm| (chunk, palm)));
+                    found.extend(payload.plants.into_iter().map(|palm| (chunk, palm)));
                 }
             }
         }
@@ -310,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn no_chunk_carries_more_palms_than_the_wire_will_take() {
+    fn no_chunk_carries_more_plants_than_the_wire_will_take() {
         for seed in [20_040_112, 1, 7] {
             // The world once, outside the walk. Built inside it, this test
             // regenerated every island for every chunk and took seven minutes.
@@ -319,7 +327,7 @@ mod tests {
                 for cx in -WINDOW..WINDOW {
                     let chunk = IVec2::new(cx, cz);
                     if let Some(payload) = world.chunk_payload(chunk) {
-                        assert!(payload.palms.len() <= MAX_PALMS);
+                        assert!(payload.plants.len() <= MAX_PLANTS);
                         assert!(payload.well_formed(), "seed {seed} chunk {chunk}");
                     }
                 }
