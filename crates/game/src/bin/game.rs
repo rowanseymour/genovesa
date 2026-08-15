@@ -18,6 +18,7 @@ use game::beasts::BeastsPlugin;
 use game::boat::BoatPlugin;
 use game::camera::MapCameraPlugin;
 use game::capture::CapturePlugin;
+use game::chart::ChartPlugin;
 use game::cli::{self, Args};
 use game::compass::CompassPlugin;
 use game::console::ConsolePlugin;
@@ -138,6 +139,7 @@ fn run(args: Args, session: Option<Session>) {
             PlayerPlugin,
             MapCameraPlugin,
             CompassPlugin,
+            ChartPlugin,
             MenuPlugin,
             // Harmless offline: its systems condition on the joined session.
             NetPlugin,

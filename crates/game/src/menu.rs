@@ -877,8 +877,8 @@ fn spawn_controls(mut commands: Commands, bindings: &KeyBindings, until: impl Bu
                 panel
                     .spawn(Node {
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
-                        margin: UiRect::vertical(Val::Px(16.0)),
+                        row_gap: Val::Px(5.0),
+                        margin: UiRect::vertical(Val::Px(12.0)),
                         ..default()
                     })
                     .with_children(|rows| {
@@ -895,7 +895,7 @@ fn spawn_controls(mut commands: Commands, bindings: &KeyBindings, until: impl Bu
                 panel
                     .spawn(Node {
                         column_gap: Val::Px(8.0),
-                        margin: UiRect::top(Val::Px(24.0)),
+                        margin: UiRect::top(Val::Px(16.0)),
                         ..default()
                     })
                     .with_children(|row| {
@@ -925,10 +925,14 @@ fn spawn_key_row(parent: &mut ChildSpawnerCommands, action: Action, key_name: &s
                 },
                 TextColor(TEXT),
             ));
-            row.spawn(button(MenuButton::Rebind(action), 170.0))
-                .with_children(|button| {
-                    button.spawn((KeyText(action), button_label(key_name)));
-                });
+            row.spawn(padded_button(
+                MenuButton::Rebind(action),
+                170.0,
+                KEY_ROW_PADDING,
+            ))
+            .with_children(|button| {
+                button.spawn((KeyText(action), button_label(key_name)));
+            });
         });
 }
 
@@ -1153,6 +1157,9 @@ fn helm_keys(
     match helm.get() {
         Helm::Sailing => next.set(Helm::Paused),
         Helm::Paused => next.set(Helm::Sailing),
+        // One step back from the chart is the helm, the same as from the pause
+        // menu — the chart is a screen over the world, not a world of its own.
+        Helm::Chart => next.set(Helm::Sailing),
         // Not ours. On the controls screen Escape may mean "not that key"
         // rather than "back", and only `settings_keys` knows which; at the
         // console it means "close the console", which is the console's own
@@ -1258,12 +1265,25 @@ fn label(parent: &mut ChildSpawnerCommands, text: &str) {
 /// A menu button without its label, so that callers who need to mark the label
 /// — as the controls screen does, to rewrite it later — can spawn their own.
 fn button(action: MenuButton, width: f32) -> impl Bundle {
+    padded_button(action, width, 12.0)
+}
+
+/// How much shorter a key row's button is than a menu's.
+///
+/// The controls screen is the one screen whose height follows from how many
+/// things there are to bind, and it has to fit in the window at every count it
+/// is ever going to have. Taking four pixels off each row's button buys back a
+/// row and a half, and a key row is a wide target that loses nothing by not
+/// being a tall one as well.
+const KEY_ROW_PADDING: f32 = 8.0;
+
+fn padded_button(action: MenuButton, width: f32, pad: f32) -> impl Bundle {
     (
         Button,
         action,
         Node {
             width: Val::Px(width),
-            padding: UiRect::axes(Val::Px(12.0), Val::Px(12.0)),
+            padding: UiRect::axes(Val::Px(12.0), Val::Px(pad)),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             border: UiRect::all(Val::Px(1.0)),

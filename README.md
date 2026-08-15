@@ -106,6 +106,34 @@ ocean of them;
 Perlin implementation, kept in-tree so a seed always produces the same world.
 Nothing in the game crate imports any of it — see below.
 
+## The chart
+
+Pressing M lays a chart over the world: an old sea chart, north up and staying
+up whichever way the view is turned, with a rose in the corner to say so. It
+can be dragged about and zoomed, and it is drawn in ink on flat parchment
+rather than on a stained paper texture — there being no textures anywhere else
+here to keep one company.
+
+What is on it is only the coast the player has actually closed with — come
+near enough to see plainly, by sea or on foot, which is a short band that
+follows them as they move. Pass an island down one side and that side is what
+the chart has; the other is blank paper until somebody goes round. A coast
+that has not been run right around is left open where the survey stopped,
+which is how a half-charted island looked before anybody had finished the job
+— and the chart knows when the job *is* finished, a coastline only closing
+once its whole shore has been followed, which is what claiming or naming an
+island will one day hang off.
+
+Everything on the sheet is drawn out of ground the client was already sent, so
+nothing about the chart crosses the wire and a client written from scratch
+would keep its own the same way. It is also the one thing that machine
+remembers rather than streams, which in a world with no edges is a question
+worth an answer —
+[`crates/game/src/chart.rs`](crates/game/src/chart.rs) is where it is given.
+A chart belongs to the world it was drawn in and is lost on leaving it.
+
+Islands have no names yet, so nothing on the sheet is lettered but its scale.
+
 ## Playing together
 
 Every world is a served world. The server generates the ocean and hands it out

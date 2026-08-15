@@ -115,6 +115,10 @@ const WATER_ALPHA: f32 = 0.84;
 /// `sqrt(HAZE_END² - 298²) ≈ 849 m` from the eye and therefore up to about
 /// 1084 m from the focus.
 ///
+/// Public because the chart's own reach is measured against it: a chunk the
+/// survey can see has to be a chunk this has already brought in, or the chart
+/// would have holes in it that nothing came back to fill.
+///
 /// That extreme sits directly *behind* the camera, though — the 235 m only
 /// adds to the reach in the direction the eye is offset in, which is the one
 /// direction the view is not looking. Ahead of the camera the visible ground
@@ -122,7 +126,7 @@ const WATER_ALPHA: f32 = 0.84;
 /// room over, and what is left of the gap is taken up by chunk granularity:
 /// [`within`] measures to a chunk's nearest corner, so a chunk is asked for
 /// whenever any of its 128 m reaches inside the radius.
-const STREAM_RADIUS: f32 = 1024.0;
+pub const STREAM_RADIUS: f32 = 1024.0;
 
 /// How far out a chunk has to fall before it is forgotten. The gap behind
 /// [`STREAM_RADIUS`] is hysteresis: panning along a line must not shed and
@@ -369,6 +373,20 @@ impl Ground {
             Chunk::Land { heights, .. } => {
                 Some(height_at(heights, at - chunk.as_vec2() * CHUNK_METRES))
             }
+        }
+    }
+
+    /// One chunk's corner heights as they were sent, or `None` for open water
+    /// and for chunks that have not arrived.
+    ///
+    /// The whole grid rather than a height at a point, because the one caller
+    /// wants to walk it: the chart traces the waterline across a chunk before
+    /// streaming forgets it — see [`crate::chart`]. Cloned, which is an
+    /// `Arc` bump, so the reader is not holding the world still while it works.
+    pub fn heights(&self, chunk: IVec2) -> Option<Arc<[f32]>> {
+        match self.chunks.get(&chunk)? {
+            Chunk::Ocean => None,
+            Chunk::Land { heights, .. } => Some(heights.clone()),
         }
     }
 

@@ -29,11 +29,14 @@ pub enum Action {
     WaitOutNight,
     TurnLeft,
     TurnRight,
+    /// One key for both directions again: it lays the chart over the world and
+    /// takes it off — see `chart::chart_key`.
+    Chart,
 }
 
 impl Action {
     /// Every action, in the order the settings screen lists them.
-    pub const ALL: [Action; 8] = [
+    pub const ALL: [Action; 9] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::SteerLeft,
@@ -42,6 +45,7 @@ impl Action {
         Action::WaitOutNight,
         Action::TurnLeft,
         Action::TurnRight,
+        Action::Chart,
     ];
 
     /// How the settings screen names the action. The last two say "view"
@@ -58,12 +62,14 @@ impl Action {
             Action::WaitOutNight => "Wait for dawn",
             Action::TurnLeft => "Turn view left",
             Action::TurnRight => "Turn view right",
+            Action::Chart => "Chart",
         }
     }
 
     /// Where the action starts out: WASD to drive, F to step ashore or
-    /// aboard, R to wait a night out, and Q/E to turn the view — WASD and
-    /// Q/E being what the game had before any of this was configurable.
+    /// aboard, R to wait a night out, M for the chart, and Q/E to turn the
+    /// view — WASD and Q/E being what the game had before any of this was
+    /// configurable.
     pub fn default_key(self) -> KeyCode {
         match self {
             Action::MoveForward => KeyCode::KeyW,
@@ -74,6 +80,7 @@ impl Action {
             Action::WaitOutNight => KeyCode::KeyR,
             Action::TurnLeft => KeyCode::KeyQ,
             Action::TurnRight => KeyCode::KeyE,
+            Action::Chart => KeyCode::KeyM,
         }
     }
 
@@ -276,9 +283,9 @@ mod tests {
     #[test]
     fn binding_a_free_key_leaves_every_other_action_alone() {
         let mut bindings = KeyBindings::default();
-        bindings.bind(Action::MoveForward, KeyCode::KeyM, None);
+        bindings.bind(Action::MoveForward, KeyCode::KeyZ, None);
 
-        assert_eq!(bindings.key(Action::MoveForward), KeyCode::KeyM);
+        assert_eq!(bindings.key(Action::MoveForward), KeyCode::KeyZ);
         for action in Action::ALL
             .into_iter()
             .filter(|a| *a != Action::MoveForward)
@@ -380,6 +387,7 @@ mod tests {
             bindings.action_bound_to(KeyCode::KeyA),
             Some(Action::SteerLeft)
         );
-        assert_eq!(bindings.action_bound_to(KeyCode::KeyM), None);
+        assert_eq!(bindings.action_bound_to(KeyCode::KeyM), Some(Action::Chart));
+        assert_eq!(bindings.action_bound_to(KeyCode::KeyZ), None);
     }
 }

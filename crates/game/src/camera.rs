@@ -221,6 +221,12 @@ fn spawn_camera(mut commands: Commands, view: Res<View>) {
         transform,
         haze(),
         Msaa::Sample4,
+        // Every menu, instrument and readout in the app draws through this
+        // camera, and says so rather than being sorted to it. The chart brings
+        // up a second camera over the world (see [`crate::chart`]), and without
+        // this the UI would move to whichever camera happened to be ordered
+        // last — so opening a chart would take the pause menu with it.
+        IsDefaultUiCamera,
     ));
 }
 

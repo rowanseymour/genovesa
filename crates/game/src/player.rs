@@ -164,6 +164,19 @@ impl PlayerPlace<'_, '_> {
     pub fn on_the_map(&self) -> Option<Vec2> {
         self.at().map(|at| at.xz())
     }
+
+    /// Which way the carrier is pointing on the map, as a unit vector — the
+    /// hull's own bow, or the walker's own face. `None` outside a match, and
+    /// `None` for a carrier standing so exactly on end that its forward has no
+    /// bearing left, which nothing here can produce but the arithmetic can.
+    ///
+    /// Flattened rather than taken whole because what asks is drawing in plan:
+    /// a hull pitching over a swell is still heading the way it was heading.
+    pub fn heading(&self) -> Option<Vec2> {
+        let carrier = self.carrier()?;
+        let forward = self.carriers.get(carrier).ok()?.forward().xz();
+        forward.try_normalize()
+    }
 }
 
 /// The player as a thing a capture sweep can move.

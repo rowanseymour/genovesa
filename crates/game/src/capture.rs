@@ -147,17 +147,11 @@ fn offscreen(resolution: UVec2) -> Image {
 /// spawned rather than as part of spawning it, so that the camera itself knows
 /// nothing about being captured.
 fn render_off_screen(
-    mut commands: Commands,
     capture: Res<Capture>,
-    mut cameras: Query<(Entity, &mut RenderTarget), With<MapCamera>>,
+    mut cameras: Query<&mut RenderTarget, With<MapCamera>>,
 ) {
-    for (entity, mut target) in &mut cameras {
+    for mut target in &mut cameras {
         *target = capture.target.clone().into();
-        // Menus normally find their camera by looking for the one drawing the
-        // primary window, and there isn't one. Saying outright which camera
-        // the UI belongs to is what keeps a shot of a menu from coming out as
-        // an empty sky.
-        commands.entity(entity).insert(IsDefaultUiCamera);
     }
 }
 
