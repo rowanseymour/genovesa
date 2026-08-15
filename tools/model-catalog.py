@@ -1,7 +1,7 @@
 """Draws every model in the game onto one page, to be looked at.
 
-    tools/model-sheet.sh              # docs/models.html
-    tools/model-sheet.sh /tmp/m.html  # somewhere else
+    tools/model-catalog.sh            # docs/models.md
+    tools/model-catalog.sh /tmp/m.md  # somewhere else
 
 Three views of each: from the tilt the game's own camera holds, from the side,
 and from below, which is where a countershaded belly is. Beside them, what the
@@ -13,10 +13,16 @@ change. It is nobody's contract: a stale one shows an old model rather than
 telling a lie about a current one, which is the whole reason a picture is
 worth keeping where a paragraph is not.
 
-The renders go beside it as files rather than inlined, so that regenerating
-after changing one model writes one small blob into the history instead of
-several megabytes of base64. `model-sheet.sh` quantises them afterwards, the
-way the README's collage is quantised.
+The renders go beside it as files, so that regenerating after changing one
+model writes one small blob into the history rather than the whole page again.
+`model-catalog.sh` quantises them afterwards, the way the README's collage is.
+
+Markdown rather than a page of my own, because the only place anybody reads
+this is GitHub, which renders `.md` and shows `.html` as source. That rules out
+CSS, so the layout is a table, and the colours are a strip of PNG — there is no
+way to draw a swatch in Markdown. It also rules out transparency: the renders
+carry their own background, or a near-black shark is invisible on a dark theme
+and the white seabird on a light one.
 """
 
 import json
@@ -33,7 +39,7 @@ MASTERS = os.path.join(HERE, 'assets-src', 'models')
 SHIPPED = os.path.join(HERE, 'assets', 'models')
 
 argv = sys.argv[sys.argv.index('--') + 1:]
-OUT = argv[0] if argv else os.path.join(HERE, 'docs', 'models.html')
+OUT = argv[0] if argv else os.path.join(HERE, 'docs', 'models.md')
 SHOTS_DIR = os.path.splitext(OUT)[0]
 
 #: The game's own downward tilt — `camera::PITCH`. Duplicated rather than read,
@@ -100,18 +106,28 @@ def stage():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     scene = bpy.context.scene
     scene.render.engine = 'BLENDER_EEVEE'
-    scene.render.film_transparent = True
+    scene.render.film_transparent = False
     scene.view_settings.view_transform = 'Standard'
     scene.render.image_settings.file_format = 'PNG'
     scene.render.image_settings.color_mode = 'RGBA'
-    scene.render.resolution_x = scene.render.resolution_y = 560
+    # Twice what the page shows them at, which is what a dense screen wants.
+    scene.render.resolution_x = scene.render.resolution_y = 460
+    # Blender dithers its output by default, which on flat tones is noise in
+    # every pixel of a background that should be one colour — and noise is the
+    # one thing PNG cannot pack. It is worth about two thirds of the file.
+    scene.render.dither_intensity = 0.0
 
     # Lit like a specimen rather than like the game. The sun goes with the
     # camera — see `render` — because a fixed one leaves every underside in
     # shadow, and an underside is the whole reason the third column is there.
     # The ambient carries the rest, so a facet turned away is still its own
     # colour rather than black.
+    # A mid slate to sit each model on. Both themes GitHub renders in are at
+    # one end or the other, so anything nearer white or black loses a model
+    # painted the same way — the shark on the dark one, the seabird on the
+    # light. This is also what the renders are lit by.
     world = bpy.data.worlds.new('sky')
+    world.node_tree.nodes['Background'].inputs[0].default_value = (0.20, 0.23, 0.26, 1)
     world.node_tree.nodes['Background'].inputs[1].default_value = 0.85
     scene.world = world
 
@@ -172,85 +188,84 @@ def render(scene, name, label, elevation):
     return os.path.join(os.path.basename(SHOTS_DIR), f'{name}-{label}.png')
 
 
-PAGE = """<!doctype html>
-<meta charset="utf-8"><title>models</title>
-<style>
- body {{ background: #1b1f23; color: #d8d4cc; font: 15px/1.5 system-ui, sans-serif;
-        margin: 0 auto; padding: 3rem 2rem; max-width: 74rem; }}
- h1 {{ font-weight: 600; letter-spacing: .02em; margin: 0 0 .3rem; }}
- .note {{ color: #8b8b86; margin-bottom: 3rem; }}
- section {{ display: grid; grid-template-columns: 1fr 1fr 1fr 15rem; gap: 1rem;
-           align-items: center; border-top: 1px solid #33383d; padding: 1.6rem 0; }}
- figure {{ margin: 0; text-align: center; }}
- figure img {{ width: 100%; background:
-   repeating-conic-gradient(#23272c 0 25%, #1e2226 0 50%) 0 0/22px 22px; border-radius: 6px; }}
- figcaption {{ color: #71736f; font-size: 12px; padding-top: .3rem; }}
- h2 {{ margin: 0 0 .5rem; font-size: 1.15rem; }}
- dl {{ display: grid; grid-template-columns: auto 1fr; gap: .1rem .7rem; margin: 0; font-size: 13px; }}
- dt {{ color: #71736f; }} dd {{ margin: 0; }}
- .swatches {{ display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .7rem; }}
- .swatch {{ width: 1.9rem; height: 1.9rem; border-radius: 4px; border: 1px solid #0006; }}
- .none {{ color: #a4746b; font-size: 13px; margin-top: .7rem; }}
-</style>
-<h1>Models</h1>
-<p class="note">Every master under <code>assets-src/models/</code>, drawn from the
-game's own camera tilt, from the side, and from below, beside what its shipped
-<code>.glb</code> holds. Generated by <code>tools/model-sheet.sh</code>; re-run
-it when the models change.</p>
-{sections}
+def palette_strip(path, colours, block=44, height=24):
+    """A row of colour blocks, as a PNG.
+
+    Hand-rolled because Markdown has no way to draw a swatch and this is the
+    one thing on the page that a reader wants to *see* rather than read — a
+    triple tells you nothing about whether two greens are alike.
+    """
+    import zlib
+
+    width = block * len(colours)
+    rows = bytearray()
+    for _ in range(height):
+        rows.append(0)                                  # no filter on this row
+        for rgb in colours:
+            rows.extend(bytes(round(c * 255) for c in rgb) * block)
+
+    def chunk(kind, body):
+        head = kind + body
+        return (struct.pack('>I', len(body)) + head
+                + struct.pack('>I', zlib.crc32(head) & 0xFFFFFFFF))
+
+    with open(path, 'wb') as f:
+        f.write(b'\x89PNG\r\n\x1a\n')
+        f.write(chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)))
+        f.write(chunk(b'IDAT', zlib.compress(bytes(rows), 9)))
+        f.write(chunk(b'IEND', b''))
+
+
+PAGE = """# Models
+
+Every master under `assets-src/models/`, drawn from the game's own camera tilt,
+from the side, and from below, beside what its shipped `.glb` holds. Generated
+by `tools/model-catalog.sh` — re-run it when the models change.
+
+| | from the camera | from the side | from below |
+| --- | --- | --- | --- |
+{rows}
 """
 
-SECTION = """<section>
-  {figures}
-  <div>
-    <h2>{name}</h2>
-    <dl>
-      <dt>size</dt><dd>{size} m</dd>
-      <dt>triangles</dt><dd>{tris}</dd>
-      <dt>vertices</dt><dd>{verts}</dd>
-      <dt>meshes</dt><dd>{meshes}</dd>
-      {clips}
-      <dt>file</dt><dd>{kb} kB</dd>
-    </dl>
-    {palette}
-  </div>
-</section>
-"""
+ROW = ("| **{name}**<br>{size} m<br>{tris} triangles<br>{verts} vertices"
+       "<br>{meshes}{clips}<br>{kb} kB{palette} "
+       "| {shots} |\n")
 
 names = sorted(d for d in os.listdir(MASTERS)
                if os.path.isdir(os.path.join(MASTERS, d)))
 os.makedirs(SHOTS_DIR, exist_ok=True)
 scene = stage()
-sections = []
+rows = []
 for name in names:
     facts = shipped(name)
-    figures = ''.join(
-        f'<figure><img src="{render(scene, name, label.split()[-1], tilt)}" alt="{name}, {label}">'
-        f'<figcaption>{label}</figcaption></figure>'
+    shots = ' | '.join(
+        f'<img src="{render(scene, name, label.split()[-1], tilt)}" '
+        f'alt="{name}, {label}" width="230">'
         for label, tilt in SHOTS)
+
     if facts['colours']:
-        swatches = ''.join(
-            '<div class="swatch" style="background: rgb({}, {}, {})" '
-            'title="{} facets"></div>'.format(
-                *[round(c * 255) for c in rgb], count)
-            for rgb, count in facts['colours'])
-        palette = f'<div class="swatches">{swatches}</div>'
+        strip = os.path.join(SHOTS_DIR, f'{name}-palette.png')
+        palette_strip(strip, [rgb for rgb, _ in facts['colours']])
+        where = os.path.join(os.path.basename(SHOTS_DIR), f'{name}-palette.png')
+        palette = (f'<br><img src="{where}" alt="its colours" '
+                   f'height="18">')
     else:
-        palette = '<p class="none">no colours of its own — the client paints it</p>'
-    sections.append(SECTION.format(
-        figures=figures,
+        palette = '<br>*painted by the client*'
+
+    rows.append(ROW.format(
         name=name,
         size=' × '.join(f'{s:g}' for s in facts['size']),
         tris=f"{facts['tris']:,}",
         verts=f"{facts['verts']:,}",
-        meshes=', '.join(facts['meshes']),
-        clips=f"<dt>clips</dt><dd>{', '.join(facts['clips'])}</dd>" if facts['clips'] else '',
+        meshes=', '.join(f'`{m}`' for m in facts['meshes']),
+        clips='<br>' + ', '.join(f'`{c}`' for c in facts['clips']) if facts['clips'] else '',
         kb=facts['bytes'] // 1024,
         palette=palette,
+        shots=shots,
     ))
     print(f'{name}: {facts["tris"]} tris, {len(facts["colours"])} colours')
 
-os.makedirs(SHOTS_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with open(OUT, 'w') as f:
-    f.write(PAGE.format(sections='\n'.join(sections)))
+    f.write(PAGE.format(rows=''.join(rows)))
 print(f'wrote {OUT} ({os.path.getsize(OUT) // 1024} kB)')

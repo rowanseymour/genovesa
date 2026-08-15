@@ -269,9 +269,9 @@ than part of what it is called. One shared `assets-src/models/export.sh` builds
 any model, and is where the export settings live. Nothing in `assets-src/`
 ships; it is kept so a shape can be taken further.
 
-[`docs/models.html`](docs/models.html) draws all of them on one page — three
-views apiece and what each shipped file holds — which is the quickest way to
-see what is there. `tools/model-sheet.sh` redraws it.
+[`docs/models.md`](docs/models.md) draws all of them on one page — three views
+apiece and what each shipped file holds — which is the quickest way to see what
+is there. `tools/model-catalog.sh` redraws it.
 
 ```bash
 assets-src/models/export.sh palm
