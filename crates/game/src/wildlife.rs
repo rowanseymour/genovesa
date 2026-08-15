@@ -769,7 +769,7 @@ mod tests {
                 .collect(),
             surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
             water: None,
-            palms: Vec::new(),
+            plants: Vec::new(),
         }
     }
 
@@ -786,7 +786,7 @@ mod tests {
                         heights: vec![quantize(-depth); FACET_VERTS * FACET_VERTS],
                         surfaces: vec![Surface::plain(Tone::Sand); FACET_TRIS],
                         water: None,
-                        palms: Vec::new(),
+                        plants: Vec::new(),
                     }),
                 );
             }
