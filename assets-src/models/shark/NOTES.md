@@ -17,10 +17,13 @@ the tests.
   dolphin from every angle that matters.
 - **Six-corner rings with a vertex on the ridge line**, so the back carries an
   edge for the fin to sit on.
-- **A pale belly.** This was once argued the other way — the camera sees a
-  shark from above, so a belly is modelling for a view that barely exists — but
-  a shark banking in clear shallows is exactly when one is looked at, and
-  countershading is what the real ones wear.
+- **A dark back and a pale belly.** The back was sand-grey once, on the
+  argument that a shark over sunlit sand reads best pale. That was backwards:
+  pale over pale sand is camouflage, and what should be moving in the shallows
+  is a shadow. Dark enough to read as one even through the water it is seen
+  through, which lightens it further. The belly was argued away too — the
+  camera sees a shark from above, so an underside is a view that barely
+  exists — but banking in clear water is exactly when one is looked at.
 - **The mesh name `hide` is load-bearing**: the game paints by name, through
   `TONES` in `crates/game/src/beasts.rs`.
 - **Origin amidships between the pectorals**, where a shark turns, since the
