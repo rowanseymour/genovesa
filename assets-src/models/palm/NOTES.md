@@ -25,14 +25,22 @@ and fall well below it, so the head has a shoulder rather than being a flat
 disc. Fronds held straight out read as a starfish on a stick.
 
 **No two fronds are alike, and that is load-bearing.** Bearing, length, droop,
-rise and width each carry their own nudge, one frond is an old one hanging well
-below the others, and every blade curves the same way about its own axis so the
-crown has a handedness. Seven fronds at exactly a seventh of a turn apart look
-identical from seven directions — and the server only ever turns a palm about
-the vertical, so a regular crown would tile: a beach of them would read as one
-tree stamped repeatedly however carefully the bearings were scattered. The
+rise and width each carry their own nudge, one frond is an older one hanging
+lower than the rest, and every blade curves the same way about its own axis so
+the crown has a handedness. Seven fronds at exactly a seventh of a turn apart
+look identical from seven directions — and the server only ever turns a palm
+about the vertical, so a regular crown would tile: a beach of them would read as
+one tree stamped repeatedly however carefully the bearings were scattered. The
 irregularity is what gives a palm a front and a back, and
 `the_crown_maps_onto_itself_at_no_rotation` holds the file to having them.
+
+What carries that, measurably, is the bearings and the reaches: the seven sit at
+gaps of 28° to 76° against a regular 51.4°, and reach 2.2 m to 2.7 m out. The
+old frond used to hang to 2.0 m, half again the length of any other and a tongue
+down the trunk from any angle; pulling it back to 4.1 m, still the lowest in a
+crown whose next is at 4.6 m, moved the test's margin from 1.86 m to 1.45 m
+against a floor of 0.25. So the low frond is a shoulder on the crown, not the
+thing keeping a beach from tiling — that was already carried elsewhere.
 
 **Each frond is a closed blade, not a plane.** A leaf is usually a flat quad at
 half the triangles, but a plane has no back — it would vanish from one side
