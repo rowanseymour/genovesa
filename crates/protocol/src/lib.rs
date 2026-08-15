@@ -22,10 +22,11 @@
 //! its digests, on one machine at a time.
 //!
 //! Like the world's layout, the wire is a *format*: the bytes each message
-//! encodes to are pinned by tests, because a server must understand clients
-//! built from other checkouts. Changing any encoding means bumping
-//! [`PROTOCOL_VERSION`], which is the first thing a client says and the one
-//! thing a server may refuse.
+//! encodes to are pinned by tests, so that changing what a client receives is
+//! something done on purpose rather than noticed later. [`PROTOCOL_VERSION`]
+//! is the first thing a client says and the one thing a server may refuse,
+//! but it is not bumped for every encoding change — there is no fleet of
+//! older clients to turn away, only whatever was built from this checkout.
 
 pub mod ground;
 
@@ -902,9 +903,10 @@ mod tests {
 
     #[test]
     fn the_wire_is_a_format() {
-        // The exact bytes, pinned the way the world pins its digests: a server
-        // must understand clients built from other checkouts, so changing any
-        // of this means bumping PROTOCOL_VERSION, not re-recording the test.
+        // The exact bytes, pinned the way the world pins its digests. Nothing
+        // old is left running to be broken, so re-recording is the right
+        // answer to a deliberate change — the pin is here to make sure the
+        // change was deliberate, and that both ends are rebuilt together.
         //
         // Every variant of both enums appears, because the round trip above
         // cannot see any of the ways this format could move while still

@@ -22,11 +22,18 @@ to agree across machines, and neither pin is legacy baggage to be filed off:
   re-record them — `--nocapture` prints the new values. If you didn't touch it
   and they go red, a platform has stopped agreeing about what a seed means,
   which is a real bug. Never answer a red digest by loosening the assertion.
-- **Two builds must still be able to talk.** That is **`PROTOCOL_VERSION`**:
-  changing an encoding means bumping it, not re-recording
-  `the_wire_is_a_format`. The wire is wider than it looks — the chunk grid, the
-  height quantisation and the palette are all part of it, because a client
-  draws the ground out of them.
+- **The wire is a format, and changing it should be deliberate.** That is what
+  `the_wire_is_a_format` pins. The wire is wider than it looks — the chunk
+  grid, the height quantisation and the palette are all part of it, because a
+  client draws the ground out of them, so a change that only looks like a
+  palette tidy is a change to what a client receives. Re-record the test when
+  you meant it; the point is that it cannot happen by accident.
+
+  **`PROTOCOL_VERSION` does not have to move with it.** Nobody is playing
+  this, and the only client is the one in this repo, built from the checkout
+  that built the server — so bumping buys a refusal nobody was going to hit,
+  at the cost of touching the constant in every encoding commit. Leave it
+  alone unless you actually want old builds turned away.
 
 So inside `world`: no `f32::powf` (use `terrain::pow`), and nothing may depend
 on time, addresses or `HashMap` order.
