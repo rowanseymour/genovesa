@@ -52,7 +52,7 @@ use crate::camera::MapCamera;
 use crate::player::PlayerPlace;
 use crate::sea::SeaConditions;
 use crate::terrain::{Ground, TerrainChunk};
-use crate::{between, eased, matte, model_mesh, scramble, signed, unit, AppState};
+use crate::{between, eased, matte, model_mesh, scramble, signed, unit, AppState, Size};
 
 /// The kinds of creature. Also an index into [`WildlifeModels`], so anything
 /// that knows what it is can find what to draw it with.
@@ -72,6 +72,26 @@ const KINDS: [(&str, Color); 2] = [
     ("models/eagle.glb", EAGLE_COLOR),
     ("models/seabird.glb", SEABIRD_COLOR),
 ];
+
+/// The spans each kind comes in, wingtip to wingtip, and what its file
+/// measures — see [`Size`]. Birds are quoted across rather than nose to tail
+/// because a bird against the sky *is* its span.
+///
+/// Both ranges are smaller than the models were drawn at. The eagle in
+/// particular spanned 3.7 m unscaled, which is past a wandering albatross and
+/// past a condor: it was reading as an enormous bird because it was one.
+/// These stop short of a real eagle's 2.3 m, deliberately — a bird circling a
+/// summit is watched from forty metres up and a true-to-life one is a speck —
+/// but the sky and the sea now disagree with life in the same direction
+/// rather than in opposite ones.
+const EAGLE_SIZE: Size = Size {
+    model: 3.70,
+    range: (2.2, 2.8),
+};
+const SEABIRD_SIZE: Size = Size {
+    model: 2.10,
+    range: (1.6, 2.2),
+};
 
 /// Dark umber. An eagle is seen against sky or against sunlit rock, and in
 /// both it is its silhouette — real plumage colour would only muddy a shape
@@ -276,7 +296,12 @@ fn watch_summits(
                     headroom: EAGLE_HEADROOM,
                     ..Shy::of(EAGLE_WARY)
                 },
-                Transform::from_translation(centre),
+                // A pair on one thermal are two birds, not one bird twice, so
+                // the trailing one is dealt its own span. [`soar`] writes only
+                // where a bird is and how it is turned, so a scale set here
+                // survives every frame after.
+                Transform::from_translation(centre)
+                    .with_scale(Vec3::splat(EAGLE_SIZE.dealt(bits ^ wing, 0xEA61))),
                 models[Kind::Eagle].drawn_as(),
             ));
         }
@@ -556,7 +581,13 @@ fn send_crossings(
                         // ahead did.
                         phase: -lag * TAU / UNDULATION_LENGTH,
                     },
-                    Transform::from_xyz(line.slop * jitter(member, 0x5B3), SKIM_HEIGHT, lag),
+                    // Its own span, from the same bits its station is
+                    // jittered by: a line of identical birds reads as one
+                    // bird stamped along a course.
+                    Transform::from_xyz(line.slop * jitter(member, 0x5B3), SKIM_HEIGHT, lag)
+                        .with_scale(Vec3::splat(
+                            SEABIRD_SIZE.dealt(entropy ^ ((member as u32) << 8), 0x5B4),
+                        )),
                     models[line.kind].drawn_as(),
                 ));
             }
@@ -939,18 +970,46 @@ mod tests {
     }
 
     #[test]
-    fn the_wildlife_is_built_to_scale() {
-        // What the spawners assume when they place the models unscaled: a
-        // remodel that came through in centimetres — or with the exporter's
-        // axes wrong — would fly a hundred-metre bird. Wingspans lie along X.
-        // The swimming kinds' pins moved to the beasts' tests with the
-        // animals themselves.
-        for (kind, axis, wanted) in [(Kind::Eagle, 0, 3.0..4.5), (Kind::Seabird, 0, 1.6..2.6)] {
+    fn the_models_measure_what_their_sizes_say_they_do() {
+        // The divisor a [`Size`] turns metres into a scale with, which
+        // nothing at runtime can check: a remodel that came through in
+        // centimetres — or with the exporter's axes wrong — would fly a
+        // hundred-metre bird while the range here still read two point
+        // something. Wingspans lie along X. The swimming kinds' pins moved
+        // to the beasts' tests with the animals themselves.
+        for (kind, size) in [(Kind::Eagle, &EAGLE_SIZE), (Kind::Seabird, &SEABIRD_SIZE)] {
             let file = KINDS[kind as usize].0;
-            let measured = span(file, 0, axis);
+            let measured = span(file, 0, 0);
             assert!(
-                wanted.contains(&measured),
-                "{file} measures {measured}m across axis {axis}, not {wanted:?}"
+                (measured - size.model).abs() < 0.01,
+                "{file} measures {measured} m across, but its Size divides by {}",
+                size.model
+            );
+        }
+    }
+
+    #[test]
+    fn every_bird_is_dealt_a_span_inside_its_kind_s_range() {
+        // As the beasts' own: inside the range, and actually using it —
+        // birds are dealt from the chunk they were found over and from a
+        // crossing's entropy, and either mixer answering flatly would fly a
+        // sky of identical birds.
+        for (size, salt) in [(&EAGLE_SIZE, 0xEA61), (&SEABIRD_SIZE, 0x5B4)] {
+            let (low, high) = size.range;
+            let (mut least, mut most) = (f32::MAX, f32::MIN);
+            for bits in 0..1024 {
+                let drawn = size.model * size.dealt(bits, salt);
+                assert!(
+                    (low..=high).contains(&drawn),
+                    "a bird was dealt {drawn} m across, outside {low}–{high}"
+                );
+                least = least.min(drawn);
+                most = most.max(drawn);
+            }
+            let span = high - low;
+            assert!(
+                least < low + span * 0.1 && most > high - span * 0.1,
+                "the spans dealt only ever ran {least}–{most} of {low}–{high}"
             );
         }
     }

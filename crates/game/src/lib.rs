@@ -150,6 +150,49 @@ pub fn between(bits: u32, salt: u32, range: (usize, usize)) -> usize {
     range.0 + scramble(bits ^ salt) as usize % (range.1 + 1 - range.0)
 }
 
+/// The sizes one kind of animal comes in, and what its model measures — the
+/// pair being what turns a size in world metres into the scale the model is
+/// hung at.
+///
+/// Every animal here is drawn at a size dealt from bits, the way palms are
+/// (see [`protocol::ground::PALM_SCALE_MIN`]) and for the same reason: one
+/// model stamped at one size reads as one animal repeated, which is what a
+/// row of identical palms taught. The sea's kinds deal from the
+/// [`protocol::BeastId`] and the sky's from the chunk or the crossing, so
+/// every client draws the same animal at the same size without a byte
+/// crossing the wire for it.
+///
+/// Written in *world metres* rather than as a multiplier because that is the
+/// thing worth arguing about — a shark is three to four metres long, and
+/// what multiple of the file that happens to be is arithmetic. [`Size::model`]
+/// is what keeps the two honest.
+pub struct Size {
+    /// What the file measures along the axis the range is quoted on — nose to
+    /// tail for a swimmer, wingtip to wingtip for a bird.
+    ///
+    /// Held to the model by each kind's own test, because nothing at runtime
+    /// can tell: a remodel that comes through half the size it was, with this
+    /// left alone, draws every animal at half the size asked for and looks
+    /// exactly like a modelling decision.
+    pub model: f32,
+    /// The smallest and largest one is drawn at, in world metres.
+    pub range: (f32, f32),
+}
+
+impl Size {
+    /// The scale to hang one at, dealt from bits every machine was dealt
+    /// alike — see [`scramble`] on why that is the whole trick.
+    pub fn dealt(&self, bits: u32, salt: u32) -> f32 {
+        self.drawn(bits, salt) / self.model
+    }
+
+    /// The size that scale draws, in world metres. What the tests measure,
+    /// and the only place the range is read.
+    pub fn drawn(&self, bits: u32, salt: u32) -> f32 {
+        self.range.0 + unit(bits, salt) * (self.range.1 - self.range.0)
+    }
+}
+
 /// Top-level screen the app is on.
 #[derive(States, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum AppState {

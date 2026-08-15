@@ -53,7 +53,7 @@ use protocol::{BeastId, BeastKind};
 use crate::models::{above, Tones};
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
-use crate::{between, eased, matte, signed, unit, AppState};
+use crate::{between, eased, matte, signed, unit, AppState, Size};
 
 /// The shark, rigged and with its one clip in it. The other kinds are rigid
 /// meshes whose whole-body motion is computed here, as it was when they were
@@ -62,6 +62,34 @@ use crate::{between, eased, matte, signed, unit, AppState};
 const SHARK_MODEL: &str = "models/shark.glb";
 const DOLPHIN_MODEL: &str = "models/dolphin.glb";
 const WHALE_MODEL: &str = "models/whale.glb";
+
+/// How long each kind runs, nose to tail, and what its file measures — see
+/// [`Size`], which is where the arithmetic and the reasoning both live.
+///
+/// The shark's range is the point of the exercise. Drawn at the model's own
+/// length it was eleven centimetres longer than a dolphin and a quarter of
+/// the whale, which is a reef shark: the animal read as harmless at exactly
+/// the moment it is meant to be the reason to keep the hull between yourself
+/// and the water. Three to four metres is a bull or a tiger, and it is the
+/// dolphin beside it that makes the difference legible.
+///
+/// Which is why the dolphin stops at 2.9 rather than at the 3.2 a bottlenose
+/// reaches. The two ranges are read against each other far more often than
+/// either is read against life — a pod and a fin are the same water — and
+/// overlapping them puts the occasional dolphin above the occasional shark,
+/// which is exactly the impression the shark's range exists to end.
+const SHARK_SIZE: Size = Size {
+    model: 2.64,
+    range: (3.0, 4.0),
+};
+const DOLPHIN_SIZE: Size = Size {
+    model: 2.38,
+    range: (2.4, 2.9),
+};
+const WHALE_SIZE: Size = Size {
+    model: 11.1,
+    range: (11.0, 15.0),
+};
 
 /// The clip, by its position in the file — held to its name by
 /// `the_model_carries_the_swim_the_game_plays`. Swimming is the whole
@@ -96,17 +124,21 @@ const WHALE_COLOR: Color = Color::srgb(0.27, 0.31, 0.37);
 const SWISH_PACE: f32 = 1.4;
 
 /// How far under the local water surface the origin rides when the shark is
-/// up, in metres. The dorsal fin tip stands 0.65 over the origin, so riding
-/// awash puts a forearm's length of fin out of the water — it was first set
-/// deeper, a hand's width of fin, and from the camera's height that read as
-/// no fin at all. The back stays just under at this depth, a paleness the
-/// fin is cutting out of.
+/// up, measured on the model rather than in world metres: [`glide`] scales it
+/// by the size this shark was dealt, so what stays constant between a three
+/// metre shark and a four metre one is the *proportion* of fin showing, which
+/// is what the eye is reading. The dorsal fin tip stands 0.65 over the origin,
+/// so riding awash puts a forearm's length of fin out of the water — it was
+/// first set deeper, a hand's width of fin, and from the camera's height that
+/// read as no fin at all. The back stays just under at this depth, a paleness
+/// the fin is cutting out of.
 const AWASH: f32 = 0.38;
 
 /// And when it has sounded: fin under by a fin's own height, body still
 /// shallow enough to stay a shape in the water rather than vanishing —
 /// a shark that disappeared entirely would read as despawned, and the
-/// unsettling thing about a shark is knowing it is still there.
+/// unsettling thing about a shark is knowing it is still there. Scaled with
+/// the animal, like [`AWASH`].
 const SOUNDED: f32 = 0.88;
 
 /// Seconds of one breath of depth, awash to sounded and back. Slow enough
@@ -402,16 +434,20 @@ fn dress(
                 commands.entity(beast).with_child((
                     Name::new("figure"),
                     BeastFigure,
+                    // Hung at the size the id deals it — the same size
+                    // [`glide`] rides it at, both of them asking [`Size`]
+                    // rather than one of them being told by the other.
+                    Transform::from_scale(Vec3::splat(shark_size(of.seed))),
                     WorldAssetRoot(assets.load(GltfAssetLabel::Scene(0).from_asset(SHARK_MODEL))),
                 ));
             }
             BeastKind::Dolphins => {
                 let (mesh, material) = models.dolphin.clone();
-                for (member, station, swimming) in pod_members(of.seed) {
+                for (member, station, size, swimming) in pod_members(of.seed) {
                     commands.entity(beast).with_child((
                         Name::new(format!("dolphin {member}")),
                         swimming,
-                        Transform::from_translation(station),
+                        Transform::from_translation(station).with_scale(Vec3::splat(size)),
                         Mesh3d(mesh.clone()),
                         MeshMaterial3d(material.clone()),
                     ));
@@ -428,7 +464,8 @@ fn dress(
                         phase: unit(of.seed, 0x817A1E) * TAU,
                         ..WHALE_SWIM
                     },
-                    Transform::from_xyz(0.0, -(WHALE_SWIM.cruise + WHALE_SWIM.leap), 0.0),
+                    Transform::from_xyz(0.0, -(WHALE_SWIM.cruise + WHALE_SWIM.leap), 0.0)
+                        .with_scale(Vec3::splat(whale_size(of.seed))),
                     Mesh3d(mesh),
                     MeshMaterial3d(material),
                 ));
@@ -437,18 +474,40 @@ fn dress(
     }
 }
 
+/// How big a shark of this id is drawn, as a multiple of the model. Asked
+/// twice — once where the figure is hung and once every frame as it is
+/// ridden — and a pure function of the id both times, so the two agree
+/// without either storing the answer, exactly as the breath phase does.
+fn shark_size(seed: u32) -> f32 {
+    SHARK_SIZE.dealt(seed, 0x5A1E)
+}
+
+/// And a whale's, which is asked for in one place only — but a salt spelled
+/// out at the call and again in the test that checks it is two spellings of
+/// one number, and the test would go on passing after one of them changed.
+fn whale_size(seed: u32) -> f32 {
+    WHALE_SIZE.dealt(seed, 0x8A1E)
+}
+
 /// The members of the pod a [`BeastId`]'s bits deal: station index, where it
-/// swims in the pod's frame, and its porpoising. A pure function of the
-/// seed, which is the point — see the module doc — and starting under the
-/// water's own opacity, so however a pod first appears it *surfaces*.
-fn pod_members(seed: u32) -> Vec<(usize, Vec3, Porpoising)> {
+/// swims in the pod's frame, how big it is drawn, and its porpoising. A pure
+/// function of the seed, which is the point — see the module doc — and
+/// starting under the water's own opacity, so however a pod first appears it
+/// *surfaces*.
+///
+/// Size is dealt per member rather than per pod, from the same bits the
+/// station jitter uses: a pod is a family and holds a big one and a small
+/// one, and sizing the whole pod together would put five identical animals
+/// abreast, which is the thing the jitter exists to avoid.
+fn pod_members(seed: u32) -> Vec<(usize, Vec3, f32, Porpoising)> {
     let count = between(seed, 0x90D5, POD_SIZE);
     POD_STATIONS
         .iter()
         .enumerate()
         .take(count)
         .map(|(member, (side, lag))| {
-            let jitter = |salt: u32| signed(seed ^ ((member as u32) << 8), salt);
+            let bits = seed ^ ((member as u32) << 8);
+            let jitter = |salt: u32| signed(bits, salt);
             let swimming = Porpoising {
                 phase: member as f32 * POD_STAGGER + 0.12 * jitter(0xD01),
                 ..DOLPHIN_SWIM
@@ -460,6 +519,7 @@ fn pod_members(seed: u32) -> Vec<(usize, Vec3, Porpoising)> {
                     -(swimming.cruise + swimming.leap),
                     lag + POD_SLOP * jitter(0xD03),
                 ),
+                DOLPHIN_SIZE.dealt(bits, 0xD04),
                 swimming,
             )
         })
@@ -527,7 +587,12 @@ fn glide(
                 let breath = unit(beast.seed, 0xB0B) * TAU;
                 let surface = sea.water_over(ground.as_deref(), at, elapsed);
                 let breathing = 0.5 - 0.5 * ((elapsed / RISE_PERIOD * TAU) + breath).cos();
-                let riding = surface - AWASH - (SOUNDED - AWASH) * breathing;
+                // Both depths are on the model, so a bigger shark rides
+                // proportionally deeper and shows the same fin — see
+                // [`AWASH`]. Riding every shark at one depth would put a
+                // four-metre animal's whole shoulder out of the water.
+                let deep = (AWASH + (SOUNDED - AWASH) * breathing) * shark_size(beast.seed);
+                let riding = surface - deep;
                 sunk(ground.as_deref(), at, riding, sounding.0)
             }
             BeastKind::Dolphins | BeastKind::Whale => 0.0,
@@ -656,9 +721,11 @@ mod tests {
 
     #[test]
     fn the_shark_is_a_shark_swimming_forward() {
-        // Shark-sized — a reef shark, not a whale and not a minnow — with
-        // the girth forward of amidships, which is what points it: the file
-        // faces -Z like everything here, so the fat end must lean that way.
+        // Shark-shaped — not a whale and not a minnow — with the girth
+        // forward of amidships, which is what points it: the file faces -Z
+        // like everything here, so the fat end must lean that way. How long
+        // the animal actually swims is [`SHARK_SIZE`]'s business, this being
+        // the file it is measured from.
         let (nose, tail) = extent(SHARK_MODEL, 0, 2);
         let length = tail - nose;
         assert!(
@@ -705,18 +772,74 @@ mod tests {
     }
 
     #[test]
-    fn the_rigid_kinds_are_one_creature_each_built_to_scale() {
-        // What `dress` assumes when it hangs the models unscaled — a remodel
-        // that came through in centimetres, or with the exporter's axes
-        // wrong, would swim a hundred-metre whale. Nose-to-tail lengths lie
-        // along Z, the forward axis. These pins lived in the wildlife's
-        // tests while these animals were wildlife.
-        for (file, wanted) in [(DOLPHIN_MODEL, 2.0..3.0), (WHALE_MODEL, 9.0..13.0)] {
+    fn the_rigid_kinds_are_one_creature_each() {
+        // These pins lived in the wildlife's tests while these animals were
+        // wildlife.
+        for file in [DOLPHIN_MODEL, WHALE_MODEL] {
             assert_model_draws(file, &[(0, creature_named_by(file))]);
+        }
+    }
+
+    #[test]
+    fn the_models_measure_what_their_sizes_say_they_do() {
+        // The one thing about a [`Size`] nothing at runtime can check. It
+        // turns a length in world metres into a scale by dividing by what
+        // the file measures, so a remodel that came through in centimetres —
+        // or with the exporter's axes wrong — would swim a shark a hundred
+        // times over while every number in this module still read three to
+        // four metres. Nose to tail lies along Z, the forward axis.
+        for (file, size) in [
+            (SHARK_MODEL, &SHARK_SIZE),
+            (DOLPHIN_MODEL, &DOLPHIN_SIZE),
+            (WHALE_MODEL, &WHALE_SIZE),
+        ] {
             let measured = span(file, 0, 2);
             assert!(
-                wanted.contains(&measured),
-                "{file} measures {measured}m nose to tail, not {wanted:?}"
+                (measured - size.model).abs() < 0.01,
+                "{file} measures {measured} m nose to tail, but its Size divides by {}",
+                size.model
+            );
+        }
+    }
+
+    #[test]
+    fn every_beast_is_dealt_a_size_inside_its_kind_s_range() {
+        // The sizes are the whole of what `dress` hangs and what `glide`
+        // rides at, and a deal that fell outside its range would be an
+        // animal that is simply the wrong size, which is only ever noticed
+        // by eye. Both ends are asked for as well: a `dealt` that answered
+        // one value would satisfy the range and lose the variety, which is
+        // the reason any of this is dealt rather than fixed.
+        let mut seen: Vec<(f32, f32)> = vec![(f32::MAX, f32::MIN); 3];
+        for seed in 0..1024 {
+            let sizes = [
+                (0, SHARK_SIZE.model * shark_size(seed), &SHARK_SIZE),
+                (2, WHALE_SIZE.model * whale_size(seed), &WHALE_SIZE),
+            ];
+            let pod: Vec<_> = pod_members(seed)
+                .into_iter()
+                .map(|(_, _, size, _)| (1, DOLPHIN_SIZE.model * size, &DOLPHIN_SIZE))
+                .collect();
+            for (kind, drawn, size) in sizes.into_iter().chain(pod) {
+                let (low, high) = size.range;
+                assert!(
+                    (low..=high).contains(&drawn),
+                    "a beast was dealt {drawn} m, outside {low}–{high}"
+                );
+                seen[kind].0 = seen[kind].0.min(drawn);
+                seen[kind].1 = seen[kind].1.max(drawn);
+            }
+        }
+        for (kind, size) in [&SHARK_SIZE, &DOLPHIN_SIZE, &WHALE_SIZE]
+            .into_iter()
+            .enumerate()
+        {
+            let (low, high) = size.range;
+            let span = high - low;
+            assert!(
+                seen[kind].0 < low + span * 0.1 && seen[kind].1 > high - span * 0.1,
+                "kind {kind} only ever came out {:?} of {low}–{high}",
+                seen[kind]
             );
         }
     }
@@ -735,8 +858,9 @@ mod tests {
                 "one id dealt two pods"
             );
             assert!((POD_SIZE.0..=POD_SIZE.1).contains(&dealt.len()));
-            for ((member, station, _), again) in dealt.iter().zip(pod_members(seed)) {
+            for ((member, station, size, _), again) in dealt.iter().zip(pod_members(seed)) {
                 assert_eq!(*station, again.1, "member {member} moved between deals");
+                assert_eq!(*size, again.2, "member {member} changed size between deals");
                 // On station give or take the slop, under water to start.
                 let (side, lag) = POD_STATIONS[*member];
                 assert!((station.x - side).abs() <= POD_SLOP);
