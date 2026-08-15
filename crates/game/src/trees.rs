@@ -39,10 +39,6 @@ const TRUNK_COLOR: Color = Color::srgb(0.42, 0.33, 0.24);
 /// rather than an outcrop of whatever it is standing in front of.
 const FROND_COLOR: Color = Color::srgb(0.31, 0.50, 0.20);
 
-/// Marks a palm, so a test can find them and count them.
-#[derive(Component)]
-pub struct Tree;
-
 /// The two meshes and two materials every palm in the world shares, loaded
 /// once. Sharing them is what lets the whole beach draw in as few calls as
 /// there are materials, rather than one apiece.
@@ -101,27 +97,30 @@ fn plant(
             let Some(surface) = ground.surface(at.x, at.y) else {
                 continue;
             };
-            // Placed under the chunk it belongs to, so it is despawned with
-            // the ground rather than needing a lifetime of its own — and in
-            // the chunk's own frame, which is what the transform below is in.
+            // Where the tree stands, in the chunk's own frame. Both halves of
+            // it are given the same one: a palm is two entities rather than a
+            // parent and two children, because it is two meshes only for as
+            // long as it is two materials, and once they both know where they
+            // stand there is nothing left for a third entity to hold. A tree
+            // is a hundred-odd triangles either way, and it is entities a
+            // world full of plants runs out of first.
+            let stands = Transform::from_xyz(palm.at.x, surface, palm.at.y)
+                .with_rotation(Quat::from_rotation_y(palm.yaw))
+                .with_scale(Vec3::splat(palm.scale));
+            // Placed under the chunk they belong to, so they are despawned
+            // with the ground rather than needing a lifetime of their own.
             commands.entity(chunk).with_children(|under| {
                 under.spawn((
-                    Name::new("Palm"),
-                    Tree,
-                    Transform::from_xyz(palm.at.x, surface, palm.at.y)
-                        .with_rotation(Quat::from_rotation_y(palm.yaw))
-                        .with_scale(Vec3::splat(palm.scale)),
-                    Visibility::default(),
-                    children![
-                        (
-                            Mesh3d(model.trunk.clone()),
-                            MeshMaterial3d(model.trunk_material.clone()),
-                        ),
-                        (
-                            Mesh3d(model.fronds.clone()),
-                            MeshMaterial3d(model.frond_material.clone()),
-                        )
-                    ],
+                    Name::new("Palm trunk"),
+                    stands,
+                    Mesh3d(model.trunk.clone()),
+                    MeshMaterial3d(model.trunk_material.clone()),
+                ));
+                under.spawn((
+                    Name::new("Palm crown"),
+                    stands,
+                    Mesh3d(model.fronds.clone()),
+                    MeshMaterial3d(model.frond_material.clone()),
                 ));
             });
         }
