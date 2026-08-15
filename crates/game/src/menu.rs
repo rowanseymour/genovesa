@@ -1157,14 +1157,12 @@ fn helm_keys(
     match helm.get() {
         Helm::Sailing => next.set(Helm::Paused),
         Helm::Paused => next.set(Helm::Sailing),
-        // One step back from the chart is the helm, the same as from the pause
-        // menu — the chart is a screen over the world, not a world of its own.
-        Helm::Chart => next.set(Helm::Sailing),
         // Not ours. On the controls screen Escape may mean "not that key"
         // rather than "back", and only `settings_keys` knows which; at the
-        // console it means "close the console", which is the console's own
-        // to hear.
-        Helm::Controls | Helm::Console => {}
+        // console it means "close the console"; on the chart it may mean
+        // "stop writing this island's name". Each screen hears its own key,
+        // because only it knows what the key means while it is up.
+        Helm::Controls | Helm::Console | Helm::Chart => {}
     }
 }
 
