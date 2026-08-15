@@ -443,6 +443,15 @@ impl SeaConditions {
         })
     }
 
+    /// The wind the sea is being drawn under, in metres per second — the
+    /// eased wind rather than the forecast, which is what anything *reading*
+    /// the weather wants: an instrument settling on a new wind at a different
+    /// rate from the water under it would be telling the player about a sea
+    /// they cannot see. The compass's arm is drawn off this.
+    pub fn wind(&self) -> Vec2 {
+        self.wind
+    }
+
     /// The shore wave's unbroken height under this wind. The breaking cap is
     /// depth's business, not the weather's — a blow widens the surf simply
     /// by giving the cap more to bite off.
