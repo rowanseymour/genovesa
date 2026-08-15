@@ -11,10 +11,20 @@ under its own power — `export.sh` carries skins and animations for its sake.
   knee-deep in the sand.
 - **Boxes, and one triangle.** A person built of rectangular solids is no more
   of a compromise than a beach built of facets. Nothing here needs a bevel.
-- **Three meshes, one per tone: `coat`, `canvas`, `skin`.** The game paints by
-  name — `TONES` in `crates/game/src/figure.rs` — so the split is by colour and
-  not by body part: the coat carries the hat, and which bone moves which vertex
-  cuts across it freely.
+- **One mesh, carrying its own colours on its facets.** It was three meshes
+  once, one per tone, when the client painted by name; with the colour on the
+  corners the split had no job left. The mesh name `player` is still
+  load-bearing — the game paints it white, through `TONES` in
+  `crates/game/src/figure.rs`, to keep the file's PBR material out of the
+  world.
+- **Charcoal coat and hat.** A silhouette rather than a colour: findable on
+  sand, grass and deck alike, and out of the way of the hues the remote
+  players' markers are dealt from.
+- **Sun-bleached canvas legs.** Pale against the coat, so the swinging half of
+  the figure is the half that stands out.
+- **Weathered skin for the head and bare forearms.** Warm, where nothing else
+  on the figure is, so a small head still reads as a head between the hat and
+  the coat.
 - **Every vertex weighted to exactly one bone.** The easiest rule to break with
   a weight-paint brush: a shared vertex *bends* its facet as the figure walks,
   and a gradient across a facet is the one thing this look cannot have.
