@@ -31,6 +31,19 @@ means shark.
 file**, which the +Y-up export turns into Bevy's -Z forward, the boat's own
 convention.
 
+**It carries its own colours, and they are countershaded.** The back keeps the
+deep blue-grey the client used to hold, (0.27, 0.31, 0.37) — darker than the
+dolphin's, because a whale's back barely clears the water and what sells the
+size is a long dark mass rather than a bright shape. The belly is
+(0.62, 0.65, 0.68).
+
+Which facets are belly is decided by the way each one *faces*, not by how high
+it sits: the underside is pale because it is the side in shadow, which is what
+countershading is, and on a hundred facets it puts the join along the widest
+line of the animal, where an eye expects it. It matters most when a whale
+rolls or sounds — a flat-coloured whale is a slab from every angle, and the
+flukes coming up are the moment the shape wants reading.
+
 Where a whale *swims* is the server's word and the wire carries it — a
 whale is a *beast* now, one creature every player can point at — while what
 it looks like doing so stays the client's, in `crates/game/src/beasts.rs`.

@@ -138,7 +138,10 @@ pub fn stands_at(origin: Vec2, plant: &Plant) -> Vec2 {
 mod tests {
     use super::*;
 
-    use crate::testing::{assert_model_draws, creature_named_by, mesh_names, model, triangles};
+    use crate::testing::{
+        assert_model_draws, assert_model_is_painted, creature_named_by, mesh_names, model,
+        triangles,
+    };
 
     #[test]
     fn every_model_is_one_painted_plant_fit_to_draw() {
@@ -151,14 +154,7 @@ mod tests {
             let named = creature_named_by(file);
             assert_model_draws(file, &[(THE_PLANT, named)]);
             assert_eq!(mesh_names(file), [named], "a plant is one mesh");
-
-            let (json, _) = model(file);
-            let attributes = &json["meshes"][THE_PLANT]["primitives"][0]["attributes"];
-            assert!(
-                !attributes["COLOR_0"].is_null(),
-                "{file} carries no colours — see its NOTES.md, and the export \
-                 settings that pass them through"
-            );
+            assert_model_is_painted(file, THE_PLANT);
         }
     }
 

@@ -31,6 +31,17 @@ dolphin bends — amidships — or the nose would sweep and the tail would hang.
 **It faces +Y in this file**, which the +Y-up export turns into Bevy's -Z
 forward, the boat's own convention.
 
+**It carries its own colours, and they are countershaded.** The back keeps the
+wet slate the client used to hold, (0.42, 0.50, 0.55) — lighter than the deep
+sea it breaks out of and darker than the spray-white a leap suggests, so the
+arc reads against the water at the distances pods keep. The belly is
+(0.80, 0.81, 0.82).
+
+Which facets are belly is decided by the way each one faces rather than by how
+high it sits. The porpoising is what it is for: a pod leaves the water on its
+side as often as level, and a dolphin that was one colour all over lost the
+whole shape of the leap.
+
 Where a pod *swims* is the server's word and the wire carries it — a pod is
 a *beast* now, one creature every player can point at — while what it looks
 like doing so stays the client's, in `crates/game/src/beasts.rs`: the member

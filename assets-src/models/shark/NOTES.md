@@ -62,7 +62,21 @@ game plays it on its own clock and scales the playback rate with how fast
 the water is going by, so a shark pushed faster one day swishes faster
 rather than gliding like a submarine.
 
+**It carries its own colours, and they are countershaded.** The back keeps the
+sand-grey the client used to hold, (0.46, 0.45, 0.40): a shark here is seen
+through a metre of sunlit shallow water or as a fin against it, and both read
+best a shade paler than the dolphin's wet slate — the dolphin is a dark arc
+over deep water, where the shark is a pale shape over sand. The belly is
+(0.78, 0.77, 0.71), near enough white.
+
+Which facets are belly is decided by the way each one faces, not by how high it
+sits — the underside is pale because it is the side in shadow. A shark is the
+animal that most wants it: the countershading is exactly what the real ones
+carry, and it reads the moment one banks in clear water.
+
 `build.py` beside this file is the script the master was first raised by,
 kept as the record of the numbers. The `.blend` is still the master: if it
 has been edited by hand since, the script is history rather than truth, so
-do not re-run it over the file.
+do not re-run it over the file. It has been — the colours above were painted
+onto the master after the fact, and `build.py` knows nothing about them, so
+re-running it would raise a shark with no paint on it.

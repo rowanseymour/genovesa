@@ -26,6 +26,16 @@ forward, the boat's own convention. Wings and tail are thin closed sheets,
 like the palm's fronds — a plane has no back, and would vanish from one side
 under backface culling.
 
+**It carries its own colours: white, with a grey mantle and dark wingtips.** The
+body keeps the chalk grey the client used to hold, (0.84, 0.84, 0.80) — a
+seabird is seen low against bright water, where a pale bird is the one that
+reads. The upper wing is (0.55, 0.57, 0.60) and the tips (0.22, 0.22, 0.24).
+
+The other way round from the eagle, and for the same reason: what a bird is
+seen from decides which surface is worth painting. The underside stays white
+throughout, and only the four up-facing facets of each wing carry anything —
+which at this size is a gull, and at any smaller size is still a pale bird.
+
 Where a line *flies* is the game's business, in `crates/game/src/wildlife.rs`
 — decorative wildlife is client-side, so nothing about this model or its
 placing crosses the wire.

@@ -29,6 +29,19 @@ side under backface culling.
 -Z, which is Bevy's forward and the boat's convention, so the game can point
 it along its flight with a plain `looking_to`.
 
+**It carries its own colours: dark above, pale below, white at both ends.** The
+body and the upper wings keep the dark umber the client used to hold,
+(0.24, 0.18, 0.13). Beneath is (0.72, 0.68, 0.58), and the head and the tail
+are (0.90, 0.89, 0.85).
+
+The white is the concession to being four pixels across. An eagle is seen from
+above, where an underside never shows, so countershading alone would have left
+it the dark blob it already was; white at both ends of a dark bird is the one
+plumage pattern that survives being that small, and it is what a fish eagle
+actually looks like. The markings are deliberately blocks rather than detail —
+the old client-side note was right that real plumage colour would only muddy a
+shape this size, and the answer is to be bolder rather than to stay plain.
+
 Where an eagle *flies* is the game's business, in `crates/game/src/wildlife.rs`
 — decorative wildlife is client-side, so nothing about this model or its
 placing crosses the wire.

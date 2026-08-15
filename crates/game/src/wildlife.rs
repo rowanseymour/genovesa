@@ -63,15 +63,13 @@ enum Kind {
 }
 
 /// What each kind is made of, in [`Kind`]'s own order: the file its mesh
-/// comes out of, and the colour it is painted.
+/// comes out of. What it is *painted* is the file's own business now — see
+/// the masters' NOTES — so there is nothing here but a name.
 ///
 /// The models hold one mesh each, at position 0 — pinned by
 /// `the_models_are_one_creature_each_fit_to_draw` the way the palm's order
 /// is, which reads the file names here to know what it is looking for.
-const KINDS: [(&str, Color); 2] = [
-    ("models/eagle.glb", EAGLE_COLOR),
-    ("models/seabird.glb", SEABIRD_COLOR),
-];
+const KINDS: [&str; 2] = ["models/eagle.glb", "models/seabird.glb"];
 
 /// The spans each kind comes in, wingtip to wingtip, and what its file
 /// measures — see [`Size`]. Birds are quoted across rather than nose to tail
@@ -92,16 +90,6 @@ const SEABIRD_SIZE: Size = Size {
     model: 2.10,
     range: (1.6, 2.2),
 };
-
-/// Dark umber. An eagle is seen against sky or against sunlit rock, and in
-/// both it is its silhouette — real plumage colour would only muddy a shape
-/// a few pixels across.
-const EAGLE_COLOR: Color = Color::srgb(0.24, 0.18, 0.13);
-
-/// Chalk grey. A seabird is seen low against bright water, where a pale bird
-/// is the one that reads — the real birds are mostly white for their own
-/// reasons.
-const SEABIRD_COLOR: Color = Color::srgb(0.84, 0.84, 0.80);
 
 // --- Minding the player ------------------------------------------------------
 
@@ -707,9 +695,13 @@ fn load_the_models(
     mut materials: ResMut<Assets<StandardMaterial>>,
     assets: Res<AssetServer>,
 ) {
-    commands.insert_resource(WildlifeModels(KINDS.map(|(file, colour)| Creature {
+    // One white material between them, because a bird's colours ride on its
+    // own vertices and a material that let them through is the same material
+    // whichever bird it is.
+    let painted = materials.add(matte(Color::WHITE));
+    commands.insert_resource(WildlifeModels(KINDS.map(|file| Creature {
         mesh: assets.load(model_mesh(file, 0)),
-        material: materials.add(matte(colour)),
+        material: painted.clone(),
     })));
 }
 
@@ -746,7 +738,9 @@ mod tests {
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
     use protocol::ground::{quantize, ChunkPayload, Surface, Tone, FACET_TRIS, FACET_VERTS};
 
-    use crate::testing::{assert_model_draws, creature_named_by, span, test_ground};
+    use crate::testing::{
+        assert_model_draws, assert_model_is_painted, creature_named_by, span, test_ground,
+    };
 
     /// Every course this entropy can lay for a kind, tried until one is
     /// found. Which bits fit is nobody's business, so a claim about the water
@@ -964,8 +958,9 @@ mod tests {
         // See `assert_model_draws`. Each file holds one mesh, at position 0,
         // and it is the animal the file is named for — which is the one thing
         // about them the game cannot see for itself.
-        for (file, _) in KINDS {
+        for file in KINDS {
             assert_model_draws(file, &[(0, creature_named_by(file))]);
+            assert_model_is_painted(file, 0);
         }
     }
 
@@ -978,7 +973,7 @@ mod tests {
         // something. Wingspans lie along X. The swimming kinds' pins moved
         // to the beasts' tests with the animals themselves.
         for (kind, size) in [(Kind::Eagle, &EAGLE_SIZE), (Kind::Seabird, &SEABIRD_SIZE)] {
-            let file = KINDS[kind as usize].0;
+            let file = KINDS[kind as usize];
             let measured = span(file, 0, 0);
             assert!(
                 (measured - size.model).abs() < 0.01,

@@ -50,13 +50,28 @@
 #   are redundant, and a cycle sampled at its quarters is all extremes and
 #   crossings with nothing redundant in it to drop.
 #
-#   The vertex colours, and exactly one set of them. A plant carries its own
-#   colours rather than being painted by the client — see the palm's NOTES —
-#   so `COLOR_0` is part of what a model *is*. Two settings, both needed:
-#   `MATERIAL` writes the attribute a material actually reads, and without
-#   `export_all_vertex_colors` turned off the exporter adds a second, dummy
-#   set alongside it. A master with no colour attribute exports exactly as it
-#   did before this was turned on.
+#   The vertex colours, and exactly one set of them. A model carries its own
+#   colours rather than being painted by the client — see any master's NOTES —
+#   so `COLOR_0` is part of what a model *is*, and the game draws it with a
+#   white material that does nothing but let them through. Two settings, both
+#   needed: `MATERIAL` writes the attribute a material actually reads, and
+#   without `export_all_vertex_colors` turned off the exporter adds a second,
+#   dummy set alongside it. A master with no colour attribute exports exactly
+#   as it did before this was turned on.
+#
+#   Two things a master has to get right for this to come out looking like the
+#   rest of the game, neither of which the exporter can fix:
+#
+#   A colour belongs to a *facet*, not to a vertex. A vertex colour is
+#   interpolated across the triangle it belongs to, and there are no gradients
+#   anywhere in this world — so the attribute goes on the **corner** domain
+#   with every corner of a face given the same value. On the point domain it
+#   is only safe where a whole part is one colour.
+#
+#   And the colours are **scene-linear**, because that is what a glTF
+#   `COLOR_0` means. The sRGB triples the palette and these notes are written
+#   in are what a screen is told; written into a file as though they were
+#   linear they come out a good deal paler than they read.
 #
 # No cameras and no lights: the game lights its own world, and keeping them out
 # means a stray light left in a master cannot follow a model into the game.

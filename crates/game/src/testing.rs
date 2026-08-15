@@ -437,6 +437,23 @@ pub fn assert_model_draws(file: &str, meshes: &[(usize, &str)]) {
     }
 }
 
+/// Whether a model brings its own colours.
+///
+/// Every model painted this way is drawn with a *white* material, so a mesh
+/// that lost its colour attribute — a master saved without one, or an export
+/// that dropped it — would arrive as a white animal rather than as an
+/// obviously broken one. That is a failure worth a test of its own, because
+/// nothing else in the game would report it.
+pub fn assert_model_is_painted(file: &str, mesh: usize) {
+    let (json, _) = model(file);
+    let attributes = &json["meshes"][mesh]["primitives"][0]["attributes"];
+    assert!(
+        !attributes["COLOR_0"].is_null(),
+        "{file} carries no colours — see its NOTES.md, and the export settings \
+         that pass them through"
+    );
+}
+
 /// The creature a model file is named for: `models/whale.glb` is a whale.
 ///
 /// The one-mesh models are all named this way — the master names the object
