@@ -83,11 +83,19 @@
 //! what it ought to be, a machine that produces chunks and what stands on
 //! them and owes nothing downstream an explanation.
 //!
+//! An island can already be *named*: clicking one on the sheet puts a caret
+//! on its lettering and the keyboard becomes the pen — there is no dialog,
+//! because a chart is written on, not filled in. The name is written against
+//! the ring's identity on the step lattice (see [`Chart::coastlines`]) and is
+//! the chart's own to keep: it lives and dies with the sheet, exactly as what
+//! the sheet has seen does.
+//!
 //! A *claim* itself would cross the wire and be the server's to grant. The
 //! server holds the same chunks, so it can check a claim by this same
 //! arithmetic without trusting the client — and when that day comes, the
 //! contour-and-ring arithmetic should move to `protocol`, where the things
-//! both ends must agree on live, so the two cannot drift.
+//! both ends must agree on live, so the two cannot drift — and a name worth
+//! showing to anybody else would ride with the claim.
 //!
 //! # Ink, not paper
 //!
@@ -109,11 +117,14 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::ButtonState;
 use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::text::{Font, FontSize, FontSource};
+use bevy::window::PrimaryWindow;
 
 use protocol::ground::{chunk_at, CHUNK_METRES, FACET_METRES, FACET_QUADS, FACET_VERTS};
 
@@ -262,6 +273,11 @@ impl Coast {
 #[derive(Resource, Default)]
 pub struct Chart {
     coasts: HashMap<IVec2, Vec<Coast>>,
+    /// What the player has christened their islands, keyed by [`Island::id`].
+    /// Part of the chart rather than a resource of its own because it is the
+    /// same kind of fact as the coasts: what *this* player holds about *this*
+    /// world, gone with the world when they leave it.
+    names: HashMap<IVec2, String>,
 }
 
 /// What the chart holds, counted.
@@ -292,12 +308,18 @@ pub struct ChartTally {
 
 /// An island the chart has closed — the nameable unit, see the module docs —
 /// measured for the lettering that goes on it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Island {
+    /// What names the island for as long as the chart lives: the least point
+    /// of its ring on the step lattice, which is the same points however the
+    /// walk went round — see [`Chart::coastlines`].
+    pub id: IVec2,
     /// The middle of its bounding box, on the sheet (see [`on_the_sheet`]).
     pub centre: Vec2,
     /// How far it reaches: the longer side of that box, in metres.
     pub extent: f32,
+    /// What the player has christened it, if they have.
+    pub name: Option<String>,
 }
 
 impl Chart {
@@ -312,7 +334,7 @@ impl Chart {
         let surveyed = self.coasts.len();
         let coastal = self.coasts.values().filter(|runs| !runs.is_empty()).count();
         let mut islands = 0;
-        let (complete, open) = self.coastlines(&mut |ring| {
+        let (complete, open) = self.coastlines(&mut |_, ring| {
             if measure(ring).is_island() {
                 islands += 1;
             }
@@ -329,21 +351,40 @@ impl Chart {
     /// The islands the chart has closed, each measured for its lettering.
     pub fn islands(&self) -> Vec<Island> {
         let mut islands = Vec::new();
-        self.coastlines(&mut |ring| {
+        self.coastlines(&mut |id, ring| {
             let measured = measure(ring);
             if measured.is_island() {
                 islands.push(Island {
+                    id,
                     centre: measured.centre,
                     extent: measured.extent,
+                    name: self.names.get(&id).cloned(),
                 });
             }
         });
         islands
     }
 
+    /// Writes a name against an island — [`Island::id`] says which — or,
+    /// given only whitespace, washes it off again.
+    pub fn christen(&mut self, island: IVec2, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.names.remove(&island);
+        } else {
+            self.names.insert(island, name.to_string());
+        }
+    }
+
+    /// What an island is called, if the player has called it anything.
+    pub fn name(&self, island: IVec2) -> Option<&str> {
+        self.names.get(&island).map(String::as_str)
+    }
+
     /// Follows every coastline the chart holds, handing each closed one to
-    /// `close` — whole, in the order the shore is walked — and counting what
-    /// it found: coastlines that close, and chains still hanging open.
+    /// `close` — whole, in the order the shore is walked, under the identity
+    /// that names it — and counting what it found: coastlines that close,
+    /// and chains still hanging open.
     ///
     /// Whether a coastline closes is integer bookkeeping, not geometry: a
     /// [`Mark`] lands exactly on the chunk boundary, so a run's end and its
@@ -351,7 +392,16 @@ impl Chart {
     /// following a shore is a lookup. The walk is the survey's own two-pass
     /// one a scale up — chains first from every run nothing links into, then
     /// whatever is left, which can only be loops.
-    fn coastlines(&self, close: &mut dyn FnMut(&mut dyn Iterator<Item = Vec2>)) -> (usize, usize) {
+    ///
+    /// The identity handed with each ring is its least point on that same
+    /// lattice. It is integers, so no tolerance is involved; chunks are
+    /// surveyed once and never again, so a closed ring is the same points for
+    /// as long as the chart lives; and the *least* point in particular does
+    /// not care where the walk happened to start, which a hash map decides.
+    fn coastlines(
+        &self,
+        close: &mut dyn FnMut(IVec2, &mut dyn Iterator<Item = Vec2>),
+    ) -> (usize, usize) {
         let mut complete = 0;
 
         // Where each open run starts and ends, in whole steps of the mark
@@ -363,7 +413,8 @@ impl Chart {
                 if run.closed {
                     // A ring inside one chunk closed the moment it was drawn.
                     complete += 1;
-                    close(&mut run.points(chunk));
+                    let id = ring_id(run.marks.iter().map(|&mark| run_steps(chunk, mark)));
+                    close(id, &mut run.points(chunk));
                     continue;
                 }
                 starts.insert(run_steps(chunk, run.marks[0]), (chunk, at));
@@ -414,7 +465,14 @@ impl Chart {
             }
             let chain = walk(key, &mut walked);
             complete += 1;
+            let id = ring_id(chain.iter().flat_map(|&(chunk, at)| {
+                self.coasts[&chunk][at]
+                    .marks
+                    .iter()
+                    .map(move |&mark| run_steps(chunk, mark))
+            }));
             close(
+                id,
                 &mut chain
                     .iter()
                     .flat_map(|&(chunk, at)| self.coasts[&chunk][at].points(chunk)),
@@ -452,6 +510,14 @@ impl Chart {
 /// follow a shore across chunks by equality rather than by tolerance.
 fn run_steps(chunk: IVec2, mark: Mark) -> IVec2 {
     chunk * u8::MAX as i32 + IVec2::new(mark.x as i32, mark.z as i32)
+}
+
+/// The least of a ring's points on the step lattice, west before south — the
+/// ring's identity, whatever order its points arrive in.
+fn ring_id(marks: impl Iterator<Item = IVec2>) -> IVec2 {
+    marks
+        .min_by_key(|point| (point.x, point.y))
+        .expect("a ring has points")
 }
 
 /// A closed ring, measured on the sheet.
@@ -907,6 +973,22 @@ const NAME_FONT: &str = "fonts/IMFellEnglish-Italic.ttf";
 /// it holds its size on the paper however far the sheet is zoomed.
 const NAME_SIZE: f32 = 17.0;
 
+/// The most letters a name may run to. A chart has room for a real name and
+/// not for a sentence, and the cap is what keeps one island's lettering from
+/// being laid across its neighbour's.
+const NAME_LENGTH: usize = 24;
+
+/// How far the mouse may wander between press and release and still mean a
+/// click rather than a small drag, in pixels. The same hand does both — the
+/// sheet is panned with this button — so the two have to be told apart, and
+/// they are told apart the way every map application does it.
+const CLICK_SLOP: f32 = 5.0;
+
+/// Half-extents of the click target under an island's lettering, in pixels —
+/// so the name is still clickable when the sheet is zoomed out far enough
+/// that the island itself has become a speck.
+const NAME_REACH: Vec2 = Vec2::new(60.0, 14.0);
+
 /// Metres of world to a pixel of sheet, at either end of the zoom and where it
 /// opens.
 ///
@@ -1061,6 +1143,9 @@ impl Plugin for ChartPlugin {
                 (
                     unroll.run_if(no_sheet_yet),
                     find_the_reader,
+                    escape_key,
+                    write_the_name,
+                    click_to_name,
                     pan,
                     zoom,
                     hold_the_sheet,
@@ -1097,9 +1182,11 @@ fn chart_key(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     helm: Res<State<Helm>>,
+    naming: Option<Res<Naming>>,
     mut next: ResMut<NextState<Helm>>,
 ) {
-    if !keys.just_pressed(bindings.key(Action::Chart)) {
+    // While a name is being written the chart key is a letter of it.
+    if naming.is_some() || !keys.just_pressed(bindings.key(Action::Chart)) {
         return;
     }
     match helm.get() {
@@ -1194,8 +1281,13 @@ fn roll_up(mut commands: Commands, mut world_camera: Query<&mut Camera, With<Map
     }
     commands.remove_resource::<Inks>();
     commands.remove_resource::<Lettering>();
-    // The engraving goes with the sheet, so the next opening draws one for
-    // wherever the reader has got to rather than trusting a window from before.
+    // A name still being written is left unwritten: the ways off the chart
+    // with the pen down all mean the player's attention went elsewhere, and
+    // half a name committed by a distraction would be worse than the draft
+    // lost. The engraving goes with the sheet too, so the next opening draws
+    // one for wherever the reader has got to rather than trusting a window
+    // from before.
+    commands.remove_resource::<Naming>();
     commands.remove_resource::<Engraved>();
 }
 
@@ -1241,9 +1333,15 @@ fn pan(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
+    naming: Option<Res<Naming>>,
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
 ) {
+    // While a name is being written the keys spell it — see [`Naming`] — and
+    // the mouse is on its way to a click, which must not shove the sheet.
+    if naming.is_some() {
+        return;
+    }
     let (ahead, helm) = bindings.driving(&keys);
     // The helm's positive is to port, which on a sheet with north up is west.
     let keyed = Vec2::new(-helm, ahead) * PAN_SPEED * view.metres_per_pixel * time.delta_secs();
@@ -1312,9 +1410,17 @@ fn engrave(
     mut engraver: Engraver,
     chart: Res<Chart>,
     view: Res<ChartView>,
+    naming: Option<Res<Naming>>,
+    mut was_naming: Local<bool>,
     engraved: Option<Res<Engraved>>,
     sheet: Query<&Camera, With<ChartSheet>>,
 ) {
+    // The pen moving is a reason to redraw: each letter typed, the pen going
+    // down, and — since a cancelled draft leaves the chart itself untouched —
+    // the pen coming up again, which nothing but this remembers.
+    let pen_moved = naming.as_ref().is_some_and(|naming| naming.is_changed())
+        || naming.is_some() != *was_naming;
+    *was_naming = naming.is_some();
     // The sheet's own viewport rather than the window's size, because they are
     // not always the same thing: a run taking pictures draws to an off-screen
     // image and has no window at all. `None` on the frame the camera is spawned
@@ -1330,7 +1436,11 @@ fn engrave(
     let showing = window(&view, size);
     if let Some(engraved) = &engraved {
         let held = engraved.covered.contains(showing.min) && engraved.covered.contains(showing.max);
-        if held && engraved.metres_per_pixel == view.metres_per_pixel && !chart.is_changed() {
+        if held
+            && engraved.metres_per_pixel == view.metres_per_pixel
+            && !chart.is_changed()
+            && !pen_moved
+        {
             return;
         }
     }
@@ -1384,20 +1494,30 @@ fn engrave(
     }
 
     // The names, over the ink. Every island the survey has closed carries
-    // one, and until players can give their own, every one reads the same.
-    // The walk is over the whole chart rather than the window — a chain can
-    // cross any number of chunks, so a ring cannot be closed from a window's
-    // worth — and only the lettering that lands on the paper is spawned.
+    // one — the player's own if they have written one, and a placeholder
+    // until they do. The island under the pen shows the draft instead, caret
+    // and all: the lettering is the text field, because a chart is written
+    // on, not filled in. The walk is over the whole chart rather than the
+    // window — a chain can cross any number of chunks, so a ring cannot be
+    // closed from a window's worth — and only the lettering that lands on
+    // the paper is spawned.
     let on_paper = Rect::from_corners(on_the_sheet(covered.min), on_the_sheet(covered.max));
     for island in chart.islands() {
         if !on_paper.contains(island.centre) {
             continue;
         }
+        let lettered = match &naming {
+            Some(naming) if naming.island == island.id => format!("{}|", naming.draft),
+            _ => island
+                .name
+                .clone()
+                .unwrap_or_else(|| "Unnamed island".to_string()),
+        };
         engraver.commands.spawn((
             Name::new("Chart lettering"),
             Engraving,
             ChartSheet,
-            Text2d::new("Unnamed island"),
+            Text2d::new(lettered),
             TextFont {
                 font: FontSource::Handle(engraver.lettering.0.clone()),
                 font_size: FontSize::Px(NAME_SIZE),
@@ -1510,6 +1630,193 @@ fn readers_mark() -> Mesh {
     strokes.triangle(points[0], points[1], points[2]);
     strokes.triangle(points[0], points[2], points[3]);
     strokes.mesh().expect("the mark is never empty")
+}
+
+// ---------------------------------------------------------------------------
+// Naming
+// ---------------------------------------------------------------------------
+
+/// A name being written on the sheet: the island under the pen, and the
+/// letters so far.
+///
+/// While this exists the keyboard is the pen's: the chart key spells a
+/// letter, the driving keys spell letters, and Escape means put the pen down
+/// — so [`chart_key`] and [`pan`] stand down while it does, and
+/// [`escape_key`] hears Escape first. There is no dialog and no state for
+/// one, because a chart is written on, not filled in: the island's own
+/// lettering shows the draft, with a caret on the end.
+#[derive(Resource)]
+pub struct Naming {
+    island: IVec2,
+    draft: String,
+}
+
+/// Escape on the chart: with a name half-written it puts the pen down and
+/// leaves the name as it was, and otherwise it closes the sheet — one step
+/// back, the same as from the pause menu. The chart hears its own Escape the
+/// way the console does, and for the same reason: while a name is being
+/// written the key means something the helm cannot know about.
+fn escape_key(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    naming: Option<Res<Naming>>,
+    mut next: ResMut<NextState<Helm>>,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    if naming.is_some() {
+        commands.remove_resource::<Naming>();
+    } else {
+        next.set(Helm::Sailing);
+    }
+}
+
+/// The pen at work: letters typed go into the draft, Backspace takes one
+/// back, and Enter writes the name against the island — where writing an
+/// emptied draft washes the name off, which is how a mistake is undone.
+///
+/// Asks what the keyboard *typed* rather than which positions were pressed,
+/// the same way the console and the menus' two fields do, so a name can hold
+/// whatever a layout can produce.
+fn write_the_name(
+    mut commands: Commands,
+    mut chart: ResMut<Chart>,
+    naming: Option<ResMut<Naming>>,
+    mut presses: MessageReader<KeyboardInput>,
+) {
+    let Some(mut naming) = naming else {
+        // Drained even with no pen down, so that picking an island up does
+        // not deliver everything typed since the chart was opened.
+        presses.clear();
+        return;
+    };
+
+    for press in presses.read() {
+        // A held key repeats, which is what a text field wants: holding
+        // backspace should clear the name rather than one letter of it.
+        if press.state != ButtonState::Pressed {
+            continue;
+        }
+        match press.key_code {
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                chart.christen(naming.island, &naming.draft);
+                commands.remove_resource::<Naming>();
+                return;
+            }
+            KeyCode::Backspace => {
+                naming.draft.pop();
+            }
+            _ => {
+                // The space named rather than read off the key, as the
+                // console found before this did: it arrives as [`Key::Space`]
+                // and not as a character.
+                let typed = match &press.logical_key {
+                    Key::Character(typed) => typed.as_str(),
+                    Key::Space => " ",
+                    _ => continue,
+                };
+                for letter in typed.chars().filter(|c| !c.is_control()) {
+                    if naming.draft.chars().count() < NAME_LENGTH {
+                        naming.draft.push(letter);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The hand on the sheet, watched for a click: the button, the motion that
+/// tells a click from a drag, and what it takes to say where on the sheet the
+/// click landed. One parameter rather than five for the same reason
+/// [`Engraver`] is one — they are one job.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Pointer<'w, 's> {
+    buttons: Res<'w, ButtonInput<MouseButton>>,
+    motion: Res<'w, AccumulatedMouseMotion>,
+    dragged: Local<'s, f32>,
+    windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    sheet: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<ChartSheet>>,
+}
+
+impl Pointer<'_, '_> {
+    /// Where a click landed on the sheet, if this frame ended one.
+    ///
+    /// A click is a release that never became a drag, which is the only way
+    /// to share the button with panning: the hand that drags the sheet and
+    /// the hand that taps an island are the same hand on the same button.
+    fn clicked(&mut self) -> Option<Vec2> {
+        if self.buttons.just_pressed(MouseButton::Left) {
+            *self.dragged = 0.0;
+        } else if self.buttons.pressed(MouseButton::Left) {
+            *self.dragged += self.motion.delta.length();
+        }
+        if !self.buttons.just_released(MouseButton::Left) || *self.dragged > CLICK_SLOP {
+            return None;
+        }
+        // The cursor through the sheet's own camera, so the point comes back
+        // in the sheet's coordinates at whatever pan and zoom the sheet is
+        // at. A run taking pictures has no window and no cursor, and takes
+        // no clicks.
+        let cursor = self
+            .windows
+            .iter()
+            .next()
+            .and_then(Window::cursor_position)?;
+        let (camera, placed) = self.sheet.single().ok()?;
+        camera.viewport_to_world_2d(placed, cursor).ok()
+    }
+}
+
+/// Picks the pen up and puts it down: a click on an island starts writing its
+/// name, and a click anywhere with a name in hand writes that name as it
+/// stands — clicking away is finishing, not abandoning, because a half-typed
+/// name lost to a stray click would be the sheet eating somebody's work.
+fn click_to_name(
+    mut commands: Commands,
+    mut chart: ResMut<Chart>,
+    view: Res<ChartView>,
+    naming: Option<Res<Naming>>,
+    mut pointer: Pointer,
+) {
+    let Some(at) = pointer.clicked() else {
+        return;
+    };
+
+    let hit = hit_island(&chart.islands(), at, view.metres_per_pixel);
+    if let Some(naming) = naming {
+        chart.christen(naming.island, &naming.draft);
+        commands.remove_resource::<Naming>();
+        // Clicking the island being written is only ever finishing it.
+        if hit.as_ref().map(|island| island.id) == Some(naming.island) {
+            return;
+        }
+    }
+    if let Some(island) = hit {
+        commands.insert_resource(Naming {
+            island: island.id,
+            draft: island.name.unwrap_or_default(),
+        });
+    }
+}
+
+/// The island a click on the sheet lands on, if any: within the island's own
+/// bounds, or within the stretch of paper its lettering sits on — and where
+/// those crowd, whichever island's middle lies nearest.
+fn hit_island(islands: &[Island], at: Vec2, metres_per_pixel: f32) -> Option<Island> {
+    islands
+        .iter()
+        .filter(|island| {
+            let half = Vec2::splat(island.extent / 2.0).max(NAME_REACH * metres_per_pixel);
+            let off = (at - island.centre).abs();
+            off.x <= half.x && off.y <= half.y
+        })
+        .min_by(|a, b| {
+            a.centre
+                .distance_squared(at)
+                .total_cmp(&b.centre.distance_squared(at))
+        })
+        .cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -2311,6 +2618,7 @@ mod tests {
         .init_resource::<ButtonInput<MouseButton>>()
         .init_resource::<AccumulatedMouseMotion>()
         .init_resource::<AccumulatedMouseScroll>()
+        .add_message::<KeyboardInput>()
         .init_asset::<Mesh>()
         .init_asset::<ColorMaterial>()
         // The lettering hand: unrolling the sheet asks the asset server for
@@ -2340,6 +2648,184 @@ mod tests {
         keys.release(key);
         keys.press(key);
         run_frames(app, 2);
+    }
+
+    /// Types one keypress into the name being written, the way a real
+    /// keyboard delivers it — the same shape the console's tests fake.
+    fn type_key(app: &mut App, key: KeyCode, typed: &str) {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: key,
+            logical_key: match typed {
+                " " => Key::Space,
+                "\r" => Key::Enter,
+                "\u{8}" => Key::Backspace,
+                typed => Key::Character(typed.into()),
+            },
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+    }
+
+    fn type_word(app: &mut App, text: &str) {
+        for character in text.chars() {
+            let key = if character == ' ' {
+                KeyCode::Space
+            } else {
+                KeyCode::KeyA
+            };
+            type_key(app, key, &character.to_string());
+        }
+    }
+
+    #[test]
+    fn christening_an_island_letters_it_by_name() {
+        // The names ride the islands the walk finds: written against the id,
+        // read back off the island — and only whitespace washes them off.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+        chart.record(
+            IVec2::new(1, 0),
+            survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
+        );
+
+        let id = chart.islands()[0].id;
+        chart.christen(id, "  Isla Genovesa  ");
+        assert_eq!(chart.islands()[0].name.as_deref(), Some("Isla Genovesa"));
+        assert_eq!(chart.name(id), Some("Isla Genovesa"));
+
+        chart.christen(id, "   ");
+        assert_eq!(chart.islands()[0].name, None);
+    }
+
+    #[test]
+    fn an_islands_identity_survives_more_of_the_world_arriving() {
+        // The id has to keep naming the same ring while the chart around it
+        // grows, or a name would fall off its island when the player sailed
+        // on. More survey arriving elsewhere must not move it.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+        chart.record(
+            IVec2::new(1, 0),
+            survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
+        );
+        let id = chart.islands()[0].id;
+
+        chart.record(IVec2::new(4, 4), survey(&a_north_shore(50.0)));
+        chart.record(IVec2::new(-3, 2), survey(&all(-8.0)));
+        assert_eq!(chart.islands()[0].id, id);
+    }
+
+    #[test]
+    fn a_click_lands_on_the_island_or_its_lettering() {
+        let island = Island {
+            id: IVec2::ZERO,
+            centre: Vec2::ZERO,
+            extent: 200.0,
+            name: None,
+        };
+        let islands = vec![island];
+
+        // On the island itself, and just off it.
+        assert!(hit_island(&islands, Vec2::new(80.0, 40.0), 1.0).is_some());
+        assert!(hit_island(&islands, Vec2::new(300.0, 0.0), 1.0).is_none());
+
+        // Zoomed far out the island is a speck — extent under a pixel of
+        // reach — but the stretch of lettering still takes the click.
+        assert!(hit_island(&islands, Vec2::new(1500.0, 0.0), 32.0).is_some());
+        assert!(hit_island(&islands, Vec2::new(0.0, 1500.0), 32.0).is_none());
+    }
+
+    #[test]
+    fn a_typed_name_is_written_by_enter() {
+        let mut app = keyed_app();
+        press(&mut app, KeyCode::KeyM);
+        assert_eq!(helm(&app), Helm::Chart);
+
+        let island = IVec2::new(40, -17);
+        app.insert_resource(Naming {
+            island,
+            draft: String::new(),
+        });
+        type_word(&mut app, "Skull Rock");
+        type_key(&mut app, KeyCode::Enter, "\r");
+
+        let world = app.world();
+        assert_eq!(world.resource::<Chart>().name(island), Some("Skull Rock"));
+        assert!(
+            world.get_resource::<Naming>().is_none(),
+            "the pen is still down"
+        );
+    }
+
+    #[test]
+    fn backspace_takes_a_letter_back_and_a_name_stops_at_its_cap() {
+        let mut app = keyed_app();
+        press(&mut app, KeyCode::KeyM);
+
+        let island = IVec2::ZERO;
+        app.insert_resource(Naming {
+            island,
+            draft: String::new(),
+        });
+        // Far past the cap, so the surplus has something to be dropped from.
+        type_word(&mut app, &"a".repeat(NAME_LENGTH + 9));
+        type_key(&mut app, KeyCode::Backspace, "\u{8}");
+        type_key(&mut app, KeyCode::Enter, "\r");
+
+        let written = app
+            .world()
+            .resource::<Chart>()
+            .name(island)
+            .expect("a name was written");
+        assert_eq!(written.chars().count(), NAME_LENGTH - 1);
+    }
+
+    #[test]
+    fn escape_puts_the_pen_down_without_writing() {
+        let mut app = keyed_app();
+        press(&mut app, KeyCode::KeyM);
+
+        let island = IVec2::ZERO;
+        app.insert_resource(Naming {
+            island,
+            draft: "Half a nam".to_string(),
+        });
+        press(&mut app, KeyCode::Escape);
+
+        // The draft is gone, nothing was written, and the chart is still up:
+        // Escape spoke to the pen, not the sheet.
+        assert_eq!(helm(&app), Helm::Chart);
+        let world = app.world();
+        assert!(world.get_resource::<Naming>().is_none());
+        assert_eq!(world.resource::<Chart>().name(island), None);
+    }
+
+    #[test]
+    fn escape_with_no_pen_down_closes_the_chart() {
+        let mut app = keyed_app();
+        press(&mut app, KeyCode::KeyM);
+        assert_eq!(helm(&app), Helm::Chart);
+
+        press(&mut app, KeyCode::Escape);
+        assert_eq!(helm(&app), Helm::Sailing);
+    }
+
+    #[test]
+    fn the_chart_key_spells_a_letter_while_a_name_is_written() {
+        let mut app = keyed_app();
+        press(&mut app, KeyCode::KeyM);
+
+        app.insert_resource(Naming {
+            island: IVec2::ZERO,
+            draft: String::new(),
+        });
+        press(&mut app, KeyCode::KeyM);
+        assert_eq!(helm(&app), Helm::Chart, "the chart key closed the sheet");
     }
 
     #[test]
