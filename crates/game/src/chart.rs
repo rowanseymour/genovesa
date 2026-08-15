@@ -59,26 +59,35 @@
 //! left empty because a hill stood in front of it would read as the chart
 //! being broken rather than as the survey being honest.
 //!
-//! # Closing a coastline
+//! # Closing a coastline, and what an island is
 //!
 //! Because coast is charted by going there, "has the player been all the way
-//! round this island" is a question with an answer, and the chart can give it
-//! without ever knowing what an island is: strokes meet *exactly* at chunk
-//! boundaries — see [`Mark`] — so a circumnavigated coastline is a chain of
-//! runs that links back to its own start, found by integer bookkeeping.
-//! [`Chart::tally`] counts the coastlines that close and the chains still
-//! open, which is the fact a future claim-or-name feature hangs off: an
-//! island should become claimable once its coast has been walked or sailed
-//! right round, and this is the machine that knows.
+//! round this shore" is a question with an answer: strokes meet *exactly* at
+//! chunk boundaries — see [`Mark`] — so a circumnavigated coastline is a
+//! chain of runs that links back to its own start, found by integer
+//! bookkeeping. [`Chart::tally`] counts the coastlines that close and the
+//! chains still hanging open.
 //!
-//! Deliberately, the unit here is the *ring* and not the island. Many an
-//! island is a little archipelago — a main shore with skerries off it — and
-//! each of those closes as its own coastline; which rings make one island,
-//! and which of them a claim should require (the biggest, most likely, rather
-//! than every rock awash), is judgment this module does not own. A claim
-//! would cross the wire and be the server's to grant, and the server is also
-//! the one end that *knows* the islands — it planned them — so grouping rings
-//! into claims belongs over there, checked by this same arithmetic.
+//! And a closed coastline is what an *island* is, for the game: a ring that
+//! rings **land** — the survey's land-on-the-left convention makes a ring
+//! around land and a ring around a lagoon run opposite ways, so the signed
+//! area tells them apart for free — and that reaches at least
+//! [`LEAST_ISLAND`] across. That is the unit a player will one day claim and
+//! name, and it is deliberately defined here, on the coastline, rather than
+//! by asking the generator. The generator plans an island to grow ground
+//! from, but what it grows may meet the sea in more pieces than one: a
+//! planned island can surface as a main shore and a scatter of skerries, or
+//! as two hills with a drowned middle. Each piece big enough is its own
+//! island in the game, each rock awash is charted without being anybody's
+//! island, and no part of any of it asks the plan — which keeps generation
+//! what it ought to be, a machine that produces chunks and what stands on
+//! them and owes nothing downstream an explanation.
+//!
+//! A *claim* itself would cross the wire and be the server's to grant. The
+//! server holds the same chunks, so it can check a claim by this same
+//! arithmetic without trusting the client — and when that day comes, the
+//! contour-and-ring arithmetic should move to `protocol`, where the things
+//! both ends must agree on live, so the two cannot drift.
 //!
 //! # Ink, not paper
 //!
@@ -162,6 +171,20 @@ const TOLERANCE: f32 = 3.0;
 /// Open runs are not filtered: a short one is a coast leaving the chunk, and
 /// the rest of it is the neighbour's to draw.
 const LEAST_ISLET: f32 = 6.0;
+
+/// The smallest closed coastline that counts as an *island*, as the longer
+/// side of what it rings, in metres.
+///
+/// The claimable, nameable unit — see the module docs. Below this a ring is a
+/// rock or a skerry: charted, drawn, honestly part of the coast, but not a
+/// place anybody would put a name to. A hundred metres is a little under the
+/// smallest island the generator sets out to make, so everything *meant* as
+/// an island qualifies and the accidents of a coast mostly do not.
+///
+/// Not to be confused with [`LEAST_ISLET`], which is about ink — what is too
+/// small to draw at all — where this is about standing: what is too small to
+/// claim. The gap between the two is exactly the skerries.
+pub const LEAST_ISLAND: f32 = 100.0;
 
 /// One point of a surveyed coastline, in chunk-local steps.
 ///
@@ -257,6 +280,11 @@ pub struct ChartTally {
     /// Chains that do not close yet — coasts with their ends still hanging,
     /// waiting for the player to go and look.
     pub open: usize,
+    /// The closed coastlines that are *islands*: rings with the land inside
+    /// and at least [`LEAST_ISLAND`] across. The claimable count, and the
+    /// only number here gameplay will ever read — the gap between it and
+    /// [`ChartTally::complete`] is the skerries and the lagoons.
+    pub islands: usize,
 }
 
 impl Chart {
@@ -265,8 +293,8 @@ impl Chart {
         self.coasts.contains_key(&chunk)
     }
 
-    /// Counts what the chart holds — including, in [`ChartTally::complete`],
-    /// the coastlines the player has closed.
+    /// Counts what the chart holds — including, in [`ChartTally::islands`],
+    /// the closed coastlines that are islands to claim.
     ///
     /// Whether a coastline closes is integer bookkeeping, not geometry: a
     /// [`Mark`] lands exactly on the chunk boundary, so a run's end and its
@@ -277,17 +305,27 @@ impl Chart {
     pub fn tally(&self) -> ChartTally {
         let surveyed = self.coasts.len();
         let coastal = self.coasts.values().filter(|runs| !runs.is_empty()).count();
+        let mut complete = 0;
+        let mut islands = 0;
+        let mut close = |ring: &mut dyn Iterator<Item = Vec2>| {
+            complete += 1;
+            let (extent, area) = measure(ring);
+            // Positive area is land inside — see [`measure`]. A lagoon fails
+            // the sign however big it is, a skerry the reach.
+            if area > 0.0 && extent >= LEAST_ISLAND {
+                islands += 1;
+            }
+        };
 
         // Where each open run starts and ends, in whole steps of the mark
         // lattice — exact, so equality is equality.
         let mut starts: HashMap<IVec2, (IVec2, usize)> = HashMap::default();
         let mut ends: HashSet<IVec2> = HashSet::default();
-        let mut complete = 0;
         for (&chunk, runs) in &self.coasts {
             for (at, run) in runs.iter().enumerate() {
                 if run.closed {
                     // A ring inside one chunk closed the moment it was drawn.
-                    complete += 1;
+                    close(&mut run.points(chunk));
                     continue;
                 }
                 starts.insert(run_steps(chunk, run.marks[0]), (chunk, at));
@@ -295,20 +333,27 @@ impl Chart {
             }
         }
 
+        // Follows a shore from one run for as long as the links hold, and
+        // says which runs it passed through.
         let end_of = |key: (IVec2, usize)| {
             let run = &self.coasts[&key.0][key.1];
             run_steps(key.0, run.marks[run.marks.len() - 1])
         };
         let mut walked: HashSet<IVec2> = HashSet::default();
         let walk = |from: (IVec2, usize), walked: &mut HashSet<IVec2>| {
+            let mut chain = vec![from];
             let mut here = from;
             loop {
                 let end = end_of(here);
                 match starts.get(&end) {
-                    Some(&next) if walked.insert(end) => here = next,
+                    Some(&next) if walked.insert(end) => {
+                        chain.push(next);
+                        here = next;
+                    }
                     _ => break,
                 }
             }
+            chain
         };
 
         // The open chains first, from every run whose start nothing ends at —
@@ -323,13 +368,18 @@ impl Chart {
         }
 
         // Whatever is left links into itself: a coastline the player has been
-        // all the way round.
+        // all the way round, measured whole — every run of the chain, in the
+        // order the shore is walked.
         for (&start, &key) in &starts {
             if !walked.insert(start) {
                 continue;
             }
-            complete += 1;
-            walk(key, &mut walked);
+            let chain = walk(key, &mut walked);
+            close(
+                &mut chain
+                    .iter()
+                    .flat_map(|&(chunk, at)| self.coasts[&chunk][at].points(chunk)),
+            );
         }
 
         ChartTally {
@@ -337,6 +387,7 @@ impl Chart {
             coastal,
             complete,
             open,
+            islands,
         }
     }
 
@@ -368,6 +419,42 @@ impl Chart {
 /// follow a shore across chunks by equality rather than by tolerance.
 fn run_steps(chunk: IVec2, mark: Mark) -> IVec2 {
     chunk * u8::MAX as i32 + IVec2::new(mark.x as i32, mark.z as i32)
+}
+
+/// A closed ring measured: how far it reaches — the longer side of its
+/// bounding box, in metres — and its signed area on the sheet.
+///
+/// The sign is what tells an island from a lagoon, and it is the survey's
+/// land-on-the-left convention paying out a second time: a ring walked with
+/// the land always on the left runs anticlockwise around land and clockwise
+/// around enclosed water, so land inside is exactly a positive shoelace sum
+/// on the sheet. No second look at any height field, and no flag stored — the
+/// direction of travel *is* the answer.
+///
+/// Consecutive duplicate points — the joins, where one run's end is the next
+/// run's identical start — contribute nothing to either measure, so a chain
+/// can be fed through whole without trimming them.
+fn measure(ring: &mut dyn Iterator<Item = Vec2>) -> (f32, f32) {
+    let mut least = Vec2::splat(f32::INFINITY);
+    let mut most = Vec2::splat(f32::NEG_INFINITY);
+    let mut area = 0.0;
+    let mut first = None;
+    let mut previous: Option<Vec2> = None;
+    for point in ring.map(on_the_sheet) {
+        least = least.min(point);
+        most = most.max(point);
+        if let Some(previous) = previous {
+            area += previous.perp_dot(point);
+        }
+        first.get_or_insert(point);
+        previous = Some(point);
+    }
+    // The ring is closed, so the walk back from the last point to the first
+    // is part of it whether or not the points spell it out.
+    if let (Some(first), Some(last)) = (first, previous) {
+        area += last.perp_dot(first);
+    }
+    ((most - least).max_element(), area / 2.0)
 }
 
 /// Which grid edge a contour crosses — named by the edge rather than by where
@@ -1936,44 +2023,79 @@ mod tests {
         // boundary.
         let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
         let mut chart = Chart::default();
-        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 40.0)));
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
 
         let tally = chart.tally();
         assert_eq!(
-            (tally.complete, tally.open),
-            (0, 1),
+            (tally.complete, tally.open, tally.islands),
+            (0, 1, 0),
             "half an island read as a closed coastline"
         );
 
         chart.record(
             IVec2::new(1, 0),
-            survey(&a_cone(IVec2::new(1, 0), middle, 40.0)),
+            survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
         );
         let tally = chart.tally();
         assert_eq!(
-            (tally.complete, tally.open),
-            (1, 0),
-            "the whole shore does not close"
+            (tally.complete, tally.open, tally.islands),
+            (1, 0, 1),
+            "the whole shore does not close into an island"
         );
     }
 
     #[test]
-    fn every_ring_of_an_archipelago_closes_as_its_own_coastline() {
+    fn a_skerry_closes_as_a_coastline_without_being_an_island() {
         // Many an island is a little archipelago — a main shore with skerries
-        // off it. Each ring closes on its own; which of them make one island,
-        // and which a claim should require, is deliberately not this module's
-        // judgment — see the module docs.
+        // off it. Each ring closes on its own, and the threshold is what says
+        // which of them are islands to claim: the main shore is one, and the
+        // rock off it is charted without being anybody's island.
         let mut chart = Chart::default();
-        let mut runs = survey(&a_cone(IVec2::ZERO, Vec2::new(40.0, 40.0), 25.0));
-        runs.extend(survey(&a_cone(IVec2::ZERO, Vec2::new(100.0, 100.0), 12.0)));
-        chart.record(IVec2::ZERO, runs);
+        chart.record(
+            IVec2::ZERO,
+            survey(&a_cone(IVec2::ZERO, Vec2::splat(64.0), 55.0)),
+        );
+        chart.record(
+            IVec2::new(5, 5),
+            survey(&a_cone(
+                IVec2::new(5, 5),
+                Vec2::splat(5.0 * CHUNK_METRES + 64.0),
+                12.0,
+            )),
+        );
 
         let tally = chart.tally();
         assert_eq!((tally.complete, tally.open), (2, 0));
+        assert_eq!(tally.islands, 1, "the skerry counts as an island");
+    }
+
+    #[test]
+    fn a_lagoon_rings_water_and_is_never_an_island() {
+        // The mirror image of an islet: land everywhere except a basin of
+        // water in the middle, whose waterline is a closed ring the same size
+        // an island's would be. The land-on-the-left convention runs the two
+        // opposite ways round, which is the whole test of whether the sign
+        // does its job — a lagoon must fail however big it is.
+        let middle = Vec2::splat(CHUNK_METRES / 2.0);
+        let heights: Vec<f32> = (0..FACET_VERTS * FACET_VERTS)
+            .map(|i| {
+                let at =
+                    Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32) * FACET_METRES;
+                at.distance(middle) - 55.0
+            })
+            .collect();
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&heights));
+
+        let tally = chart.tally();
+        assert_eq!((tally.complete, tally.open), (1, 0));
+        assert_eq!(tally.islands, 0, "a lagoon was claimed as an island");
     }
 
     #[test]
     fn an_islet_ringed_in_one_chunk_is_already_closed() {
+        // Big enough to close, and — at sixty metres across — too small to be
+        // an island anybody names.
         let mut chart = Chart::default();
         chart.record(
             IVec2::ZERO,
@@ -1981,7 +2103,7 @@ mod tests {
         );
 
         let tally = chart.tally();
-        assert_eq!((tally.complete, tally.open), (1, 0));
+        assert_eq!((tally.complete, tally.open, tally.islands), (1, 0, 0));
     }
 
     #[test]

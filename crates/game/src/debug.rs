@@ -561,12 +561,12 @@ fn overlay_text(
         ));
     }
     // Under the chunks, because it is drawn out of them and grows behind them.
-    // The last number is the one gameplay will hang off: coastlines the player
-    // has been all the way round.
+    // The last number is the one gameplay will hang off: closed coastlines
+    // big enough, and the right way round, to be islands a player could claim.
     if let Some(chart) = held.charted {
         lines.push(format!(
-            "{} surveyed / {} with coast / {} closed",
-            chart.surveyed, chart.coastal, chart.complete
+            "{} surveyed / {} with coast / {} closed / {} claimable",
+            chart.surveyed, chart.coastal, chart.complete, chart.islands
         ));
     }
     if let Some(hour) = hour {
@@ -706,8 +706,9 @@ mod tests {
                     charted: Some(ChartTally {
                         surveyed: 96,
                         coastal: 21,
-                        complete: 2,
-                        open: 3,
+                        complete: 3,
+                        open: 2,
+                        islands: 1,
                     }),
                 },
                 Some(0.35),
@@ -718,7 +719,7 @@ mod tests {
             "60 fps / 214 meshes / 1,234,567 triangles\n\
              3,298,112 shadow tris / 623 draws / 4 cascades\n\
              231 chunks / 58 ocean / 12 requested\n\
-             96 surveyed / 21 with coast / 2 closed\n\
+             96 surveyed / 21 with coast / 3 closed / 1 claimable\n\
              sky 08:24\n\
              seed 20040112 / focus 98,-317 / yaw 45 / zoom 42"
         );
