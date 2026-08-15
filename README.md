@@ -69,6 +69,12 @@ belongs to the server, as the weather does: everyone in a world is under the
 same sky, and a shared world's night only runs off while all of them are at
 anchor waiting it out.
 
+While the sun is up, cloud shadows wander across the water and up the
+hillsides. They are the only part of a sky this camera can see — it looks
+down, and clouds hung between it and the ground would cover the picture
+rather than decorate it — and they go with the wind, so a blow getting up
+shows on the ground as shade hurrying over it.
+
 The look is flat-shaded facets in a small fixed palette — no textures and no
 gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
 height field is sampled, so the facets read as deliberate shapes.
