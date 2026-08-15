@@ -315,7 +315,9 @@ pub fn model(name: &str) -> (serde_json::Value, Vec<u8>) {
 }
 
 /// One mesh of a model, as the triangles it is made of — `attribute` being
-/// `POSITION` for where its corners are or `NORMAL` for where they face.
+/// `POSITION` for where its corners are, `NORMAL` for where they face, or
+/// `COLOR_0` for what colour they are painted, whose fourth component is an
+/// opacity nothing here has any use for and is dropped.
 ///
 /// Read through the accessors' own view of the buffer, so an exporter that
 /// changes how it packs the numbers changes nothing here.
@@ -332,8 +334,13 @@ pub fn triangles(name: &str, index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
     };
 
     let wanted = primitive["attributes"][attribute].as_u64().unwrap() as usize;
-    let values: Vec<Vec3> = read(&json["accessors"][wanted], 12)
-        .chunks_exact(12)
+    let stride = match json["accessors"][wanted]["type"].as_str() {
+        Some("VEC3") => 12,
+        Some("VEC4") => 16,
+        other => panic!("{attribute} of {name} is a {other:?}, which is not a vector"),
+    };
+    let values: Vec<Vec3> = read(&json["accessors"][wanted], stride)
+        .chunks_exact(stride)
         .map(|v| {
             Vec3::new(
                 f32::from_le_bytes(v[0..4].try_into().unwrap()),

@@ -12,9 +12,11 @@
 //! cameras and menus — and depends on none of this.
 
 pub mod archipelago;
+pub mod bananas;
 pub mod noise;
 pub mod palms;
 pub mod plan;
+pub mod plants;
 pub mod terrain;
 pub mod weather;
 

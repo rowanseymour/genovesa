@@ -855,7 +855,7 @@ impl Archipelago {
             }),
             heights: heights.iter().copied().map(quantize).collect(),
             water: facet_water(base, &heights, |wx, wz| island.lake_level(wx, wz)),
-            plants: crate::palms::palms(&island, chunk),
+            plants: crate::plants::plants(&island, chunk),
         })
     }
 

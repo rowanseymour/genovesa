@@ -56,7 +56,10 @@ stiller, with the grass coming down to a reed margin instead of a beach.
 Palms grow along the back of a beach, where the dry sand gives out to
 whatever the island is wearing behind it — scattered, and only where a coast
 has sand to offer, so a rocky island has none and a long shallow bay is
-fringed with them.
+fringed with them. Behind them, in the shelter of a valley floor or around the
+margin of a lake, grow bananas: broader and lower, and wanting the wet ground
+a palm has no use for, so the two are found in different places on the same
+island.
 
 A day turns in ten minutes. The sun crosses from east to west and the whole
 world's colour goes with it: long warm light at either end of the day, a flat
@@ -293,11 +296,13 @@ keep is that a skin must be rigid — every vertex on exactly one bone — or
 facets bend as the model moves and the flat shading goes with them.
 
 Where a model *stands*, when it is scenery rather than the player, is not the
-client's business at all. Palms are placed by the server, along the back of
-whatever beaches a seed happens to raise, and travel with the ground a client
-asks for — so two players anchored off the same beach see the same trees on
-it. The rule is in `world`'s `palms` module and is pinned by a digest like
-the terrain's.
+client's business at all. Plants are placed by the server and travel with the
+ground a client asks for — so two players anchored off the same beach see the
+same trees on it. Each kind has a rule of its own in `world`, pinned by a
+digest like the terrain's: palms along the back of whatever beaches a seed
+happens to raise, bananas on the valley floors and lake margins behind them.
+What a chunk carries of all of them together is gathered in `world`'s `plants`
+module, which is where they share the one budget the wire gives a chunk.
 
 ## Tests
 

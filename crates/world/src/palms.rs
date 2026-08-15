@@ -20,9 +20,10 @@
 //! lose one between them.
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{Kind, Plant, Tone, CHUNK_METRES, MAX_PLANTS};
+use protocol::ground::{Kind, Plant, Tone, CHUNK_METRES};
 
 use crate::archipelago::Island;
+use crate::plants::{draw, mix};
 
 /// Metres between the cells a palm may stand in — and so, less the jitter
 /// below, the closest two of them ever come.
@@ -82,16 +83,9 @@ const FOOTING: f32 = 1.4;
 /// Every palm standing on one chunk of an island.
 ///
 /// Walks the lattice cells whose centres fall inside the chunk, in a fixed
-/// order, and asks each in turn. The order is what makes the truncation at
-/// [`MAX_PLANTS`] deterministic — a chunk with more candidates than the wire
-/// will carry keeps the first of them, and keeps the same first every time,
-/// on every machine that generates it.
-///
-/// The budget it truncates against belongs to every kind of plant together,
-/// not to palms. With palms the only kind there is, spending it here is the
-/// same thing as spending it anywhere; the second kind will want the
-/// truncation moved to wherever a chunk's kinds are gathered, so that a beach
-/// cannot eat a swamp's allowance by being asked first.
+/// order, and asks each in turn. The order is what keeps a truncated chunk the
+/// same chunk everywhere — see [`crate::plants`], which is where the budget a
+/// chunk's plants share is spent, and where any truncating is done.
 pub fn palms(island: &Island, chunk: IVec2) -> Vec<Plant> {
     let base = chunk.as_vec2() * CHUNK_METRES;
     let cells = (CHUNK_METRES / CELL) as i32;
@@ -103,9 +97,6 @@ pub fn palms(island: &Island, chunk: IVec2) -> Vec<Plant> {
     let mut found = Vec::new();
     for cz in 0..cells {
         for cx in 0..cells {
-            if found.len() == MAX_PLANTS {
-                return found;
-            }
             let cell = origin + IVec2::new(cx, cz);
             if let Some(palm) = in_cell(island, cell, base) {
                 found.push(palm);
@@ -192,43 +183,11 @@ fn is_sand(island: &Island, at: Vec2, height: f32) -> bool {
     island.surface(at.x, at.y, height, normal).tone == Tone::Sand
 }
 
-/// A cell and a seed, folded to one number.
-///
-/// Integer arithmetic throughout, and written out here rather than taken from
-/// a crate, for the reason the noise gives: a seed has to mean the same thing
-/// in every build there will ever be, and a hasher from the lockfile is not
-/// that. Splitmix64's finaliser over the two coordinates and the seed packed
-/// into one word.
-fn mix(cell: IVec2, seed: u32) -> u64 {
-    let packed = (cell.x as u32 as u64) | ((cell.y as u32 as u64) << 32);
-    let mut z = packed
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add((seed as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
-/// The `nth` independent draw from a hash, in `0.0..1.0`.
-///
-/// The word is re-finalised per draw rather than sliced into fields, so two
-/// draws off the same cell are uncorrelated — sliced bits of one splitmix
-/// output are not, and a scatter built on them lines its trees up with its
-/// jitter.
-fn draw(seed: u64, nth: u32) -> f32 {
-    let mut z = seed.wrapping_add((nth as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    // The top 24 bits over 2^24: every value is exactly representable, so the
-    // same word gives the same float on any machine.
-    (z >> 40) as f32 / (1u32 << 24) as f32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::archipelago::{Archipelago, WorldConfig};
+    use crate::plants::{draw, mix};
     use crate::testing::{digest, floats};
     use protocol::ground::chunk_at;
 
@@ -240,14 +199,22 @@ mod tests {
         Archipelago::new(&WorldConfig { seed })
     }
 
-    /// Every palm in the window, with the chunk that carried it.
+    /// Every palm in the window, with the chunk that carried it. Palms only:
+    /// a chunk's list holds every kind now, and a digest of all of them would
+    /// move whenever any other rule did.
     fn all_palms(world: &Archipelago) -> Vec<(IVec2, Plant)> {
         let mut found = Vec::new();
         for cz in -WINDOW..WINDOW {
             for cx in -WINDOW..WINDOW {
                 let chunk = IVec2::new(cx, cz);
                 if let Some(payload) = world.chunk_payload(chunk) {
-                    found.extend(payload.plants.into_iter().map(|palm| (chunk, palm)));
+                    found.extend(
+                        payload
+                            .plants
+                            .into_iter()
+                            .filter(|plant| plant.kind == Kind::Palm)
+                            .map(|palm| (chunk, palm)),
+                    );
                 }
             }
         }
@@ -327,7 +294,7 @@ mod tests {
                 for cx in -WINDOW..WINDOW {
                     let chunk = IVec2::new(cx, cz);
                     if let Some(payload) = world.chunk_payload(chunk) {
-                        assert!(payload.plants.len() <= MAX_PLANTS);
+                        assert!(payload.plants.len() <= protocol::ground::MAX_PLANTS);
                         assert!(payload.well_formed(), "seed {seed} chunk {chunk}");
                     }
                 }

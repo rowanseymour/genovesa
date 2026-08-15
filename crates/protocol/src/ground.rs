@@ -466,6 +466,7 @@ pub struct Plant {
 #[repr(u8)]
 pub enum Kind {
     Palm = 0,
+    Banana = 1,
 }
 
 impl Kind {
@@ -474,6 +475,7 @@ impl Kind {
     pub const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Palm),
+            1 => Some(Self::Banana),
             _ => None,
         }
     }
@@ -492,6 +494,12 @@ impl Kind {
     pub const fn scale(self) -> (f32, f32) {
         match self {
             Self::Palm => (0.78, 1.24),
+            // Wider than the palm's, and that is the point of the table
+            // rather than a constant: a banana clump is a few stems of
+            // whatever age happened to sucker there, and the young ones are
+            // half the old ones. A row of identically sized clumps reads as
+            // planted, which is the one thing a jungle must not.
+            Self::Banana => (0.68, 1.34),
         }
     }
 }

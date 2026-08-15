@@ -48,6 +48,28 @@ under backface culling, or need a two-sided material nothing else in this world
 uses. Giving fronds a little thickness keeps one rule for the whole game, which
 is the rule the tests check.
 
+**One mesh, and it carries its own colours.** The tree is painted per vertex
+and drawn with a white material, so a palm is one mesh, one material and one
+entity — it was two of each only for as long as the crown and the trunk were
+two colours the *client* held. The colours themselves:
+
+- **Timber**, a shade browner and darker than the sand a palm stands on, so
+  the trunk reads against it at any zoom. Deliberately not the boat's — a hull
+  is meant to be findable in a landscape and a tree is meant to belong to one.
+- **Frond green**, darker and yellower than the grass behind a beach and
+  lighter than the forest above it, so a stand of palms is its own band of
+  colour rather than an outcrop of whatever it is standing in front of.
+
+They are stored **scene-linear**, which is what a glTF `COLOR_0` means and what
+the game multiplies into a white base colour. The sRGB triples those two are
+named by — (0.42, 0.33, 0.24) and (0.31, 0.50, 0.20) — are what a screen is
+told, not what the file holds; writing them in as though they were linear would
+draw the tree a good deal paler than any of this describes. The material has to
+*read* the colour attribute through a Color Attribute node, and not merely have
+one alongside it: the exporter maps an attribute to `COLOR_0` only where a
+material uses it. Wiring it is also what makes Blender show the tree in the
+colours the game will draw it in.
+
 The trunk's foot sits at the model's origin, and that is not free to change:
 the client puts a palm's origin on the height field at its own position, so a
 trunk starting a metre up would hover over its own shadow. There is a test.

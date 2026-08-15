@@ -50,6 +50,14 @@
 #   are redundant, and a cycle sampled at its quarters is all extremes and
 #   crossings with nothing redundant in it to drop.
 #
+#   The vertex colours, and exactly one set of them. A plant carries its own
+#   colours rather than being painted by the client — see the palm's NOTES —
+#   so `COLOR_0` is part of what a model *is*. Two settings, both needed:
+#   `MATERIAL` writes the attribute a material actually reads, and without
+#   `export_all_vertex_colors` turned off the exporter adds a second, dummy
+#   set alongside it. A master with no colour attribute exports exactly as it
+#   did before this was turned on.
+#
 # No cameras and no lights: the game lights its own world, and keeping them out
 # means a stray light left in a master cannot follow a model into the game.
 set -euo pipefail
@@ -99,6 +107,8 @@ bpy.ops.export_scene.gltf(
     export_skins=True,
     export_optimize_animation_size=False,
     export_extras=False,
+    export_vertex_color='MATERIAL',
+    export_all_vertex_colors=False,
 )
 " >/dev/null
 

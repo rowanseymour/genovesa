@@ -1,10 +1,19 @@
-//! The palms along the back of a beach.
+//! The plants standing on the ground: palms along the back of a beach,
+//! bananas on the valley floors behind them.
 //!
 //! The server says where they stand; this decides what one looks like. That
 //! split is the same one the ground is drawn on — a chunk arrives as heights
-//! and palette entries, and what green means is the client's business — and it
-//! is why a palm crosses the wire as a position, a bearing and a size rather
-//! than as anything to do with trunks or fronds.
+//! and palette entries — and it is why a plant crosses the wire as a kind, a
+//! position, a bearing and a size rather than as anything to do with trunks
+//! or fronds.
+//!
+//! What green means is the *model's* business, not this module's. A plant's
+//! colours ride on its own vertices and the material here is white, so
+//! nothing in this file knows a frond from a trunk. The ground's palette is
+//! the other way about for a reason that does not apply here: a tone is a
+//! number on the wire, shared by two machines that must agree, while a mesh
+//! is an asset the client already holds and can perfectly well be handed
+//! painted.
 //!
 //! A palm hangs off the chunk its foot stands in, so it is drawn when that
 //! ground is drawn and goes away with it. Nothing here streams, caches or
@@ -17,37 +26,30 @@ use protocol::ground::{Kind, Plant, CHUNK_METRES};
 use crate::terrain::{Ground, PendingPlants, TerrainChunk};
 use crate::{matte, model_mesh, AppState};
 
-/// The palm, as a file. Built from `assets-src/models/palm/palm.blend` by
-/// `assets-src/models/export.sh`, which is where the export settings the look
-/// depends on are written down.
-const MODEL: &str = "models/palm.glb";
+/// The plants, as files. Each is built from the master of the same name under
+/// `assets-src/models/` by `assets-src/models/export.sh`, which is where the
+/// export settings the look depends on are written down — including the ones
+/// that carry a plant's own colours through.
+const PALM: &str = "models/palm.glb";
+const BANANA: &str = "models/banana.glb";
 
-/// Which mesh in [`MODEL`] is which — positions in the file, as the boat's
-/// are, and pinned by `the_model_is_a_crown_and_a_trunk_fit_to_draw` for the same
-/// reason. Note the order: the exporter writes meshes by name rather than in
-/// the order the objects were made, so the fronds come first.
-const FRONDS_MESH: usize = 0;
-const TRUNK_MESH: usize = 1;
+/// Which mesh in each of them the plant is. A plant is one mesh, so there is
+/// only ever the one — pinned, with the name, by
+/// `every_model_is_one_painted_plant_fit_to_draw`.
+const THE_PLANT: usize = 0;
 
-/// Timber, a shade browner and darker than the sand a palm stands on so the
-/// trunk reads against it at any zoom. Deliberately not the boat's — a hull is
-/// meant to be findable in a landscape and a tree is meant to belong to one.
-const TRUNK_COLOR: Color = Color::srgb(0.42, 0.33, 0.24);
-
-/// Frond green. Darker and yellower than the grass behind a beach and lighter
-/// than the forest above it, so a stand of palms is its own band of colour
-/// rather than an outcrop of whatever it is standing in front of.
-const FROND_COLOR: Color = Color::srgb(0.31, 0.50, 0.20);
-
-/// The two meshes and two materials every palm in the world shares, loaded
-/// once. Sharing them is what lets the whole beach draw in as few calls as
-/// there are materials, rather than one apiece.
+/// One mesh per kind, and one material for every plant in the world, loaded
+/// once.
+///
+/// The material is white and does nothing but let the vertices through. That
+/// is what makes a plant one entity: a tree was two meshes because it was two
+/// materials, and a model that carries its own colours is neither.
 #[derive(Resource)]
-struct PalmModel {
-    fronds: Handle<Mesh>,
-    trunk: Handle<Mesh>,
-    frond_material: Handle<StandardMaterial>,
-    trunk_material: Handle<StandardMaterial>,
+struct PlantModels {
+    palm: Handle<Mesh>,
+    banana: Handle<Mesh>,
+    /// White, matte, and shared by every kind — see [`matte`].
+    painted: Handle<StandardMaterial>,
 }
 
 pub struct TreesPlugin;
@@ -64,25 +66,24 @@ fn load_the_model(
     mut materials: ResMut<Assets<StandardMaterial>>,
     assets: Res<AssetServer>,
 ) {
-    commands.insert_resource(PalmModel {
-        fronds: assets.load(model_mesh(MODEL, FRONDS_MESH)),
-        trunk: assets.load(model_mesh(MODEL, TRUNK_MESH)),
-        frond_material: materials.add(matte(FROND_COLOR)),
-        trunk_material: materials.add(matte(TRUNK_COLOR)),
+    commands.insert_resource(PlantModels {
+        palm: assets.load(model_mesh(PALM, THE_PLANT)),
+        banana: assets.load(model_mesh(BANANA, THE_PLANT)),
+        painted: materials.add(matte(Color::WHITE)),
     });
 }
 
-/// Turns the palms a chunk arrived carrying into trees standing on it.
+/// Turns the plants a chunk arrived carrying into trees standing on it.
 ///
-/// The height comes from [`Ground`] rather than from the wire: a palm's foot
+/// The height comes from [`Ground`] rather than from the wire: a plant's foot
 /// has to sit on the surface the client draws and the boat floats on, which is
 /// the interpolated height field, and that is the only place that answer
 /// lives. A chunk being planted has by definition arrived, so the lookup
 /// cannot miss — but it is written to skip rather than to unwrap, because a
-/// palm quietly not planted is a better failure than a panicked frame.
+/// tree quietly not planted is a better failure than a panicked frame.
 fn plant(
     mut commands: Commands,
-    model: Res<PalmModel>,
+    model: Res<PlantModels>,
     ground: Res<Ground>,
     pending: Query<(Entity, &PendingPlants, &TerrainChunk)>,
 ) {
@@ -93,46 +94,31 @@ fn plant(
 
         let origin = at_chunk.coords.as_vec2() * CHUNK_METRES;
         for plant in &plants.0 {
-            // What each kind is made of. A match rather than a table lookup so
-            // that a kind added to the wire cannot compile until this module
-            // has decided what it looks like — the alternative is a client
-            // that quietly stands nothing where a mangrove was sent.
-            let (trunk, crown, trunk_material, crown_material) = match plant.kind {
-                Kind::Palm => (
-                    &model.trunk,
-                    &model.fronds,
-                    &model.trunk_material,
-                    &model.frond_material,
-                ),
+            // Which model to stand here. A match rather than a table lookup
+            // so that a kind added to the wire cannot compile until this
+            // module has decided what it looks like — the alternative is a
+            // client that quietly stands nothing where a mangrove was sent.
+            let (name, mesh) = match plant.kind {
+                Kind::Palm => ("Palm", &model.palm),
+                Kind::Banana => ("Banana", &model.banana),
             };
             let at = stands_at(origin, plant);
             let Some(surface) = ground.surface(at.x, at.y) else {
                 continue;
             };
-            // Where the tree stands, in the chunk's own frame. Both halves of
-            // it are given the same one: a palm is two entities rather than a
-            // parent and two children, because it is two meshes only for as
-            // long as it is two materials, and once they both know where they
-            // stand there is nothing left for a third entity to hold. A tree
-            // is a hundred-odd triangles either way, and it is entities a
-            // world full of plants runs out of first.
-            let stands = Transform::from_xyz(plant.at.x, surface, plant.at.y)
-                .with_rotation(Quat::from_rotation_y(plant.yaw))
-                .with_scale(Vec3::splat(plant.scale));
-            // Placed under the chunk they belong to, so they are despawned
-            // with the ground rather than needing a lifetime of their own.
+            // One entity: one mesh, one material, and the chunk for a parent
+            // so that a tree is despawned with the ground it stands on rather
+            // than needing a lifetime of its own. A tree is a hundred-odd
+            // triangles however it is drawn, and it is entities a world full
+            // of plants runs out of first.
             commands.entity(chunk).with_children(|under| {
                 under.spawn((
-                    Name::new("Trunk"),
-                    stands,
-                    Mesh3d(trunk.clone()),
-                    MeshMaterial3d(trunk_material.clone()),
-                ));
-                under.spawn((
-                    Name::new("Crown"),
-                    stands,
-                    Mesh3d(crown.clone()),
-                    MeshMaterial3d(crown_material.clone()),
+                    Name::new(name),
+                    Transform::from_xyz(plant.at.x, surface, plant.at.y)
+                        .with_rotation(Quat::from_rotation_y(plant.yaw))
+                        .with_scale(Vec3::splat(plant.scale)),
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(model.painted.clone()),
                 ));
             });
         }
@@ -152,33 +138,47 @@ pub fn stands_at(origin: Vec2, plant: &Plant) -> Vec2 {
 mod tests {
     use super::*;
 
-    use crate::testing::{assert_model_draws, model, triangles};
+    use crate::testing::{assert_model_draws, creature_named_by, mesh_names, model, triangles};
 
     #[test]
-    fn the_model_is_a_crown_and_a_trunk_fit_to_draw() {
-        // See `assert_model_draws`. The order has a sharper edge here than on
-        // the boat: glTF numbers its meshes in the order the *exporter* wrote
-        // them, which is by name — so the fronds come first despite the trunk
-        // being modelled first, and anything that reasoned from the modelling
-        // order would paint the crown in bark.
-        assert_model_draws(MODEL, &[(FRONDS_MESH, "fronds"), (TRUNK_MESH, "trunk")]);
+    fn every_model_is_one_painted_plant_fit_to_draw() {
+        // See `assert_model_draws` for the three conditions every model in the
+        // game is held to. The two after it are this module's own: a plant is
+        // one mesh, and it carries its own colours — the material it is drawn
+        // with is white, so an unpainted mesh would arrive as a white tree
+        // rather than as an obviously broken one.
+        for file in [PALM, BANANA] {
+            let named = creature_named_by(file);
+            assert_model_draws(file, &[(THE_PLANT, named)]);
+            assert_eq!(mesh_names(file), [named], "a plant is one mesh");
+
+            let (json, _) = model(file);
+            let attributes = &json["meshes"][THE_PLANT]["primitives"][0]["attributes"];
+            assert!(
+                !attributes["COLOR_0"].is_null(),
+                "{file} carries no colours — see its NOTES.md, and the export \
+                 settings that pass them through"
+            );
+        }
     }
 
     #[test]
-    fn the_palm_stands_on_its_own_origin() {
-        // What `plant` assumes when it puts a palm's foot at the surface
-        // height: the model's own foot is at its origin, so a trunk whose
-        // geometry started a metre up would hover, and one that started below
-        // would be driven into the sand.
-        let (json, _) = model(MODEL);
-        let trunk = &json["meshes"][TRUNK_MESH]["primitives"][0];
-        let positions =
-            &json["accessors"][trunk["attributes"]["POSITION"].as_u64().unwrap() as usize];
-        let low = positions["min"][1].as_f64().unwrap();
-        assert!(
-            low.abs() < 1e-4,
-            "the trunk starts at {low} rather than at the ground"
-        );
+    fn every_plant_stands_on_its_own_origin() {
+        // What `plant` assumes when it puts a foot at the surface height: the
+        // model's own foot is at its origin, so a trunk whose geometry started
+        // a metre up would hover, and one that started below would be driven
+        // into the ground.
+        for file in [PALM, BANANA] {
+            let (json, _) = model(file);
+            let tree = &json["meshes"][THE_PLANT]["primitives"][0];
+            let positions =
+                &json["accessors"][tree["attributes"]["POSITION"].as_u64().unwrap() as usize];
+            let low = positions["min"][1].as_f64().unwrap();
+            assert!(
+                low.abs() < 1e-4,
+                "{file} starts at {low} rather than at the ground"
+            );
+        }
     }
 
     #[test]
@@ -193,10 +193,25 @@ mod tests {
         // and read 14mm on a crown that is visibly lopsided: fronds radiate,
         // so averaging their corners hides exactly what is being asked about.
         // This turns the crown instead and asks how well it lands on itself.
-        let corners: Vec<Vec3> = triangles(MODEL, FRONDS_MESH, "POSITION")
+        //
+        // Which corners are the crown is a thing the file now says rather than
+        // a mesh apart: a palm is one painted mesh, and a corner painted
+        // greener than it is red is a frond where the trunk's timber is the
+        // other way about. That is a better question than the old one anyway —
+        // it asks after the green of the tree, which is what tiles visibly.
+        let corners: Vec<Vec3> = triangles(PALM, THE_PLANT, "POSITION")
             .into_iter()
             .flatten()
+            .zip(triangles(PALM, THE_PLANT, "COLOR_0").into_iter().flatten())
+            .filter(|(_, paint)| paint.y > paint.x)
+            .map(|(corner, _)| corner)
             .collect();
+        assert!(
+            corners.len() > 20,
+            "only {} corners of the palm are green — the crown has lost its \
+             paint, or the trunk has taken it",
+            corners.len()
+        );
         let axis = corners.iter().sum::<Vec3>() / corners.len() as f32;
 
         for seventh in 1..7 {
