@@ -75,6 +75,14 @@ down, and clouds hung between it and the ground would cover the picture
 rather than decorate it — and they go with the wind, so a blow getting up
 shows on the ground as shade hurrying over it.
 
+The shade says the wind is up; a pennant at the masthead says which way it is
+going. It streams on the wind the boat itself feels — hanging dead in a calm,
+snapping in a blow, blown astern by a boat driving into a light air — so what
+the weather is doing can be read without looking away from the water. The
+compass in the corner carries an arrow along the wind beside its north, for
+when the bearing itself is the question. Under way the two disagree, which is
+the difference between a flag and an instrument.
+
 The look is flat-shaded facets in a small fixed palette — no textures and no
 gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
 height field is sampled, so the facets read as deliberate shapes.
