@@ -133,7 +133,11 @@ would keep its own the same way. It is also the one thing that machine
 remembers rather than streams, which in a world with no edges is a question
 worth an answer —
 [`crates/game/src/chart.rs`](crates/game/src/chart.rs) is where it is given.
-A chart belongs to the world it was drawn in and is lost on leaving it.
+A chart belongs to the world it was drawn in, and it outlives the visit: each
+world's survey is written into a logbook on the player's own machine, keyed to
+that world, and taken up again on returning. What it is never written into is
+the server — having seen a stretch of coast is a fact about one player's
+client, and stays one.
 
 Islands have no names yet, so nothing on the sheet is lettered but its scale.
 
@@ -155,11 +159,11 @@ reproduce every noise octave and every rounding to the bit. Determinism still
 matters, but only on the server — a seed handed to a different machine to host
 has to raise the same islands.
 
-A world started from the menu can be kept or shared, and both run a server:
-the game hosts one and joins it over the loopback exactly as anyone else joins
-it over the network, so there is no second, quieter kind of session for playing
-alone. Sharing only decides who else can reach it. Others get in from the
-menu's join screen, or straight from the command line:
+A world started from the menu can be kept to yourself or shared, and both run
+a server: the game hosts one and joins it over the loopback exactly as anyone
+else joins it over the network, so there is no second, quieter kind of session
+for playing alone. Sharing only decides who else can reach it. Others get in
+from the menu's join screen, or straight from the command line:
 
 ```bash
 cargo run -- --join localhost
@@ -172,11 +176,23 @@ what a dedicated server is:
 cargo run --bin server -- --seed 7
 ```
 
-Worlds open in the morning; `--time` opens one at any hour instead, on either
-binary.
+A world opened from the menu is *kept*: leave it and it is still there,
+offered again from the menu — the same islands, the clock where it stood, the
+player where the world last saw them. Time only passes while a world is open,
+so a gale quit out of is a gale returned to, and nothing in a world can be
+dodged by leaving it. Returning players are known by a token their own machine
+keeps, dealt on first visit; there are no accounts. A dedicated server keeps a
+world the same way when given `--world <file>` — and the file *is* the world,
+small enough to copy anywhere, raising the same islands on whatever machine
+hosts it, which is the seed's promise.
 
-Everyone enters the world in the same place — afloat just off the coast of
-the same island — and other players appear as coloured markers. The server
+Worlds open in the morning, and a kept world reopens at the hour it closed
+on; `--time` opens a new world at any hour instead — or winds a kept one
+forward to it — on either binary.
+
+Everyone enters a world for the first time in the same place — afloat just
+off the coast of the same island — and other players appear as coloured
+markers. The server
 also owns the sea's creatures worth agreeing on: sharks patrol the shallows
 with their fins cutting the surface, dolphin pods and the odd whale cross
 the deeper water, and every client is told about the same animal in the

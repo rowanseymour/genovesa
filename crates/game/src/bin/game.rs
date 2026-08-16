@@ -24,6 +24,7 @@ use game::cli::{self, Args};
 use game::compass::CompassPlugin;
 use game::console::ConsolePlugin;
 use game::debug::DebugOverlayPlugin;
+use game::logbook::{self, LogbookPlugin};
 use game::menu::MenuPlugin;
 use game::models::ModelsPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
@@ -59,10 +60,16 @@ fn main() -> ExitCode {
     // waits for a button.
     let session = match (&args.join, args.state) {
         (Some(addr), _) => Some(Session::joining(addr)),
-        // Alone, because a run that asked for a world on the command line
-        // asked for one to look at rather than one to be joined: sharing is
-        // the menu's switch, and a dedicated `server` is the other binary.
-        (None, AppState::InWorld) => Some(Session::open(args.config, Reach::Alone, args.opening)),
+        // Alone and unkept, because a run that asked for a world on the
+        // command line asked for one to look at rather than one to be joined
+        // or returned to: sharing and keeping are the menu's business, and a
+        // dedicated `server` is the other binary.
+        (None, AppState::InWorld) => Some(Session::open(
+            args.config,
+            Reach::Alone,
+            args.opening,
+            false,
+        )),
         (None, _) => None,
     };
     let session = match session.transpose() {
@@ -110,6 +117,12 @@ fn run(args: Args, session: Option<Session>) {
     }
 
     if let Some(session) = session {
+        // The logbook before the pieces of the session are given up: a
+        // joined world is one this machine remembers, and the book is what
+        // the chart and the boat read on the way in.
+        if let Some(logbook) = logbook::for_session(&session) {
+            app.insert_resource(logbook);
+        }
         if let Some(host) = session.hosting {
             app.insert_resource(Hosting(host));
         }
@@ -144,9 +157,11 @@ fn run(args: Args, session: Option<Session>) {
             MapCameraPlugin,
             CompassPlugin,
             ChartPlugin,
-            // The sheet the menus stand on, and the menus. Nested only
-            // because a plugin tuple holds fifteen.
-            (BackdropPlugin, MenuPlugin),
+            // The logbook — harmless in a world nobody remembers, its systems
+            // conditioning on a book being open — then the sheet the menus
+            // stand on, and the menus. Nested only because a plugin tuple
+            // holds fifteen.
+            (LogbookPlugin, BackdropPlugin, MenuPlugin),
             // Harmless offline: its systems condition on the joined session.
             NetPlugin,
             CapturePlugin {

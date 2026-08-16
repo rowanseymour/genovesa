@@ -20,6 +20,7 @@ pub mod compass;
 pub mod console;
 pub mod debug;
 pub mod figure;
+pub mod logbook;
 pub mod menu;
 pub mod models;
 pub mod net;
@@ -202,6 +203,9 @@ impl Size {
 pub enum AppState {
     #[default]
     MainMenu,
+    /// Choosing which kept world to return to, and whether to share it this
+    /// time.
+    SetSail,
     /// Choosing the seed of the world about to be entered, and whether to
     /// share it with anyone else.
     NewWorld,

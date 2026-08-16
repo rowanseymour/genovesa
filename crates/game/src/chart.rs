@@ -272,6 +272,16 @@ impl Mark {
     fn local(self) -> Vec2 {
         Vec2::new(self.x as f32, self.z as f32) * MARK_STEP
     }
+
+    /// The mark as the two bytes it is, for the logbook to write down —
+    /// and [`Mark::unpack`] to take back. The pair is `[x, z]`.
+    pub(crate) fn pack(self) -> [u8; 2] {
+        [self.x, self.z]
+    }
+
+    pub(crate) fn unpack([x, z]: [u8; 2]) -> Self {
+        Self { x, z }
+    }
 }
 
 /// One run of surveyed coastline inside a single chunk.
@@ -285,15 +295,22 @@ impl Mark {
 pub struct Coast {
     /// The points of the run, land always on the left hand of the direction of
     /// travel — which is what lets the shore ticks be drawn without asking the
-    /// height field a second question.
-    marks: Vec<Mark>,
+    /// height field a second question. Readable by the logbook, which writes
+    /// the survey down between visits.
+    pub(crate) marks: Vec<Mark>,
     /// Whether the run closes on itself: an islet small enough to sit inside
     /// one chunk. An open run leaves the chunk by its edge, and is continued —
     /// or is not — by the neighbour's own survey.
-    closed: bool,
+    pub(crate) closed: bool,
 }
 
 impl Coast {
+    /// A run as the logbook read it back — the survey's own runs are built
+    /// by [`survey`], and this is only for reloading what that once made.
+    pub(crate) fn new(marks: Vec<Mark>, closed: bool) -> Self {
+        Self { marks, closed }
+    }
+
     /// The run in world metres, given the chunk it belongs to.
     fn points(&self, chunk: IVec2) -> impl Iterator<Item = Vec2> + '_ {
         let base = chunk.as_vec2() * CHUNK_METRES;
@@ -543,6 +560,33 @@ impl Chart {
     fn record(&mut self, chunk: IVec2, found: Soundings) {
         self.soundings.insert(chunk, found);
     }
+
+    /// Everything surveyed, and every name written on the sheet, as plain
+    /// entries for the logbook to write down.
+    pub(crate) fn entries(&self) -> (Vec<(IVec2, Soundings)>, Vec<(IVec2, String)>) {
+        (
+            self.soundings
+                .iter()
+                .map(|(chunk, found)| (*chunk, found.clone()))
+                .collect(),
+            self.names
+                .iter()
+                .map(|(island, name)| (*island, name.clone()))
+                .collect(),
+        )
+    }
+
+    /// A chart rebuilt from a logbook's entries — the survey, and the
+    /// christenings, taken up from wherever the last visit left off.
+    pub(crate) fn from_entries(
+        soundings: impl IntoIterator<Item = (IVec2, Soundings)>,
+        names: impl IntoIterator<Item = (IVec2, String)>,
+    ) -> Self {
+        Self {
+            soundings: soundings.into_iter().collect(),
+            names: names.into_iter().collect(),
+        }
+    }
 }
 
 /// A mark as a point on the world-wide step lattice: 255 whole steps to a
@@ -754,10 +798,11 @@ fn segments(cell: (usize, usize), heights: &[f32], level: f32) -> Vec<(Crossing,
 pub struct Soundings {
     /// Where the ground meets the sea. The line the chart is *about*: what the
     /// islands are measured from, what the ticks hang off, what closes.
-    coast: Vec<Coast>,
+    /// Readable by the logbook, which writes the survey down between visits.
+    pub(crate) coast: Vec<Coast>,
     /// Where the water reaches [`SHOAL_DEPTH`]. Drawn and nothing else — it
     /// rings nothing, names nothing and closes nothing.
-    shoal: Vec<Coast>,
+    pub(crate) shoal: Vec<Coast>,
 }
 
 /// Both lines of one chunk's ground, ready to be kept.
@@ -1321,15 +1366,25 @@ impl Plugin for ChartPlugin {
     }
 }
 
-/// A world gets a blank chart, and takes it with it when it goes: what has been
-/// seen is a fact about *this* world, and carrying it into the next would draw
-/// one seed's islands on another's water.
-fn start_a_chart(mut commands: Commands, mut view: ResMut<ChartView>) {
-    commands.insert_resource(Chart::default());
+/// A world gets a blank chart — or, in a world this machine remembers, the
+/// chart the last visit left off with — and takes it with it when it goes:
+/// what has been seen is a fact about *this* world, and carrying it into the
+/// next would draw one seed's islands on another's water. The logbook is
+/// keyed by the world's own id, which is what makes reloading it safe where
+/// carrying it over would not be.
+fn start_a_chart(
+    mut commands: Commands,
+    mut view: ResMut<ChartView>,
+    logbook: Option<Res<crate::logbook::Logbook>>,
+) {
+    commands.insert_resource(logbook.map_or_else(Chart::default, |logbook| logbook.charted()));
     *view = ChartView::default();
 }
 
-fn stow_the_chart(mut commands: Commands) {
+/// Pub within the crate so the logbook's closing write can order itself
+/// before this: a chart stowed first would be a chart with nothing left to
+/// write down.
+pub(crate) fn stow_the_chart(mut commands: Commands) {
     commands.remove_resource::<Chart>();
     commands.remove_resource::<Engraved>();
 }

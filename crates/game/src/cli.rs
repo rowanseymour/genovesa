@@ -149,8 +149,9 @@ Genovesa — an endless ocean of generated islands to look around.
 Usage: game [options]
 
 Options:
-  --state <screen>  start on `mainmenu`, `newworld`, `joinworld`, `settings`,
-                    `inworld`, `paused`, `pausedcontrols` or `chart`
+  --state <screen>  start on `mainmenu`, `setsail`, `newworld`, `joinworld`,
+                    `settings`, `inworld`, `paused`, `pausedcontrols` or
+                    `chart`
                     [default: mainmenu, or inworld when shots or a server are
                     asked for]
   --seed <n>        the world to open [default: a new one every run, and the
@@ -330,6 +331,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
 fn state(value: &str) -> Result<(AppState, Helm), String> {
     match value {
         "mainmenu" => Ok((AppState::MainMenu, Helm::Sailing)),
+        "setsail" => Ok((AppState::SetSail, Helm::Sailing)),
         "newworld" => Ok((AppState::NewWorld, Helm::Sailing)),
         "joinworld" => Ok((AppState::JoinWorld, Helm::Sailing)),
         "settings" => Ok((AppState::Settings, Helm::Sailing)),
@@ -338,8 +340,8 @@ fn state(value: &str) -> Result<(AppState, Helm), String> {
         "pausedcontrols" => Ok((AppState::InWorld, Helm::Controls)),
         "chart" => Ok((AppState::InWorld, Helm::Chart)),
         other => Err(format!(
-            "`{other}` is not a screen — try mainmenu, newworld, joinworld, \
-             settings, inworld, paused, pausedcontrols or chart"
+            "`{other}` is not a screen — try mainmenu, setsail, newworld, \
+             joinworld, settings, inworld, paused, pausedcontrols or chart"
         )),
     }
 }

@@ -5,14 +5,16 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource, FontStyle};
 
-use protocol::DEFAULT_PORT;
+use std::time::SystemTime;
+
+use protocol::{DAY_SECONDS, DEFAULT_PORT};
 
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
 use crate::camera::View;
 use crate::chart::{INK, INK_DIM, PAPER};
-use crate::net::{Dialing, Hosting, Online, Reach};
+use crate::net::{self, Dialing, Hosting, Online, Reach};
 use crate::{AppState, Helm};
-use server::{random_seed, WorldConfig, MAX_SEED};
+use server::{kept_worlds, random_seed, KeptWorld, WorldConfig, MAX_SEED};
 
 /// Longest seed the user can type — read off [`MAX_SEED`], so the field can
 /// always hold a seed the game itself picked.
@@ -125,6 +127,7 @@ impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NewWorldSettings>()
             .init_resource::<JoinSettings>()
+            .init_resource::<Harbour>()
             .init_resource::<Status>()
             // Shared with the camera, which registers them too — see
             // `MapCameraPlugin`.
@@ -139,6 +142,10 @@ impl Plugin for MenuPlugin {
             // Cleared before the screen is built, so that a screen only ever
             // shows what this visit to it has had to say.
             .add_systems(
+                OnEnter(AppState::SetSail),
+                (clear_status, spawn_set_sail).chain(),
+            )
+            .add_systems(
                 OnEnter(AppState::NewWorld),
                 (clear_status, spawn_new_world_dialog).chain(),
             )
@@ -152,6 +159,7 @@ impl Plugin for MenuPlugin {
             // with it. Left running, it would arrive in the middle of some
             // other screen and drag the player into a world they had already
             // walked away from.
+            .add_systems(OnExit(AppState::SetSail), stop_dialing)
             .add_systems(OnExit(AppState::NewWorld), stop_dialing)
             .add_systems(OnExit(AppState::JoinWorld), stop_dialing)
             // Leaving the screen mid-capture would otherwise come back to it
@@ -164,6 +172,7 @@ impl Plugin for MenuPlugin {
                     highlight_buttons,
                     settle_dialing.run_if(resource_exists::<Dialing>),
                     main_menu_actions.run_if(in_state(AppState::MainMenu)),
+                    (set_sail_actions, refresh_set_sail).run_if(in_state(AppState::SetSail)),
                     (dialog_actions, open_world, refresh_dialog)
                         .run_if(in_state(AppState::NewWorld)),
                     // `type_seed` carries no run condition of its own, for
@@ -261,6 +270,16 @@ impl Default for JoinSettings {
 #[derive(Resource, Default)]
 struct Status(String);
 
+/// The kept worlds the set-sail screen is offering, read off the worlds
+/// directory each time the screen opens, and whether the one chosen will be
+/// shared. The rows hold indexes into this list — see
+/// [`MenuButton::OpenKept`].
+#[derive(Resource, Default)]
+struct Harbour {
+    worlds: Vec<server::KeptWorld>,
+    share: bool,
+}
+
 /// The action whose new key the controls screen is waiting for, if any. Only
 /// one row can be armed at a time — the next key pressed has to mean one thing.
 #[derive(Resource, Default)]
@@ -268,6 +287,9 @@ struct Rebinding(Option<Action>);
 
 #[derive(Component, Clone, Copy, PartialEq)]
 enum MenuButton {
+    /// Opens the kept-worlds screen. Only offered once there is a world to
+    /// return to.
+    SetSail,
     NewWorld,
     JoinWorld,
     Settings,
@@ -276,6 +298,10 @@ enum MenuButton {
     /// Turns sharing the world about to be started on and off.
     ToggleShare,
     Start,
+    /// Reopens the kept world at this row of the [`Harbour`].
+    OpenKept(usize),
+    /// Turns sharing the kept world about to be reopened on and off.
+    ToggleKeptShare,
     /// Dials the address on the join screen.
     Connect,
     /// Arms this action's row, so the next key pressed becomes its key.
@@ -297,6 +323,11 @@ struct SeedText;
 #[derive(Component)]
 struct ShareText;
 
+/// The set-sail screen's own sharing label — a component of its own so the
+/// two screens' refreshes cannot write each other's switches.
+#[derive(Component)]
+struct KeptShareText;
+
 /// Marks the address readout on the join screen.
 #[derive(Component)]
 struct AddressText;
@@ -315,6 +346,13 @@ struct KeyText(Action);
 // ---------------------------------------------------------------------------
 
 fn spawn_main_menu(mut commands: Commands) {
+    // Whether there is anywhere to set sail *to*: a machine with no kept
+    // worlds gets the menu it always had, and the button appears the first
+    // time there is a world to return to. Asked of the directory on each
+    // opening of this screen, which is exactly as often as the answer can
+    // have changed.
+    let kept_any = net::worlds_dir().is_some_and(|dir| !server::kept_worlds(&dir).is_empty());
+
     // The whole menu goes inside the cartouche, which is where an engraved
     // chart carries its title and everything said about it.
     let ink = ON_PAPER;
@@ -332,6 +370,9 @@ fn spawn_main_menu(mut commands: Commands) {
                     spawn_title(panel, &ink);
                     spawn_subtitle(panel, &ink);
 
+                    if kept_any {
+                        spawn_button(panel, &ink, MenuButton::SetSail, "Set Sail", 240.0);
+                    }
                     spawn_button(panel, &ink, MenuButton::NewWorld, "New World", 240.0);
                     spawn_button(panel, &ink, MenuButton::JoinWorld, "Join World", 240.0);
                     spawn_button(panel, &ink, MenuButton::Settings, "Controls", 240.0);
@@ -437,6 +478,7 @@ fn main_menu_actions(
             continue;
         }
         match button {
+            MenuButton::SetSail => next.set(AppState::SetSail),
             MenuButton::NewWorld => next.set(AppState::NewWorld),
             MenuButton::JoinWorld => next.set(AppState::JoinWorld),
             MenuButton::Settings => next.set(AppState::Settings),
@@ -445,6 +487,165 @@ fn main_menu_actions(
             }
             _ => {}
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Set sail: the kept worlds
+// ---------------------------------------------------------------------------
+
+/// Rows the screen offers before it starts summarising. Eight is more worlds
+/// than most machines will ever keep; the summary line below the rows is
+/// what says the rest are not lost, only older.
+const MOST_KEPT_ROWS: usize = 8;
+
+fn spawn_set_sail(mut commands: Commands, mut harbour: ResMut<Harbour>) {
+    // Read fresh on every visit to the screen: worlds are files, and files
+    // can have been copied in, deleted, or sailed from another install since
+    // the last look.
+    harbour.worlds = net::worlds_dir()
+        .map(|dir| kept_worlds(&dir))
+        .unwrap_or_default();
+
+    let ink = ON_PAPER;
+    commands
+        .spawn((
+            Name::new("Set sail dialog"),
+            DespawnOnExit(AppState::SetSail),
+            screen(&ink),
+        ))
+        .with_children(|screen| {
+            screen
+                .spawn(panel(&ink, 10.0, PANEL_PADDING))
+                .with_children(|panel| {
+                    cartouche_rule(panel, &ink);
+                    heading(panel, &ink, "Set Sail", 20.0);
+                    label(panel, &ink, "return to a world this machine keeps");
+
+                    for (row, world) in harbour.worlds.iter().take(MOST_KEPT_ROWS).enumerate() {
+                        spawn_button(
+                            panel,
+                            &ink,
+                            MenuButton::OpenKept(row),
+                            &world_label(world),
+                            360.0,
+                        );
+                    }
+                    if harbour.worlds.len() > MOST_KEPT_ROWS {
+                        label(
+                            panel,
+                            &ink,
+                            &format!(
+                                "and {} more, sailed longer ago",
+                                harbour.worlds.len() - MOST_KEPT_ROWS
+                            ),
+                        );
+                    }
+
+                    // The same switch the new-world dialog carries, meaning
+                    // the same thing: who can reach the world about to be
+                    // served.
+                    panel
+                        .spawn(Node {
+                            margin: UiRect::top(Val::Px(20.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            row.spawn(button(&ink, MenuButton::ToggleKeptShare, 160.0))
+                                .with_children(|button| {
+                                    button.spawn((
+                                        KeptShareText,
+                                        button_label(&ink, share_label(harbour.share)),
+                                    ));
+                                });
+                        });
+                    label(
+                        panel,
+                        &ink,
+                        &format!("sharing hosts the world on port {DEFAULT_PORT}"),
+                    );
+
+                    status_line(panel, &ink);
+                    spawn_button(panel, &ink, MenuButton::Back, "Back", 130.0);
+                });
+        });
+}
+
+/// What a kept world's row reads. The place's own story where it has one —
+/// its name, once worlds have names — and otherwise how far into its days it
+/// is, which is the one fact the file can offer that describes the world
+/// rather than the machinery. "Sailed when" is what tells two rows apart on
+/// a machine that keeps several.
+fn world_label(world: &KeptWorld) -> String {
+    let day = (world.age / DAY_SECONDS) as u32 + 1;
+    let sailed = sailed_when(world.kept);
+    if world.name.is_empty() {
+        format!("Day {day} — {sailed}")
+    } else {
+        format!("{} — {sailed}", world.name)
+    }
+}
+
+/// A last-sailed moment as prose. Coarse on purpose: "sailed today" is what
+/// a person checks a list by, and an hour count would just be a smaller
+/// number to ignore.
+fn sailed_when(kept: SystemTime) -> String {
+    match kept.elapsed() {
+        Ok(since) => match since.as_secs() / 86_400 {
+            0 => "sailed today".to_string(),
+            1 => "sailed yesterday".to_string(),
+            days => format!("sailed {days} days ago"),
+        },
+        // A file stamped in the future is a clock that moved, not a world
+        // that has not been played yet.
+        Err(_) => "sailed today".to_string(),
+    }
+}
+
+fn set_sail_actions(
+    mut commands: Commands,
+    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    dialing: Option<Res<Dialing>>,
+    mut harbour: ResMut<Harbour>,
+    mut status: ResMut<Status>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    for (interaction, button) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match button {
+            MenuButton::Back => next.set(AppState::MainMenu),
+            MenuButton::ToggleKeptShare => harbour.share = !harbour.share,
+            // Already ringing: asking for a second world would only fail on
+            // the lock the first one is taking.
+            MenuButton::OpenKept(_) if dialing.is_some() => {}
+            MenuButton::OpenKept(row) => {
+                let Some(world) = harbour.worlds.get(*row) else {
+                    continue;
+                };
+                status.0 = "reopening the world...".to_string();
+                commands.insert_resource(Dialing::reopening(
+                    world.path.clone(),
+                    if harbour.share {
+                        Reach::Shared
+                    } else {
+                        Reach::Alone
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Keeps the sharing switch's label in step with the setting behind it.
+fn refresh_set_sail(harbour: Res<Harbour>, mut share_text: Query<&mut Text, With<KeptShareText>>) {
+    if !harbour.is_changed() {
+        return;
+    }
+    for mut text in &mut share_text {
+        text.0 = share_label(harbour.share).to_string();
     }
 }
 
@@ -597,6 +798,9 @@ fn open_world(
                 // open at; choosing another is a thing the command line can
                 // ask for and this screen has no room to.
                 server::OPENING,
+                // And it is kept: the menu's worlds are worlds to live in,
+                // and the set-sail screen is where they are returned to.
+                true,
             ));
             return;
         }
@@ -865,6 +1069,19 @@ fn settle_dialing(
     // that no longer exists.
     view.enter(session.connection.spawn, session.connection.facing);
 
+    // The logbook first, while the session is still whole: what the chart
+    // and the boat read on their way into the world, for a world this
+    // machine remembers. A restored berth also aims the view — the hull
+    // comes back on its own heading, and the camera belongs behind it, not
+    // wherever the menu's drifting sea last left the bearing.
+    if let Some(logbook) = crate::logbook::for_session(&session) {
+        match logbook.berth {
+            Some(crate::logbook::Berth::Aboard { heading }) => view.yaw = heading,
+            Some(crate::logbook::Berth::Ashore { facing, .. }) => view.yaw = facing,
+            None => {}
+        }
+        commands.insert_resource(logbook);
+    }
     if let Some(host) = session.hosting {
         commands.insert_resource(Hosting(host));
     }
@@ -1472,6 +1689,9 @@ mod tests {
 
     /// A headless app running the menu systems, with no renderer attached.
     fn test_app(state: AppState) -> App {
+        // The Start button keeps the world it opens, and a test's world must
+        // not land among the player's real ones.
+        crate::testing::quarantine_data_dir();
         let mut app = App::new();
         app.add_plugins((StatesPlugin, MenuPlugin))
             .insert_state(state)

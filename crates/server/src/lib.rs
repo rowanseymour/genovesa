@@ -19,19 +19,22 @@
 pub mod beasts;
 pub mod cli;
 mod console;
+mod keeper;
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
-use protocol::{BeastKind, PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
+use protocol::{BeastKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION};
 use world::archipelago::Archipelago;
 
+pub use keeper::{data_dir, kept_worlds, KeptWorld};
 pub use world::archipelago::{random_seed, WorldConfig, MAX_SEED};
 
 /// How long a fresh connection has to say hello. Generous for a slow link,
@@ -147,6 +150,14 @@ const SKY_TICK: Duration = Duration::from_millis(200);
 /// means of moving, and a second of drift is a fifth of a degree of arc.
 const SKY_TELL: Duration = Duration::from_secs(1);
 
+/// How often a kept world is written back to its file while the session
+/// runs. The closing save is the one that matters — it is what makes
+/// leaving and returning seamless — and these are insurance against the
+/// session never reaching it: a crash or a kill costs at most this much
+/// history, of a world whose whole file is smaller than one chunk of
+/// ground.
+const KEEP_INTERVAL: Duration = Duration::from_secs(30);
+
 /// How much the wind must have moved, in metres per second of vector change,
 /// before it is worth telling everyone about.
 const WIND_STEP: f32 = 0.25;
@@ -160,6 +171,10 @@ type Report = Box<dyn Fn(&str) + Send + Sync>;
 pub struct Server {
     listener: TcpListener,
     shared: Arc<Shared>,
+    /// Whether this world was reopened from a file rather than freshly made
+    /// — what [`Server::opening_at`] reads to decide between setting the
+    /// clock and winding it, a kept world's day only ever growing older.
+    loaded: bool,
     /// Both ends of the chunk queue, held until there is something to serve.
     ///
     /// Deliberately not in [`Shared`], and that is the whole of how the
@@ -193,9 +208,31 @@ pub(crate) struct Shared {
     /// its view looking at land rather than out to sea. Equal to the spawn
     /// itself when the layout offered nothing, which names no direction.
     facing: Vec2,
+    /// Which world this is — see [`protocol::WorldId`]. Minted when the
+    /// world was first made and constant for its life, however many times it
+    /// is reopened or rehosted.
+    world_id: WorldId,
+    /// What the world is called on screens that list worlds. Empty for every
+    /// world today — naming is a design still owed — and carried through
+    /// from the file so a hand-named world keeps its name. Nothing on the
+    /// wire carries it, and nothing here sets it: the file's own line-based
+    /// parse is what guarantees it can never hold a newline, which the
+    /// format could not survive.
+    name: String,
     /// Dealt in joining order, and never reused within a session.
     next_id: AtomicU32,
     pub(crate) players: Mutex<HashMap<PlayerId, Player>>,
+    /// Where the world last saw each player not currently in it, by the
+    /// token it dealt them. What [`ToServer::Papers`] is answered from, and
+    /// — merged with the roster, which holds the players who are here — what
+    /// a save writes down. Loaded from the world's file when there is one,
+    /// and kept regardless, so leaving and rejoining works even in a world
+    /// nobody is keeping.
+    remembered: Mutex<HashMap<Token, Vec2>>,
+    /// The file this world survives in, if it is being kept: `None` is an
+    /// ephemeral world — a test's, or a dedicated server nobody asked to
+    /// remember — which lives exactly as long as its process.
+    keeper: Option<keeper::Keeper>,
     /// Set once, by the end of the session, and read by every thread that
     /// might still be joining one: see [`Host::drop`], which is what makes it
     /// true, and [`serve`], which is what makes it mean something.
@@ -239,6 +276,10 @@ struct ChunkRequest {
 /// One connected player, as the roster sees them.
 pub(crate) struct Player {
     pub(crate) position: Vec2,
+    /// The token this player holds the world by — presented at the door or
+    /// dealt there, and where the world will file their position when they
+    /// leave. See [`protocol::Token`].
+    token: Token,
     /// When this player last asked for the night to be over, if they have —
     /// see [`ToServer::WantDawn`], which stands only for [`WAIT_LAPSE`].
     waiting_since: Option<Instant>,
@@ -261,7 +302,8 @@ impl Player {
 }
 
 impl Server {
-    /// Binds the listener, makes the world, and asks it where it is entered.
+    /// Binds the listener, makes a fresh world, and asks it where it is
+    /// entered.
     ///
     /// That generates the entry island — tens to hundreds of milliseconds,
     /// once, before anyone can join — and the origin is the fallback the
@@ -270,15 +312,37 @@ impl Server {
     ///
     /// Nothing is generated beyond that entry island, and no worker is
     /// started: a bound server is a world with a door, and [`Server::run`] or
-    /// [`Server::spawn`] is what opens it.
+    /// [`Server::spawn`] is what opens it. The world is ephemeral until
+    /// [`Server::keeping_in`] or [`Server::keeping_at`] says otherwise.
     pub fn bind(addr: impl ToSocketAddrs, config: WorldConfig) -> io::Result<Self> {
+        Self::from_record(addr, keeper::WorldRecord::fresh(config.seed), None, false)
+    }
+
+    /// Reopens the kept world at `path` and binds a listener for it: the
+    /// same islands, the sun where it stood, the players where the world
+    /// last saw them. The world's lock is taken before its file is read, so
+    /// a world cannot be reopened out from under a session that is still
+    /// writing it.
+    pub fn reopen(addr: impl ToSocketAddrs, path: &Path) -> io::Result<Self> {
+        let keeper = keeper::Keeper::hold(path)?;
+        let record = keeper::load(path)?;
+        Self::from_record(addr, record, Some(keeper), true)
+    }
+
+    fn from_record(
+        addr: impl ToSocketAddrs,
+        record: keeper::WorldRecord,
+        keeper: Option<keeper::Keeper>,
+        loaded: bool,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        let world = Arc::new(Archipelago::new(&config));
+        let world = Arc::new(Archipelago::new(&WorldConfig { seed: record.seed }));
         let entry = world.spawn();
         let spawn = entry.map_or(Vec2::ZERO, |entry| entry.point);
 
         Ok(Self {
             listener,
+            loaded,
             queue: mpsc::sync_channel(CHUNK_QUEUE_DEPTH),
             shared: Arc::new(Shared {
                 world,
@@ -286,17 +350,48 @@ impl Server {
                 // A world with no island to look at leaves the bearing to the
                 // client, which is what a facing equal to the spawn means.
                 facing: entry.map_or(spawn, |entry| entry.island.centre()),
+                world_id: record.id,
+                name: record.name,
                 next_id: AtomicU32::new(1),
                 players: Mutex::new(HashMap::new()),
+                remembered: Mutex::new(record.players),
+                keeper,
                 stopping: AtomicBool::new(false),
                 started: Instant::now(),
-                opening: OPENING,
-                skipped: Mutex::new(0.0),
+                opening: record.opening,
+                // The whole of how a world resumes mid-story: its lived
+                // seconds are on the clock before the session's first tick,
+                // so the hour and the weather carry on from where the last
+                // session left them — see [`Shared::age`].
+                skipped: Mutex::new(record.age),
                 commanded_wind: Mutex::new(None),
                 summoned: Mutex::new(Vec::new()),
                 report: Box::new(|_| {}),
             }),
         })
+    }
+
+    /// Keeps this world at exactly `path`, writing it there now so it exists
+    /// on disk from birth. For the caller who names the file — a dedicated
+    /// server's `--world`; a game keeps its worlds with
+    /// [`Server::keeping_in`] instead.
+    pub fn keeping_at(mut self, path: PathBuf) -> io::Result<Self> {
+        let keeper = keeper::Keeper::hold(&path)?;
+        keeper.save(&self.shared.record())?;
+        // The same moment [`Server::reporting_to`] uses, and for the same
+        // reason: nothing is serving yet, so the shared state has one owner.
+        Arc::get_mut(&mut self.shared)
+            .expect("a server that has not been run yet owns its shared state")
+            .keeper = Some(keeper);
+        Ok(self)
+    }
+
+    /// Keeps this world in the directory `dir`, filed under its own id —
+    /// how a game keeps every world it opens without inventing names for
+    /// files.
+    pub fn keeping_in(self, dir: &Path) -> io::Result<Self> {
+        let id = self.shared.world_id;
+        self.keeping_at(dir.join(format!("{id}.world")))
     }
 
     /// Where to send news of players coming and going: called with a line of
@@ -317,6 +412,12 @@ impl Server {
     /// [`ToClient::Daylight`]. Worlds open in the morning unless somebody
     /// asks for otherwise, which is what `--time` and the tests of the night
     /// do.
+    ///
+    /// On a *reopened* world this winds the clock forward to the next
+    /// occurrence of that hour rather than setting it, exactly as the
+    /// console's `time` command would: a kept world's day only ever grows
+    /// older — the promise [`ToClient::Daylight`] makes — and its weather,
+    /// running on the same clock, moves on with it.
     pub fn opening_at(mut self, phase: f32) -> Self {
         // Dropped rather than clamped when it is not a number, because a NaN
         // is not an hour that overshot — there is no hour it was nearly
@@ -325,13 +426,18 @@ impl Server {
         // would answer NaN for ever, [`protocol::is_night`] calls that night,
         // and every client would refuse every telling of the time.
         let phase = if phase.is_finite() { phase } else { OPENING };
+        let phase = phase.rem_euclid(1.0);
 
         // The same moment [`Server::reporting_to`] uses, and for the same
         // reason: nothing is serving yet, so this is where the shared state
         // still has one owner.
-        Arc::get_mut(&mut self.shared)
-            .expect("a server that has not been run yet owns its shared state")
-            .opening = phase.rem_euclid(1.0);
+        if self.loaded {
+            self.shared.wind_forward_to(phase);
+        } else {
+            Arc::get_mut(&mut self.shared)
+                .expect("a server that has not been run yet owns its shared state")
+                .opening = phase;
+        }
         self
     }
 
@@ -339,6 +445,13 @@ impl Server {
     /// tests host on whatever the machine has free.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    /// The seed of the world being served — for the process hosting, which
+    /// is entitled to say which world it made; nothing on the wire carries
+    /// it. What a reopened world's host prints, having never been told.
+    pub fn seed(&self) -> u32 {
+        self.shared.world.seed()
     }
 
     /// Serves forever on this thread: every connection gets a thread of its
@@ -441,18 +554,21 @@ impl Drop for Host {
 }
 
 /// Takes connections until asked to stop, giving each a thread of its own,
-/// and lets the world forget the islands nobody is near.
+/// lets the world forget the islands nobody is near, and keeps the world's
+/// file current.
 ///
-/// The sweep rides along here rather than on a thread of its own because this
-/// loop already wakes on a timer and has nothing else to do between
-/// connections. It has to happen *somewhere* — a world that only ever grew
-/// would hold every island anybody had sailed past for the life of the
-/// process.
+/// The sweep and the saves ride along here rather than on threads of their
+/// own because this loop already wakes on a timer and has nothing else to do
+/// between connections. Each has to happen *somewhere*: a world that only
+/// ever grew would hold every island anybody had sailed past for the life of
+/// the process, and a world only ever saved at the end would lose its whole
+/// session to a crash.
 fn accept(listener: &TcpListener, shared: &Arc<Shared>, wanted: &mpsc::SyncSender<ChunkRequest>) {
     // Non-blocking, so that the stop above is noticed within [`STOP_POLL`]
     // rather than whenever the next connection happens to arrive.
     let _ = listener.set_nonblocking(true);
     let mut swept = Instant::now();
+    let mut kept = Instant::now();
 
     while !shared.stopping.load(Ordering::Relaxed) {
         match listener.accept() {
@@ -481,6 +597,23 @@ fn accept(listener: &TcpListener, shared: &Arc<Shared>, wanted: &mpsc::SyncSende
                 .world
                 .retain_near(&where_everyone_is, ISLAND_CACHE_RADIUS);
         }
+
+        if kept.elapsed() >= KEEP_INTERVAL {
+            kept = Instant::now();
+            shared.keep();
+        }
+    }
+
+    // The closing save: this loop ends inside the drop of a [`Host`] — a
+    // player leaving the world they hosted — so by the time the drop
+    // returns, everything the session was is in the file. The lock is let
+    // go here too, rather than when the shared state finally drops: the
+    // worker threads hold that state for a beat past the end, and a world
+    // left and immediately reopened must not be refused by its own
+    // session's shadow.
+    shared.keep();
+    if let Some(keeper) = &shared.keeper {
+        keeper.release();
     }
 }
 
@@ -610,16 +743,30 @@ fn watch_the_sky(shared: &Arc<Shared>) {
 }
 
 impl Shared {
+    /// World-seconds lived: the session's own clock plus [`Shared::skipped`]
+    /// — which a reopened world starts with its whole past in, so age spans
+    /// every session the world has ever run. The hour and the weather are
+    /// both functions of it, and only of it: while the world is closed no
+    /// time passes at all, which is what makes quitting mid-gale and
+    /// reloading land back in the same gale rather than past it.
+    fn age(&self) -> f32 {
+        let skipped = *self.skipped.lock().expect("no poisoned lock");
+        self.started.elapsed().as_secs_f32() + skipped
+    }
+
     /// The wind over this world right now. Asked rather than kept: the
-    /// weather is a pure function of the seed and the session's clock, so
-    /// there is no cached state for two askers to disagree over — unless the
+    /// weather is a pure function of the seed and the world's age, so there
+    /// is no cached state for two askers to disagree over — unless the
     /// console has taken the weather in hand, which *is* state, and then its
     /// order is the answer for everyone until it lets go.
+    ///
+    /// The age rather than the session's own clock, deliberately, on both
+    /// counts: a kept world resumes the sky it closed under, and a night
+    /// waited out is weather passing too — a crew at anchor through till
+    /// dawn has sat out some of the blow.
     fn wind(&self) -> Vec2 {
         let commanded = *self.commanded_wind.lock().expect("no poisoned lock");
-        commanded.unwrap_or_else(|| {
-            world::weather::wind(self.world.seed(), self.started.elapsed().as_secs_f32())
-        })
+        commanded.unwrap_or_else(|| world::weather::wind(self.world.seed(), self.age()))
     }
 
     /// Orders the wind, or — with `None` — gives the weather back to the
@@ -653,13 +800,50 @@ impl Shared {
     /// What time of day it is here, as a phase — see [`ToClient::Daylight`].
     ///
     /// The same construction as the wind, and for the same reason: the hour
-    /// follows from how long the world has been open, so nothing has to be
-    /// kept in step. The one piece of state is [`Shared::skipped`], which is
-    /// what a night waited out leaves behind.
+    /// follows from the world's age, so nothing has to be kept in step. The
+    /// one piece of state is [`Shared::skipped`], which is what a night
+    /// waited out — and, for a kept world, every earlier session — leaves
+    /// behind.
     fn phase(&self) -> f32 {
-        let skipped = *self.skipped.lock().expect("no poisoned lock");
-        let seconds = self.started.elapsed().as_secs_f32() + skipped;
-        (self.opening + seconds / protocol::DAY_SECONDS).rem_euclid(1.0)
+        (self.opening + self.age() / protocol::DAY_SECONDS).rem_euclid(1.0)
+    }
+
+    /// This world, summarised for its file: the identity, the age as of
+    /// now, and everyone the world has ever seen — the roster's positions
+    /// laid over the remembered ones, so a player who is here is written
+    /// where they are, not where they last left.
+    ///
+    /// The locks are taken one at a time, never nested, like every other
+    /// path through them.
+    fn record(&self) -> keeper::WorldRecord {
+        let aboard: Vec<(Token, Vec2)> = {
+            let players = self.players.lock().expect("no poisoned lock");
+            players
+                .values()
+                .map(|player| (player.token, player.position))
+                .collect()
+        };
+        let mut players = self.remembered.lock().expect("no poisoned lock").clone();
+        players.extend(aboard);
+        keeper::WorldRecord {
+            id: self.world_id,
+            seed: self.world.seed(),
+            name: self.name.clone(),
+            opening: self.opening,
+            age: self.age(),
+            players,
+        }
+    }
+
+    /// Writes the world to its file, if it is being kept — the world's own
+    /// failure story: a save that fails is reported and the session sails
+    /// on, the next interval being another chance.
+    fn keep(&self) {
+        if let Some(keeper) = &self.keeper {
+            if let Err(error) = keeper.save(&self.record()) {
+                (self.report)(&format!("the world could not be kept: {error}"));
+            }
+        }
     }
 
     /// Runs the clock on through a night everybody is waiting out, and says
@@ -752,8 +936,42 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         }
         _ => return,
     }
+
+    // Which world this is, so the client can look out what it holds of it —
+    // and then the papers themselves, under the same deadline the hello was:
+    // a connection that says hello and then nothing is the same stalled
+    // stranger either way.
+    if (ToClient::World {
+        id: shared.world_id,
+    })
+    .write(&mut &stream)
+    .is_err()
+    {
+        return;
+    }
+    let presented = match ToServer::read(&mut reader) {
+        Ok(ToServer::Papers { token }) => token,
+        _ => return,
+    };
     let _ = reader.set_read_timeout(None);
     let id = PlayerId(shared.next_id.fetch_add(1, Ordering::Relaxed));
+
+    // The papers, resolved against what the world remembers: a recognised
+    // token re-enters where the world last saw its holder, and anything else
+    // — no token, or one this world never dealt — is a stranger, dealt a
+    // fresh token on the spot. An unrecognised token is not an offence,
+    // because the world's memory and a client's can part ways honestly: a
+    // world file lost, or a world rebuilt under the same address.
+    let (token, returning_to) = {
+        let remembered = shared.remembered.lock().expect("no poisoned lock");
+        match presented {
+            Some(token) => match remembered.get(&token) {
+                Some(&position) => (token, Some(position)),
+                None => (Token(keeper::mint()), None),
+            },
+            None => (Token(keeper::mint()), None),
+        }
+    };
 
     // The player's writer: everything the session wants them to hear goes
     // down the channel, and this thread puts it on the socket. It ends when
@@ -771,12 +989,14 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         }
     });
 
-    let player = Player {
-        position: shared.spawn_for(id),
+    let mut player = Player {
+        position: returning_to.unwrap_or_else(|| shared.spawn_for(id)),
+        token,
         waiting_since: None,
         outbox,
         line: stream,
     };
+    let mut returning = returning_to.is_some();
 
     // Onto the roster and then welcomed, under one hold of the lock.
     //
@@ -813,10 +1033,31 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             return;
         }
 
+        // A token already on the roster is one client's files opened twice —
+        // somebody joining as themselves while themselves. The second
+        // arrival enters as a stranger rather than being refused: a refusal
+        // would lock a player out of a world over a copied file, where a
+        // fresh start merely puzzles them, and only the world's memory of
+        // one position was ever at stake.
+        if players.values().any(|other| other.token == player.token) {
+            player.token = Token(keeper::mint());
+            player.position = shared.spawn_for(id);
+            returning = false;
+        }
+
         let welcome = ToClient::Welcome {
             id,
             spawn: player.position,
-            facing: shared.facing,
+            // A returning player is not put down beside the entry island, so
+            // its centre is nothing to turn their view towards: their own
+            // position names no direction, which leaves the bearing to the
+            // client, exactly as a world with no island to look at does.
+            facing: if returning {
+                player.position
+            } else {
+                shared.facing
+            },
+            token: player.token,
         };
         let arrival = ToClient::Joined {
             id,
@@ -920,6 +1161,27 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         }
     }
 
+    // Where the world last saw them, filed under their token *before* they
+    // leave the roster — a save can land between the two steps, and a player
+    // momentarily in both places is written once, where they are, while one
+    // momentarily in neither would be a position lost. The position cannot
+    // move between the snapshot and the removal: only this thread's read
+    // loop ever moved it, and the read loop is over. And the two locks are
+    // taken one after the other, never together, like every other path
+    // through them.
+    let leaving = {
+        let players = shared.players.lock().expect("no poisoned lock");
+        players
+            .get(&id)
+            .map(|player| (player.token, player.position))
+    };
+    if let Some((token, position)) = leaving {
+        shared
+            .remembered
+            .lock()
+            .expect("no poisoned lock")
+            .insert(token, position);
+    }
     {
         let mut players = shared.players.lock().expect("no poisoned lock");
         players.remove(&id);
@@ -931,8 +1193,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
 /// Whether a reported position is one a player could actually be standing at:
 /// finite, and inside the coordinate space the world resolves — see
 /// [`MAX_RANGE`]. A non-finite or absurd position would poison every machine
-/// that eased a marker towards it.
-fn reachable(position: Vec2) -> bool {
+/// that eased a marker towards it. The keeper holds a loaded world file to
+/// the same test, an edited file being the one other door positions arrive
+/// through.
+pub(crate) fn reachable(position: Vec2) -> bool {
     position.is_finite() && position.abs().max_element() <= MAX_RANGE
 }
 

@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Mutex;
 use std::thread;
@@ -33,7 +34,7 @@ use std::time::Duration;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use protocol::{PlayerId, ToClient, ToServer, DEFAULT_PORT, PROTOCOL_VERSION};
+use protocol::{PlayerId, ToClient, ToServer, Token, WorldId, DEFAULT_PORT, PROTOCOL_VERSION};
 use server::{Host, Server, WorldConfig};
 
 use crate::player::PlayerPlace;
@@ -87,6 +88,17 @@ pub struct Connection {
     /// particular to offer, which names no direction and leaves the bearing
     /// alone.
     pub facing: Vec2,
+    /// Which world this is — what the client's own files about the world are
+    /// keyed by. See [`protocol::WorldId`].
+    pub world: WorldId,
+    /// The token this player now holds the world by, for the logbook to
+    /// keep and the next visit to present.
+    pub token: Token,
+    /// Whether the server recognised the papers presented — a resumed visit,
+    /// with the spawn being where the world last saw this player, rather
+    /// than an arrival. What decides whether the logbook's berth is to be
+    /// believed.
+    pub resumed: bool,
 }
 
 impl Connection {
@@ -113,8 +125,32 @@ impl Connection {
         .write(&mut &stream)
         .map_err(|error| format!("`{addr}` hung up mid-greeting: {error}"))?;
 
+        // The server names which world this is, and the papers answer: the
+        // token the logbook holds for that world, or nothing — being new
+        // here. The refusal a version mismatch earns arrives here, in the
+        // world's place.
+        let world = match ToClient::read(&mut &stream) {
+            Ok(ToClient::World { id }) => id,
+            Ok(ToClient::Refused { version }) => {
+                return Err(format!(
+                    "`{addr}` speaks protocol {version}, this build speaks {PROTOCOL_VERSION}"
+                ))
+            }
+            Ok(other) => return Err(format!("`{addr}` is talking nonsense: {other:?}")),
+            Err(error) => return Err(format!("no answer from `{addr}`: {error}")),
+        };
+        let presented = crate::logbook::token_for(world);
+        (ToServer::Papers { token: presented })
+            .write(&mut &stream)
+            .map_err(|error| format!("`{addr}` hung up mid-greeting: {error}"))?;
+
         match ToClient::read(&mut &stream) {
-            Ok(ToClient::Welcome { id, spawn, facing }) => {
+            Ok(ToClient::Welcome {
+                id,
+                spawn,
+                facing,
+                token,
+            }) => {
                 let _ = stream.set_read_timeout(None);
                 let _ = stream.set_write_timeout(Some(REPORT_TIMEOUT));
                 // From here the socket splits: this thread reads it forever,
@@ -138,11 +174,13 @@ impl Connection {
                     id,
                     spawn,
                     facing,
+                    world,
+                    token,
+                    // The welcome echoing the presented token is the whole
+                    // of how "welcome back" is said.
+                    resumed: presented == Some(token),
                 })
             }
-            Ok(ToClient::Refused { version }) => Err(format!(
-                "`{addr}` speaks protocol {version}, this build speaks {PROTOCOL_VERSION}"
-            )),
             Ok(other) => Err(format!("`{addr}` is talking nonsense: {other:?}")),
             Err(error) => Err(format!("no welcome from `{addr}`: {error}")),
         }
@@ -224,6 +262,13 @@ impl Drop for Connection {
     }
 }
 
+/// Where this machine keeps the worlds it opens from the menu — what
+/// [`Session::open`] files them into and the set-sail screen lists. `None`
+/// on a machine with nowhere to keep anything.
+pub fn worlds_dir() -> Option<PathBuf> {
+    Some(server::data_dir()?.join("worlds"))
+}
+
 /// What a server named as `host` or `host:port` is dialled as: a bare name
 /// gets [`DEFAULT_PORT`], which is the whole of what a player has to be told
 /// to join somebody.
@@ -242,6 +287,13 @@ pub struct Session {
     /// The server serving this session, when it is our own. Held for the life
     /// of the match — see [`Hosting`].
     pub hosting: Option<Host>,
+    /// Whether the hosted world outlives this session — kept in the game's
+    /// worlds directory, to be offered again from the menu. Always false for
+    /// a joined session, whose keeping is the far host's business; what it
+    /// decides here is whether this machine opens a logbook (see
+    /// [`crate::logbook::for_session`]) — a world both ephemeral and our own
+    /// is not worth remembering, since it will never exist again.
+    pub kept: bool,
 }
 
 impl Session {
@@ -250,6 +302,7 @@ impl Session {
         Ok(Self {
             connection: Connection::join(address)?,
             hosting: None,
+            kept: false,
         })
     }
 
@@ -268,16 +321,45 @@ impl Session {
     ///
     /// `opening` is the hour of its day the world starts at, as a phase —
     /// [`server::OPENING`] for a world nobody asked anything particular of.
-    pub fn open(config: WorldConfig, reach: Reach, opening: f32) -> Result<Self, String> {
-        let server = Server::bind(reach.bound_to(), config)
+    /// `keep` files the world in this machine's worlds directory, to be
+    /// offered again from the menu: what the menu asks and the command line
+    /// does not, a `--seed` run being a world to look at rather than one to
+    /// live in.
+    pub fn open(
+        config: WorldConfig,
+        reach: Reach,
+        opening: f32,
+        keep: bool,
+    ) -> Result<Self, String> {
+        let mut server = Server::bind(reach.bound_to(), config)
             .map_err(|error| format!("cannot open a world: {error}"))?
             .opening_at(opening);
+        if keep {
+            let worlds = worlds_dir()
+                .ok_or_else(|| "this machine has nowhere to keep a world".to_string())?;
+            server = server
+                .keeping_in(&worlds)
+                .map_err(|error| format!("cannot keep the world: {error}"))?;
+        }
+        Self::hosting(server, keep)
+    }
+
+    /// Reopens a kept world and joins it — the same world, aged only by the
+    /// time it was actually open, with this player where it last saw them.
+    pub fn reopening(path: PathBuf, reach: Reach) -> Result<Self, String> {
+        let server = Server::reopen(reach.bound_to(), &path)
+            .map_err(|error| format!("cannot reopen the world: {error}"))?;
+        Self::hosting(server, true)
+    }
+
+    fn hosting(server: Server, kept: bool) -> Result<Self, String> {
         let host = server
             .spawn()
             .map_err(|error| format!("cannot open a world: {error}"))?;
         Ok(Self {
             connection: Connection::join(&format!("127.0.0.1:{}", host.addr().port()))?,
             hosting: Some(host),
+            kept,
         })
     }
 }
@@ -348,10 +430,15 @@ impl Dialing {
 
     /// Starts opening a world on this machine — see [`Session::open`], which
     /// this is the off-the-frame-loop way to reach.
-    pub fn opening(config: WorldConfig, reach: Reach, opening: f32) -> Self {
+    pub fn opening(config: WorldConfig, reach: Reach, opening: f32, keep: bool) -> Self {
         Self::on(reach.described(), move || {
-            Session::open(config, reach, opening)
+            Session::open(config, reach, opening, keep)
         })
+    }
+
+    /// Starts reopening a kept world — see [`Session::reopening`].
+    pub fn reopening(path: PathBuf, reach: Reach) -> Self {
+        Self::on(reach.described(), move || Session::reopening(path, reach))
     }
 
     fn on(what: String, dial: impl FnOnce() -> Result<Session, String> + Send + 'static) -> Self {
@@ -635,7 +722,7 @@ fn receive(
             ToClient::Vocabulary { verbs } => told.console.teach(verbs),
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
-            ToClient::Welcome { .. } | ToClient::Refused { .. } => {}
+            ToClient::Welcome { .. } | ToClient::Refused { .. } | ToClient::World { .. } => {}
         }
     }
 }
@@ -714,6 +801,9 @@ fn place_markers(
 pub(crate) fn fake_server(spawn: Vec2, facing: Vec2) -> (String, Receiver<TcpStream>) {
     use std::net::TcpListener;
 
+    // Joining reads (and playing on would write) logbooks, and a test's must
+    // not be the player's.
+    crate::testing::quarantine_data_dir();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
     let (handover, socket) = mpsc::channel();
@@ -723,10 +813,23 @@ pub(crate) fn fake_server(spawn: Vec2, facing: Vec2) -> (String, Receiver<TcpStr
             ToServer::Hello { version } => assert_eq!(version, PROTOCOL_VERSION),
             other => panic!("expected a hello, got {other:?}"),
         }
+        // An id no real world will ever mint — they are drawn from the
+        // clock — so the joining client's logbook lookup finds nothing and
+        // every fake join is a fresh arrival.
+        (ToClient::World {
+            id: protocol::WorldId(42),
+        })
+        .write(&mut &stream)
+        .expect("world");
+        match ToServer::read(&mut &stream).expect("papers") {
+            ToServer::Papers { .. } => {}
+            other => panic!("expected papers, got {other:?}"),
+        }
         (ToClient::Welcome {
             id: PlayerId(1),
             spawn,
             facing,
+            token: Token(7),
         })
         .write(&mut &stream)
         .expect("welcome");
@@ -776,6 +879,9 @@ mod tests {
     /// Waits for a dial to land. It crosses real sockets and a thread, so a
     /// moment of patience is legitimate — five seconds of it is a failure.
     fn settle(dialing: &Dialing) -> Result<Session, String> {
+        // Every dial's handshake reads the data directory for its papers,
+        // and a test's must not be the player's.
+        crate::testing::quarantine_data_dir();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if let Some(outcome) = dialing.outcome() {
@@ -793,7 +899,12 @@ mod tests {
         // the loopback on a port of the machine's choosing, which is what
         // `Reach::Alone` is — a test run cannot collide with a real server on
         // this machine, and neither can a player.
-        let dialing = Dialing::opening(WorldConfig { seed: 77 }, Reach::Alone, server::OPENING);
+        let dialing = Dialing::opening(
+            WorldConfig { seed: 77 },
+            Reach::Alone,
+            server::OPENING,
+            false,
+        );
         let session = settle(&dialing).expect("the world should be opened and joined");
 
         assert!(
@@ -811,12 +922,14 @@ mod tests {
             WorldConfig { seed: 77 },
             Reach::Alone,
             server::OPENING,
+            false,
         ))
         .expect("a world should open");
         let second = settle(&Dialing::opening(
             WorldConfig { seed: 78 },
             Reach::Alone,
             server::OPENING,
+            false,
         ))
         .expect("a world should open");
         // A host can ask its own server which world it made — that is where
@@ -836,7 +949,12 @@ mod tests {
         // The point of sharing: the world the host is standing in is reachable
         // from outside, and whoever arrives is somebody else in the same
         // world rather than the host again.
-        let dialing = Dialing::opening(WorldConfig { seed: 3 }, Reach::Alone, server::OPENING);
+        let dialing = Dialing::opening(
+            WorldConfig { seed: 3 },
+            Reach::Alone,
+            server::OPENING,
+            false,
+        );
         let session = settle(&dialing).expect("the world should be opened and joined");
         let port = session.hosting.as_ref().expect("hosting").addr().port();
 
