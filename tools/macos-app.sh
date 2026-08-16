@@ -79,6 +79,9 @@ cp "$root/target/release/game" "$contents/MacOS/$NAME"
 # invalidates one.
 strip -x "$contents/MacOS/$NAME"
 
+# Resources, because that is where macOS keeps everything a program only reads
+# — and `asset_plugin` in the game is the other half of it. Bevy would look
+# beside the binary otherwise, which is one directory over and empty.
 cp -R "$root/assets" "$contents/Resources/assets"
 "$root/assets-src/icon/build.py" --icns "$contents/Resources/$NAME.icns" >/dev/null
 

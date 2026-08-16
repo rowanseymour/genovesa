@@ -29,6 +29,19 @@ on here, there being no editor. See [Models](#models).
 There is a second binary, `mapgen`, which renders maps from above as PNG
 without opening a window — see [Looking at maps](#looking-at-maps).
 
+On macOS it can be wrapped as an application — something with a name and an
+icon on it, opened the way anything else is:
+
+```bash
+tools/macos-app.sh
+```
+
+That writes `target/Genovesa.app`, with the icon drawn into the `.icns` the
+system wants and the assets where a bundle keeps them. Its signature is
+ad-hoc, which is enough to open it on the machine that built it and no
+further: a copy handed to anybody else would need a Developer ID and
+notarisation.
+
 ## The world, briefly
 
 The world is an infinite plane of ocean with islands scattered across it, and
