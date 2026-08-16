@@ -100,6 +100,15 @@ rather than as the WAV Freesound serves, and the script that cuts it, which is
 where the numbers live. Freesound hands the master out only to an account, so a
 clone could not fetch it back on its own — hence carrying it here.
 
+## IM Fell English Italic
+
+The hand the chart letters island names in. Digitised by Igino Marini from
+the types John Fell gathered for the Oxford University Press in the
+seventeenth century, and published under the
+[SIL Open Font License 1.1](fonts/OFL.txt), a copy of which sits beside the
+font in `fonts/`. Fetched from the
+[Google Fonts collection](https://fonts.google.com/specimen/IM+Fell+English).
+
 ## icon
 
 Original to this project, and under the same licence as the rest of it. A

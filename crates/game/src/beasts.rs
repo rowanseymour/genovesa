@@ -50,7 +50,7 @@ use bevy::prelude::*;
 
 use protocol::{BeastId, BeastKind};
 
-use crate::models::{above, Tones};
+use crate::models::above;
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
 use crate::{between, eased, matte, signed, unit, AppState, Size};
@@ -95,27 +95,6 @@ const WHALE_SIZE: Size = Size {
 /// `the_model_carries_the_swim_the_game_plays`. Swimming is the whole
 /// vocabulary: a shark that stopped swimming would be a drowning shark.
 const SWIM: usize = 0;
-
-/// What each mesh in the file is painted, by the name it carries there —
-/// the same arrangement as the player's figure, one entry per tone, and
-/// registered with [`crate::models::Tones`] alongside it.
-const TONES: [(&str, Color); 1] = [("hide", HIDE_COLOR)];
-
-/// Sand-grey. A shark here is seen through a metre of sunlit shallow water
-/// or as a fin against it, and both read best a shade paler than the
-/// dolphin's wet slate — the dolphin is a dark arc over deep water, where
-/// the shark is a pale shape over sand.
-const HIDE_COLOR: Color = Color::srgb(0.46, 0.45, 0.40);
-
-/// Wet slate. Lighter than the deep sea it breaks out of and darker than the
-/// spray-white a leap suggests, so the arc reads against the water at the
-/// distances pods keep.
-const DOLPHIN_COLOR: Color = Color::srgb(0.42, 0.50, 0.55);
-
-/// Deep blue-grey, darker than the dolphin's: a whale's back barely clears
-/// the water, and what sells the size is a long dark mass rather than a
-/// bright shape.
-const WHALE_COLOR: Color = Color::srgb(0.27, 0.31, 0.37);
 
 /// Metres per second of water the swim cycle was drawn against: at this
 /// pace the clip plays at exactly the rate the master keyed. Not in the
@@ -361,9 +340,6 @@ impl Plugin for BeastsPlugin {
         // it alone.
         app.init_resource::<Beasts>()
             .init_resource::<SeaConditions>()
-            // Also initialised by ModelsPlugin, which owns the painting;
-            // this is for the tests, which run this plugin alone.
-            .init_resource::<Tones>()
             .add_systems(Startup, school)
             .add_systems(
                 Update,
@@ -386,10 +362,7 @@ fn school(
     assets: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    mut tones: ResMut<Tones>,
 ) {
-    tones.register(&mut materials, &TONES);
-
     let mut graph = AnimationGraph::new();
     let root = graph.root;
     let node = graph.add_clip(
@@ -401,15 +374,16 @@ fn school(
         graph: graphs.add(graph),
         node,
     });
+    // One white material for both, and for the same reason the birds share
+    // one: each animal's colours are on its own vertices, so what is left for
+    // a material to say is nothing.
+    let painted = materials.add(matte(Color::WHITE));
     commands.insert_resource(BeastModels {
         dolphin: (
             assets.load(crate::model_mesh(DOLPHIN_MODEL, 0)),
-            materials.add(matte(DOLPHIN_COLOR)),
+            painted.clone(),
         ),
-        whale: (
-            assets.load(crate::model_mesh(WHALE_MODEL, 0)),
-            materials.add(matte(WHALE_COLOR)),
-        ),
+        whale: (assets.load(crate::model_mesh(WHALE_MODEL, 0)), painted),
     });
 }
 
@@ -703,15 +677,23 @@ mod tests {
     use super::*;
     use crate::net::{fake_server, NetPlugin, Online};
     use crate::testing::{
-        assert_model_draws, assert_model_paints, assert_rigid_skin, clip_names, creature_named_by,
-        extent, run_frames, run_until, span, triangles,
+        assert_model_draws, assert_model_is_painted, assert_rigid_skin, clip_names,
+        creature_named_by, extent, run_frames, run_until, span, triangles,
     };
     use crate::Helm;
     use protocol::ToClient;
 
     #[test]
-    fn the_model_is_the_shark_the_game_paints() {
-        assert_model_paints(SHARK_MODEL, &TONES);
+    fn the_model_is_a_shark_fit_to_draw() {
+        assert_model_draws(SHARK_MODEL, &[(0, "hide")]);
+        assert_model_is_painted(SHARK_MODEL, 0);
+    }
+
+    #[test]
+    fn the_dolphin_and_the_whale_bring_their_own_colours() {
+        for file in [DOLPHIN_MODEL, WHALE_MODEL] {
+            assert_model_is_painted(file, 0);
+        }
     }
 
     #[test]

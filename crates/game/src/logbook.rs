@@ -39,7 +39,7 @@ use bevy::prelude::*;
 use protocol::{Token, WorldId};
 
 use crate::boat::Boat;
-use crate::chart::{Chart, Coast};
+use crate::chart::{Chart, Coast, Soundings};
 use crate::net::Session;
 use crate::player::Player;
 use crate::AppState;
@@ -68,7 +68,11 @@ pub struct Logbook {
     pub berth: Option<Berth>,
     /// The chart as of the last write — the working copy is the [`Chart`]
     /// resource, read back in here each time the book is written.
-    coasts: Vec<(IVec2, Vec<Coast>)>,
+    soundings: Vec<(IVec2, Soundings)>,
+    /// And the names the player has written on it, by island id: the other
+    /// half of what the chart holds, and the half it would hurt most to
+    /// lose.
+    names: Vec<(IVec2, String)>,
 }
 
 /// Where a player left off, in the terms the wire does not carry: the server
@@ -107,7 +111,7 @@ const BERTH_SLACK: f32 = 8.0;
 impl Logbook {
     /// The chart this world's book holds, for the survey to continue from.
     pub fn charted(&self) -> Chart {
-        Chart::from_entries(self.coasts.iter().cloned())
+        Chart::from_entries(self.soundings.iter().cloned(), self.names.iter().cloned())
     }
 }
 
@@ -132,7 +136,8 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
             path: place_for(connection.world),
             token: connection.token,
             berth: None,
-            coasts: Vec::new(),
+            soundings: Vec::new(),
+            names: Vec::new(),
         },
         // A book that exists and cannot be read is left exactly where it is
         // — no path, so nothing this session writes can land on it. The one
@@ -142,7 +147,8 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
             path: None,
             token: connection.token,
             berth: None,
-            coasts: Vec::new(),
+            soundings: Vec::new(),
+            names: Vec::new(),
         },
     };
     book.token = connection.token;
@@ -192,11 +198,12 @@ fn read(world: WorldId) -> Read {
         return Read::Missing;
     };
     match parse(&text) {
-        Ok((token, berth, coasts)) => Read::Book(Logbook {
+        Ok((token, berth, soundings, names)) => Read::Book(Logbook {
             path: Some(path),
             token,
             berth,
-            coasts,
+            soundings,
+            names,
         }),
         Err(why) => {
             // A book this build cannot read is left where it is, unwritten
@@ -289,7 +296,7 @@ fn close_the_log(mut commands: Commands, mut logbook: ResMut<Logbook>, chart: Op
 
 fn write_down(logbook: &mut Logbook, chart: Option<&Chart>) {
     if let Some(chart) = chart {
-        logbook.coasts = chart.entries();
+        (logbook.soundings, logbook.names) = chart.entries();
     }
     let Some(path) = &logbook.path else {
         return;
@@ -334,24 +341,52 @@ fn compose(logbook: &Logbook) -> String {
         }
     }
     // Sorted, so that one chart is one file, byte for byte, whatever order
-    // the survey's map hands its chunks out in.
-    let mut coasts: Vec<&(IVec2, Vec<Coast>)> = logbook.coasts.iter().collect();
-    coasts.sort_by_key(|(chunk, _)| (chunk.x, chunk.y));
-    for (chunk, runs) in coasts {
+    // the survey's map hands its chunks out in. Every surveyed chunk gets a
+    // `coast` line even when it found nothing — surveyed-and-empty is worth
+    // remembering, or the survey would do the chunk again next visit — and a
+    // `shoal` line only when there is a shoal to draw.
+    let mut soundings: Vec<&(IVec2, Soundings)> = logbook.soundings.iter().collect();
+    soundings.sort_by_key(|(chunk, _)| (chunk.x, chunk.y));
+    for (chunk, found) in soundings {
         let _ = write!(out, "coast {} {}", chunk.x, chunk.y);
-        for run in runs {
-            let _ = write!(out, " {}", if run.closed { 'c' } else { 'o' });
-            for mark in &run.marks {
-                let [x, z] = mark.pack();
-                let _ = write!(out, "{x:02x}{z:02x}");
-            }
-        }
+        put_runs(&mut out, &found.coast);
         let _ = writeln!(out);
+        if !found.shoal.is_empty() {
+            let _ = write!(out, "shoal {} {}", chunk.x, chunk.y);
+            put_runs(&mut out, &found.shoal);
+            let _ = writeln!(out);
+        }
+    }
+    let mut names: Vec<&(IVec2, String)> = logbook.names.iter().collect();
+    names.sort_by_key(|(island, _)| (island.x, island.y));
+    for (island, name) in names {
+        // A name is one line of the book, so it must be one line of text:
+        // anything a control character could do to the format is dropped
+        // rather than written into it.
+        let name: String = name.chars().filter(|c| !c.is_control()).collect();
+        if !name.is_empty() {
+            let _ = writeln!(out, "name {} {} {name}", island.x, island.y);
+        }
     }
     out
 }
 
-type Parsed = (Token, Option<Berth>, Vec<(IVec2, Vec<Coast>)>);
+fn put_runs(out: &mut String, runs: &[Coast]) {
+    for run in runs {
+        let _ = write!(out, " {}", if run.closed { 'c' } else { 'o' });
+        for mark in &run.marks {
+            let [x, z] = mark.pack();
+            let _ = write!(out, "{x:02x}{z:02x}");
+        }
+    }
+}
+
+type Parsed = (
+    Token,
+    Option<Berth>,
+    Vec<(IVec2, Soundings)>,
+    Vec<(IVec2, String)>,
+);
 
 fn parse(text: &str) -> Result<Parsed, String> {
     let mut lines = text.lines();
@@ -363,7 +398,8 @@ fn parse(text: &str) -> Result<Parsed, String> {
 
     let mut token = None;
     let mut berth = None;
-    let mut coasts = Vec::new();
+    let mut soundings: std::collections::HashMap<(i32, i32), Soundings> = Default::default();
+    let mut names = Vec::new();
     for line in lines {
         if line.is_empty() {
             continue;
@@ -396,17 +432,45 @@ fn parse(text: &str) -> Result<Parsed, String> {
                     facing,
                 });
             }
-            "coast" => coasts.push(coast(value)?),
+            "coast" => {
+                let (chunk, runs) = runs_line(value)?;
+                soundings.entry((chunk.x, chunk.y)).or_default().coast = runs;
+            }
+            "shoal" => {
+                let (chunk, runs) = runs_line(value)?;
+                soundings.entry((chunk.x, chunk.y)).or_default().shoal = runs;
+            }
+            "name" => {
+                let mut fields = value.splitn(3, ' ');
+                let island = IVec2::new(
+                    whole(fields.next().ok_or("a name with no island")?)?,
+                    whole(fields.next().ok_or("a name with half an island")?)?,
+                );
+                let text = fields.next().filter(|text| !text.is_empty());
+                names.push((
+                    island,
+                    text.ok_or("a name with nothing written")?.to_string(),
+                ));
+            }
             other => return Err(format!("unknown key `{other}`")),
         }
     }
-    Ok((token.ok_or("no token")?, berth, coasts))
+    Ok((
+        token.ok_or("no token")?,
+        berth,
+        soundings
+            .into_iter()
+            .map(|((x, y), found)| (IVec2::new(x, y), found))
+            .collect(),
+        names,
+    ))
 }
 
-/// One surveyed chunk's line: its coordinates, then each run as `c` (a ring)
-/// or `o` (open) followed by the marks as hex pairs. A chunk with no runs is
-/// still an entry — surveyed, and found to be all water or all land.
-fn coast(value: &str) -> Result<(IVec2, Vec<Coast>), String> {
+/// One line of survey — `coast` and `shoal` share the shape: the chunk's
+/// coordinates, then each run as `c` (a ring) or `o` (open) followed by the
+/// marks as hex pairs. A `coast` with no runs is still an entry — surveyed,
+/// and found to be all water or all land.
+fn runs_line(value: &str) -> Result<(IVec2, Vec<Coast>), String> {
     let mut fields = value.split(' ');
     let chunk = IVec2::new(
         whole(fields.next().ok_or("a coast with no chunk")?)?,
@@ -474,50 +538,65 @@ mod tests {
                 height: 2.5,
                 facing: -0.75,
             }),
-            coasts: vec![
+            soundings: vec![
                 (
                     IVec2::new(3, -2),
-                    vec![
-                        Coast::new(vec![Mark::unpack([0, 17]), Mark::unpack([255, 254])], false),
-                        Coast::new(
-                            vec![
-                                Mark::unpack([10, 10]),
-                                Mark::unpack([20, 10]),
-                                Mark::unpack([10, 20]),
-                            ],
-                            true,
-                        ),
-                    ],
+                    Soundings {
+                        coast: vec![
+                            Coast::new(
+                                vec![Mark::unpack([0, 17]), Mark::unpack([255, 254])],
+                                false,
+                            ),
+                            Coast::new(
+                                vec![
+                                    Mark::unpack([10, 10]),
+                                    Mark::unpack([20, 10]),
+                                    Mark::unpack([10, 20]),
+                                ],
+                                true,
+                            ),
+                        ],
+                        shoal: vec![Coast::new(
+                            vec![Mark::unpack([5, 5]), Mark::unpack([200, 5])],
+                            false,
+                        )],
+                    },
                 ),
                 // Surveyed and found to hold no coast at all — still worth a
                 // line, or the survey would do the chunk again next visit.
-                (IVec2::new(-8, 4), Vec::new()),
+                (IVec2::new(-8, 4), Soundings::default()),
             ],
+            names: vec![(IVec2::new(701, -512), "Windward Reach".to_string())],
         }
     }
 
     #[test]
     fn a_logbook_survives_the_round_trip() {
         let book = a_book();
-        let (token, berth, coasts) = parse(&compose(&book)).expect("parse what was composed");
+        let (token, berth, soundings, names) =
+            parse(&compose(&book)).expect("parse what was composed");
         assert_eq!(token, book.token);
         assert_eq!(berth, book.berth);
-        // Composing sorts the chunks — one chart, one file — so the entries
-        // come back in that order whatever order they were held in.
-        let mut held = book.coasts.clone();
-        held.sort_by_key(|(chunk, _)| (chunk.x, chunk.y));
-        assert_eq!(coasts, held);
+        // Composing sorts the entries — one chart, one file — so they come
+        // back in that order whatever order they were held in; sorting both
+        // sides makes the comparison about content alone.
+        let sorted = |mut entries: Vec<(IVec2, Soundings)>| {
+            entries.sort_by_key(|(chunk, _)| (chunk.x, chunk.y));
+            entries
+        };
+        assert_eq!(sorted(soundings), sorted(book.soundings.clone()));
+        assert_eq!(names, book.names);
     }
 
     #[test]
     fn a_book_with_no_berth_still_reads() {
         let mut book = a_book();
         book.berth = None;
-        let (_, berth, _) = parse(&compose(&book)).expect("parse");
+        let (_, berth, _, _) = parse(&compose(&book)).expect("parse");
         assert_eq!(berth, None);
 
         book.berth = Some(Berth::Aboard { heading: 2.5 });
-        let (_, berth, _) = parse(&compose(&book)).expect("parse");
+        let (_, berth, _, _) = parse(&compose(&book)).expect("parse");
         assert_eq!(berth, book.berth);
     }
 
@@ -527,7 +606,8 @@ mod tests {
             path: None,
             token: Token(1),
             berth: Some(berth),
-            coasts: Vec::new(),
+            soundings: Vec::new(),
+            names: Vec::new(),
         }
     }
 
@@ -623,6 +703,10 @@ mod tests {
             (
                 "genovesa logbook 1\ntoken 1\nashore 1 2 3\n",
                 "half a berth",
+            ),
+            (
+                "genovesa logbook 1\ntoken 1\nname 1 2\n",
+                "a name with nothing written",
             ),
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");

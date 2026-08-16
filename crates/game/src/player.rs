@@ -325,15 +325,18 @@ fn wading(ground: Option<&Ground>, at: Vec2) -> f32 {
 ///
 /// The player steps off facing away from the boat — the direction they
 /// stepped — and takes on a `DespawnOnExit` of their own, being no longer
-/// under the boat's. Boarding is the mirror: back into the hierarchy at the
-/// identity, the marker comes off, and the helm answers again.
+/// under the boat's. Stepping off also furls the sails, so a boat is never
+/// left riding at anchor under canvas. Boarding is the mirror: back into the
+/// hierarchy at the identity, the marker comes off, and the helm answers
+/// again — with the sails as the player left them, making sail being a
+/// deliberate act rather than a side effect of stepping aboard.
 fn embark_or_land(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     mut commands: Commands,
     ground: Option<Res<Ground>>,
     players: Query<(Entity, &Transform, Option<&ChildOf>), With<Player>>,
-    boats: Query<(Entity, &Transform, &Boat)>,
+    mut boats: Query<(Entity, &Transform, &mut Boat)>,
 ) {
     if !keys.just_pressed(bindings.key(Action::Board)) {
         return;
@@ -345,7 +348,7 @@ fn embark_or_land(
 
     match aboard {
         Some(aboard) => {
-            let Ok((_, boat, hull)) = boats.get(aboard.parent()) else {
+            let Ok((_, boat, mut hull)) = boats.get_mut(aboard.parent()) else {
                 return;
             };
             if !hull.at_rest() {
@@ -354,6 +357,10 @@ fn embark_or_land(
             let Some((spot, height)) = landing(ground, boat) else {
                 return;
             };
+            // The crew furls as the skipper steps off. Belt and braces —
+            // `boat::steer` drives no boat nobody is aboard — but a beach
+            // must not show an unattended hull under canvas either.
+            hull.furl();
             let stepped = (spot - boat.translation.xz()).normalize_or_zero();
             commands.entity(player).remove::<ChildOf>().insert((
                 Transform::from_xyz(spot.x, height, spot.y)
@@ -375,12 +382,12 @@ fn embark_or_land(
             else {
                 return;
             };
-            // Standing on the deck, not at the hull's origin: that origin is
+            // Standing at the helm, not at the hull's origin: that origin is
             // the waterline, which is most of a metre down inside the boat.
             commands
                 .entity(player)
                 .remove::<DespawnOnExit<AppState>>()
-                .insert((ChildOf(boat), Transform::from_xyz(0.0, hull.deck(), 0.0)));
+                .insert((ChildOf(boat), Transform::from_translation(hull.helm())));
         }
     }
 }
@@ -519,7 +526,7 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        elapsed, hold, run_frames, test_ground, test_shore, world_app, SHORE_BLUFF_FOOT,
+        elapsed, hold, run_frames, set_wind, test_ground, test_shore, world_app, SHORE_BLUFF_FOOT,
         SHORE_PEAK, SHORE_TOP, SHORE_WATERLINE, TEST_ISLAND_REACH,
     };
 
@@ -671,8 +678,12 @@ mod tests {
     #[test]
     fn going_ashore_is_refused_under_way() {
         // The same shore that lands fine at rest refuses while the hull is
-        // making way — and lands again once the way has run off.
+        // making way — and lands again once the sails are furled and the way
+        // has run off.
         let mut app = shore_app();
+        // Onshore — dead astern of a bow pointed at the island — so making
+        // sail below actually makes way.
+        set_wind(&mut app, Vec2::new(-7.0, 0.0));
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 6);
         press_board(&mut app);
@@ -681,15 +692,47 @@ mod tests {
             "the player stepped off a deck making way"
         );
 
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(KeyCode::ArrowUp);
+        keys.press(KeyCode::ArrowDown);
+        run_frames(&mut app, 1);
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
-            .release(KeyCode::ArrowUp);
+            .release(KeyCode::ArrowDown);
         run_frames(&mut app, 800);
         press_board(&mut app);
         assert_eq!(
             aboard(&mut app),
             None,
             "the landing never worked again once the boat had stopped"
+        );
+    }
+
+    #[test]
+    fn going_ashore_furls_the_sails() {
+        // A beach never shows an unattended hull under canvas: stepping off
+        // furls. The wind blows *offshore* here, so the sails go up in irons
+        // — set, but the hull at rest at its anchorage, which is what lets
+        // the landing happen while there is still canvas to take in.
+        let mut app = shore_app();
+        set_wind(&mut app, Vec2::new(7.0, 0.0));
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 2);
+
+        fn sails(app: &mut App) -> bool {
+            app.world_mut()
+                .query::<&Boat>()
+                .single(app.world())
+                .expect("a match should have a boat in it")
+                .sails_set()
+        }
+        assert!(sails(&mut app), "the sails never went up in irons");
+
+        press_board(&mut app);
+        assert_eq!(aboard(&mut app), None, "the landing was refused");
+        assert!(
+            !sails(&mut app),
+            "the boat was left riding at anchor under canvas"
         );
     }
 
@@ -986,18 +1029,22 @@ mod tests {
             app.world().entity(boat).get::<Boat>().is_some(),
             "the player boarded something that is not a boat"
         );
-        // Aboard at the boat's own heading, standing on its deck.
-        let deck = app
+        // Aboard at the boat's own heading, standing at the helm.
+        let helm = app
             .world()
             .entity(boat)
             .get::<Boat>()
             .expect("a boat")
-            .deck();
+            .helm();
         assert_eq!(
             player_transform(&mut app),
-            Transform::from_xyz(0.0, deck, 0.0)
+            Transform::from_translation(helm)
         );
 
+        // Back at the helm: making sail moves the boat again. The wind is
+        // set onshore — dead astern of a bow still pointed at the island —
+        // because going ashore furled the sails and boarding left them so.
+        set_wind(&mut app, Vec2::new(-7.0, 0.0));
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 30);
         assert_ne!(

@@ -28,6 +28,7 @@ use crate::boat::BoatPlugin;
 use crate::camera::View;
 use crate::player::PlayerPlugin;
 use crate::terrain::Ground;
+use crate::wake::WakePlugin;
 use crate::{AppState, Helm};
 
 /// How long every test frame lasts in a [`world_app`]. Headless frames take
@@ -83,6 +84,11 @@ pub fn world_app_ashore_of_entry() -> App {
         StatesPlugin,
         bevy::animation::AnimationPlugin,
         BoatPlugin,
+        // Nothing here draws a sea for it to be painted on, so all the wake
+        // does in these tests is keep its track — which is what a test of a
+        // boat's wake wants to look at, and what every other test here wants
+        // running over the hulls it sails without ever noticing it.
+        WakePlugin,
         PlayerPlugin,
     ))
     .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
@@ -165,6 +171,18 @@ pub fn rebind(app: &mut App, action: Action, key: KeyCode) {
     app.world_mut()
         .resource_mut::<KeyBindings>()
         .bind(action, key, None);
+}
+
+/// Sets the wind the frozen test sea blows. A [`world_app`] never settles the
+/// conditions — no forecast, no easing — so this holds until the test says
+/// otherwise, and without it every test runs under the assumed day's wind,
+/// under which the default boat lies *in irons*: a driving test that forgets
+/// to set a wind is testing a boat that never moves, so assert way or
+/// movement, never only where the hull ended up. The other direction bites
+/// too: tests that compare heights against `SeaConditions::default().swell`
+/// must not call this — a different wind is a different sea.
+pub fn set_wind(app: &mut App, wind: Vec2) {
+    app.insert_resource(crate::sea::SeaConditions::blowing(wind));
 }
 
 /// How far the test island reaches from the origin, in metres — the radius at
@@ -309,7 +327,7 @@ fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
                     // enclose a basin, so there is no lake on either to draw.
                     water: None,
                     // Nor anything the palm rule would call a beach.
-                    palms: Vec::new(),
+                    plants: Vec::new(),
                 });
             ground.deliver(chunk, payload);
         }
@@ -342,7 +360,9 @@ pub fn model(name: &str) -> (serde_json::Value, Vec<u8>) {
 }
 
 /// One mesh of a model, as the triangles it is made of — `attribute` being
-/// `POSITION` for where its corners are or `NORMAL` for where they face.
+/// `POSITION` for where its corners are, `NORMAL` for where they face, or
+/// `COLOR_0` for what colour they are painted, whose fourth component is an
+/// opacity nothing here has any use for and is dropped.
 ///
 /// Read through the accessors' own view of the buffer, so an exporter that
 /// changes how it packs the numbers changes nothing here.
@@ -359,8 +379,13 @@ pub fn triangles(name: &str, index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
     };
 
     let wanted = primitive["attributes"][attribute].as_u64().unwrap() as usize;
-    let values: Vec<Vec3> = read(&json["accessors"][wanted], 12)
-        .chunks_exact(12)
+    let stride = match json["accessors"][wanted]["type"].as_str() {
+        Some("VEC3") => 12,
+        Some("VEC4") => 16,
+        other => panic!("{attribute} of {name} is a {other:?}, which is not a vector"),
+    };
+    let values: Vec<Vec3> = read(&json["accessors"][wanted], stride)
+        .chunks_exact(stride)
         .map(|v| {
             Vec3::new(
                 f32::from_le_bytes(v[0..4].try_into().unwrap()),
@@ -457,6 +482,23 @@ pub fn assert_model_draws(file: &str, meshes: &[(usize, &str)]) {
     }
 }
 
+/// Whether a model brings its own colours.
+///
+/// Every model painted this way is drawn with a *white* material, so a mesh
+/// that lost its colour attribute — a master saved without one, or an export
+/// that dropped it — would arrive as a white animal rather than as an
+/// obviously broken one. That is a failure worth a test of its own, because
+/// nothing else in the game would report it.
+pub fn assert_model_is_painted(file: &str, mesh: usize) {
+    let (json, _) = model(file);
+    let attributes = &json["meshes"][mesh]["primitives"][0]["attributes"];
+    assert!(
+        !attributes["COLOR_0"].is_null(),
+        "{file} carries no colours — see its NOTES.md, and the export settings \
+         that pass them through"
+    );
+}
+
 /// The creature a model file is named for: `models/whale.glb` is a whale.
 ///
 /// The one-mesh models are all named this way — the master names the object
@@ -517,43 +559,14 @@ pub fn span(file: &str, mesh: usize, axis: usize) -> f32 {
     high - low
 }
 
-/// Holds a model whose meshes are asked for *by name* to the palette that
-/// names them — the sibling of [`assert_model_draws`], which pins meshes by
-/// their position in the file instead.
-///
-/// Every mesh in the file must be one the palette has a tone for and every
-/// tone must have a mesh, because a mesh outside the pairing keeps whatever
-/// Blender last gave it: it arrives wearing a PBR material, which is a
-/// highlight, in a world that has none anywhere. The winding and the shading
-/// are held to the same conditions everything else here is.
-pub fn assert_model_paints(file: &str, tones: &[(&str, Color)]) {
-    let mut named = mesh_names(file);
-    named.sort();
-    let mut wanted: Vec<String> = tones.iter().map(|(name, _)| (*name).to_owned()).collect();
-    wanted.sort();
-    assert_eq!(named, wanted, "{file}'s meshes are not the palette's");
-
-    for (index, name) in mesh_names(file).iter().enumerate() {
-        let faces = triangles(file, index, "POSITION");
-        assert!(
-            winds_outwards(&faces),
-            "the {name} of {file} is wound inside-out"
-        );
-        assert!(
-            is_flat_shaded(&faces, &triangles(file, index, "NORMAL")),
-            "the {name} of {file} is smooth-shaded"
-        );
-    }
-}
-
 /// The rule every rigged model here lives by: each vertex carried by exactly
 /// one bone, at full weight.
 ///
 /// Weight-paint a shoulder smoothly in Blender and the facets round off as
 /// the model moves — gradients across faces, in a look built out of flat
 /// tones that has none. It is a modelling decision nothing at runtime would
-/// catch, and the one thing CLAUDE.md's Models section calls out, so it is
-/// asserted from one place rather than copied per rigged model.
+/// catch, and one of the rules `assets-src/models/NOTES.md` calls out, so it
+/// is asserted from one place rather than copied per rigged model.
 pub fn assert_rigid_skin(file: &str) {
     let names = mesh_names(file);
     for (mesh, name) in names.iter().enumerate() {

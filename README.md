@@ -56,7 +56,10 @@ stiller, with the grass coming down to a reed margin instead of a beach.
 Palms grow along the back of a beach, where the dry sand gives out to
 whatever the island is wearing behind it — scattered, and only where a coast
 has sand to offer, so a rocky island has none and a long shallow bay is
-fringed with them.
+fringed with them. Behind them, in the shelter of a valley floor or around the
+margin of a lake, grow bananas: broader and lower, and wanting the wet ground
+a palm has no use for, so the two are found in different places on the same
+island.
 
 A day turns in ten minutes. The sun crosses from east to west and the whole
 world's colour goes with it: long warm light at either end of the day, a flat
@@ -282,6 +285,10 @@ than part of what it is called. One shared `assets-src/models/export.sh` builds
 any model, and is where the export settings live. Nothing in `assets-src/`
 ships; it is kept so a shape can be taken further.
 
+[`docs/models.md`](docs/models.md) draws all of them on one page — three views
+apiece and what each shipped file holds — which is the quickest way to see what
+is there. `tools/model-catalog.sh` redraws it.
+
 ```bash
 assets-src/models/export.sh palm
 ```
@@ -291,9 +298,12 @@ export, and the running world has the new shape a moment later. There is no
 editor, and this is the substitute — a hull is a thing to be looked at from a
 camera forty metres up while it is being moved, not a set of numbers.
 
-Materials in the file are ignored. The look is a small fixed palette of flat
-tones, and the game assigns those itself, so a model carries shape and motion
-and nothing else. What it *must* carry is checked: `boat.rs` holds the file to
+A model carries its own colours, one flat tone per facet on its vertices, and
+the game draws it with a white matte material that does nothing but let them
+through — what a thing is painted is settled in its master, beside its shape.
+The files' *materials* are still ignored: glTF materials are PBR, and a hull
+lit the way Blender asked would be the one surface in the world with a
+highlight on it. What a model *must* carry is checked: `boat.rs` holds the file to
 the dimensions the collision code assumes of it, to the order its meshes are
 in, and to being flat-shaded and wound outwards — the failures a modelling
 program makes easy and the eye lets through.
@@ -309,11 +319,13 @@ keep is that a skin must be rigid — every vertex on exactly one bone — or
 facets bend as the model moves and the flat shading goes with them.
 
 Where a model *stands*, when it is scenery rather than the player, is not the
-client's business at all. Palms are placed by the server, along the back of
-whatever beaches a seed happens to raise, and travel with the ground a client
-asks for — so two players anchored off the same beach see the same trees on
-it. The rule is in `world`'s `palms` module and is pinned by a digest like
-the terrain's.
+client's business at all. Plants are placed by the server and travel with the
+ground a client asks for — so two players anchored off the same beach see the
+same trees on it. Each kind has a rule of its own in `world`, pinned by a
+digest like the terrain's: palms along the back of whatever beaches a seed
+happens to raise, bananas on the valley floors and lake margins behind them.
+What a chunk carries of all of them together is gathered in `world`'s `plants`
+module, which is where they share the one budget the wire gives a chunk.
 
 ## Tests
 

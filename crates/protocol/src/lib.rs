@@ -22,10 +22,11 @@
 //! its digests, on one machine at a time.
 //!
 //! Like the world's layout, the wire is a *format*: the bytes each message
-//! encodes to are pinned by tests, because a server must understand clients
-//! built from other checkouts. Changing any encoding means bumping
-//! [`PROTOCOL_VERSION`], which is the first thing a client says and the one
-//! thing a server may refuse.
+//! encodes to are pinned by tests, so that changing what a client receives is
+//! something done on purpose rather than noticed later. [`PROTOCOL_VERSION`]
+//! is the first thing a client says and the one thing a server may refuse,
+//! but it is not bumped for every encoding change — there is no fleet of
+//! older clients to turn away, only whatever was built from this checkout.
 
 pub mod ground;
 
@@ -38,7 +39,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 14;
 
 /// How long one turn of the world's day takes, in seconds — sunrise to
 /// sunrise, ten minutes of it.
@@ -100,15 +101,15 @@ const MAX_CLIENT_FRAME: u16 = 512;
 
 /// The longest frame a client will accept from a server, which is exactly one
 /// chunk of ground and not a byte more: its tag, its coordinates, the flag
-/// that says what kind of answer this is, the count of palms standing on it,
+/// that says what kind of answer this is, the count of plants growing on it,
 /// and the payload — the largest kind, which is ground with standing water on
-/// it and a full complement of palms.
+/// it and a full complement of plants.
 ///
 /// Derived rather than picked, so that a message which outgrew it fails to
 /// send here instead of arriving as garbage — and so that "how much can one
 /// answer cost" has one answer, written down.
 const MAX_SERVER_FRAME: u16 =
-    (1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PALMS)) as u16;
+    (1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS)) as u16;
 
 /// A player, as the server counts them: dealt out in joining order, never
 /// reused within a session, meaningless across sessions.
@@ -614,7 +615,7 @@ impl ToClient {
                         // and for the same reason: between them they say how
                         // long the rest of the message is, which is what a
                         // reader needs before it can read any of it.
-                        payload.push(ground.palms.len() as u8);
+                        payload.push(ground.plants.len() as u8);
                         ground.put(&mut payload);
                     }
                 }
@@ -653,8 +654,8 @@ impl ToClient {
                 let ground = match payload.u8()? {
                     0 => None,
                     flag @ (1 | 2) => {
-                        let palms = payload.u8()? as usize;
-                        Some(payload.chunk_payload(flag == 2, palms)?)
+                        let plants = payload.u8()? as usize;
+                        Some(payload.chunk_payload(flag == 2, plants)?)
                     }
                     flag => return Err(corrupt(format!("chunk {chunk} flagged {flag}"))),
                 };
@@ -851,9 +852,9 @@ impl<'a> Payload<'a> {
             .map_err(|_| corrupt("text that is not UTF-8 is not text".into()))
     }
 
-    fn chunk_payload(&mut self, water: bool, palms: usize) -> io::Result<ChunkPayload> {
-        let bytes = self.take(ground::payload_bytes(water, palms))?;
-        ChunkPayload::take(bytes, water, palms).ok_or_else(|| {
+    fn chunk_payload(&mut self, water: bool, plants: usize) -> io::Result<ChunkPayload> {
+        let bytes = self.take(ground::payload_bytes(water, plants))?;
+        ChunkPayload::take(bytes, water, plants).ok_or_else(|| {
             corrupt("a chunk painted in colours this build has never heard of".into())
         })
     }
@@ -902,14 +903,14 @@ mod tests {
                             Tone::Sand,
                             Tone::Forest,
                             Tone::Fell,
-                            Tone::Snow,
+                            Tone::Marsh,
                         ][i % 5],
                         [Shade::Dark, Shade::Plain, Shade::Light][i % 3],
                     )
                 })
                 .collect(),
             water: None,
-            palms: Vec::new(),
+            plants: Vec::new(),
         }
     }
 
@@ -1025,9 +1026,10 @@ mod tests {
 
     #[test]
     fn the_wire_is_a_format() {
-        // The exact bytes, pinned the way the world pins its digests: a server
-        // must understand clients built from other checkouts, so changing any
-        // of this means bumping PROTOCOL_VERSION, not re-recording the test.
+        // The exact bytes, pinned the way the world pins its digests. Nothing
+        // old is left running to be broken, so re-recording is the right
+        // answer to a deliberate change — the pin is here to make sure the
+        // change was deliberate, and that both ends are rebuilt together.
         //
         // Every variant of both enums appears, because the round trip above
         // cannot see any of the ways this format could move while still
@@ -1311,7 +1313,7 @@ mod tests {
             "the head of a ground answer"
         );
         assert_eq!(ground[11], 1, "the flag says there is dry ground");
-        assert_eq!(ground[12], 0, "and the count says no palms stand on it");
+        assert_eq!(ground[12], 0, "and the count says nothing grows on it");
 
         // Heights start at 13. Corner 0 is 0, corner 1 is 601, corner 2 is
         // 1202 — little-endian pairs.
@@ -1360,6 +1362,37 @@ mod tests {
         // 1814.
         let water = surfaces + FACET_TRIS;
         assert_eq!(lake[water..water + 6], [0, 0, 0x8B, 0x03, 0x16, 0x07]);
+
+        // And a plant, which goes on the end of everything else: its kind
+        // first, then its position as a pair of little-endian sixteenths of a
+        // chunk, then its bearing and its size as single bytes. The kind
+        // leads because the size cannot be read without it — a size is a step
+        // through the range that kind is drawn at.
+        let mut planted = a_chunk();
+        planted.plants = vec![ground::Plant {
+            kind: ground::Kind::Palm,
+            at: Vec2::new(2.0, 96.0),
+            yaw: std::f32::consts::FRAC_PI_2,
+            scale: ground::Kind::Palm.scale().1,
+        }];
+        let stand = bytes_of_server(&ToClient::Chunk {
+            chunk: IVec2::new(5, -3),
+            ground: Some(planted),
+        });
+        assert_eq!(stand.len(), ground.len() + ground::PLANT_BYTES);
+        assert_eq!(stand[12], 1, "the count says one thing grows on it");
+        let plant = 13 + ground::PAYLOAD_BYTES;
+        assert_eq!(
+            stand[plant..plant + ground::PLANT_BYTES],
+            [
+                0, // a palm
+                0x00, 0x04, // x = 2 m of 128
+                0xFF, 0xBF, // z = 96 m of 128
+                64,   // a quarter turn
+                255,  // the largest a palm is drawn
+            ],
+            "one palm, on the end of the ground it stands on"
+        );
     }
 
     #[test]
@@ -1379,17 +1412,18 @@ mod tests {
         assert!(wire.is_empty(), "half a frame reached the wire");
 
         // And the server's ceiling is exactly the largest chunk there is —
-        // ground with water on it and as many palms as one may carry — so
+        // ground with water on it and as many plants as one may carry — so
         // that answer fits with nothing to spare, and a plainer chunk fits
         // with the difference to spare.
         let mut most = a_chunk_with_a_lake();
-        most.palms = vec![
-            ground::Palm {
+        most.plants = vec![
+            ground::Plant {
+                kind: ground::Kind::Palm,
                 at: Vec2::ZERO,
                 yaw: 0.0,
-                scale: ground::PALM_SCALE_MIN,
+                scale: ground::Kind::Palm.scale().0,
             };
-            ground::MAX_PALMS
+            ground::MAX_PLANTS
         ];
         let biggest = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
@@ -1398,7 +1432,7 @@ mod tests {
         assert_eq!(
             biggest.len() - 2,
             MAX_SERVER_FRAME as usize,
-            "a watered chunk under a full stand of palms is what the ceiling is for"
+            "a watered chunk under a full stand of plants is what the ceiling is for"
         );
         let lake = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
@@ -1411,7 +1445,7 @@ mod tests {
         assert_eq!(lake.len() - ground.len(), ground::WATER_BYTES);
         assert_eq!(
             biggest.len() - lake.len(),
-            ground::MAX_PALMS * ground::PALM_BYTES
+            ground::MAX_PLANTS * ground::PLANT_BYTES
         );
     }
 

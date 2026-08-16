@@ -28,7 +28,7 @@ use bevy::math::Vec3Swizzles;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 
-use crate::bindings::KeyBindings;
+use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
 use crate::logbook::{Berth, Logbook};
 use crate::player::Player;
@@ -68,13 +68,16 @@ struct Hull {
     /// but what makes it the game's business rather than the model's is
     /// [`Hull::grounding_draft`], which is measured from it.
     draft: f32,
-    /// Deck height above the waterline — the freeboard, the model's own
-    /// sheer. The game's business because somebody stands on it: a player
-    /// aboard is put down here rather than at the hull's origin, which is the
-    /// waterline and so is knee-deep in the bilges. Held to the model by
-    /// `the_model_is_the_hull_the_keel_is_probed_along`, like the draft it is
-    /// measured against.
-    deck: f32,
+    /// The quarterdeck: the raised deck aft, in metres above the waterline,
+    /// and the helm's station on it — where somebody aboard stands, beside
+    /// the tiller. A player is put down here rather than at the hull's
+    /// origin, which is the waterline and so is knee-deep in the bilges.
+    /// The model's numbers rather than the game's to choose, like the draft:
+    /// held to the file by `the_model_is_the_hull_the_keel_is_probed_along`.
+    /// The main deck's own height is *not* here — nothing below the sail's
+    /// corners reads it, so it belongs to the model alone.
+    quarterdeck: f32,
+    helm_station: f32,
     /// Where the keel begins and ends, in metres from amidships — negative
     /// forward, the same axis the hull is modelled on. [`grounding`] probes
     /// along these, so what runs aground is the line that is drawn.
@@ -139,6 +142,20 @@ impl Hull {
     fn grounding_draft(&self) -> f32 {
         self.draft - KEEL_BITE
     }
+
+    /// Where somebody aboard stands, in the hull's own frame: at the helm,
+    /// on the quarterdeck, forward of the tiller.
+    fn helm(&self) -> Vec3 {
+        Vec3::new(0.0, self.quarterdeck, self.helm_station)
+    }
+
+    /// Where the hull meets the water forward, in its own frame: the stem, on
+    /// the waterline. Not the forefoot — that is where the *keel* begins, a
+    /// good deal aft of the bow because the stem is raked — and the water is
+    /// parted at the bow.
+    fn stem(&self) -> Vec3 {
+        Vec3::new(0.0, 0.0, -self.length / 2.0)
+    }
 }
 
 /// The ship: the boat a world is entered aboard, and [`MODEL`]'s subject.
@@ -150,7 +167,11 @@ const SHIP: Hull = Hull {
     length: 7.0,
     beam: 2.4,
     draft: 0.8,
-    deck: 0.9,
+    // The step up aft and the spot on it just forward of the tiller's grip —
+    // the model's numbers. The station keeps the helmsman clear of the boom,
+    // which sweeps the main deck and nothing abaft the step.
+    quarterdeck: 1.2,
+    helm_station: 2.6,
     // The forefoot stops short of the bow, which is what gives the stem its
     // rake; the heel runs right aft to the transom.
     forefoot_station: -7.0 * 0.5 * 0.7,
@@ -238,12 +259,92 @@ const WAY_STOPPED: f32 = 0.02;
 /// invisible at any zoom.
 const HEEL_SETTLED: f32 = 0.005;
 
-/// Timber. Nothing on an island or in the sea is anywhere near this hue, so the
-/// boat is findable in a landscape of greens and blues without being lit any
-/// differently from them.
-const HULL_COLOR: Color = Color::srgb(0.62, 0.28, 0.22);
-/// Bare spar, pale enough to stand off both the water and the hull.
-const SPAR_COLOR: Color = Color::srgb(0.86, 0.80, 0.68);
+/// The no-go zone: within this of head-to-wind, set sails carry nothing, in
+/// radians. This is the one piece of sailing realism kept for its own sake,
+/// because it *is* the game — upwind is tacked for, downwind is free — and
+/// 45 degrees is wide enough that pinching reads as a mistake while a
+/// full-helm tack still crosses the whole zone inside a second (see
+/// `a_tack_carries_way_through_the_eye_of_the_wind` for the arithmetic,
+/// pinned).
+///
+/// These are the game's sailing rules rather than any hull's manners, which
+/// is why they are module constants and not [`Hull`] fields, the same
+/// standing [`KEEL_BITE`] has: the ship sails by them today, and the rowboat
+/// to come is rowed, not sailed.
+const NO_GO: f32 = std::f32::consts::FRAC_PI_4;
+
+/// Where the sails reach their full drive: a beam reach, a quarter turn off
+/// the wind. From the edge of the no-go zone to here the drive ramps
+/// linearly, and from here through a dead run it is full — no downwind
+/// taper, on purpose. A real hull's polar sags a little dead downwind, but
+/// modelling that only makes the fastest point of sail one the player is
+/// never quite on, which is realism spent making the game worse.
+const FULL_DRIVE: f32 = std::f32::consts::FRAC_PI_2;
+
+/// The band the wind's strength drives the hull across: the fraction of
+/// [`Hull::speed`] made in a flat calm, and the fraction made once the wind
+/// saturates. The floor is what keeps a calm from stranding anybody — the
+/// world is crossed by boat and the weather holds its spells for minutes at
+/// a time, so no sky may take the boat away — and the ceiling is a modest
+/// reward for sailing a blow rather than a new top gear. The angle to the
+/// wind is the game; the strength is flavour inside this band. Under the
+/// assumed 7 m/s breeze the factor comes out near 0.9.
+const DRIVE_BAND: (f32, f32) = (0.6, 1.1);
+
+/// The wind at which the drive saturates, in metres per second — a strong
+/// breeze, short of the near-gale the weather tops out at. Above it more
+/// wind is more sea — the swell's business — but no more speed.
+const WIND_SATURATES: f32 = 12.0;
+
+/// Below this, in metres per second, the wind names no direction — the same
+/// bar the compass's arm and the sea's wave trains hold themselves to — so
+/// the no-go zone stands aside and the calm's floor drives on any heading.
+/// Without it a dying air would still park a boat pointed the wrong way,
+/// with nothing on screen left to say which way "wrong" was.
+const WIND_NAMED: f32 = 0.5;
+
+/// How much of the hull's speed set sails can draw at an angle off the wind,
+/// 0..=1. `off_wind` is the unsigned angle between the bow and the eye of
+/// the wind: zero head-to-wind, a straight angle on a dead run.
+fn polar(off_wind: f32) -> f32 {
+    ((off_wind - NO_GO) / (FULL_DRIVE - NO_GO)).clamp(0.0, 1.0)
+}
+
+/// How hard the wind drives, as a factor on [`Hull::speed`]: [`DRIVE_BAND`]
+/// walked linearly, saturating at [`WIND_SATURATES`].
+fn strength(wind_speed: f32) -> f32 {
+    let (floor, ceiling) = DRIVE_BAND;
+    floor + (ceiling - floor) * (wind_speed / WIND_SATURATES).clamp(0.0, 1.0)
+}
+
+/// The lean a turn asks of the hull, in radians of roll: the full-turn heel,
+/// by how hard the helm is over, by the way's share of the hull's speed —
+/// that share clamped at one, because a blow drives past hull speed (see
+/// [`DRIVE_BAND`]'s ceiling) and the full-turn heel is a ceiling of its own,
+/// not a proportion to be outgrown. Port helm is a positive turn and an
+/// outward lean is to starboard, which about the forward axis is a negative
+/// roll — hence the sign.
+fn heel_for(hull: &Hull, helm: f32, way: f32) -> f32 {
+    -hull.heel_at_full_turn * helm * (way / hull.speed).clamp(-1.0, 1.0)
+}
+
+/// The speed set sails ask for, as a factor on [`Hull::speed`]: the polar at
+/// this heading times the wind's strength. `bow` is the hull's forward in
+/// the map's terms; `wind` is [`sea::SeaConditions::wind`] — the *true*
+/// wind, not the apparent, so the speed a heading earns holds still while
+/// the boat gathers way towards it. The pennant at the masthead flies the
+/// apparent wind and will disagree; that disagreement is real sailing, not
+/// a bug to reconcile.
+fn sail_drive(bow: Vec2, wind: Vec2) -> f32 {
+    let blowing = wind.length();
+    if blowing < WIND_NAMED {
+        return strength(blowing);
+    }
+    // The angle off the eye of the wind — the bow against where the air is
+    // coming *from*, `wind` being where it is going.
+    strength(blowing) * polar(bow.angle_to(-wind).abs())
+}
+
 /// The pennant. Hotter and lighter than the hull's timber, which is the only
 /// other warm thing in a world of greens and blues: at the far end of the zoom
 /// the boat is a mark on the water and this is the mark on the mark.
@@ -256,12 +357,46 @@ const PENNANT_COLOR: Color = Color::srgb(0.87, 0.35, 0.18);
 /// flag when the wind drops (see [`pennant_mesh`]).
 const PENNANT: (f32, f32) = (1.2, 0.3);
 
+/// Canvas. Near the spar's cream and a shade warmer, so a set sail reads
+/// against sky and sea without adding a new colour to a palette this small.
+const SAIL_COLOR: Color = Color::srgb(0.93, 0.89, 0.79);
+
+/// The sail, as corners in the frame of an entity stood at the mast's foot
+/// on the waterline — so everything [`trim_the_sails`] does is a rotation
+/// about the mast, which is what trimming is. Tack and head up the luff,
+/// clew aft along the boom, in metres. The head stops short of the masthead
+/// so the pennant flies clear of the cloth, and the clew ends inboard of the
+/// transom.
+const SAIL_TACK: Vec3 = Vec3::new(0.0, 1.3, 0.0);
+const SAIL_HEAD: Vec3 = Vec3::new(0.0, 6.5, 0.0);
+const SAIL_CLEW: Vec3 = Vec3::new(0.0, 1.3, 3.0);
+/// The belly: pushed out to one side for exactly the pennant's reason — see
+/// [`pennant_mesh`] — and proportionally deeper, canvas drawing harder than
+/// a flag.
+const SAIL_BELLY: Vec3 = Vec3::new(0.4, 3.4, 1.1);
+
+/// How far the boom lies off the centreline, in radians: close-hauled at the
+/// edge of the no-go zone, eased out to nearly square on a dead run. Visual
+/// only — the drive is [`sail_drive`]'s business — but a sail sheeted the
+/// way the wind asks is what the eye reads as "the wind is doing this",
+/// which is the whole point of drawing one.
+const TRIM_BAND: (f32, f32) = (0.26, 1.35);
+
 /// The apparent wind that flies the pennant out, in metres per second, and
 /// how far it still sags at that wind, in radians. Both are the drawing's to
 /// pick rather than the weather's: a flag that only lifted in the gales would
 /// be a limp rag through most of a day, and one that ever came out perfectly
 /// straight would read as a signboard rather than as cloth.
-const PENNANT_FLIES: (f32, f32) = (8.0, 0.14);
+const PENNANT_FLIES: (f32, f32) = (5.0, 0.14);
+
+/// How far the pennant's tie stands off the mast's axis, in metres: the
+/// spar's half-width and a little air. The flag is tied to the spar's
+/// *surface* on the side it is flying — sliding round the timber with the
+/// wind, the way a ring on a mast would — because a tie on the axis swings
+/// every sag of the cloth down through the spar itself, and a becalmed flag
+/// hung entirely inside the masthead. Held to the model's actual girth by
+/// `the_model_flies_a_pennant_from_its_masthead`.
+const PENNANT_TIE_OFF: f32 = 0.1;
 
 /// Below this apparent wind, in metres per second, the pennant keeps the
 /// bearing it had and simply hangs. The same problem the compass's arm has —
@@ -299,10 +434,16 @@ pub struct Boat {
     heel: f32,
     pitch: f32,
     roll: f32,
+    /// Whether the sails are set. Set, the wind is the throttle — see
+    /// [`sail_drive`]; furled, the target way is zero, the hull glides to a
+    /// stop and holds station, and that holding is the whole of "anchored"
+    /// here — the crew drops the hook, nothing simulates it.
+    sails_set: bool,
 }
 
 impl Boat {
-    /// The ship a world is entered aboard, at rest.
+    /// The ship a world is entered aboard, at rest — sails furled, a world
+    /// being entered at anchor.
     pub fn ship() -> Self {
         Self {
             hull: SHIP,
@@ -310,7 +451,27 @@ impl Boat {
             heel: 0.0,
             pitch: 0.0,
             roll: 0.0,
+            sails_set: false,
         }
+    }
+
+    /// Sets the sails: the wind has the hull until [`furl`] takes it back.
+    ///
+    /// [`furl`]: Boat::furl
+    pub fn hoist(&mut self) {
+        self.sails_set = true;
+    }
+
+    /// Furls the sails. The way runs off on the hull's own glide and the
+    /// boat holds station where it dies — which is what going ashore does to
+    /// a boat on the way off it, so nothing is ever left sailing unmanned.
+    pub fn furl(&mut self) {
+        self.sails_set = false;
+    }
+
+    /// Whether the sails are set.
+    pub fn sails_set(&self) -> bool {
+        self.sails_set
     }
 
     /// Whether the hull has no way on at all. Exact equality is meaningful
@@ -322,11 +483,35 @@ impl Boat {
         self.way == 0.0
     }
 
-    /// Where somebody aboard stands, in metres above the hull's origin — see
-    /// [`Hull::deck`]. What a player boarding is put down at, so that they
-    /// stand on the deck rather than in it.
-    pub fn deck(&self) -> f32 {
-        self.hull.deck
+    /// Where somebody aboard stands, in the hull's own frame — see
+    /// [`Hull::quarterdeck`]. What a player boarding is put down at, so that
+    /// they stand at the helm rather than in the bilges.
+    pub fn helm(&self) -> Vec3 {
+        self.hull.helm()
+    }
+
+    /// Where the hull parts the water, in its own frame — see [`Hull::stem`].
+    /// The wake is laid from here rather than from the origin amidships, so
+    /// that the white water the hull is standing in is water its own bow
+    /// turned over a moment ago.
+    pub fn stem(&self) -> Vec3 {
+        self.hull.stem()
+    }
+
+    /// How wide a stretch of water the hull pushes aside, in metres — its
+    /// beam. What the wake is scaled off, a bigger hull leaving a broader
+    /// one; see [`crate::wake`].
+    pub fn beam(&self) -> f32 {
+        self.hull.beam
+    }
+
+    /// The way the hull is making, in metres a second — negative going
+    /// astern. The hull's own number rather than anything measured off its
+    /// transform, which is the point: a transform moves for reasons that are
+    /// not sailing, and [`crate::wake`] wants the speed the water is being
+    /// stirred at.
+    pub fn way(&self) -> f32 {
+        self.way
     }
 }
 
@@ -338,6 +523,13 @@ impl Boat {
 struct Pennant {
     bearing: f32,
 }
+
+/// The sail hung from the mast — a marker, unlike [`Pennant`], because trim
+/// carries no memory: the boom lies where [`sail_trim`] puts it this frame,
+/// and a wind too slack to name a side leaves it on the centreline, hidden
+/// under a furl nobody is watching for long anyway.
+#[derive(Component)]
+struct Sail;
 
 pub struct BoatPlugin;
 
@@ -357,14 +549,16 @@ impl Plugin for BoatPlugin {
                 // under it — so leaving it running means a chunk arriving
                 // while the pause menu is up is settled on before the player
                 // looks again, rather than snapping under them on resume.
-                // The pennant last, and outside the pause like the floating:
-                // it flies off the hull's rotation and the wind, so reading
-                // either before this frame's steering had written it would
-                // leave the flag a frame behind the mast it is tied to.
+                // The pennant and the sail last, and outside the pause like
+                // the floating: both are drawn off the hull's rotation and
+                // the wind, so reading either before this frame's steering
+                // had written it would leave the cloth a frame behind the
+                // mast it hangs on.
                 (
                     steer.run_if(in_state(Helm::Sailing)),
                     float,
                     fly_the_pennant,
+                    trim_the_sails,
                 )
                     .chain()
                     .run_if(in_state(AppState::InWorld)),
@@ -381,14 +575,15 @@ impl Plugin for BoatPlugin {
 /// point — open water the layout keeps just off the first island's coast —
 /// so the boat starts afloat with land dead ahead; a `--focus` can still put
 /// it down inland, aground until the movement keys drive it back to the sea.
-/// The meshes hang off the boat as children rather than on it: a mesh carries
-/// one material, and the hull and the spar are two colours. Their geometry is
-/// already in the boat's own frame — the modeller places the mast on the deck,
-/// not the game — so the children sit at the identity and the only transform
-/// anything writes is the boat's own. The player is one more child, at the
-/// identity like the meshes: aboard *is* being in the hierarchy — see
-/// [`crate::player`] — so they stand wherever the hull carries them and go
-/// down with the ship when the world is left.
+/// The meshes hang off the boat as children rather than on it: the hull and
+/// the spar stay two meshes not for their colours — both carry their own now —
+/// but because the game measures them separately, the keel probed along one
+/// and the pennant tied to the other. Their geometry is already in the boat's
+/// own frame — the modeller places the mast on the deck, not the game — so the
+/// children sit at the identity and the only transform anything writes is the
+/// boat's own. The player is one more child: aboard *is* being in the
+/// hierarchy — see [`crate::player`] — so they stand wherever the hull carries
+/// them and go down with the ship when the world is left.
 ///
 /// A world this machine remembers can override the ceremony — see
 /// [`Berth`]: a resumed visit puts the hull back on its own heading, and one
@@ -410,15 +605,12 @@ fn launch(
         Some(Berth::Aboard { heading }) => (entered, heading),
         Some(Berth::Ashore { boat, heading, .. }) => (boat, heading),
     };
-    // The file's own materials are ignored, and the meshes are pulled out of it
-    // one at a time rather than the whole scene being spawned. glTF materials
-    // are PBR — a roughness, a metalness, a specular response — and the look
-    // here is a small fixed palette under `matte`, so a hull lit the way the
-    // file asked for would be the one surface in the world with a highlight on
-    // it. Leaving the colours in Rust also keeps them beside the ground's,
-    // which is the comparison that matters when either is picked.
-    let hull_material = materials.add(matte(HULL_COLOR));
-    let spar_material = materials.add(matte(SPAR_COLOR));
+    // The model carries its own colours on its facets — see the master's
+    // NOTES — so the timber is drawn with one white matte that does nothing
+    // but let them through, the same way every painted model here is. The
+    // file's PBR materials are still ignored: lit the way the file asked for,
+    // the hull would be the one surface in the world with a highlight on it.
+    let painted = materials.add(matte(Color::WHITE));
     // Cloth is the one thing aboard with no inside, so it is the one material
     // here that is drawn from both faces. Left single-sided the pennant would
     // wink out every time the wind put its back to the camera, which happens
@@ -427,6 +619,12 @@ fn launch(
         double_sided: true,
         cull_mode: None,
         ..matte(PENNANT_COLOR)
+    });
+    // Cloth again, so drawn from both faces for the pennant's reason.
+    let sail_material = materials.add(StandardMaterial {
+        double_sided: true,
+        cull_mode: None,
+        ..matte(SAIL_COLOR)
     });
 
     let boat = commands
@@ -447,12 +645,12 @@ fn launch(
                 (
                     Name::new("Hull"),
                     Mesh3d(assets.load(model_mesh(MODEL, HULL_MESH))),
-                    MeshMaterial3d(hull_material),
+                    MeshMaterial3d(painted.clone()),
                 ),
                 (
                     Name::new("Spar"),
                     Mesh3d(assets.load(model_mesh(MODEL, SPAR_MESH))),
-                    MeshMaterial3d(spar_material),
+                    MeshMaterial3d(painted),
                 ),
                 // Tied to the masthead and pointed by [`fly_the_pennant`]. The
                 // one piece of the boat that is not in the file: a flag is a
@@ -470,15 +668,27 @@ fn launch(
                     MeshMaterial3d(pennant_material),
                     Transform::from_xyz(0.0, SHIP.masthead, SHIP.masthead_station),
                 ),
+                // The sail, at the mast's foot so its rotation is a turn about
+                // the mast, and hidden because a world is entered at anchor —
+                // [`trim_the_sails`] shows it while the sails are set and lays
+                // the boom where the wind asks.
+                (
+                    Name::new("Sail"),
+                    Sail,
+                    Mesh3d(meshes.add(sail_mesh())),
+                    MeshMaterial3d(sail_material),
+                    Transform::from_xyz(0.0, 0.0, SHIP.masthead_station),
+                    Visibility::Hidden,
+                ),
             ],
         ))
         .id();
 
     // The figure itself is hung under the player by `figure::dress`, which
-    // is the player's own business rather than the boat's. Aboard, the player
-    // is a child of the hull, standing on its deck — aboard *is* being in
-    // the hierarchy. Ashore they stand on their own transform with a
-    // `DespawnOnExit` of their own, exactly as stepping off the gunwale
+    // is the player's own business rather than the boat's. Aboard, the
+    // player is a child of the hull, standing at its helm — aboard *is*
+    // being in the hierarchy. Ashore they stand on their own transform with
+    // a `DespawnOnExit` of their own, exactly as stepping off the gunwale
     // leaves them.
     match berth {
         Some(Berth::Ashore { height, facing, .. }) => {
@@ -495,7 +705,7 @@ fn launch(
             commands.entity(boat).with_child((
                 Name::new("Player"),
                 Player,
-                Transform::from_xyz(0.0, SHIP.deck, 0.0),
+                Transform::from_translation(SHIP.helm()),
                 Visibility::default(),
             ));
         }
@@ -552,6 +762,85 @@ fn pennant_mesh() -> Mesh {
         vec![tie, foot, belly, foot, fly, belly, fly, tie, belly],
     )
     .with_computed_flat_normals()
+}
+
+/// The sail, as a shape: three triangles fanned round a belly, exactly
+/// [`pennant_mesh`]'s construction and for its reasons — unindexed so each
+/// facet carries its own flat normal, and bellied so no wind direction ever
+/// turns the cloth edge-on to the camera and deletes it. The luff runs up
+/// the mast from tack to head, the foot aft to the clew, and the whole shape
+/// is drawn sheeted amidships; where the boom actually lies is a rotation,
+/// [`trim_the_sails`]'s to make.
+fn sail_mesh() -> Mesh {
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![
+            SAIL_TACK, SAIL_HEAD, SAIL_BELLY, SAIL_HEAD, SAIL_CLEW, SAIL_BELLY, SAIL_CLEW,
+            SAIL_TACK, SAIL_BELLY,
+        ],
+    )
+    .with_computed_flat_normals()
+}
+
+/// Where the boom lies for a wind, in radians about the mast: swung to
+/// leeward — the side the wind is not on — close-hauled at the band's floor
+/// against the edge of the no-go zone, nearly square before a dead run. In
+/// irons it stays close-hauled, which is also roughly where luffing canvas
+/// hangs, and a wind too slack to name a side leaves the boom amidships.
+/// The *true* wind, like the drive and unlike the pennant: the boom is
+/// trimmed to the same wind the speed is earned from, so what the eye reads
+/// off it agrees with what the hull does.
+fn sail_trim(bow: Vec2, wind: Vec2) -> f32 {
+    if wind.length() < WIND_NAMED {
+        return 0.0;
+    }
+    let off = bow.angle_to(-wind);
+    let (close, square) = TRIM_BAND;
+    let out = close
+        + (square - close) * ((off.abs() - NO_GO) / (std::f32::consts::PI - NO_GO)).clamp(0.0, 1.0);
+    // The sign: `off` is positive with the eye of the wind to starboard —
+    // the map's turn runs against the yaw's — and leeward is then to port,
+    // which about the mast's own vertical is a negative turn for a boom
+    // hung aft. Pinned by `the_boom_swings_to_leeward` rather than by this
+    // sentence.
+    -off.signum() * out
+}
+
+/// Shows the sail while it is set, hides it furled, and lays the boom on the
+/// wind — after [`steer`] for the pennant's reason: both read the heading
+/// and the sail state this frame's steering wrote. The rotation is about the
+/// sail's own local vertical, which *is* the mast however the hull heels and
+/// pitches, the sail being a child of it.
+fn trim_the_sails(
+    conditions: Res<sea::SeaConditions>,
+    boats: Query<(&Boat, &Transform), Without<Sail>>,
+    mut sails: Query<(&ChildOf, &mut Transform, &mut Visibility), With<Sail>>,
+) {
+    for (of, mut transform, mut visibility) in &mut sails {
+        let Ok((boat, hull)) = boats.get(of.parent()) else {
+            continue;
+        };
+        // Written only on change, so an idle boat's sail is as unwritten as
+        // the rest of it.
+        let shown = if boat.sails_set() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != shown {
+            *visibility = shown;
+        }
+        if boat.sails_set() {
+            let trimmed = Quat::from_rotation_y(sail_trim(hull.forward().xz(), conditions.wind()));
+            if transform.rotation != trimmed {
+                transform.rotation = trimmed;
+            }
+        }
+    }
 }
 
 /// How the pennant lies under an apparent wind: the bearing it streams on and
@@ -619,6 +908,15 @@ fn fly_the_pennant(
 
         let flying = Quat::from_rotation_y(bearing + flutter) * Quat::from_rotation_x(-droop);
         transform.rotation = hull.rotation.inverse() * flying;
+
+        // The tie rides the spar's surface on the side the flag is flying —
+        // see [`PENNANT_TIE_OFF`] — so the pivot for all of the above sits
+        // clear of the timber, and a hanging flag hangs beside the masthead
+        // rather than inside it. Steered by the bearing without the flutter:
+        // the tie is a fixed point on a swinging flag, not a swinging one.
+        let tie_off = Quat::from_rotation_y(bearing) * (Vec3::NEG_Z * PENNANT_TIE_OFF);
+        transform.translation = Vec3::new(0.0, boat.hull.masthead, boat.hull.masthead_station)
+            + hull.rotation.inverse() * tie_off;
     }
 }
 
@@ -653,7 +951,7 @@ fn fly_the_pennant(
 /// applied last frame from the right and hangs the new one on, and [`steer`],
 /// multiplying its heel delta on from the right, keeps reaching the roll
 /// factor it always has.
-fn float(
+pub(crate) fn float(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
     sea: Res<sea::SeaConditions>,
@@ -770,25 +1068,42 @@ fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32
         .fold(f32::NEG_INFINITY, f32::max)
 }
 
-/// Drives the boat the player is at the helm of, in its own frame, the way a
-/// boat is driven: forward and back run the hull along its heading, and the
-/// steering keys are the helm, bringing the bow round for as long as they're
-/// held. The view plays no part — turning the camera changes what the keys
-/// look like on screen, never what they do — which is what makes a long sail
-/// a held key rather than a chase between the camera's yaw and the boat's.
+/// Sails the boat the player is at the helm of, in its own frame, the way a
+/// boat is sailed: one key makes sail and hands the hull to the wind, one
+/// furls, and the steering keys are the helm, bringing the bow round for as
+/// long as they're held. The view plays no part — turning the camera changes
+/// what the keys look like on screen, never what they do — which is what
+/// makes a long sail a held course rather than a chase between the camera's
+/// yaw and the boat's.
 ///
 /// Only the boat the player is *aboard* answers, which is what being at the
 /// helm means here. Ashore, the same keys are the walker's — see
 /// `player::walk` — and a hull left at anchor holds station rather than
 /// sailing off with its absent owner's keystrokes.
 ///
-/// The throttle is eased rather than instant: the keys name a target speed
-/// and the hull's way relaxes towards it on its own way-response curve,
-/// stepped exactly for however long the frame was, so the ramp is the same
-/// shape at any frame rate. That covers both ends of a sail — way gathered
-/// over seconds when the key goes down, and carried into a glide when it
-/// comes up — from one constant, with [`WAY_STOPPED`] closing the tail the
-/// exponential would otherwise never finish.
+/// With the sails set the wind is the throttle: the target speed is the
+/// hull's times [`sail_drive`] — the polar at this heading, the strength of
+/// the blow — and the player's whole control of it is the helm, the game
+/// trimming the sails itself. Furling takes the target to zero; the way runs
+/// off on the glide and the hull holds station where it dies, which is all
+/// "anchored" means here. Backing is the one drive the wind has no part in —
+/// held astern with the sails furled, at the hull's own astern speed —
+/// because backing off a beach is how a grounding is undone, and an escape
+/// that waited on a favourable wind would be no escape. The sail keys are
+/// taps rather than holds, and a frame that carries both taps furls first
+/// and hoists second — a fixed order rather than a race, erring towards
+/// sailing.
+///
+/// The way is eased rather than instant: whatever names the target speed,
+/// the hull's way relaxes towards it on its own way-response curve, stepped
+/// exactly for however long the frame was, so the ramp is the same shape at
+/// any frame rate. That covers both ends of a sail — way gathered over
+/// seconds when the sails go up, and carried into a glide when they come
+/// down — from one constant, with [`WAY_STOPPED`] closing the tail the
+/// exponential would otherwise never finish. The glide is also what makes
+/// tacking work at all: the target dies crossing the no-go zone, but the way
+/// carried into the turn is enough to bring the bow through the eye and out
+/// the other side still moving.
 ///
 /// The helm answers even with no way on, which no rudder would; a boat that
 /// can't point where it's told while stationary is annoying before it is
@@ -829,7 +1144,11 @@ fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32
 /// the hull's full-turn heel, a gentle one at half way a quarter of it, and a bow
 /// swung round at rest none at all — and the shown heel relaxes towards it on
 /// the hull's heel-response curve, which is both the roll into the turn and the
-/// straightening out of it. Signed way keeps the geometry honest going
+/// straightening out of it. The way's share is clamped at the hull's own
+/// speed, because a strong blow drives past it — see [`DRIVE_BAND`]'s
+/// ceiling — and the full-turn heel is a ceiling of its own, not a
+/// proportion to be outgrown: the biggest lean the hull ever shows, however
+/// hard the day. Signed way keeps the geometry honest going
 /// astern: the same helm turns about a centre on the other side, so the heel
 /// flips with it. The roll is applied about the boat's own forward axis, and
 /// the keel lies along that axis, so heeling moves nothing [`grounding`]
@@ -847,11 +1166,14 @@ fn steer(
     bindings: Res<KeyBindings>,
     time: Res<Time>,
     ground: Option<Res<Ground>>,
+    conditions: Res<sea::SeaConditions>,
     players: Query<&ChildOf, With<Player>>,
     mut boats: Query<(&mut Transform, &mut Boat)>,
 ) {
     // A player ashore is in no boat's query, and that is the whole of how
-    // the helm goes dead when they step off.
+    // the helm goes dead when they step off. It is also how a typed `w`
+    // never hoists sail: this system runs only while the player has the
+    // helm, so the console and the menus keep the keys to themselves.
     let Some((mut transform, mut boat)) = players
         .single()
         .ok()
@@ -860,23 +1182,36 @@ fn steer(
         return;
     };
 
-    let (drive, helm) = bindings.driving(&keys);
+    // The sail keys — see the doc above for the furl-then-hoist order.
+    if bindings.tapped(&keys, Action::MoveBack, KeyCode::ArrowDown) {
+        boat.furl();
+    }
+    if bindings.tapped(&keys, Action::MoveForward, KeyCode::ArrowUp) {
+        boat.hoist();
+    }
+
+    let (_, helm) = bindings.driving(&keys);
 
     let ground = ground.as_deref();
 
     let hull = boat.hull;
-    let speed = if drive > 0.0 {
-        hull.speed
-    } else {
-        hull.astern_speed
-    };
-    let target = drive * speed;
     // A response named in seconds is a rate of its reciprocal.
     let t = eased(1.0 / hull.way_response, time.delta_secs());
 
     if helm != 0.0 {
         transform.rotate_y(helm * hull.turn_rate * time.delta_secs());
     }
+
+    // The target after the helm, so the drive is read off the heading this
+    // frame settled on — the same rule the grounding poses live by.
+    let astern = !boat.sails_set && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
+    let target = if boat.sails_set {
+        hull.speed * sail_drive(transform.forward().xz(), conditions.wind())
+    } else if astern {
+        -hull.astern_speed
+    } else {
+        0.0
+    };
     // Written only while something is happening, so an idle boat holds
     // still without being marked changed every frame.
     if target != 0.0 || boat.way != 0.0 {
@@ -908,14 +1243,12 @@ fn steer(
 
     // Heel last, against the way this frame settled on, so running
     // aground starts the straightening the same frame it takes the way
-    // off. Port helm is a positive turn and an outward lean is to
-    // starboard, which about the forward axis is a negative roll — hence
-    // the sign. The transform holds heading, then the water's pitch,
+    // off. The transform holds heading, then the water's pitch,
     // then one roll factor the heel shares with the wave roll — see
     // [`float`] — and the helm above multiplies heading on from the
     // left, so rolling on from the right reaches that roll factor alone
     // and the guard keeps an idle boat's rotation unwritten.
-    let target_heel = -hull.heel_at_full_turn * helm * boat.way / hull.speed;
+    let target_heel = heel_for(&hull, helm, boat.way);
     if boat.heel != target_heel {
         let heel_t = eased(1.0 / hull.heel_response, time.delta_secs());
         let heel = settled(boat.heel + (target_heel - boat.heel) * heel_t, target_heel);
@@ -931,8 +1264,8 @@ mod tests {
     use super::*;
     use crate::bindings::Action;
     use crate::testing::{
-        assert_model_draws, elapsed, hold, rebind, run_frames, test_ground, triangles, world_app,
-        TEST_ISLAND_REACH,
+        assert_model_draws, assert_model_is_painted, assert_rigid_skin, clip_names, elapsed, hold,
+        rebind, run_frames, set_wind, test_ground, triangles, world_app, TEST_ISLAND_REACH,
     };
 
     /// Frames enough for the ease to be indistinguishable from settled —
@@ -950,6 +1283,45 @@ mod tests {
             .query_filtered::<&Transform, With<Boat>>()
             .single(app.world())
             .expect("a match should have a boat in it")
+    }
+
+    /// The way the hull is making, straight off the component — what the
+    /// tack test watches frame by frame, an end position being unable to say
+    /// whether the way ever died along the road to it.
+    fn way_on(app: &mut App) -> f32 {
+        app.world_mut()
+            .query::<&Boat>()
+            .single(app.world())
+            .expect("a match should have a boat in it")
+            .way
+    }
+
+    /// Whether the boat's sails are set.
+    fn sails_are_set(app: &mut App) -> bool {
+        app.world_mut()
+            .query::<&Boat>()
+            .single(app.world())
+            .expect("a match should have a boat in it")
+            .sails_set()
+    }
+
+    /// Taps a key — down for one frame, then released. What the sail keys
+    /// are: [`steer`] reads their edges, so a tap is the whole gesture.
+    fn tap(app: &mut App, key: KeyCode) {
+        hold(app, key);
+        run_frames(app, 1);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(key);
+    }
+
+    /// Puts the wind dead astern of the boat as it lies, blowing `speed`
+    /// metres a second — the run every driving test wants, because the
+    /// default heading under the assumed wind is *in irons* and a test that
+    /// forgets the weather is testing a boat that never moves.
+    fn wind_astern(app: &mut App, speed: f32) {
+        let forward = boat(app).forward();
+        set_wind(app, forward.xz() * speed);
     }
 
     /// The bow's bearing, in the same terms as a camera yaw.
@@ -994,6 +1366,10 @@ mod tests {
         // bare-spar cream and stand a seven-metre plank of timber where the
         // mast should be.
         assert_model_draws(MODEL, &[(HULL_MESH, "hull"), (SPAR_MESH, "spar")]);
+        // And both carry their own colours — drawn with a white material, a
+        // mesh that lost them would arrive as a white boat, not a broken one.
+        assert_model_is_painted(MODEL, HULL_MESH);
+        assert_model_is_painted(MODEL, SPAR_MESH);
     }
 
     #[test]
@@ -1009,7 +1385,6 @@ mod tests {
             .flatten()
             .collect();
         let lowest = corners.iter().map(|c| c.y).fold(f32::MAX, f32::min);
-        let highest = corners.iter().map(|c| c.y).fold(f32::MIN, f32::max);
         let (bow, transom) = corners
             .iter()
             .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
@@ -1018,13 +1393,6 @@ mod tests {
             (lowest + SHIP.draft).abs() < 1e-4,
             "the model's keel is {lowest} below the waterline, not {}",
             -SHIP.draft
-        );
-        // And the sheer, which is where a player aboard is stood: remodel the
-        // hull with more freeboard and they would be shin-deep in the deck.
-        assert!(
-            (highest - SHIP.deck).abs() < 1e-4,
-            "the model's deck is {highest} above the waterline, not {}",
-            SHIP.deck
         );
         let half = SHIP.length * 0.5;
         assert!(
@@ -1049,6 +1417,37 @@ mod tests {
             SHIP.forefoot_station,
             SHIP.heel_station
         );
+
+        // The quarterdeck, the same way as the keel: a plane of corners at
+        // exactly its height, spanning the helm's station — where a player
+        // aboard is stood. Remodel it without re-measuring and they are
+        // shin-deep in timber, or walking on air.
+        let plane: Vec<&Vec3> = corners
+            .iter()
+            .filter(|c| (c.y - SHIP.quarterdeck).abs() < 1e-4)
+            .collect();
+        let fore = plane.iter().map(|c| c.z).fold(f32::MAX, f32::min);
+        let aft = plane.iter().map(|c| c.z).fold(f32::MIN, f32::max);
+        assert!(
+            (fore..=aft).contains(&SHIP.helm_station),
+            "no quarterdeck at {} under the helm at {}",
+            SHIP.quarterdeck,
+            SHIP.helm_station
+        );
+
+        // And the boom's sweep: the sail's foot turns about the mast at the
+        // tack's height, out to the clew, so whatever the hull raises inside
+        // that circle has to stay under it or the canvas drags through the
+        // deck furniture. The companionway lives with this rule; the
+        // quarterdeck, the tiller and the stem head stand outside the circle
+        // or under the cloth instead.
+        for corner in &corners {
+            let reach = Vec2::new(corner.x, corner.z - SHIP.masthead_station).length();
+            assert!(
+                reach >= SAIL_CLEW.z || corner.y < SAIL_TACK.y,
+                "{corner} stands into the boom's sweep, {reach} m from the mast"
+            );
+        }
     }
 
     #[test]
@@ -1077,6 +1476,47 @@ mod tests {
             "the mast stands at {stepped}, not {}",
             SHIP.masthead_station
         );
+
+        // And the tie stands off the axis by more than the spar's own half
+        // width — see [`PENNANT_TIE_OFF`]. Re-cut a fatter mast without
+        // re-measuring and the flag is back inside the timber.
+        let girth = corners
+            .iter()
+            .map(|c| c.x.abs().max((c.z - stepped).abs()))
+            .fold(0.0f32, f32::max);
+        assert!(
+            girth < PENNANT_TIE_OFF,
+            "the spar reaches {girth} m from its axis, past the pennant's {PENNANT_TIE_OFF} m tie"
+        );
+    }
+
+    /// The next hull along, as a file: `assets-src/models/rowboat/`.
+    ///
+    /// Nothing spawns one yet, and it is named here rather than beside
+    /// [`MODEL`] for that reason — but a master is a thing an afternoon in
+    /// Blender can quietly break, and the conditions below are exactly the
+    /// ones nothing else would report.
+    const ROWBOAT: &str = "models/rowboat.glb";
+
+    #[test]
+    fn the_rowboat_is_a_boat_fit_to_draw() {
+        // One mesh carrying its own colours, like the figure — the oars move
+        // under the boat's own skin rather than being meshes of their own, so
+        // there is one shape here and not three.
+        assert_model_draws(ROWBOAT, &[(0, "rowboat")]);
+        assert_model_is_painted(ROWBOAT, 0);
+        // And rigged, so the same rule the figure lives by applies: a vertex
+        // shared between bones bends its facet as the oars swing, and a
+        // gradient across a facet is the one thing this look cannot have.
+        assert_rigid_skin(ROWBOAT);
+    }
+
+    #[test]
+    fn the_rowboat_ships_its_oars_and_pulls_them() {
+        // The two states a boat with oars in it has, and the order a clip is
+        // asked for by. Renaming an action in Blender is a keystroke, and the
+        // boat that came back would row with its oars lying in the bilges.
+        assert_eq!(clip_names(ROWBOAT), ["stowed", "stroke"]);
     }
 
     #[test]
@@ -1108,9 +1548,10 @@ mod tests {
         // than snapping to whatever direction the last breath of air took.
         let (held, hanging) = pennant_pose(Vec2::new(0.05, -0.05), 1.234);
         assert_eq!(held, 1.234);
-        // Within a degree of straight down: the breath of air still in the
-        // numbers is allowed to lift it by that much and no more.
-        assert!(hanging > std::f32::consts::FRAC_PI_2 - 0.02);
+        // Within a couple of degrees of straight down: the breath of air
+        // still in the numbers is allowed to lift it by that much and no
+        // more.
+        assert!(hanging > std::f32::consts::FRAC_PI_2 - 0.03);
 
         // Half the wind is most of the way down: the flag lifts through the
         // airs and only the last of it is spent on the blows, which is what
@@ -1145,6 +1586,49 @@ mod tests {
     }
 
     #[test]
+    fn the_polar_is_dead_in_irons_and_full_from_a_beam_reach() {
+        // Nothing to windward of the zone's edge, everything from a beam
+        // reach round to a dead run — the no-downwind-taper choice, pinned.
+        assert_eq!(polar(0.0), 0.0);
+        assert_eq!(polar(NO_GO), 0.0);
+        let mid = (NO_GO + FULL_DRIVE) * 0.5;
+        assert!(
+            (polar(mid) - 0.5).abs() < 1e-6,
+            "halfway up the ramp draws {}, not half",
+            polar(mid)
+        );
+        assert_eq!(polar(FULL_DRIVE), 1.0);
+        assert_eq!(polar(std::f32::consts::PI), 1.0);
+    }
+
+    #[test]
+    fn the_wind_drives_within_its_band() {
+        // The floor is what a calm leaves, the ceiling what a blow earns,
+        // and between them more wind is never less speed.
+        assert_eq!(strength(0.0), DRIVE_BAND.0);
+        assert_eq!(strength(WIND_SATURATES), DRIVE_BAND.1);
+        assert_eq!(strength(WIND_SATURATES * 2.0), DRIVE_BAND.1);
+        let mut last = 0.0;
+        for tenth in 0..=120 {
+            let s = strength(tenth as f32 * 0.1);
+            assert!(s >= last, "the band dips at {} m/s", tenth as f32 * 0.1);
+            last = s;
+        }
+    }
+
+    #[test]
+    fn a_calm_refuses_no_heading() {
+        // A wind too slack to have a direction has no eye to be caught in:
+        // the floor of the band drives the boat wherever it points, dead
+        // "upwind" of the last breath of air included.
+        for bow in [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::new(0.7, -0.7)] {
+            assert_eq!(sail_drive(bow, Vec2::ZERO), DRIVE_BAND.0);
+        }
+        let breath = Vec2::new(0.0, 0.3);
+        assert_eq!(sail_drive(-breath.normalize(), breath), strength(0.3));
+    }
+
+    #[test]
     fn the_boat_points_its_bow_the_way_it_faces() {
         // What steering will be written against: -Z is the bow, so a boat
         // turned to a heading moves along its own forward.
@@ -1164,19 +1648,26 @@ mod tests {
     #[test]
     fn pausing_takes_the_helm_away_and_resuming_gives_it_back() {
         let mut app = test_app();
+        wind_astern(&mut app, 7.0);
         set_helm(&mut app, Helm::Paused);
 
         let before = boat(&mut app).translation;
-        hold(&mut app, KeyCode::ArrowUp);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 20);
         assert_eq!(
             boat(&mut app).translation,
             before,
             "the boat sailed on with the pause menu up"
         );
+        // Not merely unmoved: the tap itself fell on a dead helm, so the
+        // sails never went up — a paused press does nothing later either.
+        assert!(
+            !sails_are_set(&mut app),
+            "a keypress under the pause menu set the sails"
+        );
 
         set_helm(&mut app, Helm::Sailing);
-        hold(&mut app, KeyCode::ArrowUp);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 20);
         assert_ne!(
             boat(&mut app).translation,
@@ -1208,15 +1699,16 @@ mod tests {
     }
 
     #[test]
-    fn the_forward_key_drives_the_boat_the_way_the_bow_points() {
+    fn making_sail_drives_the_boat_the_way_the_bow_points() {
         let mut app = test_app();
+        wind_astern(&mut app, 7.0);
         let before = boat(&mut app);
-        hold(&mut app, KeyCode::ArrowUp);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 20);
         let moved = boat(&mut app).translation - before.translation;
 
-        // Forward means the boat's own forward — no helm held, so the whole
-        // of the movement is dead ahead.
+        // The wind may drive the hull only along its own forward — no helm
+        // held, so the whole of the movement is dead ahead.
         assert!(moved.length() > 0.0, "the boat never moved");
         assert!(
             moved.normalize().dot(*before.forward()) > 0.999,
@@ -1226,36 +1718,48 @@ mod tests {
         assert_eq!(moved.y, 0.0);
     }
 
-    /// Metres per second the boat settles to while `key` is held, signed by
-    /// whether it went ahead or astern — measured after the way is gathered,
-    /// so it is the speed made good and not some point on the ramp.
-    fn speed_made(key: KeyCode) -> f32 {
-        let mut app = test_app();
-        hold(&mut app, key);
-        run_frames(&mut app, SETTLED);
+    /// Metres per second the boat settles to from here, signed by whether it
+    /// went ahead or astern — measured after the way is gathered, so it is
+    /// the speed made good and not some point on the ramp.
+    fn speed_settled(app: &mut App) -> f32 {
+        run_frames(app, SETTLED);
 
-        let before = boat(&mut app);
-        let start = elapsed(&app);
-        run_frames(&mut app, 60);
-        let seconds = elapsed(&app) - start;
-        assert!(seconds > 0.0, "no time passed while the key was held");
+        let before = boat(app);
+        let start = elapsed(app);
+        run_frames(app, 60);
+        let seconds = elapsed(app) - start;
+        assert!(seconds > 0.0, "no time passed while the boat settled");
 
-        let moved = boat(&mut app).translation - before.translation;
+        let moved = boat(app).translation - before.translation;
         moved.dot(*before.forward()) / seconds
     }
 
     #[test]
-    fn ahead_and_astern_each_make_their_own_speed() {
-        let ahead = speed_made(KeyCode::ArrowUp);
+    fn sails_make_the_speed_the_wind_gives() {
+        // Dead downwind under the reference breeze: the polar's full drive,
+        // scaled by the band — the expectation computed from the same
+        // functions the helm reads, so this pins the *wiring*, the curves
+        // having tests of their own.
+        let mut app = test_app();
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
+        let expected = SHIP.speed * strength(7.0);
+        let ahead = speed_settled(&mut app);
         assert!(
-            (ahead - SHIP.speed).abs() < SHIP.speed * 0.01,
-            "the boat made {ahead} m/s ahead, not {}",
-            SHIP.speed
+            (ahead - expected).abs() < expected * 0.01,
+            "the boat made {ahead} m/s on a run, not {expected}"
         );
+    }
 
-        // Backing off a beach is the whole use of astern, so it is slower and
-        // it is backwards — along the heading reversed, not a turn.
-        let astern = speed_made(KeyCode::ArrowDown);
+    #[test]
+    fn astern_makes_its_own_speed_whatever_the_wind() {
+        // Backing off a beach is the whole use of astern, so it is slower,
+        // it is backwards — along the heading reversed, not a turn — and it
+        // owes the wind nothing: the default heading is in irons, and the
+        // boat backs at exactly its astern speed anyway.
+        let mut app = test_app();
+        hold(&mut app, KeyCode::ArrowDown);
+        let astern = speed_settled(&mut app);
         assert!(
             (astern + SHIP.astern_speed).abs() < SHIP.astern_speed * 0.01,
             "the boat made {astern} m/s astern, not -{}",
@@ -1265,39 +1769,43 @@ mod tests {
 
     #[test]
     fn the_boat_gathers_way_rather_than_leaping_to_speed() {
-        // The first half second of a standing start: under way at once, but
-        // nowhere near full speed — the ramp is the point of the ease.
+        // The first half second after making sail: under way at once, but
+        // nowhere near the wind's speed — the ramp is the point of the ease.
         let mut app = test_app();
+        wind_astern(&mut app, 7.0);
         let before = boat(&mut app).translation;
         let start = elapsed(&app);
-        hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 30);
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 29);
         let seconds = elapsed(&app) - start;
 
         let made = (boat(&mut app).translation - before).length() / seconds;
         assert!(made > 0.0, "the boat never began to move");
         assert!(
-            made < SHIP.speed * 0.5,
+            made < SHIP.speed * strength(7.0) * 0.5,
             "{made} m/s inside the first half second is a leap, not gathered way"
         );
     }
 
     #[test]
-    fn the_boat_carries_its_way_into_a_glide_and_then_stops() {
+    fn furling_carries_the_way_into_a_glide_and_then_holds_station() {
+        // What "anchored" is: the sails come down, the way runs off over a
+        // few metres of glide, and the hull ends *held* — the same spot
+        // exactly, frame after frame.
         let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowUp);
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .release_all();
 
-        // Off the key at full speed: a glide of a few metres, not a dead stop.
+        // Furled at full speed: a glide of a few metres, not a dead stop.
+        tap(&mut app, KeyCode::ArrowDown);
+        assert!(!sails_are_set(&mut app), "the sails never came down");
         let going = boat(&mut app).translation;
         run_frames(&mut app, 30);
         let glide = (boat(&mut app).translation - going).length();
         assert!(
             glide > 1.0,
-            "the boat stopped dead the moment the key came up"
+            "the boat stopped dead the moment the sails came down"
         );
 
         // And the glide ends: the way snaps to stopped, and a boat at rest
@@ -1345,6 +1853,159 @@ mod tests {
         assert_ne!(after.rotation, before.rotation, "the bow never swung");
     }
 
+    #[test]
+    fn the_sail_shows_when_set_and_hides_furled() {
+        // The sail is the sailing state, drawn: hidden at launch — a world
+        // is entered at anchor — shown the frame the sails go up, hidden
+        // again the frame they come down.
+        fn sail_shown(app: &mut App) -> Visibility {
+            *app.world_mut()
+                .query_filtered::<&Visibility, With<Sail>>()
+                .single(app.world())
+                .expect("a boat should carry a sail")
+        }
+
+        let mut app = test_app();
+        wind_astern(&mut app, 7.0);
+        run_frames(&mut app, 2);
+        assert_eq!(sail_shown(&mut app), Visibility::Hidden);
+
+        tap(&mut app, KeyCode::ArrowUp);
+        assert_eq!(sail_shown(&mut app), Visibility::Inherited);
+
+        tap(&mut app, KeyCode::ArrowDown);
+        assert_eq!(sail_shown(&mut app), Visibility::Hidden);
+    }
+
+    #[test]
+    fn the_boom_swings_to_leeward() {
+        // A bow due north — along -Z, the map's (0, -1) — with the wind
+        // blowing toward -X is a wind out of the east: from starboard, so
+        // the boom belongs to port, which about the mast is a negative turn
+        // (see `sail_trim` for the axis bookkeeping this pins).
+        let north = Vec2::new(0.0, -1.0);
+        let from_starboard = sail_trim(north, Vec2::new(-7.0, 0.0));
+        assert!(
+            from_starboard < 0.0,
+            "a wind from starboard laid the boom {from_starboard} rad — to windward"
+        );
+        // A wind from port is the mirror.
+        assert_eq!(sail_trim(north, Vec2::new(7.0, 0.0)), -from_starboard);
+
+        // Sheeted harder the closer the course: square before a dead run,
+        // hauled to the band's floor close to the wind, and never outside
+        // the band.
+        let running = sail_trim(north, Vec2::new(0.0, -7.0)).abs();
+        assert_eq!(running, TRIM_BAND.1);
+        let abeam = from_starboard.abs();
+        assert!(
+            abeam > TRIM_BAND.0 && abeam < TRIM_BAND.1,
+            "a beam reach sheets the boom {abeam} rad, outside the band"
+        );
+
+        // In irons the boom sits close-hauled rather than inventing a side.
+        let in_irons = sail_trim(north, Vec2::new(0.0, 7.0)).abs();
+        assert_eq!(in_irons, TRIM_BAND.0);
+
+        // And a nameless wind leaves it amidships.
+        assert_eq!(sail_trim(north, Vec2::new(0.1, -0.1)), 0.0);
+    }
+
+    #[test]
+    fn a_tack_carries_way_through_the_eye_of_the_wind() {
+        // The proof that the constants are compatible: the glide is long
+        // enough, against the turn rate and the width of the no-go zone,
+        // that a boat tacking from a beam reach is never stopped in the eye.
+        // If a constant change ever reds this, the boat has been made
+        // un-tackable and the constant is wrong, not the test.
+        let mut app = test_app();
+        set_wind(&mut app, Vec2::new(7.0, 0.0));
+        // A beam reach: wind from the west abeam, bow due north.
+        place(&mut app, Vec2::ZERO, Vec2::new(0.0, -1.0));
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+        let entered = way_on(&mut app);
+        assert!(entered > 0.0, "the boat never settled onto its reach");
+
+        // Helm hard over through the eye to the mirror course — half a turn
+        // at the ship's turn rate, watched frame by frame: an end position
+        // could not say whether the way died somewhere along the road.
+        hold(&mut app, KeyCode::ArrowLeft);
+        let frames = (std::f32::consts::PI / SHIP.turn_rate / 0.016) as usize;
+        let mut least = f32::MAX;
+        for _ in 0..frames {
+            run_frames(&mut app, 1);
+            least = least.min(way_on(&mut app));
+        }
+        assert!(
+            least > entered * 0.3,
+            "the tack fell to {least} m/s from {entered} — becalmed in the eye"
+        );
+
+        // And out the other side the wind fills the sails again.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release_all();
+        run_frames(&mut app, SETTLED);
+        let out = way_on(&mut app);
+        assert!(
+            (out - entered).abs() < entered * 0.05,
+            "the mirror reach makes {out} m/s where the first made {entered}"
+        );
+    }
+
+    #[test]
+    fn in_irons_the_boat_stops_and_the_helm_frees_it() {
+        // Sails set dead into the wind gather nothing — and the way snaps to
+        // exactly zero, which is what re-opens going ashore and the night
+        // offer to a boat parked head-to-wind. The helm answers with no way
+        // on, so being in irons is a state, never a trap.
+        let mut app = test_app();
+        let bow = boat(&mut app).forward().xz();
+        set_wind(&mut app, -bow * 7.0);
+        let before = boat(&mut app).translation;
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 60);
+        assert!(sails_are_set(&mut app));
+        assert_eq!(way_on(&mut app), 0.0, "the eye of the wind drove the boat");
+        assert_eq!(boat(&mut app).translation, before);
+
+        // A second of helm swings the bow out of the zone and the sails
+        // fill.
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, 60);
+        assert!(
+            way_on(&mut app) > 0.0,
+            "the bow came round but the sails never filled"
+        );
+    }
+
+    #[test]
+    fn astern_needs_the_sails_furled() {
+        // One held key is "stop, then back": its first frame furls — sails
+        // set, the same key would otherwise be asking for two drives at once
+        // — and every frame after backs the boat on the way the glide is
+        // still paying out.
+        let mut app = test_app();
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+
+        hold(&mut app, KeyCode::ArrowDown);
+        run_frames(&mut app, 1);
+        assert!(
+            !sails_are_set(&mut app),
+            "a held furl key left the sails up"
+        );
+        run_frames(&mut app, SETTLED);
+        let astern = way_on(&mut app);
+        assert!(
+            (astern + SHIP.astern_speed).abs() < SHIP.astern_speed * 0.01,
+            "the boat settled to {astern} m/s, not -{}",
+            SHIP.astern_speed
+        );
+    }
+
     /// The hull's heel, in radians, positive with the masthead to port — what
     /// is left of the pose once the heading's yaw is taken back off it. Read
     /// from the transform rather than the component, because the lean the
@@ -1355,23 +2016,60 @@ mod tests {
         let yaw = f32::atan2(-forward.x, -forward.z);
         let roll = Quat::from_rotation_y(yaw).inverse() * transform.rotation;
         let (axis, angle) = roll.to_axis_angle();
-        angle * axis.z
+        // `to_axis_angle` answers on [0, 2π), and a heading that has wound
+        // past half a turn negates the quaternion — the same rotation,
+        // double-covered — so a small heel can read as nearly a full turn
+        // the other way. Wrap to the short way round.
+        let heel = angle * axis.z;
+        if heel > std::f32::consts::PI {
+            heel - std::f32::consts::TAU
+        } else if heel < -std::f32::consts::PI {
+            heel + std::f32::consts::TAU
+        } else {
+            heel
+        }
+    }
+
+    /// The biggest lean a spell of turning shows, signed as [`heel_shown`]
+    /// is, taken frame by frame — a circle under sail sweeps through the
+    /// no-go zone every half turn, so the way breathes and no single settled
+    /// heel exists to read.
+    fn deepest_heel(app: &mut App, frames: usize) -> f32 {
+        let mut deepest = 0.0f32;
+        for _ in 0..frames {
+            run_frames(app, 1);
+            let heel = heel_shown(app);
+            if heel.abs() > deepest.abs() {
+                deepest = heel;
+            }
+        }
+        deepest
     }
 
     #[test]
     fn a_turn_at_speed_heels_the_hull_outwards() {
+        // A circle at full helm under a saturating wind. Under sail the way
+        // breathes as the bow sweeps through the no-go zone, so what is
+        // pinned is the *deepest* lean of a full circle: a real lean, to
+        // starboard under port helm — a keeled hull leans out of a corner,
+        // not into it like a bicycle — and never past the full-turn heel,
+        // which is the ceiling [`heel_for`] clamps to however hard the wind
+        // drives.
         let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowUp);
+        wind_astern(&mut app, WIND_SATURATES);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
 
-        // Port helm at full way: the whole of the heel, and to starboard —
-        // a keeled hull leans out of a corner, not into it like a bicycle.
+        // A full circle at 2 rad/s is about 200 frames; watch two.
         hold(&mut app, KeyCode::ArrowLeft);
-        run_frames(&mut app, SETTLED);
-        let heel = heel_shown(&mut app);
+        let heel = deepest_heel(&mut app, 400);
         assert!(
-            (heel + SHIP.heel_at_full_turn).abs() < SHIP.heel_at_full_turn * 0.05,
-            "a full-speed port turn heels {heel} rad, not -{}",
+            heel < -SHIP.heel_at_full_turn * 0.7,
+            "a full-helm circle under sail only heeled {heel} rad"
+        );
+        assert!(
+            heel >= -SHIP.heel_at_full_turn - HEEL_SETTLED,
+            "the hull heeled {heel} rad, past the full-turn ceiling of {}",
             SHIP.heel_at_full_turn
         );
 
@@ -1385,12 +2083,31 @@ mod tests {
             .release(KeyCode::ArrowLeft);
         hold(&mut app, KeyCode::ArrowRight);
         run_frames(&mut app, SETTLED);
-        let heel = heel_shown(&mut app);
+        let heel = deepest_heel(&mut app, 400);
         assert!(
-            (heel - SHIP.heel_at_full_turn).abs() < SHIP.heel_at_full_turn * 0.05,
-            "a full-speed starboard turn heels {heel} rad, not {}",
-            SHIP.heel_at_full_turn
+            heel > SHIP.heel_at_full_turn * 0.7,
+            "a starboard circle only heeled {heel} rad"
         );
+        assert!(heel <= SHIP.heel_at_full_turn + HEEL_SETTLED);
+    }
+
+    #[test]
+    fn the_heel_asked_of_a_turn_is_capped_at_the_full_turns() {
+        // The clamp in [`heel_for`], pinned where it lives: a blow drives
+        // the way past hull speed — see [`DRIVE_BAND`]'s ceiling — and the
+        // full-turn heel must be the most the hull is ever asked for, not a
+        // proportion that grows with the day.
+        let over = SHIP.speed * DRIVE_BAND.1;
+        assert!(over > SHIP.speed, "the band's ceiling no longer overdrives");
+        assert_eq!(heel_for(&SHIP, 1.0, over), -SHIP.heel_at_full_turn);
+        assert_eq!(heel_for(&SHIP, -1.0, over), SHIP.heel_at_full_turn);
+        // Under hull speed it is still a proportion — half way, half heel —
+        // and astern the same helm heels the other side.
+        assert_eq!(
+            heel_for(&SHIP, 1.0, SHIP.speed * 0.5),
+            -SHIP.heel_at_full_turn * 0.5
+        );
+        assert!(heel_for(&SHIP, 1.0, -SHIP.astern_speed) > 0.0);
     }
 
     #[test]
@@ -1398,7 +2115,8 @@ mod tests {
         // A few frames into a full-speed turn: leaning already, but nowhere
         // near the whole heel — the roll is eased the way the way is.
         let mut app = test_app();
-        hold(&mut app, KeyCode::ArrowUp);
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
         hold(&mut app, KeyCode::ArrowLeft);
         run_frames(&mut app, 6);
@@ -1443,19 +2161,13 @@ mod tests {
     }
 
     #[test]
-    fn opposed_keys_hold_the_boat_still() {
-        // All four at once: ahead cancels astern outright — not by the faster
-        // gear's margin — and port cancels starboard.
+    fn opposed_helm_keys_hold_the_heading() {
+        // Port cancels starboard outright, and a boat with furled sails and
+        // both helm keys down is a boat doing nothing at all.
         let mut app = test_app();
         let before = boat(&mut app);
-        for key in [
-            KeyCode::ArrowUp,
-            KeyCode::ArrowDown,
-            KeyCode::ArrowLeft,
-            KeyCode::ArrowRight,
-        ] {
-            hold(&mut app, key);
-        }
+        hold(&mut app, KeyCode::ArrowLeft);
+        hold(&mut app, KeyCode::ArrowRight);
         run_frames(&mut app, 20);
         let after = boat(&mut app);
         assert_eq!(after.translation, before.translation);
@@ -1463,36 +2175,61 @@ mod tests {
     }
 
     #[test]
-    fn a_rebound_key_steers_and_the_key_it_replaced_stops() {
+    fn both_sail_keys_at_once_leave_the_sails_set() {
+        // One frame carrying both taps furls first and hoists second — a
+        // fixed order rather than a race — so the boat comes out sailing,
+        // and the held furl key cannot also drag it astern: backing is gated
+        // on the sails being down, and they are up.
         let mut app = test_app();
+        wind_astern(&mut app, 7.0);
+        let before = boat(&mut app).translation;
+        hold(&mut app, KeyCode::ArrowUp);
+        hold(&mut app, KeyCode::ArrowDown);
+        run_frames(&mut app, 30);
+
+        assert!(sails_are_set(&mut app), "opposed taps left the sails down");
+        let moved = boat(&mut app).translation - before;
+        assert!(
+            moved.dot(*boat(&mut app).forward()) > 0.0,
+            "the boat went {moved:?} rather than ahead under sail"
+        );
+    }
+
+    #[test]
+    fn a_rebound_key_makes_sail_and_the_key_it_replaced_stops() {
+        let mut app = test_app();
+        wind_astern(&mut app, 7.0);
         rebind(&mut app, Action::MoveForward, KeyCode::KeyJ);
 
         let before = boat(&mut app).translation;
-        hold(&mut app, KeyCode::KeyJ);
+        tap(&mut app, KeyCode::KeyJ);
         run_frames(&mut app, 20);
         assert_ne!(
             boat(&mut app).translation,
             before,
-            "the newly bound key did not steer"
+            "the newly bound key did not make sail"
         );
 
         // J was nobody's key, so nothing was traded for it and W is now bound
-        // to nothing at all. Holding it has to leave the boat where it lies.
+        // to nothing at all. Tapping it has to leave the sails down and the
+        // boat where it lies.
         let mut app = test_app();
+        wind_astern(&mut app, 7.0);
         rebind(&mut app, Action::MoveForward, KeyCode::KeyJ);
         let before = boat(&mut app).translation;
-        hold(&mut app, KeyCode::KeyW);
+        tap(&mut app, KeyCode::KeyW);
         run_frames(&mut app, 20);
-        assert_eq!(
-            boat(&mut app).translation,
-            before,
-            "W still steers after being rebound away"
+        assert!(
+            !sails_are_set(&mut app),
+            "W still makes sail after being rebound away"
         );
+        assert_eq!(boat(&mut app).translation, before);
     }
 
     #[test]
     fn the_arrow_keys_steer_whatever_the_bindings_say() {
         let mut app = test_app();
+        wind_astern(&mut app, 7.0);
         // Hand every movement action to keys nowhere near the arrows.
         rebind(&mut app, Action::MoveForward, KeyCode::KeyI);
         rebind(&mut app, Action::MoveBack, KeyCode::KeyK);
@@ -1500,7 +2237,7 @@ mod tests {
         rebind(&mut app, Action::SteerRight, KeyCode::KeyL);
 
         let before = boat(&mut app).translation;
-        hold(&mut app, KeyCode::ArrowUp);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 20);
         assert_ne!(
             boat(&mut app).translation,
@@ -1781,8 +2518,9 @@ mod tests {
             Vec2::new(TEST_ISLAND_REACH + 60.0, 0.0),
             Vec2::new(-1.0, 0.0),
         );
+        wind_astern(&mut app, 7.0);
 
-        hold(&mut app, KeyCode::ArrowUp);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
 
         // Held off the island rather than stopped out in the open: the test
@@ -1797,9 +2535,11 @@ mod tests {
             "the boat stopped {reached} m out, nowhere near the coast it was driven at"
         );
 
-        // And stopped is stopped, not grinding: the way came off, so the hull
-        // holds exactly the same spot with the key still down. The same spot
-        // *on the map* — it still bobs, the water under it being water.
+        // And stopped is stopped, not grinding: the ground takes the way off
+        // each frame the wind puts a breath of it back on, so the hull holds
+        // exactly the same spot with the sails still set and the wind still
+        // blowing onshore. The same spot *on the map* — it still bobs, the
+        // water under it being water.
         let aground = boat(&mut app).translation;
         run_frames(&mut app, 10);
         let held = boat(&mut app).translation;
@@ -1818,7 +2558,11 @@ mod tests {
             Vec2::new(TEST_ISLAND_REACH + 60.0, 0.0),
             Vec2::new(-1.0, 0.0),
         );
-        hold(&mut app, KeyCode::ArrowUp);
+        // The wind blows *onshore* for the whole test, so the backing-off
+        // half is also the pin on astern owing the wind nothing: dead
+        // downwind of the beach, the boat still comes off it.
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
         let aground = from_the_island(&mut app);
         // Phase one has to have been *stopped* for phase two to say anything:
@@ -1838,7 +2582,8 @@ mod tests {
 
         // Backing off a beach is what astern is for, and it needs no rule of
         // its own: away from the ground is the deeper water the hull came in
-        // over, and deeper is always allowed.
+        // over, and deeper is always allowed. One held key is the whole
+        // gesture — its first frame furls the sails, the rest of it backs.
         let backed = from_the_island(&mut app);
         assert!(
             backed > aground + SHIP.length,
@@ -1848,7 +2593,7 @@ mod tests {
     }
 
     #[test]
-    fn open_water_is_sailed_at_full_speed() {
+    fn open_water_is_sailed_at_the_speed_the_wind_gives() {
         // Nothing under the keel, nothing in the way: the ground the boat has
         // been sent must cost it no speed at all where there is water enough.
         let mut app = island_app();
@@ -1857,7 +2602,8 @@ mod tests {
             Vec2::new(TEST_ISLAND_REACH + 100.0, 0.0),
             Vec2::new(1.0, 0.0),
         );
-        hold(&mut app, KeyCode::ArrowUp);
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
 
         let before = boat(&mut app).translation;
@@ -1865,11 +2611,11 @@ mod tests {
         run_frames(&mut app, 60);
         let seconds = elapsed(&app) - start;
 
+        let expected = SHIP.speed * strength(7.0);
         let made = (boat(&mut app).translation - before).length() / seconds;
         assert!(
-            (made - SHIP.speed).abs() < SHIP.speed * 0.01,
-            "the boat made {made} m/s over open water, not {}",
-            SHIP.speed
+            (made - expected).abs() < expected * 0.01,
+            "the boat made {made} m/s over open water, not {expected}"
         );
     }
 
@@ -1885,7 +2631,10 @@ mod tests {
             "the spot picked to be dry land has water over it"
         );
 
-        hold(&mut app, KeyCode::ArrowUp);
+        // No wind is set here, deliberately: facing +X the assumed day's
+        // breeze is already near dead astern, and the assertion below reads
+        // the *default* conditions' swell — a custom wind is a different sea.
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
 
         // Back at sea means back on the water: riding the swell exactly,
@@ -1932,7 +2681,9 @@ mod tests {
         let out = from_the_island(&mut app);
         assert!(before > 0.0, "the boat was meant to start aground");
 
-        hold(&mut app, KeyCode::ArrowUp);
+        // An onshore wind, or the no-go zone would be doing the rule's work.
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
 
         let after = bite(&mut app);
@@ -1964,7 +2715,8 @@ mod tests {
         );
         let before = boat(&mut app).rotation;
 
-        hold(&mut app, KeyCode::ArrowUp);
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
         hold(&mut app, KeyCode::ArrowLeft);
         run_frames(&mut app, 20);
 

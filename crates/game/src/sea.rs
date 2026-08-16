@@ -421,6 +421,31 @@ pub struct SeaExtension {
     /// [`DEPTH_RANGE`]. Rewritten whenever the window scrolls.
     #[uniform(100)]
     window: Vec4,
+    /// The wake's band: `x` the half-width of the water a hull turns over at
+    /// its stem, `y` how far the arms open per metre run, `z` how thick an
+    /// arm is, `w` how long a wake lasts.
+    #[uniform(100)]
+    pub(crate) wash: Vec4,
+    /// The boil and what wears it away: `x` how fast it widens in metres per
+    /// second of age, `y` how many seconds of it there are, `z` the cell of
+    /// the field an ageing wake breaks up on, `w` the least way that leaves
+    /// any mark at all.
+    #[uniform(100)]
+    pub(crate) boil: Vec4,
+    /// Where the wake could possibly be: `xy` the least corner, `zw` the
+    /// greatest. Water outside it rejects the wake in two comparisons rather
+    /// than walking the track, and a box with its least corner past its
+    /// greatest — which is what this opens as — is water with no wake on it
+    /// at all.
+    #[uniform(100)]
+    pub(crate) wake_bounds: Vec4,
+    /// The hull's track, newest first: `xy` where its stem was, `z` how many
+    /// seconds ago, `w` the way it was making then. Written by
+    /// [`crate::wake`], which owns every number in these last four fields and
+    /// is where the reasoning for all of them lives; the sea only carries
+    /// them to the shader that paints the foam.
+    #[uniform(100)]
+    pub(crate) wake: [Vec4; crate::wake::TRAIL],
     /// The depth window itself — see [`DepthWindow`], which owns the scroll
     /// and the sweep that keep it current.
     #[texture(101)]
@@ -451,6 +476,13 @@ impl SeaExtension {
             caps: Vec4::new(WHITECAP.0, WHITECAP.1, WHITECAP.2, 0.0),
             breaking: Vec4::new(BREAKING_FIELD.0, BREAKING_FIELD.1, 0.0, 0.0),
             window: Self::window_uniform(origin),
+            // No boat has been anywhere yet. The empty box is what makes the
+            // rest of this safe to leave at zero: nothing reads a track it is
+            // never allowed to be inside the bounds of.
+            wash: Vec4::ZERO,
+            boil: Vec4::ZERO,
+            wake_bounds: Vec4::new(1.0, 1.0, -1.0, -1.0),
+            wake: [Vec4::ZERO; crate::wake::TRAIL],
             depth,
         }
     }
@@ -539,6 +571,25 @@ impl Default for SeaConditions {
 }
 
 impl SeaConditions {
+    /// A sea already settled under a given wind — no forecast, no easing, the
+    /// slots aimed as [`settle_conditions`] would have left them after the
+    /// veer was over. What a test that cares which way the wind blows starts
+    /// from: `world_app` never runs the settle system, so a sea inserted this
+    /// way blows its wind for good.
+    #[cfg(test)]
+    pub(crate) fn blowing(wind: Vec2) -> Self {
+        Self {
+            wind,
+            slots: WAVES.map(|(bearing, ..)| Slot {
+                // A calm names no bearing, so like the settle system the
+                // slots fall back to *a* heading rather than a NaN one.
+                heading: Vec2::from_angle(bearing).rotate(wind.normalize_or(Vec2::X)),
+                dim: 1.0,
+            }),
+            assumed: true,
+        }
+    }
+
     /// The wave trains, worked into the terms both copies of the formula run
     /// on: `xy` heading times wavenumber, `z` angular frequency, `w`
     /// amplitude — the reference amplitude scaled by the wind and by the
@@ -809,6 +860,14 @@ impl DepthWindow {
         }
     }
 
+    /// The sea's own material — the one asset the water is drawn out of, and
+    /// so the one place anything with something to tell the water writes it.
+    /// The wake has no window of its own to hang a handle on and reaches it
+    /// through here; see [`crate::wake`].
+    pub(crate) fn material(&self) -> &Handle<SeaMaterial> {
+        &self.material
+    }
+
     /// The window origin that centres the window on a focus, on the lattice.
     fn origin_under(focus: Vec2) -> Vec2 {
         Vec2::new(snap(focus.x), snap(focus.y)) - DEPTH_EXTENT / 2.0
@@ -1016,6 +1075,28 @@ mod tests {
     fn ceiling(sea: &SeaConditions) -> f32 {
         let deep: f32 = sea.components().iter().map(|wave| wave.w).sum();
         deep.max(sea.shore_amplitude())
+    }
+
+    #[test]
+    fn a_test_wind_blows_settled() {
+        // What the sailing tests build on: the wind reads back exactly, and
+        // the primary train runs downwind at full strength — the sea a real
+        // forecast would have left once the easing was over.
+        let wind = Vec2::new(-3.0, 4.0);
+        let sea = SeaConditions::blowing(wind);
+        assert_eq!(sea.wind(), wind);
+        let heading = sea.slots[0].heading;
+        assert!(
+            (heading - wind.normalize()).length() < 1e-6,
+            "the primary train runs {heading:?} under a wind toward {:?}",
+            wind.normalize()
+        );
+        assert_eq!(sea.slots[0].dim, 1.0);
+
+        // And a calm is allowed: no direction to aim by must not mean NaN in
+        // the headings the swell is summed over.
+        let calm = SeaConditions::blowing(Vec2::ZERO);
+        assert!(calm.swell(Vec2::new(5.0, 5.0), 1.0, DEEP).is_finite());
     }
 
     #[test]

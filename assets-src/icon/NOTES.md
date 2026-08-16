@@ -49,9 +49,11 @@ proportion the generator actually produces is a hairline at this size, and the
 islands come out as green blobs with no coast. `island()` cuts the grass back
 much further than a real beach reaches, so that each has a visible shore.
 
-Nothing in the game reads `assets/icon.png`. Setting a window's icon is
-`winit`'s `set_window_icon`, which is unsupported on macOS — there the icon
-comes from a bundle's `.icns` and there is no bundle here yet — so wiring it
-would buy nothing on the machine this is developed on, and cost `game` a direct
-dependency on `winit` at a version that has to keep agreeing with Bevy's. The
-picture is worth having before that is worth doing.
+Nothing in the game reads `assets/icon.png`, and on macOS nothing needs to:
+`build.py --icns` draws the same picture into the ten sizes an `.icns` holds
+and `tools/macos-app.sh` carries it into the bundle, which is where the system
+takes an application's icon from. Setting a *window's* icon is `winit`'s
+`set_window_icon`, which macOS does not implement at all — so the one place it
+would show anything is a window on Linux or Windows, and that is the day to
+weigh it against costing `game` a direct dependency on `winit` at a version
+that has to keep agreeing with Bevy's.

@@ -30,11 +30,12 @@
 //! settles into standing rather than freezing mid-stride.
 //!
 //! Two things about the model the game cannot see for itself, both pinned by
-//! tests here: the file's meshes are named for the tones they are painted in
-//! (glTF materials are ignored, exactly as everywhere else — see
-//! [`crate::matte`]), and the skin is rigid, every vertex bound to one bone at
-//! full weight. Weight-paint it smoothly and facets bend as it walks, which is
-//! the one thing a world drawn in flat tones cannot have.
+//! tests here: the figure carries its own colours on its facets, drawn with a
+//! white material that does nothing but let them through (glTF materials are
+//! ignored, exactly as everywhere else — see [`crate::matte`]), and the skin
+//! is rigid, every vertex bound to one bone at full weight. Weight-paint it
+//! smoothly and facets bend as it walks, which is the one thing a world drawn
+//! in flat tones cannot have.
 //!
 //! A player standing on a deck has an unchanging transform *within the boat*,
 //! however fast the boat is sailing, so they stand there like a passenger.
@@ -49,7 +50,7 @@ use bevy::asset::AssetPath;
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
-use crate::models::{above, Tones};
+use crate::models::above;
 use crate::player::{Afoot, Player};
 use crate::{eased, AppState};
 
@@ -61,37 +62,6 @@ const MODEL: &str = "models/player.glb";
 /// whole vocabulary for now; a third would be a third node on the blend.
 const IDLE: usize = 0;
 const RUN: usize = 1;
-
-/// What each mesh in the file is painted, by the name it carries there.
-///
-/// The model is split into meshes by *tone* rather than by body part — one
-/// coat, one pair of legs, one lot of bare skin — because the split's only
-/// job is to carry a colour. Which bone moves which vertex is the skin's
-/// business and cuts across this freely: the coat's mesh holds the hat, which
-/// rides the head bone, and nothing has to agree about that but the master.
-///
-/// A mesh whose name is not here keeps the file's own PBR material and arrives
-/// looking like nothing else in the world, so
-/// `the_model_is_the_person_the_game_paints` holds the file to exactly these.
-/// Registered with [`crate::models::Tones`] at startup, which is what makes
-/// the materials and paints the meshes as they arrive.
-const TONES: [(&str, Color); 3] = [
-    ("coat", COAT_COLOR),
-    ("canvas", CANVAS_COLOR),
-    ("skin", SKIN_COLOR),
-];
-
-/// Charcoal, for the coat and the hat. A silhouette rather than a colour:
-/// findable on sand, grass and deck alike, and out of the way of the hues the
-/// remote players' markers are dealt from.
-const COAT_COLOR: Color = Color::srgb(0.22, 0.21, 0.26);
-/// Sun-bleached canvas, for the legs. Pale against the coat, so the swinging
-/// half of the figure is the half that stands out.
-const CANVAS_COLOR: Color = Color::srgb(0.62, 0.58, 0.50);
-/// Weathered skin, for the head and the bare forearms. Warm, where nothing
-/// else on the figure is, so a small head still reads as a head between the
-/// hat and the coat.
-const SKIN_COLOR: Color = Color::srgb(0.74, 0.55, 0.42);
 
 /// Ground covered by one turn of the run cycle, in metres — a stride being
 /// two steps, left and right.
@@ -189,28 +159,23 @@ pub struct FigurePlugin;
 
 impl Plugin for FigurePlugin {
     fn build(&self, app: &mut App) {
-        // Also initialised by ModelsPlugin, which owns the painting; this is
-        // for the tests, which run this plugin alone. Initialising a resource
-        // twice is free.
-        app.init_resource::<Tones>()
-            .add_systems(Startup, rig)
-            .add_systems(
-                Update,
-                (
-                    dress,
-                    conduct,
-                    // After the walking itself: this reads the transform the
-                    // player's own systems write, and reading it a frame late
-                    // — or, worse, a frame late every other frame — is what
-                    // makes a steady walk look like a stutter.
-                    (stride, animate).chain().after(Afoot),
-                )
-                    // There is no figure outside a match, so none of this has
-                    // anything to do on a menu screen. Within one it all runs
-                    // through a pause: a paused player is not moving, which the
-                    // gait reads as standing still and settles into on its own.
-                    .run_if(in_state(AppState::InWorld)),
-            );
+        app.add_systems(Startup, rig).add_systems(
+            Update,
+            (
+                dress,
+                conduct,
+                // After the walking itself: this reads the transform the
+                // player's own systems write, and reading it a frame late
+                // — or, worse, a frame late every other frame — is what
+                // makes a steady walk look like a stutter.
+                (stride, animate).chain().after(Afoot),
+            )
+                // There is no figure outside a match, so none of this has
+                // anything to do on a menu screen. Within one it all runs
+                // through a pause: a paused player is not moving, which the
+                // gait reads as standing still and settles into on its own.
+                .run_if(in_state(AppState::InWorld)),
+        );
     }
 }
 
@@ -227,11 +192,7 @@ fn rig(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut tones: ResMut<Tones>,
 ) {
-    tones.register(&mut materials, &TONES);
-
     let mut graph = AnimationGraph::new();
     let root = graph.root;
     let blend = graph.add_blend(1.0, root);
@@ -403,13 +364,14 @@ mod tests {
     use super::*;
     use crate::terrain::Ground;
     use crate::testing::{
-        assert_model_paints, assert_rigid_skin, clip_names, extent, hold, mesh_names, run_frames,
-        test_ground, world_app, TEST_ISLAND_REACH,
+        assert_model_draws, assert_model_is_painted, assert_rigid_skin, clip_names, extent, hold,
+        run_frames, set_wind, test_ground, world_app, TEST_ISLAND_REACH,
     };
 
     #[test]
-    fn the_model_is_the_person_the_game_paints() {
-        assert_model_paints(MODEL, &TONES);
+    fn the_model_is_a_person_fit_to_draw() {
+        assert_model_draws(MODEL, &[(0, "player")]);
+        assert_model_is_painted(MODEL, 0);
     }
 
     #[test]
@@ -422,13 +384,8 @@ mod tests {
         // Person-sized, and standing on its own soles: the master puts the
         // feet at the origin because that is the point the walk holds on the
         // ground and the deck holds a passenger at. A figure modelled about
-        // its middle would walk knee-deep in the sand. Taken across every
-        // mesh, the soles being on one of them and the hat on another.
-        let (low, high) = (0..TONES.len())
-            .map(|mesh| extent(MODEL, mesh, 1))
-            .fold((f32::MAX, f32::MIN), |(l, h), (low, high)| {
-                (l.min(low), h.max(high))
-            });
+        // its middle would walk knee-deep in the sand.
+        let (low, high) = extent(MODEL, 0, 1);
         assert!(low.abs() < 1e-4, "the figure's soles are at {low}, not 0");
         assert!(
             (1.6..=2.0).contains(&high),
@@ -441,15 +398,11 @@ mod tests {
         // The one part of the figure that says which way it is facing from
         // overhead, where a body is nearly symmetric: the brim reaches
         // further ahead — -Z, the way everything here faces — than the whole
-        // rest of the coat reaches astern.
-        let coat = mesh_names(MODEL)
-            .iter()
-            .position(|name| name == "coat")
-            .expect("coat");
-        let (ahead, astern) = extent(MODEL, coat, 2);
+        // rest of the figure reaches astern.
+        let (ahead, astern) = extent(MODEL, 0, 2);
         assert!(
             -ahead > astern,
-            "the coat reaches {} ahead and {astern} astern, so it has no point",
+            "the figure reaches {} ahead and {astern} astern, so it has no point",
             -ahead
         );
     }
@@ -724,6 +677,9 @@ mod tests {
         app.insert_resource(test_ground());
         let dancer = with_a_dancer(&mut app);
 
+        // Dead astern of the default heading, so the boat is honestly
+        // sailing rather than lying in irons under the assumed wind.
+        set_wind(&mut app, Vec2::new(-5.0, -5.0));
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 120);
 

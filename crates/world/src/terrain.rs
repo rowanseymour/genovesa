@@ -283,11 +283,6 @@ impl Targets {
     }
 }
 
-/// Height above which summits hold snow, in metres. High enough that only the
-/// tops of the biggest ranges reach it, so it stays an event rather than a
-/// band across the whole upland.
-const SNOW_LINE: f32 = 112.0;
-
 /// Share of the map that reaches the deepest the sea bed is allowed to go, so
 /// that open water reads as open water rather than as one endless shelf.
 const DEEP_FRACTION: f32 = 0.18;
@@ -354,13 +349,8 @@ const LOWLAND_FLOOR: f32 = 10.0;
 /// depending on the seed, and its summits come out between about fifty-five
 /// and ninety metres rather than the full height — a little over seventy on
 /// average. They fall short of the reach because a summit sits where the mask
-/// put the massif, which is rarely the one most interior point. Snow is rarer
-/// still: the tallest ground on any seed measured was 90 m at a kilometre,
-/// 108 m at a kilometre and a half and 116 m at two, so
-/// nothing but the largest maps crosses [`SNOW_LINE`] outright and what snow
-/// appears below that is [`SNOW_WANDER`] carrying the line down to meet a
-/// summit. Shortening this gives every size taller mountains and steeper
-/// country.
+/// put the massif, which is rarely the one most interior point. Shortening
+/// this gives every size taller mountains and steeper country.
 ///
 /// It is also a frankly generous number. A summit at [`HEIGHT_SCALE`] this far
 /// from the sea is a climb of about thirty degrees held for the whole way,
@@ -497,16 +487,14 @@ fn feature_zoom(extent: Vec2) -> f32 {
 
 /// How much each massif is measured against its own local peak rather than
 /// the map's tallest. At 0 the map is scaled by its single highest point, and
-/// on a large map with a dozen massifs only that one reaches full height and
-/// holds snow — the rest sit lower by pure luck of the mask field. At 1 every
-/// blob that clears the footprint reaches full height, however slight it is,
-/// and the map turns into a picket of identical cones. In between, the lesser
-/// ranges are lifted most of the way to parity while the luck of the field
-/// still shows through. Set high because the massif term is squared: a range
+/// on a large map with a dozen massifs only that one reaches full height —
+/// the rest sit lower by pure luck of the mask field. At 1 every blob that
+/// clears the footprint reaches full height, however slight it is, and the
+/// map turns into a picket of identical cones. In between, the lesser ranges
+/// are lifted most of the way to parity while the luck of the field still
+/// shows through. Set high because the massif term is squared: a range
 /// measured at nine tenths of its neighbour stands at eight tenths the
-/// height, so even near-parity here leaves a visible pecking order — and the
-/// snow line needs a summit at nine tenths of [`HEIGHT_SCALE`] before it
-/// grants a second white cap at all.
+/// height, so even near-parity here leaves a visible pecking order.
 const MASSIF_EQUALITY: f32 = 0.85;
 
 /// Wavelength of the undulations within a field, in metres.
@@ -744,12 +732,6 @@ const BAND_SCALE: f32 = 150.0;
 /// lands entirely above or below where a level band would have put it, and what
 /// is left behind on the other side reads as an outlying island.
 const BAND_WANDER: f32 = 9.0;
-
-/// The same for the snow line, which is free to move on its own — nothing lives
-/// above it to be squeezed. Much the larger of the two because it applies much
-/// higher up, where the ground is steep enough that a swing of a few metres
-/// would not move the edge by even one facet.
-const SNOW_WANDER: f32 = 26.0;
 
 /// What each parcel of the patchwork is drawn as, at each height it can reach.
 ///
@@ -1926,14 +1908,7 @@ impl TerrainGenerator {
             .detail
             .fbm(wx / BAND_SCALE - 53.0, wz / BAND_SCALE + 29.0, 4);
 
-        // Snow first, and on its own — it is the one band with nothing above it
-        // to be squeezed, so it gets its own swing and takes no part in the
-        // patchwork below.
-        if height + SNOW_WANDER * wander > SNOW_LINE {
-            return Surface::plain(Tone::Snow);
-        }
-
-        // The height everything below reads its band off.
+        // The height everything reads its band off.
         let banded = height + BAND_WANDER * wander;
 
         // The patchwork. Quantising a low-frequency noise field into a few
@@ -3580,8 +3555,8 @@ mod tests {
         // the machine that recorded it; a bumped `libm` would show up here the
         // same way a new platform would.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x7918_FE54_8043_299Fu64),
-            (99, UVec2::new(3, 2), 0xF7DE_E6DE_D08A_0F06u64),
+            (20_040_112u32, UVec2::new(4, 4), 0xD953_0EBA_7C15_F0BCu64),
+            (99, UVec2::new(3, 2), 0x87AF_C159_4DAB_4155u64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -4007,9 +3982,8 @@ mod tests {
     fn only_the_patchwork_is_ever_shaded() {
         // The shade steps exist to break a big parcel of one colour into
         // facets, so they belong to the parcels and nowhere else. A shaded
-        // shore or a shaded snow cap would be the mottle field reaching
-        // somewhere it has no business being — and the snow in particular has
-        // no room above it, so a lightened one would come out clamped.
+        // shore or a shaded crag would be the mottle field reaching somewhere
+        // it has no business being.
         let (config, gen) = generator(4, 4, 77);
         let half = config.half_extent();
         let parcels: std::collections::HashSet<u8> = LOWLAND_PARCELS

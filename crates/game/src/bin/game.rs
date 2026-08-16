@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::window::ExitCondition;
 
 use game::ambience::AmbiencePlugin;
+use game::backdrop::BackdropPlugin;
 use game::beasts::BeastsPlugin;
 use game::boat::BoatPlugin;
 use game::camera::MapCameraPlugin;
@@ -31,6 +32,7 @@ use game::player::PlayerPlugin;
 use game::sky::SkyPlugin;
 use game::terrain::TerrainPlugin;
 use game::trees::TreesPlugin;
+use game::wake::WakePlugin;
 use game::wildlife::WildlifePlugin;
 use game::{AppState, Helm, WINDOW};
 
@@ -149,14 +151,17 @@ fn run(args: Args, session: Option<Session>) {
             WildlifePlugin,
             BeastsPlugin,
             BoatPlugin,
+            // The white water the boat leaves, painted by the sea itself.
+            WakePlugin,
             PlayerPlugin,
             MapCameraPlugin,
             CompassPlugin,
             ChartPlugin,
-            // Harmless in a world nobody remembers: its systems condition on
-            // the logbook being open.
-            LogbookPlugin,
-            MenuPlugin,
+            // The logbook — harmless in a world nobody remembers, its systems
+            // conditioning on a book being open — then the sheet the menus
+            // stand on, and the menus. Nested only because a plugin tuple
+            // holds fifteen.
+            (LogbookPlugin, BackdropPlugin, MenuPlugin),
             // Harmless offline: its systems condition on the joined session.
             NetPlugin,
             CapturePlugin {

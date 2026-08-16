@@ -717,7 +717,7 @@ mod tests {
     use crate::boat::BoatPlugin;
     use crate::camera::View;
     use crate::net::{Online, Reach, Session};
-    use crate::testing::{hold, run_frames, run_until, FRAME};
+    use crate::testing::{hold, run_frames, run_until, set_wind, FRAME};
 
     /// A headless app in a world with the sky running, and a boat in it to
     /// lie at anchor. No terrain and no renderer: what these tests are about
@@ -1010,6 +1010,10 @@ mod tests {
         app.update();
         assert!(offer(&mut app).is_some(), "the night was not offered");
 
+        // Dead astern of the default heading — the assumed wind would leave
+        // the boat in irons, and a boat that never made way would pass this
+        // test with the offer wrongly still up.
+        set_wind(&mut app, Vec2::new(-5.0, -5.0));
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 6);
         assert_eq!(offer(&mut app), None, "a boat making way was offered a bed");

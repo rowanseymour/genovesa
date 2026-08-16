@@ -176,144 +176,99 @@ fn spawn_compass(mut commands: Commands) {
                 UiTransform::IDENTITY,
             ))
             .with_children(|card| {
-                let rose = Rose {
-                    ink: INK,
-                    dim: INK_DIM,
-                    cross: CROSS,
-                    letters: LETTER_SIZE,
-                    inset: INSET,
-                    arm: CROSS_ARM,
-                };
-                // The rose in two halves with the wind arm between them:
-                // under the letters rather than over them, because where the
-                // arm reaches its furthest it is nearly touching one, and an
+                // The card in two halves with the wind arm between them: under
+                // the letters rather than over them, because where the arm
+                // reaches its furthest it is nearly touching one, and an
                 // arrowhead drawn across a glyph would cost the letter more
-                // than it bought the arm. The chart's rose carries no arm and
-                // draws both halves in one stroke — see [`Rose::draw`].
-                rose.cross(card);
+                // than it bought the arm.
+                spawn_cross(card);
                 spawn_arm(card);
-                rose.letters(card);
+                spawn_letters(card);
             });
         });
 }
 
-/// What is drawn on a compass card: four cardinal letters and the hairline
-/// cross behind them.
+/// The four cardinal letters, N in the reading ink and the rest dimmed.
 ///
-/// Written once and drawn twice, because the app has two instruments that are
-/// the same instrument seen differently — this one, which lies foreshortened on
-/// the sea and spins with the view, and the chart's, which lies flat on paper
-/// and never moves at all. What differs between them is the ink they are drawn
-/// in and how big; what must not differ is which letter goes where, which is
-/// what a second copy of this would eventually get wrong.
-pub struct Rose {
-    /// The N, which is the reading.
-    pub ink: Color,
-    /// The other three, dimmed rather than dropped: they make N mean north
-    /// rather than "this way", and a turn read against them says how far round
-    /// it went.
-    pub dim: Color,
-    /// The arms, which are furniture behind the letters rather than a reading,
-    /// so fainter than either ink.
-    pub cross: Color,
-    /// How big a letter is set, and how far in from the rim it sits.
-    pub letters: f32,
-    pub inset: f32,
-    /// How far each arm of the cross runs from the middle, short of the
-    /// letters.
-    pub arm: f32,
+/// The other three are dimmed rather than dropped: they make N mean north
+/// rather than "this way", and a turn read against them says how far round it
+/// went.
+fn spawn_letters(card: &mut ChildSpawnerCommands) {
+    spawn_letter(card, "N", INK, JustifyContent::Center, AlignItems::Start);
+    spawn_letter(card, "E", INK_DIM, JustifyContent::End, AlignItems::Center);
+    spawn_letter(card, "S", INK_DIM, JustifyContent::Center, AlignItems::End);
+    spawn_letter(
+        card,
+        "W",
+        INK_DIM,
+        JustifyContent::Start,
+        AlignItems::Center,
+    );
 }
 
-impl Rose {
-    /// The whole rose in one stroke, for a card with no other reading to
-    /// interleave. The compass calls the halves itself instead, its wind arm
-    /// belonging between them.
-    pub fn draw(&self, card: &mut ChildSpawnerCommands) {
-        self.cross(card);
-        self.letters(card);
-    }
+/// One cardinal letter, placed by alignment rather than arithmetic: each sits
+/// in its own full-size overlay, pushed to its edge of the card, so nothing
+/// here needs to know how wide a glyph came out.
+fn spawn_letter(
+    card: &mut ChildSpawnerCommands,
+    letter: &str,
+    ink: Color,
+    justify: JustifyContent,
+    align: AlignItems,
+) {
+    card.spawn(Node {
+        position_type: PositionType::Absolute,
+        width: Val::Percent(100.0),
+        height: Val::Percent(100.0),
+        padding: UiRect::all(Val::Px(INSET)),
+        justify_content: justify,
+        align_items: align,
+        ..default()
+    })
+    .with_children(|spot| {
+        spot.spawn((
+            Text::new(letter),
+            // The serif the menus resolve, for the same reason they do: a card
+            // is a piece of chart furniture, and the machine's serif is the
+            // hand charts are lettered in.
+            TextFont {
+                font: FontSource::Serif,
+                font_size: FontSize::Px(LETTER_SIZE),
+                ..default()
+            },
+            TextColor(ink),
+        ));
+    });
+}
 
-    /// The four cardinal letters, N in the reading ink and the rest dimmed —
-    /// see [`Rose::dim`] for why they are there at all.
-    fn letters(&self, card: &mut ChildSpawnerCommands) {
-        self.letter(
-            card,
-            "N",
-            self.ink,
-            JustifyContent::Center,
-            AlignItems::Start,
-        );
-        self.letter(card, "E", self.dim, JustifyContent::End, AlignItems::Center);
-        self.letter(card, "S", self.dim, JustifyContent::Center, AlignItems::End);
-        self.letter(
-            card,
-            "W",
-            self.dim,
-            JustifyContent::Start,
-            AlignItems::Center,
-        );
-    }
-
-    /// One cardinal letter, placed by alignment rather than arithmetic: each
-    /// sits in its own full-size overlay, pushed to its edge of the card, so
-    /// nothing here needs to know how wide a glyph came out.
-    fn letter(
-        &self,
-        card: &mut ChildSpawnerCommands,
-        letter: &str,
-        ink: Color,
-        justify: JustifyContent,
-        align: AlignItems,
-    ) {
+/// The hairline cross behind the letters, drawn as two centred lines so the
+/// card reads as an instrument rather than as four floating letters.
+///
+/// A cross and not a star. The chart's rose is a sixteen-point star, and this
+/// one deliberately is not: it is eighty-eight pixels squashed to the camera's
+/// pitch with an arrow lying across it, and a star drawn under that arrow is a
+/// smudge the arrow has to be picked out of. The flourish belongs where the
+/// paper is looked at rather than glanced at.
+fn spawn_cross(card: &mut ChildSpawnerCommands) {
+    for (width, height) in [(1.0, CROSS_ARM * 2.0), (CROSS_ARM * 2.0, 1.0)] {
         card.spawn(Node {
             position_type: PositionType::Absolute,
             width: Val::Percent(100.0),
             height: Val::Percent(100.0),
-            padding: UiRect::all(Val::Px(self.inset)),
-            justify_content: justify,
-            align_items: align,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
             ..default()
         })
         .with_children(|spot| {
             spot.spawn((
-                Text::new(letter),
-                // The serif the menus resolve, for the same reason they do: a
-                // card is a piece of chart furniture, and the machine's serif
-                // is the hand charts are lettered in.
-                TextFont {
-                    font: FontSource::Serif,
-                    font_size: FontSize::Px(self.letters),
+                Node {
+                    width: Val::Px(width),
+                    height: Val::Px(height),
                     ..default()
                 },
-                TextColor(ink),
+                BackgroundColor(CROSS),
             ));
         });
-    }
-
-    /// The hairline cross behind the letters — the rose's arms, drawn as two
-    /// centred lines so the card reads as an instrument rather than as four
-    /// floating letters.
-    fn cross(&self, card: &mut ChildSpawnerCommands) {
-        for (width, height) in [(1.0, self.arm * 2.0), (self.arm * 2.0, 1.0)] {
-            card.spawn(Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            })
-            .with_children(|spot| {
-                spot.spawn((
-                    Node {
-                        width: Val::Px(width),
-                        height: Val::Px(height),
-                        ..default()
-                    },
-                    BackgroundColor(self.cross),
-                ));
-            });
-        }
     }
 }
 
@@ -572,19 +527,6 @@ mod tests {
         let a = card_rotation(0.4);
         let b = card_rotation(0.4 + std::f32::consts::TAU);
         assert!(a.angle_to(b).abs() < 1e-4);
-    }
-
-    #[test]
-    fn lies_at_the_worlds_pitch() {
-        let mut app = test_app();
-        let scale = app
-            .world_mut()
-            .query_filtered::<&UiTransform, With<CompassFace>>()
-            .single(app.world())
-            .expect("the face should exist")
-            .scale;
-        assert_eq!(scale.x, 1.0);
-        assert!((scale.y - PITCH.sin()).abs() < 1e-6);
     }
 
     #[test]

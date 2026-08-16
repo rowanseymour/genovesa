@@ -131,15 +131,15 @@ pub fn dequantize(stored: u16) -> f32 {
 // --- The palette ------------------------------------------------------------
 
 /// The ground palette. Small and flat on purpose — every triangle gets exactly
-/// one of these, so the whole world is drawn in nineteen colours plus three
+/// one of these, so the whole world is drawn in eighteen colours plus three
 /// shade steps. Saturated well past anything natural, because flat shading has
 /// no texture or gradient to carry the picture; the colour has to do that work
 /// on its own.
 ///
-/// The order is the wire's: a tone travels as its own number, so the only
-/// shape a change to this may take is another entry on the end — anything
-/// shuffled repaints the world of every build that disagrees. Either way it is
-/// a change to the format and bumps [`crate::PROTOCOL_VERSION`], because a
+/// The order is the wire's: a tone travels as its own number, so adding to the
+/// end is the cheap change and anything shuffled or removed repaints the world
+/// of every build that disagrees. Either way it is a change to the format —
+/// re-record `the_wire_is_a_format` and rebuild both ends together, because a
 /// client that has never heard of a tone cannot draw the triangle it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -168,32 +168,27 @@ pub enum Tone {
     Fell = 11,
     Rock = 12,
     RockDark = 13,
-    /// Bare stone bleached by the weather, the last step before the snow.
+    /// Bare stone bleached by the weather — the palest the summits get.
     Scree = 14,
-    /// Snow on the summits. Off-white and slightly blue: a pure white would be
-    /// the only fully saturated thing in the world and would pull the eye off
-    /// everything else, and it has to stay clearly apart from [`Tone::Rock`]
-    /// in shadow.
-    Snow = 15,
     /// The bed of standing fresh water, deep enough to be dark. Green where
     /// [`Tone::Seabed`] is blue, and darker than it: a lake bottoms out in
     /// silt and drowned vegetation rather than in sand, and it is what a lake
     /// is *seen through* that has to say fresh water rather than sea.
-    Silt = 16,
+    Silt = 15,
     /// The weedy shallows of a lake — what [`Tone::Shallow`] is to the sea,
     /// except that it deliberately refuses the turquoise. A ring of bright
     /// water is the strongest thing that says *coast* in this palette, so a
     /// lake wearing one reads as an arm of the sea that happens to be inland.
-    Shoal = 17,
+    Shoal = 16,
     /// The margin a lake leaves around itself: reed, mud and wet ground, from
     /// just under the waterline to just above it. Takes the place a beach
     /// holds on the sea coast, and is dull and dark where sand is bright —
     /// fresh water has no surf to wash a shore clean.
-    Marsh = 18,
+    Marsh = 17,
 }
 
 /// The sRGB the tones stand for, in the order they are numbered.
-const TONES: [Vec3; 19] = [
+const TONES: [Vec3; 18] = [
     Vec3::new(0.16, 0.34, 0.38), // Seabed
     Vec3::new(0.46, 0.68, 0.62), // Shallow
     // A step darker than it once was (0.90, 0.83, 0.58): the surf paints
@@ -212,7 +207,6 @@ const TONES: [Vec3; 19] = [
     Vec3::new(0.55, 0.53, 0.50), // Rock
     Vec3::new(0.40, 0.38, 0.37), // RockDark
     Vec3::new(0.68, 0.65, 0.60), // Scree
-    Vec3::new(0.90, 0.92, 0.95), // Snow
     Vec3::new(0.13, 0.24, 0.20), // Silt
     Vec3::new(0.33, 0.48, 0.32), // Shoal
     Vec3::new(0.42, 0.42, 0.25), // Marsh
@@ -262,9 +256,8 @@ impl Tone {
             12 => Self::Rock,
             13 => Self::RockDark,
             14 => Self::Scree,
-            15 => Self::Snow,
-            16 => Self::Silt,
-            17 => Self::Shoal,
+            15 => Self::Silt,
+            16 => Self::Shoal,
             _ => Self::Marsh,
         })
     }
@@ -324,19 +317,18 @@ impl Surface {
 
     /// The sRGB this surface is drawn in.
     ///
-    /// Clamped because a light cut of an already bright tone leaves the range
-    /// — [`Tone::Snow`] does, and would come out of a renderer as whatever
-    /// that renderer does with a colour past white. Nothing that paints the
-    /// world ever shades the snow, so the clamp is a guard on the arithmetic
-    /// rather than a thing anyone sees; the tones that *are* shaded all have
-    /// room for it, which the tests hold them to.
+    /// Clamped so that a light cut of a bright tone can never hand a renderer
+    /// a colour past white, whatever that renderer would do with one. No tone
+    /// in the current palette actually reaches the clamp — the tests hold
+    /// them all inside it — so this is a guard on the arithmetic rather than
+    /// a thing anyone sees.
     pub fn color(self) -> Vec3 {
         (self.tone.color() * self.shade.factor()).clamp(Vec3::ZERO, Vec3::ONE)
     }
 
     /// The byte this travels as: the tone in the high bits, the shade in the
-    /// low two. Nineteen tones and three shades, so a valid surface is always
-    /// under 80 and a good part of the byte is spare.
+    /// low two. Eighteen tones and three shades, so a valid surface is always
+    /// under 76 and a good part of the byte is spare.
     fn to_byte(self) -> u8 {
         ((self.tone as u8) << 2) | self.shade as u8
     }
@@ -400,25 +392,32 @@ pub struct ChunkPayload {
     /// chunk in the world would be half as much again on the wire for
     /// nothing.
     pub water: Option<Vec<u16>>,
-    /// The palms standing on this chunk, in no order anything may rely on
-    /// beyond its being the same order every time.
+    /// Everything growing on this chunk, of every kind, in no order anything
+    /// may rely on beyond its being the same order every time.
+    ///
+    /// One list rather than one per kind, and each plant says what it is —
+    /// see [`Plant::kind`]. A chunk is a beach or a swamp or a hillside, very
+    /// rarely all three, so a budget per kind would hand every chunk an
+    /// allowance for the kinds that do not grow on it while the kind that
+    /// does ran out. Shared, the same ceiling lets a coast spend itself on
+    /// palms and a lake margin spend itself on mangroves.
     ///
     /// Here for the same reason a lake's level is: there is no arithmetic a
     /// client could do on the heights and surfaces it already has that would
-    /// find them. Where a palm stands is a decision made against the seed —
+    /// find them. Where a plant stands is a decision made against the seed —
     /// which the client has never seen and has no use for — so it travels, or
     /// two players anchored off the same beach would see different trees on
     /// it.
     ///
-    /// A palm belongs to the chunk its foot stands in and to no other, so a
+    /// A plant belongs to the chunk its foot stands in and to no other, so a
     /// client draws each exactly once and drops it with the ground it came
-    /// on. What is *not* here is how high it stands: a palm's foot sits on
+    /// on. What is *not* here is how high it stands: a plant's foot sits on
     /// the height field at its own position, which the client already holds
     /// and already interpolates for everything else that rides the world. A
     /// height sent alongside would be a second opinion about the same ground,
     /// and the one the eye would catch out — a palm hovering a hand's breadth
     /// over its own shadow.
-    pub palms: Vec<Palm>,
+    pub plants: Vec<Plant>,
 }
 
 /// One palm, standing on the ground of the chunk that carries it.
@@ -427,10 +426,15 @@ pub struct ChunkPayload {
 /// how it is turned, not what a palm looks like, in the same way the wire
 /// names a [`Tone`] rather than sending a colour per triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Palm {
+pub struct Plant {
+    /// Which kind is standing here, and so which model a client puts on the
+    /// spot. First in the bytes because the rest cannot be read without it —
+    /// a size is a step through [`Kind::scale`]'s range, and the ranges
+    /// differ.
+    pub kind: Kind,
     /// Where it stands, in metres from the chunk's own lower corner. Always
-    /// inside the chunk — a palm on the far side of a boundary belongs to the
-    /// chunk over there.
+    /// inside the chunk — a plant on the far side of a boundary belongs to
+    /// the chunk over there.
     pub at: Vec2,
     /// Which way it is turned about the vertical, in radians.
     ///
@@ -439,39 +443,99 @@ pub struct Palm {
     /// than derived from the position, so that a client picking its own would
     /// not be a client seeing a different beach.
     pub yaw: f32,
-    /// How big, as a multiple of the model's own size — see [`PALM_SCALE_MIN`]
-    /// and [`PALM_SCALE_MAX`].
+    /// How big, as a multiple of the model's own size — see [`Kind::scale`].
     pub scale: f32,
 }
 
-/// The range a palm's size is drawn from. Narrow on purpose: a palm is a palm,
-/// and enough variation to break up a row is far less than enough to read as
-/// two different species.
-pub const PALM_SCALE_MIN: f32 = 0.78;
-pub const PALM_SCALE_MAX: f32 = 1.24;
-
-/// The most palms one chunk may carry.
+/// What kind of plant one is, which is all a client needs to know which model
+/// to stand on the spot.
 ///
-/// A ceiling rather than a target — palms stand along the back of a beach,
-/// which is a thin band, and a chunk that is all beach still holds only a
-/// fraction of this. It exists so that "how much can one answer cost" keeps
-/// having an answer: it is what [`crate::ToClient`]'s frame ceiling is
-/// derived against, and a reader refuses a chunk claiming more.
-pub const MAX_PALMS: usize = 64;
+/// A kind is a byte on the wire and the numbers are the format: a build that
+/// renumbered them would read every other build's swamps as beaches. New
+/// kinds go on the end, and a byte naming one this build has never heard of
+/// is refused rather than guessed at — see [`Kind::from_byte`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Kind {
+    Palm = 0,
+    Banana = 1,
+    Mangrove = 2,
+}
 
-/// Bytes one palm occupies: two per axis of its position, one for its bearing
-/// and one for its size.
+impl Kind {
+    /// The kind a wire byte names, or `None` for a byte naming nothing this
+    /// build knows.
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Palm),
+            1 => Some(Self::Banana),
+            2 => Some(Self::Mangrove),
+            _ => None,
+        }
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// The range this kind's size is drawn from, smallest first.
+    ///
+    /// Per kind rather than one range for everything, because what counts as
+    /// variety differs: a palm is a palm, and enough to break up a row is far
+    /// less than enough to read as two species. A kind whose oldest and
+    /// youngest look genuinely unalike can say so here without widening
+    /// anything else.
+    pub const fn scale(self) -> (f32, f32) {
+        match self {
+            Self::Palm => (0.78, 1.24),
+            // Wider than the palm's, and that is the point of the table
+            // rather than a constant: a banana clump is a few stems of
+            // whatever age happened to sucker there, and the young ones are
+            // half the old ones. A row of identically sized clumps reads as
+            // planted, which is the one thing a jungle must not.
+            Self::Banana => (0.68, 1.34),
+            // Narrower than either, and for the opposite reason to the
+            // banana's. Mangroves grow in a thicket, close enough to touch, so
+            // two neighbours a couple of metres apart are seen against each
+            // other rather than each against open ground — and at the banana's
+            // spread that reads as one of them being wrong rather than as
+            // variety. They also all raced the same water in, so a stand of
+            // them really is much of an age.
+            Self::Mangrove => (0.82, 1.14),
+        }
+    }
+}
+
+/// The most plants one chunk may carry, of all kinds together.
+///
+/// Derived rather than picked: a chunk's plant count is one byte in
+/// [`crate::ToClient::Chunk`], so this is simply what that byte can say, and
+/// raising it further is a change to the frame rather than to a number here.
+/// It is a ceiling and nowhere near a target — plants of a kind stand where
+/// that kind grows, which is a band or a margin rather than a whole chunk.
+/// The fullest chunk yet measured is a lake with a mangrove thicket standing
+/// in it, at a third of this; a beach of palms carries single figures.
+///
+/// It exists so that "how much can one answer cost" keeps having an answer:
+/// it is what [`crate::ToClient`]'s frame ceiling is derived against, and a
+/// reader refuses a chunk claiming more.
+pub const MAX_PLANTS: usize = u8::MAX as usize;
+
+/// Bytes one plant occupies: one for its kind, two per axis of its position,
+/// one for its bearing and one for its size.
 ///
 /// The position gets sixteen bits an axis because it is the one number here
-/// the eye can check — a palm is drawn against a shadow it casts on ground the
-/// client interpolates continuously, so a position on a coarse lattice would
-/// put the tree beside its own foot. The bearing and the size get eight: a
-/// palm turned to within a degree and a half, and sized to within half a
-/// percent, is a palm nobody can tell from an exact one.
-pub const PALM_BYTES: usize = 6;
+/// the eye can check — a plant is drawn against a shadow it casts on ground
+/// the client interpolates continuously, so a position on a coarse lattice
+/// would put the tree beside its own foot. The bearing and the size get
+/// eight: a palm turned to within a degree and a half, and sized to within
+/// half a percent, is a palm nobody can tell from an exact one.
+pub const PLANT_BYTES: usize = 7;
 
-impl Palm {
+impl Plant {
     fn put(&self, out: &mut Vec<u8>) {
+        out.push(self.kind.to_byte());
+
         let axis = |v: f32| {
             let steps = (v / CHUNK_METRES).clamp(0.0, 1.0) * u16::MAX as f32;
             (steps.round() as u16).to_le_bytes()
@@ -484,21 +548,28 @@ impl Palm {
         // 256, which is not a byte. It comes back as the same direction.
         out.push(((turns * 256.0).round() as u32).min(255) as u8);
 
-        let span = PALM_SCALE_MAX - PALM_SCALE_MIN;
-        let step = ((self.scale - PALM_SCALE_MIN) / span).clamp(0.0, 1.0) * u8::MAX as f32;
+        let (small, large) = self.kind.scale();
+        let step = ((self.scale - small) / (large - small)).clamp(0.0, 1.0) * u8::MAX as f32;
         out.push(step.round() as u8);
     }
 
-    fn take(bytes: &[u8]) -> Self {
+    /// `None` for a plant whose first byte names a kind this build has never
+    /// heard of. Refused rather than skipped or defaulted: the size that
+    /// follows is a step through *that kind's* range, so a build guessing at
+    /// the kind would be guessing at the size as well, and would stand
+    /// something of the wrong sort at the wrong size on somebody's beach.
+    fn take(bytes: &[u8]) -> Option<Self> {
+        let kind = Kind::from_byte(bytes[0])?;
         let axis = |pair: &[u8]| {
             u16::from_le_bytes([pair[0], pair[1]]) as f32 / u16::MAX as f32 * CHUNK_METRES
         };
-        Self {
-            at: Vec2::new(axis(&bytes[0..2]), axis(&bytes[2..4])),
-            yaw: bytes[4] as f32 / 256.0 * std::f32::consts::TAU,
-            scale: PALM_SCALE_MIN
-                + bytes[5] as f32 / u8::MAX as f32 * (PALM_SCALE_MAX - PALM_SCALE_MIN),
-        }
+        let (small, large) = kind.scale();
+        Some(Self {
+            kind,
+            at: Vec2::new(axis(&bytes[1..3]), axis(&bytes[3..5])),
+            yaw: bytes[5] as f32 / 256.0 * std::f32::consts::TAU,
+            scale: small + bytes[6] as f32 / u8::MAX as f32 * (large - small),
+        })
     }
 }
 
@@ -522,11 +593,11 @@ pub const WATER_BYTES: usize = FACET_VERTS * FACET_VERTS * 2;
 
 /// What one payload occupies on the wire, which depends on the two things
 /// about a chunk that are not fixed: whether it carries standing water, and
-/// how many palms stand on it. The flag and the count in
+/// how many plants grow on it. The flag and the count in
 /// [`crate::ToClient::Chunk`] are what say which, and so how many bytes a
 /// reader is about to be handed.
-pub const fn payload_bytes(water: bool, palms: usize) -> usize {
-    PAYLOAD_BYTES + if water { WATER_BYTES } else { 0 } + palms * PALM_BYTES
+pub const fn payload_bytes(water: bool, plants: usize) -> usize {
+    PAYLOAD_BYTES + if water { WATER_BYTES } else { 0 } + plants * PLANT_BYTES
 }
 
 impl ChunkPayload {
@@ -541,16 +612,17 @@ impl ChunkPayload {
                 .water
                 .as_ref()
                 .is_none_or(|water| water.len() == corners)
-            && self.palms.len() <= MAX_PALMS
-            && self.palms.iter().all(|palm| {
-                (0.0..CHUNK_METRES).contains(&palm.at.x) && (0.0..CHUNK_METRES).contains(&palm.at.y)
+            && self.plants.len() <= MAX_PLANTS
+            && self.plants.iter().all(|plant| {
+                (0.0..CHUNK_METRES).contains(&plant.at.x)
+                    && (0.0..CHUNK_METRES).contains(&plant.at.y)
             })
     }
 
     /// Appends this payload's bytes: every height little-endian, then every
     /// surface, then the water grid where there is one.
     ///
-    /// The water goes after them, and the palms after that, so that a reader
+    /// The water goes after them, and the plants after that, so that a reader
     /// of any kind of chunk finds the heights and the surfaces at the same
     /// offsets — a lake and a stand of palms are things a chunk carries in
     /// addition, never a rearrangement of what it already carried.
@@ -563,23 +635,23 @@ impl ChunkPayload {
         for level in self.water.iter().flatten() {
             out.extend_from_slice(&level.to_le_bytes());
         }
-        for palm in &self.palms {
-            palm.put(out);
+        for plant in &self.plants {
+            plant.put(out);
         }
     }
 
     /// Reads a payload from exactly [`payload_bytes`] of them — `water` and
-    /// `palms` say which length, and come from the flag and the count the
+    /// `plants` say which length, and come from the flag and the count the
     /// caller has already read. `None` if the bytes are not that many, or if
-    /// any surface byte names nothing this build knows.
+    /// any surface or plant byte names nothing this build knows.
     ///
     /// The length is checked rather than asserted because it is the one thing
     /// here a *frame* can be wrong about: the flag, the count and the length
     /// are written separately, so a build that disagreed with this one about
     /// how long a watered chunk is would otherwise be read as a chunk whose
     /// lake silently vanished.
-    pub(crate) fn take(bytes: &[u8], water: bool, palms: usize) -> Option<Self> {
-        if bytes.len() != payload_bytes(water, palms) || palms > MAX_PALMS {
+    pub(crate) fn take(bytes: &[u8], water: bool, plants: usize) -> Option<Self> {
+        if bytes.len() != payload_bytes(water, plants) || plants > MAX_PLANTS {
             return None;
         }
         let levels = |bytes: &[u8]| {
@@ -590,7 +662,7 @@ impl ChunkPayload {
         };
         let (heights, rest) = bytes.split_at(FACET_VERTS * FACET_VERTS * 2);
         let (surfaces, rest) = rest.split_at(FACET_TRIS);
-        let (water, palms) = rest.split_at(rest.len() - palms * PALM_BYTES);
+        let (water, plants) = rest.split_at(rest.len() - plants * PLANT_BYTES);
         Some(Self {
             heights: levels(heights),
             surfaces: surfaces
@@ -598,7 +670,10 @@ impl ChunkPayload {
                 .map(|byte| Surface::from_byte(*byte))
                 .collect::<Option<_>>()?,
             water: (!water.is_empty()).then(|| levels(water)),
-            palms: palms.chunks_exact(PALM_BYTES).map(Palm::take).collect(),
+            plants: plants
+                .chunks_exact(PLANT_BYTES)
+                .map(Plant::take)
+                .collect::<Option<_>>()?,
         })
     }
 }
@@ -657,7 +732,7 @@ mod tests {
         assert_eq!(payload_bytes(true, 0), PAYLOAD_BYTES + WATER_BYTES);
         assert_eq!(
             payload_bytes(true, 3),
-            PAYLOAD_BYTES + WATER_BYTES + 3 * PALM_BYTES
+            PAYLOAD_BYTES + WATER_BYTES + 3 * PLANT_BYTES
         );
     }
 
@@ -721,15 +796,14 @@ mod tests {
             }
         }
 
-        // And only the snow reaches the clamp, which is why nothing shades
-        // it: a lighter cut of any other tone still moves the colour by the
-        // full step, so a shaded parcel really does break into three.
+        // And nothing reaches the clamp: a lighter cut of every tone still
+        // moves the colour by the full step, so a shaded parcel really does
+        // break into three.
         for tone in 0..TONES.len() as u8 {
             let tone = Tone::from_byte(tone).expect("a tone");
             let lit = tone.color() * Shade::Light.factor();
-            assert_eq!(
+            assert!(
                 lit.cmple(Vec3::ONE).all(),
-                tone != Tone::Snow,
                 "{tone:?} is the wrong side of white when lightened"
             );
         }
@@ -763,25 +837,29 @@ mod tests {
         }
     }
 
-    /// Palms enough to tell one from another, spread across the chunk so that
+    /// Plants enough to tell one from another, spread across the chunk so that
     /// a position written to the wrong axis would land outside it.
-    fn some_palms(count: usize) -> Vec<Palm> {
+    fn some_plants(count: usize) -> Vec<Plant> {
         (0..count)
-            .map(|i| Palm {
-                at: Vec2::new(
-                    i as f32 / MAX_PALMS as f32 * CHUNK_METRES,
-                    CHUNK_METRES - 1.0 - i as f32,
-                ),
-                yaw: i as f32 / MAX_PALMS as f32 * std::f32::consts::TAU,
-                scale: PALM_SCALE_MIN
-                    + (i as f32 / MAX_PALMS as f32) * (PALM_SCALE_MAX - PALM_SCALE_MIN),
+            .map(|i| {
+                let kind = Kind::Palm;
+                let (small, large) = kind.scale();
+                Plant {
+                    kind,
+                    at: Vec2::new(
+                        i as f32 / MAX_PLANTS as f32 * CHUNK_METRES,
+                        (CHUNK_METRES - 1.0 - i as f32).max(0.0),
+                    ),
+                    yaw: i as f32 / MAX_PLANTS as f32 * std::f32::consts::TAU,
+                    scale: small + (i as f32 / MAX_PLANTS as f32) * (large - small),
+                }
             })
             .collect()
     }
 
     /// A payload whose every value differs from every other, so anything that
     /// transposed or truncated one of its grids would show.
-    fn a_payload(water: bool, palms: usize) -> ChunkPayload {
+    fn a_payload(water: bool, plants: usize) -> ChunkPayload {
         ChunkPayload {
             heights: (0..FACET_VERTS * FACET_VERTS)
                 .map(|i| (i * 7 % 65_535) as u16)
@@ -799,34 +877,37 @@ mod tests {
                     .map(|i| (i * 11 % 65_533) as u16)
                     .collect()
             }),
-            palms: some_palms(palms),
+            plants: some_plants(plants),
         }
     }
 
     #[test]
     fn a_payload_survives_its_bytes() {
         for water in [false, true] {
-            for palms in [0, 1, MAX_PALMS] {
-                let payload = a_payload(water, palms);
+            for plants in [0, 1, MAX_PLANTS] {
+                let payload = a_payload(water, plants);
                 assert!(payload.well_formed());
 
                 let mut bytes = Vec::new();
                 payload.put(&mut bytes);
-                assert_eq!(bytes.len(), payload_bytes(water, palms));
+                assert_eq!(bytes.len(), payload_bytes(water, plants));
 
-                // Palms are the one part of a payload that does not survive
+                // Plants are the one part of a payload that does not survive
                 // exactly — a position is sixteen bits an axis and a bearing
                 // is eight — so they are compared to the tolerance the wire
-                // promises rather than for equality.
-                let back = ChunkPayload::take(&bytes, water, palms).expect("a payload");
+                // promises rather than for equality. The kind is not one of
+                // those: a byte for a byte, and a plant that came back as
+                // another sort would be a different tree entirely.
+                let back = ChunkPayload::take(&bytes, water, plants).expect("a payload");
                 assert_eq!(back.heights, payload.heights);
                 assert_eq!(back.surfaces, payload.surfaces);
                 assert_eq!(back.water, payload.water);
-                assert_eq!(back.palms.len(), payload.palms.len());
-                for (got, sent) in back.palms.iter().zip(&payload.palms) {
+                assert_eq!(back.plants.len(), payload.plants.len());
+                for (got, sent) in back.plants.iter().zip(&payload.plants) {
+                    assert_eq!(got.kind, sent.kind);
                     assert!(
                         (got.at - sent.at).length() < 0.01,
-                        "a palm at {:?} came back at {:?}",
+                        "a plant at {:?} came back at {:?}",
                         sent.at,
                         got.at
                     );
@@ -838,27 +919,43 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_claiming_more_palms_than_it_may_is_refused() {
+    fn a_chunk_claiming_more_plants_than_it_may_is_refused() {
         // The ceiling is what the frame size is derived against, so a count
         // past it is a frame that could not have been written by a build that
-        // agrees with this one about how much an answer costs.
-        let payload = a_payload(false, MAX_PALMS);
+        // agrees with this one about how much an answer costs. The count is a
+        // byte and the ceiling is what a byte can say, so no frame can carry
+        // this claim — but the length it implies can still be handed here.
+        let payload = a_payload(false, MAX_PLANTS);
         let mut bytes = Vec::new();
         payload.put(&mut bytes);
-        bytes.extend_from_slice(&[0; PALM_BYTES]);
-        assert_eq!(ChunkPayload::take(&bytes, false, MAX_PALMS + 1), None);
+        bytes.extend_from_slice(&[0; PLANT_BYTES]);
+        assert_eq!(ChunkPayload::take(&bytes, false, MAX_PLANTS + 1), None);
     }
 
     #[test]
-    fn a_palm_outside_its_own_chunk_is_malformed() {
-        // What a generator is held to. A palm belongs to the chunk its foot
+    fn a_plant_of_an_unknown_kind_is_refused() {
+        // A build reading a kind it has never heard of cannot draw it, and
+        // cannot skip it either: the size byte behind it is a step through
+        // that kind's own range. So the chunk is refused whole rather than
+        // arriving with something of the wrong sort standing on it.
+        let payload = a_payload(false, 2);
+        let mut bytes = Vec::new();
+        payload.put(&mut bytes);
+        let first = payload_bytes(false, 0);
+        bytes[first] = 200;
+        assert_eq!(ChunkPayload::take(&bytes, false, 2), None);
+    }
+
+    #[test]
+    fn a_plant_outside_its_own_chunk_is_malformed() {
+        // What a generator is held to. A plant belongs to the chunk its foot
         // stands in, so one placed past the boundary would be drawn by a
         // client that never asked for it — and drawn again by the chunk it
         // really stands on.
         let mut strayed = a_payload(false, 1);
-        strayed.palms[0].at.x = CHUNK_METRES;
+        strayed.plants[0].at.x = CHUNK_METRES;
         assert!(!strayed.well_formed());
-        strayed.palms[0].at = Vec2::new(1.0, -0.5);
+        strayed.plants[0].at = Vec2::new(1.0, -0.5);
         assert!(!strayed.well_formed());
     }
 

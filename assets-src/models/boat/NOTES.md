@@ -1,34 +1,58 @@
 # The boat
 
-What the shape is *for*, which a `.blend` has nowhere to say. The dimensions
-themselves are in the file; these are the reasons behind the ones that are not
-obvious, and they were const docs in `crates/game/src/boat.rs` until the hull
-became a model.
+Why the shape is what it is; the numbers are in the file and the rules are in
+the tests. These were const docs in `crates/game/src/boat.rs` until the hull
+became a model. The shape is after the Bermuda sloops — the single-masted
+working boats of the tropics in the age of sail — as far as a handful of
+facets seen from forty metres up can carry it: sprung sheer, a full stern, a
+stepped-up deck aft.
 
-The boat is nearly always seen from a camera some forty metres up, looking down
-at 50°, against ground drawn in flat facets a couple of metres across. That is
-the one view worth modelling for, and most of what is below follows from it.
+- **Long enough to read as a boat** at the default zoom, where the visible
+  ground is some tens of metres across — and still a mark on the water at the
+  far end of the zoom range rather than gone.
+- **The widest point is aft of amidships**, the entry nearly twice the taper of
+  the run. A fine bow and a full stern is what tells one end from the other
+  with the camera looking straight down.
+- **The sheer springs up towards the bow**, a chine softens the V, and the
+  stem head stands proud of the midships deck — the extra stations are spent
+  where the silhouette is, not on detail that only reads close up.
+- **The mast is tall out of proportion.** From overhead it is most of what says
+  which way the boat is leaning and where it sits against the ground behind it,
+  and its shadow is what pins it to the water. In proportion it would be a dot.
+  It stands plumb where a real Bermudian rig rakes aft, because the pennant is
+  tied to its top and the sail turns about its axis: the game holds the spar
+  within a tenth of a metre of one vertical line, and a rake would spend that
+  allowance on style the camera reads mostly foreshortened anyway.
+- **The bottom is a shallow V, not flat**, so it reads as a boat from the side
+  as well as from above — and the game probes only the keel line for the ground
+  beneath. A flat bottom carried out to the beam would need `KEEL_PROBES` out
+  there too.
+- **The quarterdeck steps up abaft the boom.** It is where the helmsman
+  belongs, and the game stands the player there — the step begins where the
+  boom's sweep ends, so the figure at the helm never shares its air with the
+  sail. The tiller rises forward from the rudder head to the grip beside them:
+  from overhead it is what says *this end is steered*.
+- **The companionway sits between the mast and the step**, the one way down
+  into a hull that is otherwise a closed shell — a boat lived aboard rather
+  than a dinghy. Its top is the darkest tone on the model, which is what an
+  opening looks like from forty metres.
 
-**Length overall, 7 m.** At the default zoom the visible ground is some tens of
-metres across, so this reads as a boat rather than as a speck — and at the far
-end of the zoom range it is still a mark on the water rather than gone.
+## The colours
 
-**The widest point is aft of amidships.** The taper to the bow is nearly twice
-the length of the one to the transom. A fine entry and a full stern is what
-tells one end from the other when the camera is looking straight down.
+On the facets, in the file, like every model's — and the boat's palette is
+picked against the world's rather than its own parts, so it is written down
+here:
 
-**The mast is tall out of proportion to the hull.** From overhead a mast is most
-of what says which way the boat is leaning and where it is against the ground
-behind it, and its shadow is what pins it to the water. A mast in proportion
-would be a dot. It stands about a third of the way back from the bow, which is
-where a boat this shape would carry one.
+- **Timber** for the planking. Nothing on an island or in the sea is anywhere
+  near this hue, so the boat is findable in a landscape of greens and blues
+  without being lit any differently from them.
+- **Scrubbed deck**, warmer and paler than the topsides, so the deck plan —
+  sheer, step, hatch — reads from the camera's own overhead view, which is
+  where the boat is looked at most.
+- **Bare spar cream** for mast and tiller, pale enough to stand off both the
+  water and the hull. The sail and pennant the client cuts (see `boat.rs`)
+  key their cloth to it.
 
-**The bottom is a shallow V, not flat.** The hull falls from the deck to a keel
-line, so it reads as a boat from the side as well as from above — and the game
-probes only that line for the ground beneath. A hull remodelled with a flat
-bottom carried out to the beam would need `KEEL_PROBES` out there too.
-
-Two things are not free to change here. The keel's depth and the stations it
-runs between are what the grounding rule is written against, and the model is
-held to them by a test — see the module documentation in `boat.rs`. Everything
-else about the shape is this file's own business.
+The keel's depth and the stations it runs between are what the grounding rule
+is written against, and a test holds the model to them — see the module
+documentation in `boat.rs`. Everything else about the shape is this file's own.
