@@ -18,14 +18,19 @@
 //! next beat. What a shark looks like, how deep a whale rides, how many
 //! dolphins a pod is drawn as: drawing, and none of this module's business.
 //!
-//! Beasts are session state, not world state, and that is deliberate. Palms
-//! travel with the ground because a seed *means* them; two visits to one
-//! world must find the same trees on the same beach. A beast is not a fact
-//! about the world but something the world is doing, and what it is doing is
-//! *now* — so beasts are raised where the players are, live while anyone is
-//! near, and are forgotten when the last of them sails away, exactly as the
-//! weather is a function of the session's own clock rather than a recording.
-//! Nothing here touches the world's digests.
+//! Beasts are world state with session manners. The manners are unchanged
+//! from when they were the whole story: beasts are raised where the players
+//! are, live while anyone is near, and are let go when the last of them
+//! sails away — the *population* is a performance around whoever is present,
+//! not a fact a seed means the way it means palms. But the animals alive
+//! when a kept world is written are in its file, and reopen where they
+//! stood, because a beast is the kind of thing that will one day act on a
+//! player — and nothing with consequence may be escapable by relogging. A
+//! shark that had somebody cornered when they quit must still have them
+//! cornered when they reload; the same rule that keeps a gale waiting keeps
+//! the fin. What is kept per beast is only what a save could ever show —
+//! see `keeper::BeastRecord` — and everything re-derived each beat starts
+//! over, which nothing can see. Nothing here touches the world's digests.
 //!
 //! # What passes for a mind
 //!
@@ -969,6 +974,17 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
         // the tellings being the agreement.
         let mut flock = Flock::new(shared.world.seed());
 
+        // The beasts the world's file remembered, taken back up before the
+        // first beat. Read rather than drained: the ledger keeps saying what
+        // it said until the first beat rewrites it, so a save landing in the
+        // beat between reopening and here still writes the beasts down.
+        {
+            let remembered = shared.beasts.lock().expect("no poisoned lock").clone();
+            for record in remembered {
+                flock.adopt(&record);
+            }
+        }
+
         loop {
             if shared.stopping.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
@@ -994,6 +1010,11 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
                 .collect();
 
             let news = flock.beat(&shared, &players, &summoned);
+
+            // The ledger a save reads, rewritten while no other lock is
+            // held: the flock stays this thread's own, and what everyone
+            // else sees is a summary from at most a beat ago.
+            *shared.beasts.lock().expect("no poisoned lock") = flock.records();
 
             let players = shared.players.lock().expect("no poisoned lock");
             for word in news {
@@ -1191,6 +1212,44 @@ impl Flock {
         self.beasts.insert(id, beast);
         self.next_id += 1;
         id
+    }
+
+    /// Takes back up a beast the world's file remembered — the reverse of
+    /// [`Flock::records`]. One still bound somewhere is rebuilt the way a
+    /// raise builds one, still making for its goal; one that was living
+    /// where it stood is rebuilt the way a summons builds one, already
+    /// arrived. Everything re-derived each beat — stance, breath, wander —
+    /// starts over, which nothing can see; the id is fresh, ids being
+    /// meaningless across sessions.
+    fn adopt(&mut self, record: &crate::keeper::BeastRecord) {
+        let habitat = habitat_of(record.kind);
+        let entropy = self.roll();
+        let mut beast = match record.goal {
+            Some(goal) => Beast::born(habitat, record.position, Some(goal), entropy),
+            None => Beast::summoned(habitat, record.position, entropy),
+        };
+        // The life it had left is the life it gets: one life, however many
+        // sessions it spans. A beast restored with nothing left simply
+        // leaves on the first beat, which is the honest answer.
+        beast.life = record.left;
+        self.keep(beast);
+    }
+
+    /// The flock as a file writes it down — the reverse of [`Flock::adopt`].
+    /// A leaving beast is left out: an exit is finished under the water
+    /// where nobody can watch it, so a world reopened without one reads
+    /// exactly as a world it had already left.
+    fn records(&self) -> Vec<crate::keeper::BeastRecord> {
+        self.beasts
+            .values()
+            .filter(|beast| beast.doing != Doing::Leaving)
+            .map(|beast| crate::keeper::BeastRecord {
+                kind: beast.habitat.kind,
+                position: beast.position,
+                goal: beast.goal,
+                left: beast.life.saturating_sub(beast.age),
+            })
+            .collect()
     }
 
     /// Stirs the flock's bits on and hands back the new ones.
@@ -1805,6 +1864,51 @@ mod tests {
         (from..from + 400)
             .find_map(|entropy| raise(habitat_of(kind), shared, player, scramble(entropy)))
             .expect("these waters should raise the kind that lives in them")
+    }
+
+    #[test]
+    fn the_flock_survives_being_written_down_and_taken_back_up() {
+        use crate::keeper::BeastRecord;
+
+        // One living where it stands, one still bound somewhere: the two
+        // shapes a record can take, adopted back into the parts of life
+        // they were written out of.
+        let dwelling = BeastRecord {
+            kind: BeastKind::Shark,
+            position: Vec2::new(10.0, 20.0),
+            goal: None,
+            left: 500,
+        };
+        let bound = BeastRecord {
+            kind: BeastKind::Whale,
+            position: Vec2::new(-100.0, 50.0),
+            goal: Some(Vec2::new(900.0, 900.0)),
+            left: 4_000,
+        };
+        let mut flock = Flock::new(1);
+        flock.adopt(&dwelling);
+        flock.adopt(&bound);
+
+        let shark = beast(&flock, BeastId(0));
+        assert_eq!(shark.doing, Doing::Dwelling, "no goal means arrived");
+        assert_eq!(shark.life, 500, "a life spans sessions, not restarts");
+        let whale = beast(&flock, BeastId(1));
+        assert_eq!(whale.doing, Doing::Bound, "a goal means still going");
+        assert_eq!(whale.goal, bound.goal);
+
+        // Written down again, the flock reads exactly as it was adopted.
+        let mut written = flock.records();
+        written.sort_by_key(|record| record.left);
+        assert_eq!(written, vec![dwelling, bound]);
+
+        // But a leaving beast is nobody's to keep: its exit is finished
+        // under the water either way.
+        flock
+            .beasts
+            .get_mut(&BeastId(0))
+            .expect("the shark is kept")
+            .settle(Doing::Leaving, 1);
+        assert_eq!(flock.records().len(), 1, "an exit was written down");
     }
 
     #[test]

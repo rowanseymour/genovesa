@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::Vec2;
-use protocol::{Token, WorldId};
+use protocol::{BeastKind, Token, WorldId};
 
 /// The format this build writes, named in the file's first line. A file
 /// carrying a different number is refused whole rather than guessed at —
@@ -72,6 +72,9 @@ pub(crate) struct WorldRecord {
     pub age: f32,
     /// Where the world last saw each player it has dealt papers to.
     pub players: HashMap<Token, Vec2>,
+    /// The beasts alive when the world was last written — see
+    /// [`BeastRecord`], and `beasts` for how the warden takes them back up.
+    pub beasts: Vec<BeastRecord>,
 }
 
 impl WorldRecord {
@@ -84,7 +87,49 @@ impl WorldRecord {
             opening: crate::OPENING,
             age: 0.0,
             players: HashMap::new(),
+            beasts: Vec::new(),
         }
+    }
+}
+
+/// One beast, as the file remembers it: what it is, where it stood, where it
+/// was going if it was going anywhere, and how much life it had left.
+///
+/// Deliberately no more than that. Everything else about a beast — its
+/// stance toward the boats around it, its breath, its wander — is re-derived
+/// every beat and reads the same re-derived, so writing it down would couple
+/// the file to the warden's internals for nothing anyone could see. What
+/// *can* be seen is a shark still patrolling the shallows a player quit out
+/// of, and that is the fact this record exists to keep: nothing with
+/// consequence may be escapable by relogging.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BeastRecord {
+    pub kind: BeastKind,
+    pub position: Vec2,
+    /// The one place it was going — `None` for a beast that had arrived and
+    /// was living where it stood.
+    pub goal: Option<Vec2>,
+    /// Beats of life it had left. A restored beast starts its count afresh
+    /// from this, so a life is one life however many sessions it spans.
+    pub left: u32,
+}
+
+/// A kind as the file spells it — and [`kind_of`] reads it back. Words
+/// rather than the wire's bytes because this file is read by people.
+fn word_of(kind: BeastKind) -> &'static str {
+    match kind {
+        BeastKind::Shark => "shark",
+        BeastKind::Dolphins => "dolphins",
+        BeastKind::Whale => "whale",
+    }
+}
+
+fn kind_of(word: &str) -> Option<BeastKind> {
+    match word {
+        "shark" => Some(BeastKind::Shark),
+        "dolphins" => Some(BeastKind::Dolphins),
+        "whale" => Some(BeastKind::Whale),
+        _ => None,
     }
 }
 
@@ -316,6 +361,30 @@ fn compose(record: &WorldRecord) -> String {
     for (token, position) in players {
         let _ = writeln!(out, "player {:016x} {} {}", token.0, position.x, position.y);
     }
+    // Sorted likewise — by kind and then by where they stood, the bits
+    // standing in for an order nobody reads but everybody can reproduce.
+    let mut beasts = record.beasts.clone();
+    beasts.sort_by_key(|beast| {
+        (
+            word_of(beast.kind),
+            beast.position.x.to_bits(),
+            beast.position.y.to_bits(),
+        )
+    });
+    for beast in beasts {
+        let _ = write!(
+            out,
+            "beast {} {} {} {}",
+            word_of(beast.kind),
+            beast.position.x,
+            beast.position.y,
+            beast.left
+        );
+        if let Some(goal) = beast.goal {
+            let _ = write!(out, " {} {}", goal.x, goal.y);
+        }
+        let _ = writeln!(out);
+    }
     out
 }
 
@@ -330,6 +399,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
     let (mut id, mut seed, mut opening, mut age) = (None, None, None, None);
     let mut name = String::new();
     let mut players = HashMap::new();
+    let mut beasts = Vec::new();
     for line in lines {
         if line.is_empty() {
             continue;
@@ -365,6 +435,35 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 }
                 players.insert(Token(hex(token)?), position);
             }
+            "beast" => {
+                let fields: Vec<&str> = value.split(' ').collect();
+                let ([kind, x, y, left], goal) = (
+                    fields
+                        .get(..4)
+                        .and_then(|head| <[&str; 4]>::try_from(head).ok())
+                        .ok_or_else(|| format!("half a beast: `{line}`"))?,
+                    &fields[4.min(fields.len())..],
+                );
+                let goal = match goal {
+                    [] => None,
+                    [gx, gy] => Some(Vec2::new(finite(gx)?, finite(gy)?)),
+                    _ => return Err(format!("too much about one beast: `{line}`")),
+                };
+                let position = Vec2::new(finite(x)?, finite(y)?);
+                for spot in goal.iter().chain([&position]) {
+                    if !crate::reachable(*spot) {
+                        return Err(format!("no beast ever swam at {spot}"));
+                    }
+                }
+                beasts.push(BeastRecord {
+                    kind: kind_of(kind).ok_or_else(|| format!("no such beast as a {kind}"))?,
+                    position,
+                    goal,
+                    left: left
+                        .parse::<u32>()
+                        .map_err(|_| format!("`{left}` is not a count of beats"))?,
+                });
+            }
             other => return Err(format!("unknown key `{other}`")),
         }
     }
@@ -384,6 +483,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
         opening,
         age,
         players,
+        beasts,
     })
 }
 
@@ -426,6 +526,21 @@ mod tests {
                 (Token(7), Vec2::new(12.5, -340.25)),
                 (Token(0xFFFF_0000_0000_0002), Vec2::new(-0.125, 9000.0)),
             ]),
+            beasts: vec![
+                // One living where it stands, one still bound somewhere.
+                BeastRecord {
+                    kind: BeastKind::Shark,
+                    position: Vec2::new(40.0, -12.5),
+                    goal: None,
+                    left: 900,
+                },
+                BeastRecord {
+                    kind: BeastKind::Whale,
+                    position: Vec2::new(-800.0, 2_000.0),
+                    goal: Some(Vec2::new(200.0, 1_500.0)),
+                    left: 4_000,
+                },
+            ],
         }
     }
 
@@ -439,6 +554,12 @@ mod tests {
         assert_eq!(read.opening, record.opening);
         assert_eq!(read.age, record.age);
         assert_eq!(read.players, record.players);
+        // Composing sorts the beasts, so compare content rather than order.
+        let sorted = |mut beasts: Vec<BeastRecord>| {
+            beasts.sort_by_key(|beast| (word_of(beast.kind), beast.position.x.to_bits()));
+            beasts
+        };
+        assert_eq!(sorted(read.beasts), sorted(record.beasts.clone()));
     }
 
     #[test]
@@ -473,6 +594,22 @@ mod tests {
             (
                 "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1e30 0\n",
                 "a player past where the world resolves",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2\n",
+                "half a beast",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast kraken 1 2 3\n",
+                "a beast of a kind nothing keeps",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2 3 4\n",
+                "half a goal",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast whale 1e30 0 5\n",
+                "a beast past where the world resolves",
             ),
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");

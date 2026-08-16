@@ -847,6 +847,51 @@ fn a_kept_world_reopens_where_it_left_off() {
 }
 
 #[test]
+fn a_kept_world_reopens_with_its_beasts_where_they_were() {
+    // The shark scenario, by proxy of a whale: an animal alive when a world
+    // closes is in its file, and reopening finds it where it stood — a beast
+    // with consequence cannot be escaped by relogging, any more than a gale
+    // can.
+    let path = scratch("beasts").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    let (client, _id, _spawn, _facing, token) = Client::join_presenting(addr, None);
+    client.say(ToServer::Command {
+        line: "spawn whale".to_string(),
+    });
+    let summons = client.hear_reply();
+    assert!(
+        summons.starts_with("a whale"),
+        "the summons came to: {summons}"
+    );
+    // Being told of it means it is in the flock — and the ledger a save
+    // reads is rewritten before each beat's tellings go out, so by now the
+    // whale is in it.
+    let (_id, seen_at, _velocity) = client.hear_a_beast(BeastKind::Whale);
+    drop(client);
+    drop(host);
+
+    let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
+    let addr = again.local_addr().expect("addr");
+    let _host = again.spawn().expect("spawn");
+    let (client, ..) = Client::join_presenting(addr, Some(token));
+
+    // The same whale, near where it was — it wanders at a whale's own pace,
+    // and no world time passed while the world was closed, so the slack
+    // only covers the few real seconds either side of the reopening.
+    let (_id, still_at, _velocity) = client.hear_a_beast(BeastKind::Whale);
+    assert!(
+        still_at.distance(seen_at) < 300.0,
+        "the whale was at {seen_at} and reopened at {still_at}"
+    );
+}
+
+#[test]
 fn a_kept_world_cannot_be_hosted_twice_at_once() {
     // Two processes writing one file would be two histories under one name;
     // the world's lock makes the second host an error instead.
