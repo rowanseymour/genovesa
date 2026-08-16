@@ -1008,11 +1008,11 @@ fn take_soundings(
 /// again, so the three read as drawing, ruling and net rather than as three
 /// kinds of line. The reader's own mark is the one thing in another colour,
 /// which is how the eye finds it.
-const PAPER: Color = Color::srgb(0.85, 0.79, 0.64);
-const INK: Color = Color::srgb(0.24, 0.17, 0.11);
-const INK_DIM: Color = Color::srgb(0.46, 0.37, 0.26);
-const INK_FAINT: Color = Color::srgba(0.40, 0.31, 0.21, 0.40);
-const INK_GHOST: Color = Color::srgba(0.40, 0.31, 0.21, 0.22);
+pub(crate) const PAPER: Color = Color::srgb(0.85, 0.79, 0.64);
+pub(crate) const INK: Color = Color::srgb(0.24, 0.17, 0.11);
+pub(crate) const INK_DIM: Color = Color::srgb(0.46, 0.37, 0.26);
+pub(crate) const INK_FAINT: Color = Color::srgba(0.40, 0.31, 0.21, 0.40);
+pub(crate) const INK_GHOST: Color = Color::srgba(0.40, 0.31, 0.21, 0.22);
 const MARK_INK: Color = Color::srgb(0.55, 0.16, 0.12);
 
 /// How wide the sheet's lines are drawn, in pixels — pixels rather than metres
@@ -1143,7 +1143,7 @@ const ROSE_BAND: f32 = 7.0;
 const ROSE_LETTER_GAP: f32 = 12.0;
 const ROSE_LETTERS: f32 = 14.0;
 /// How much room the whole rose takes from its middle, letters and all.
-const ROSE_EXTENT: f32 = ROSE_REACH + ROSE_BAND + ROSE_LETTER_GAP + ROSE_LETTERS / 2.0;
+pub(crate) const ROSE_EXTENT: f32 = ROSE_REACH + ROSE_BAND + ROSE_LETTER_GAP + ROSE_LETTERS / 2.0;
 
 /// How heavily a rose's own circles and ticks are ruled, in pixels.
 const ROSE_WEIGHT: f32 = 1.0;
@@ -1169,7 +1169,7 @@ const NEATLINE_WEIGHT: f32 = 1.2;
 /// How many graduations of the band go to one square of the ruling. Ten, so a
 /// square is five inked cells and five of paper — fine enough to read as a
 /// scale and coarse enough that the cells never close up into a grey rule.
-const NEATLINE_CELLS: f32 = 10.0;
+pub(crate) const NEATLINE_CELLS: f32 = 10.0;
 
 /// How much bigger than the window the drawn sheet is built, each way.
 ///
@@ -2495,6 +2495,119 @@ fn distance_label(metres: f32) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// The sheet, lent out
+// ---------------------------------------------------------------------------
+
+/// The three drawings that make paper *this* paper, built for a stretch of it
+/// measured in its own pixels — see [`engraved_paper`].
+pub(crate) struct EngravedPaper {
+    /// The ruling, in [`INK_FAINT`].
+    pub ruling: Mesh,
+    /// The rhumb net thrown across it, in [`INK_GHOST`].
+    pub net: Mesh,
+    /// The dark halves of the roses the net comes from, in [`INK`], and their
+    /// light halves, in [`INK_DIM`] — two meshes because two tones, which is
+    /// what draws a lit thing on a sheet with no gradients (see [`star`]).
+    pub roses: Mesh,
+    pub lit: Mesh,
+}
+
+/// The sheet's character with nothing charted on it: ruling, net and roses,
+/// over a stretch of paper `square` pixels to the square.
+///
+/// The chart never asks for this — its own ruling is spaced in *round
+/// distances*, because a chart is read off round numbers, and it always has a
+/// zoom to work that out from. What asks for it is a screen that is made of
+/// the sheet without being a chart of anywhere, where a pixel is a pixel and
+/// there is no world under the paper at all.
+///
+/// Lending the drawing out rather than letting the other screen copy it is
+/// the whole point: there is one sheet in this game, and two would drift.
+pub(crate) fn engraved_paper(on_paper: Rect, square: f32) -> EngravedPaper {
+    let mut ruling = Strokes::default();
+    let mut net = Strokes::default();
+    let mut roses = Strokes::default();
+    let mut lit = Strokes::default();
+
+    let first = |v: f32| (v / square).ceil() * square;
+    let mut x = first(on_paper.min.x);
+    while x <= on_paper.max.x {
+        let (top, bottom) = (Vec2::new(x, on_paper.min.y), Vec2::new(x, on_paper.max.y));
+        ruling.segment(top, bottom, GRATICULE_WEIGHT);
+        x += square;
+    }
+    let mut y = first(on_paper.min.y);
+    while y <= on_paper.max.y {
+        let (west, east) = (Vec2::new(on_paper.min.x, y), Vec2::new(on_paper.max.x, y));
+        ruling.segment(west, east, GRATICULE_WEIGHT);
+        y += square;
+    }
+
+    for centre in rhumb_roses(on_paper, square * RHUMB_SQUARES) {
+        rhumbs(
+            &mut net,
+            on_paper,
+            centre,
+            PAPER_ROSE,
+            RHUMB_WEIGHT,
+            RHUMB_DASH,
+        );
+        star(&mut roses, &mut lit, centre, PAPER_ROSE);
+    }
+
+    EngravedPaper {
+        ruling: ruling.drawn(),
+        net: net.drawn(),
+        roses: roses.drawn(),
+        lit: lit.drawn(),
+    }
+}
+
+/// A rose on its own, at the size the chart pins in its corner: the star's
+/// dark halves in [`INK`], and its light halves and graduated band in
+/// [`INK_DIM`].
+pub(crate) fn drawn_rose() -> (Mesh, Mesh) {
+    let mut inked = Strokes::default();
+    let mut dimmed = Strokes::default();
+    star(&mut inked, &mut dimmed, Vec2::ZERO, ROSE_REACH);
+    band(
+        &mut dimmed,
+        Vec2::ZERO,
+        ROSE_REACH,
+        ROSE_REACH + ROSE_BAND,
+        ROSE_WEIGHT,
+    );
+    (inked.drawn(), dimmed.drawn())
+}
+
+/// The sheet's edge ruled round a window, as the rules themselves in [`INK`]
+/// and the paper that covers whatever ran out past them — see [`neatline`].
+pub(crate) fn ruled_edge(window: Rect, cell: f32) -> (Mesh, Mesh) {
+    let mut edge = Strokes::default();
+    let mut mask = Strokes::default();
+    neatline(&mut edge, &mut mask, window, cell, 1.0);
+    (edge.drawn(), mask.drawn())
+}
+
+/// How far in from the window anything standing on the paper has to sit to be
+/// clear of that edge.
+pub(crate) const PAPER_MARGIN: f32 = FURNITURE_MARGIN;
+
+/// The four letters that make a rose mean north rather than "this way", and
+/// how far out from the middle of one they are set — the chart letters its
+/// own corner rose this way, and so does anything that borrows it.
+pub(crate) const ROSE_LETTERING: [(&str, f32); 4] =
+    [("N", 0.0), ("E", 0.25), ("S", 0.5), ("W", 0.75)];
+pub(crate) const ROSE_LETTER_OUT: f32 = ROSE_REACH + ROSE_BAND + ROSE_LETTER_GAP;
+pub(crate) const ROSE_LETTER_SIZE: f32 = ROSE_LETTERS;
+
+/// A point of the compass as a direction on the sheet, for anything laying
+/// something out around a rose.
+pub(crate) fn on_the_card(turns: f32) -> Vec2 {
+    wind(turns)
+}
+
+// ---------------------------------------------------------------------------
 // The furniture
 // ---------------------------------------------------------------------------
 
@@ -2587,16 +2700,7 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
 /// layer would have done — which is the whole cost of the change, and it is one
 /// short system.
 fn corner_rose(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) {
-    let mut inked = Strokes::default();
-    let mut dimmed = Strokes::default();
-    star(&mut inked, &mut dimmed, Vec2::ZERO, ROSE_REACH);
-    band(
-        &mut dimmed,
-        Vec2::ZERO,
-        ROSE_REACH,
-        ROSE_REACH + ROSE_BAND,
-        ROSE_WEIGHT,
-    );
+    let (inked, dimmed) = drawn_rose();
 
     let rose = commands
         .spawn((
@@ -2609,27 +2713,19 @@ fn corner_rose(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) 
         ))
         .id();
 
-    for (strokes, ink) in [(inked, &inks.coast), (dimmed, &inks.dim)] {
-        if let Some(mesh) = strokes.mesh() {
-            commands.spawn((
-                Mesh2d(meshes.add(mesh)),
-                MeshMaterial2d(ink.clone()),
-                Transform::default(),
-                ChildOf(rose),
-            ));
-        }
+    for (mesh, ink) in [(inked, &inks.coast), (dimmed, &inks.dim)] {
+        commands.spawn((
+            Mesh2d(meshes.add(mesh)),
+            MeshMaterial2d(ink.clone()),
+            Transform::default(),
+            ChildOf(rose),
+        ));
     }
 
     // The letters, outside the band because the star fills the disc. N in the
     // reading ink and the other three dimmed, as on the world's compass and for
     // the same reason: they are what make N mean north rather than "this way".
-    let out = ROSE_REACH + ROSE_BAND + ROSE_LETTER_GAP;
-    for (letter, turns, ink) in [
-        ("N", 0.0, INK),
-        ("E", 0.25, INK_DIM),
-        ("S", 0.5, INK_DIM),
-        ("W", 0.75, INK_DIM),
-    ] {
+    for (letter, turns) in ROSE_LETTERING {
         commands.spawn((
             Text2d::new(letter),
             // The serif the menus and the scale bar resolve, for the reason
@@ -2638,11 +2734,11 @@ fn corner_rose(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) 
             // hand writing *on* the paper.
             TextFont {
                 font: FontSource::Serif,
-                font_size: FontSize::Px(ROSE_LETTERS),
+                font_size: FontSize::Px(ROSE_LETTER_SIZE),
                 ..default()
             },
-            TextColor(ink),
-            Transform::from_translation((wind(turns) * out).extend(0.1)),
+            TextColor(if turns == 0.0 { INK } else { INK_DIM }),
+            Transform::from_translation((on_the_card(turns) * ROSE_LETTER_OUT).extend(0.1)),
             ChildOf(rose),
         ));
     }

@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::window::ExitCondition;
 
 use game::ambience::AmbiencePlugin;
+use game::backdrop::BackdropPlugin;
 use game::beasts::BeastsPlugin;
 use game::boat::BoatPlugin;
 use game::camera::MapCameraPlugin;
@@ -143,7 +144,9 @@ fn run(args: Args, session: Option<Session>) {
             MapCameraPlugin,
             CompassPlugin,
             ChartPlugin,
-            MenuPlugin,
+            // The sheet the menus stand on, and the menus. Nested only
+            // because a plugin tuple holds fifteen.
+            (BackdropPlugin, MenuPlugin),
             // Harmless offline: its systems condition on the joined session.
             NetPlugin,
             CapturePlugin {

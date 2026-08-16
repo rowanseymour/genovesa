@@ -4,12 +4,12 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource, FontStyle};
-use bevy::ui::{UiTransform, Val2};
 
 use protocol::DEFAULT_PORT;
 
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
 use crate::camera::View;
+use crate::chart::{INK, INK_DIM, PAPER};
 use crate::net::{Dialing, Hosting, Online, Reach};
 use crate::{AppState, Helm};
 use server::{random_seed, WorldConfig, MAX_SEED};
@@ -22,39 +22,102 @@ const MAX_SEED_DIGITS: usize = MAX_SEED.ilog10() as usize + 1;
 /// and a port, well past anything anybody types.
 const MAX_ADDRESS: usize = 60;
 
-const PANEL: Color = Color::srgba(0.09, 0.11, 0.10, 0.94);
-/// Every edge the menu draws — panels and buttons alike. Pale rather than the
-/// olive it used to be: the main menu stands on open water rather than on a
-/// panel, and a dark line there is the one thing on the screen that goes
-/// missing. One colour for all of them, so a button can never come out
-/// brighter than the frame it sits in.
-const EDGE: Color = Color::srgb(0.70, 0.69, 0.62);
-const BUTTON: Color = Color::srgb(0.17, 0.20, 0.16);
-const BUTTON_HOVER: Color = Color::srgb(0.26, 0.31, 0.22);
-const BUTTON_PRESS: Color = Color::srgb(0.35, 0.42, 0.28);
-const BUTTON_ON: Color = Color::srgb(0.44, 0.40, 0.18);
-const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
-const TEXT_DIM: Color = Color::srgb(0.60, 0.60, 0.55);
-
 /// The word on the front of the box, the line under it, and how big each is
 /// drawn.
 const TITLE: &str = "GENOVESA";
 const TITLE_SIZE: f32 = 56.0;
 const SUBTITLE: &str = "the sea is charted no further";
 const SUBTITLE_SIZE: f32 = 19.0;
-/// The copies a line is drawn against: a near-black one a pixel below it and a
-/// faint warm one a pixel above. On the title the pair reads as a letter cut
-/// into a plate; on the line under it the shadow alone is what holds small
-/// italics off the water, which behind the menu is bright enough to swallow
-/// them.
-const INK_SHADOW: Color = Color::srgb(0.02, 0.03, 0.03);
-const INK_LIGHT: Color = Color::srgba(1.0, 0.97, 0.88, 0.28);
 /// How far the rules either side of the title run out.
 const TITLE_RULE: f32 = 64.0;
 
 /// How big a dialog's own title is drawn — well under [`TITLE_SIZE`], since it
 /// names a screen rather than the game.
 const HEADING_SIZE: f32 = 34.0;
+
+/// The inks a menu is drawn with.
+///
+/// There are two sets and there have to be, because there are two places a
+/// menu goes up. Outside a world it stands on [`crate::backdrop`]'s sheet and
+/// is drawn *on paper*, as part of the chart; inside one it stands over the
+/// world itself, where paper would be a chart laid on the sea. They are not
+/// one thing lit two ways — a button drawn in ink and a button drawn as a
+/// panel are two different objects — so the whole set travels together and no
+/// screen mixes them.
+#[derive(Clone, Copy)]
+struct Palette {
+    text: Color,
+    dim: Color,
+    /// Every edge the menu draws, panels and buttons alike. One colour for all
+    /// of them, so a button can never come out brighter than the frame it sits
+    /// in.
+    edge: Color,
+    panel: Color,
+    /// What the full-screen node behind the menu is washed with. Nothing on
+    /// paper — the sheet is already the colour it should be, and a wash over
+    /// it would only make it dirty paper.
+    behind: Color,
+    /// Whether a panel is a *cartouche*: the double rule with the paper
+    /// showing between the two lines that an engraver letters a chart's title
+    /// inside. It is the whole difference between a box drawn on the paper and
+    /// a box laid over it.
+    cartouche: bool,
+    /// What a button does under the pointer, and what one that is switched on
+    /// or waiting for a key looks like.
+    button: Highlight,
+}
+
+/// On the sheet.
+///
+/// A button is drawn rather than filled: paper has no lights to turn on, so
+/// the only thing that can happen to a shape on it is more ink, and pressing
+/// one is a wash of the reading ink. Armed is the one thing in another colour,
+/// the same red the chart marks the reader's own position in, which is how the
+/// eye finds it.
+const ON_PAPER: Palette = Palette {
+    text: INK,
+    dim: INK_DIM,
+    edge: INK,
+    panel: PAPER,
+    behind: Color::NONE,
+    cartouche: true,
+    button: Highlight {
+        idle: Color::NONE,
+        hover: Color::srgba(0.24, 0.17, 0.11, 0.13),
+        press: Color::srgba(0.24, 0.17, 0.11, 0.26),
+        armed: Color::srgba(0.55, 0.16, 0.12, 0.22),
+    },
+};
+
+/// Over the world: the pause menu, and the controls screen reached from it.
+const OVER_THE_WORLD: Palette = Palette {
+    text: Color::srgb(0.88, 0.87, 0.80),
+    dim: Color::srgb(0.60, 0.60, 0.55),
+    edge: Color::srgb(0.70, 0.69, 0.62),
+    panel: Color::srgba(0.09, 0.11, 0.10, 0.94),
+    behind: Color::srgba(0.05, 0.07, 0.09, 0.72),
+    cartouche: false,
+    button: Highlight {
+        idle: Color::srgb(0.17, 0.20, 0.16),
+        hover: Color::srgb(0.26, 0.31, 0.22),
+        press: Color::srgb(0.35, 0.42, 0.28),
+        armed: Color::srgb(0.44, 0.40, 0.18),
+    },
+};
+
+/// What a button is filled with in each of its states.
+///
+/// Carried on the button entity rather than looked up when one is hovered,
+/// because [`highlight_buttons`] sees every button in the app and cannot tell
+/// from one which of the two sheets it was drawn on.
+#[derive(Component, Clone, Copy)]
+struct Highlight {
+    idle: Color,
+    hover: Color,
+    press: Color,
+    /// A button switched on, or a key row waiting for a key.
+    armed: Color,
+}
 
 pub struct MenuPlugin;
 
@@ -252,27 +315,36 @@ struct KeyText(Action);
 // ---------------------------------------------------------------------------
 
 fn spawn_main_menu(mut commands: Commands) {
+    // The whole menu goes inside the cartouche, which is where an engraved
+    // chart carries its title and everything said about it.
+    let ink = ON_PAPER;
     commands
         .spawn((
             Name::new("Main menu"),
             DespawnOnExit(AppState::MainMenu),
-            screen(),
+            screen(&ink),
         ))
         .with_children(|screen| {
-            spawn_title(screen);
-            spawn_subtitle(screen);
+            screen
+                .spawn(panel(&ink, 12.0, PANEL_PADDING))
+                .with_children(|panel| {
+                    cartouche_rule(panel, &ink);
+                    spawn_title(panel, &ink);
+                    spawn_subtitle(panel, &ink);
 
-            spawn_button(screen, MenuButton::NewWorld, "New World", 240.0);
-            spawn_button(screen, MenuButton::JoinWorld, "Join World", 240.0);
-            spawn_button(screen, MenuButton::Settings, "Controls", 240.0);
-            spawn_button(screen, MenuButton::Exit, "Exit", 240.0);
+                    spawn_button(panel, &ink, MenuButton::NewWorld, "New World", 240.0);
+                    spawn_button(panel, &ink, MenuButton::JoinWorld, "Join World", 240.0);
+                    spawn_button(panel, &ink, MenuButton::Settings, "Controls", 240.0);
+                    spawn_button(panel, &ink, MenuButton::Exit, "Exit", 240.0);
+                });
         });
 }
 
 /// The title, engraved and ruled: tracked-out serif capitals with a hairline
 /// running out to either side of them, which is how a chart of the period puts
 /// its own name at the top.
-fn spawn_title(parent: &mut ChildSpawnerCommands) {
+fn spawn_title(parent: &mut ChildSpawnerCommands, ink: &Palette) {
+    let text = ink.text;
     parent
         .spawn(Node {
             align_items: AlignItems::Center,
@@ -281,16 +353,9 @@ fn spawn_title(parent: &mut ChildSpawnerCommands) {
             ..default()
         })
         .with_children(|row| {
-            spawn_hairline(row);
-            // The three copies of the word, one on top of the other. The stack
-            // takes its size from the ink alone — see [`layer`].
-            row.spawn(Node::default()).with_children(|stack| {
-                let word = spaced(TITLE);
-                stack.spawn(layer(&word, title_font(), INK_SHADOW, 1.0));
-                stack.spawn(layer(&word, title_font(), INK_LIGHT, -1.0));
-                stack.spawn((Text::new(word), title_font(), TextColor(TEXT)));
-            });
-            spawn_hairline(row);
+            spawn_hairline(row, text);
+            row.spawn((Text::new(spaced(TITLE)), title_font(), TextColor(text)));
+            spawn_hairline(row, text);
         });
 }
 
@@ -300,39 +365,16 @@ fn spawn_title(parent: &mut ChildSpawnerCommands) {
 /// for their asides: this one is read against open water, which the menu only
 /// dims rather than covers, and a grey that sits well on a panel disappears
 /// against it.
-fn spawn_subtitle(parent: &mut ChildSpawnerCommands) {
-    parent
-        .spawn(Node {
+fn spawn_subtitle(parent: &mut ChildSpawnerCommands, ink: &Palette) {
+    parent.spawn((
+        Text::new(SUBTITLE),
+        subtitle_font(),
+        TextColor(ink.text),
+        Node {
             margin: UiRect::bottom(Val::Px(48.0)),
             ..default()
-        })
-        .with_children(|stack| {
-            stack.spawn(layer(SUBTITLE, subtitle_font(), INK_SHADOW, 1.0));
-            stack.spawn((Text::new(SUBTITLE), subtitle_font(), TextColor(TEXT)));
-        });
-}
-
-/// One of the offset copies the ink is drawn against.
-///
-/// Taken out of the flow and pinned to the stack's corner, so that the copies
-/// cost the line no room of its own and the ink — the one drawing still in the
-/// flow — is what the stack is sized to. The offset is then a transform rather
-/// than a position: two texts of different colours are still the same text, and
-/// any difference in how they were laid out would read as a blur rather than as
-/// a groove.
-fn layer(text: &str, font: TextFont, ink: Color, drop: f32) -> impl Bundle {
-    (
-        Text::new(text),
-        font,
-        TextColor(ink),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(0.0),
-            top: Val::Px(0.0),
-            ..default()
         },
-        UiTransform::from_translation(Val2::px(0.0, drop)),
-    )
+    ));
 }
 
 /// The face both lines are set in: resolved from the system's font database
@@ -355,35 +397,20 @@ fn subtitle_font() -> TextFont {
     }
 }
 
-/// One of the rules the title sits between, cut the same way the letters are:
-/// a line of ink with a dark one directly beneath it.
+/// One of the rules the title sits between.
 ///
-/// Full ink rather than [`EDGE`], which every border on screen is drawn in.
-/// These two belong to the title rather than to the furniture, and a rule that
-/// runs out of a letter has to be the same weight as the letter.
-fn spawn_hairline(parent: &mut ChildSpawnerCommands) {
-    parent
-        .spawn((
-            Node {
-                width: Val::Px(TITLE_RULE),
-                height: Val::Px(1.0),
-                ..default()
-            },
-            BackgroundColor(TEXT),
-        ))
-        .with_children(|rule| {
-            rule.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    top: Val::Px(1.0),
-                    width: Val::Percent(100.0),
-                    height: Val::Px(1.0),
-                    ..default()
-                },
-                BackgroundColor(INK_SHADOW),
-            ));
-        });
+/// Full ink rather than [`Palette::edge`], which every border on screen is
+/// drawn in. It belongs to the title rather than to the furniture, and a rule
+/// that runs out of a letter has to be the same weight as the letter.
+fn spawn_hairline(parent: &mut ChildSpawnerCommands, ink: Color) {
+    parent.spawn((
+        Node {
+            width: Val::Px(TITLE_RULE),
+            height: Val::Px(1.0),
+            ..default()
+        },
+        BackgroundColor(ink),
+    ));
 }
 
 /// The letters of a word with a space between each. Tracking of the kind
@@ -426,71 +453,78 @@ fn main_menu_actions(
 // ---------------------------------------------------------------------------
 
 fn spawn_new_world_dialog(mut commands: Commands, settings: Res<NewWorldSettings>) {
+    let ink = ON_PAPER;
     commands
         .spawn((
             Name::new("New world dialog"),
             DespawnOnExit(AppState::NewWorld),
-            screen(),
+            screen(&ink),
         ))
         .with_children(|screen| {
-            screen.spawn(panel(10.0)).with_children(|panel| {
-                heading(panel, "New World", 20.0);
+            screen
+                .spawn(panel(&ink, 10.0, PANEL_PADDING))
+                .with_children(|panel| {
+                    cartouche_rule(panel, &ink);
+                    heading(panel, &ink, "New World", 20.0);
 
-                label(panel, "Seed");
-                panel.spawn((
-                    SeedText,
-                    Text::new(settings.seed.clone()),
-                    TextFont {
-                        font_size: FontSize::Px(26.0),
-                        ..default()
-                    },
-                    TextColor(TEXT),
-                ));
-                panel.spawn((
-                    Text::new("type digits, backspace to edit"),
-                    TextFont {
-                        font_size: FontSize::Px(13.0),
-                        ..default()
-                    },
-                    TextColor(TEXT_DIM),
-                ));
-                spawn_button(panel, MenuButton::RandomSeed, "Random", 160.0);
+                    label(panel, &ink, "Seed");
+                    panel.spawn((
+                        SeedText,
+                        Text::new(settings.seed.clone()),
+                        TextFont {
+                            font_size: FontSize::Px(26.0),
+                            ..default()
+                        },
+                        TextColor(ink.text),
+                    ));
+                    panel.spawn((
+                        Text::new("type digits, backspace to edit"),
+                        TextFont {
+                            font_size: FontSize::Px(13.0),
+                            ..default()
+                        },
+                        TextColor(ink.dim),
+                    ));
+                    spawn_button(panel, &ink, MenuButton::RandomSeed, "Random", 160.0);
 
-                // Sharing. A world of one's own needs no server at all, so
-                // this is the switch between playing alone and hosting.
-                // No label of its own, unlike the seed above: a switch that
-                // says which way it is set has already said what it is.
-                panel
-                    .spawn(Node {
-                        margin: UiRect::top(Val::Px(20.0)),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        row.spawn(button(MenuButton::ToggleShare, 160.0))
-                            .with_children(|button| {
-                                button
-                                    .spawn((ShareText, button_label(share_label(settings.share))));
-                            });
-                    });
-                // Phrased as what the switch does rather than as what is
-                // happening, since it is read in both positions.
-                label(
-                    panel,
-                    &format!("sharing hosts the world on port {DEFAULT_PORT}"),
-                );
+                    // Sharing. A world of one's own needs no server at all, so
+                    // this is the switch between playing alone and hosting.
+                    // No label of its own, unlike the seed above: a switch that
+                    // says which way it is set has already said what it is.
+                    panel
+                        .spawn(Node {
+                            margin: UiRect::top(Val::Px(20.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            row.spawn(button(&ink, MenuButton::ToggleShare, 160.0))
+                                .with_children(|button| {
+                                    button.spawn((
+                                        ShareText,
+                                        button_label(&ink, share_label(settings.share)),
+                                    ));
+                                });
+                        });
+                    // Phrased as what the switch does rather than as what is
+                    // happening, since it is read in both positions.
+                    label(
+                        panel,
+                        &ink,
+                        &format!("sharing hosts the world on port {DEFAULT_PORT}"),
+                    );
 
-                status_line(panel);
-                panel
-                    .spawn(Node {
-                        column_gap: Val::Px(8.0),
-                        margin: UiRect::top(Val::Px(8.0)),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        spawn_button(row, MenuButton::Back, "Back", 130.0);
-                        spawn_button(row, MenuButton::Start, "Start", 130.0);
-                    });
-            });
+                    status_line(panel, &ink);
+                    panel
+                        .spawn(Node {
+                            column_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(8.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_button(row, &ink, MenuButton::Back, "Back", 130.0);
+                            spawn_button(row, &ink, MenuButton::Start, "Start", 130.0);
+                        });
+                });
         });
 }
 
@@ -641,41 +675,49 @@ fn refresh_dialog(
 // ---------------------------------------------------------------------------
 
 fn spawn_join_dialog(mut commands: Commands, settings: Res<JoinSettings>) {
+    let ink = ON_PAPER;
     commands
         .spawn((
             Name::new("Join world dialog"),
             DespawnOnExit(AppState::JoinWorld),
-            screen(),
+            screen(&ink),
         ))
         .with_children(|screen| {
-            screen.spawn(panel(10.0)).with_children(|panel| {
-                heading(panel, "Join World", 20.0);
+            screen
+                .spawn(panel(&ink, 10.0, PANEL_PADDING))
+                .with_children(|panel| {
+                    cartouche_rule(panel, &ink);
+                    heading(panel, &ink, "Join World", 20.0);
 
-                label(panel, "Server");
-                panel.spawn((
-                    AddressText,
-                    Text::new(settings.address.clone()),
-                    TextFont {
-                        font_size: FontSize::Px(26.0),
-                        ..default()
-                    },
-                    TextColor(TEXT),
-                ));
-                label(panel, "type an address, backspace to edit");
-                label(panel, &format!("a bare name joins on port {DEFAULT_PORT}"));
+                    label(panel, &ink, "Server");
+                    panel.spawn((
+                        AddressText,
+                        Text::new(settings.address.clone()),
+                        TextFont {
+                            font_size: FontSize::Px(26.0),
+                            ..default()
+                        },
+                        TextColor(ink.text),
+                    ));
+                    label(panel, &ink, "type an address, backspace to edit");
+                    label(
+                        panel,
+                        &ink,
+                        &format!("a bare name joins on port {DEFAULT_PORT}"),
+                    );
 
-                status_line(panel);
-                panel
-                    .spawn(Node {
-                        column_gap: Val::Px(8.0),
-                        margin: UiRect::top(Val::Px(8.0)),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        spawn_button(row, MenuButton::Back, "Back", 130.0);
-                        spawn_button(row, MenuButton::Connect, "Join", 130.0);
-                    });
-            });
+                    status_line(panel, &ink);
+                    panel
+                        .spawn(Node {
+                            column_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(8.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_button(row, &ink, MenuButton::Back, "Back", 130.0);
+                            spawn_button(row, &ink, MenuButton::Connect, "Join", 130.0);
+                        });
+                });
         });
 }
 
@@ -855,60 +897,78 @@ fn refresh_status(status: Res<Status>, mut lines: Query<&mut Text, With<StatusTe
 
 /// The controls screen as reached from the main menu.
 fn spawn_settings(commands: Commands, bindings: Res<KeyBindings>) {
-    spawn_controls(commands, &bindings, DespawnOnExit(AppState::Settings));
+    spawn_controls(
+        commands,
+        &ON_PAPER,
+        &bindings,
+        DespawnOnExit(AppState::Settings),
+    );
 }
 
 /// The same screen as reached from the pause menu, differing only in living
 /// and dying with [`Helm::Controls`] instead — so that opening it does not
 /// leave the world, which is the whole reason the pause menu exists.
 fn spawn_paused_settings(commands: Commands, bindings: Res<KeyBindings>) {
-    spawn_controls(commands, &bindings, DespawnOnExit(Helm::Controls));
+    spawn_controls(
+        commands,
+        &OVER_THE_WORLD,
+        &bindings,
+        DespawnOnExit(Helm::Controls),
+    );
 }
 
 /// Builds the controls screen, cleared up by whichever state opened it.
-fn spawn_controls(mut commands: Commands, bindings: &KeyBindings, until: impl Bundle) {
+fn spawn_controls(
+    mut commands: Commands,
+    ink: &Palette,
+    bindings: &KeyBindings,
+    until: impl Bundle,
+) {
     commands
-        .spawn((Name::new("Controls screen"), until, screen()))
+        .spawn((Name::new("Controls screen"), until, screen(ink)))
         .with_children(|screen| {
-            screen.spawn(panel(8.0)).with_children(|panel| {
-                heading(panel, "Controls", 6.0);
-                label(panel, "click a key, then press the one you want");
+            screen
+                .spawn(panel(ink, 6.0, CONTROLS_PADDING))
+                .with_children(|panel| {
+                    cartouche_rule(panel, ink);
+                    heading(panel, ink, "Controls", 6.0);
+                    label(panel, ink, "click a key, then press the one you want");
 
-                panel
-                    .spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(5.0),
-                        margin: UiRect::vertical(Val::Px(12.0)),
-                        ..default()
-                    })
-                    .with_children(|rows| {
-                        for action in Action::ALL {
-                            spawn_key_row(rows, action, &bindings.name(action));
-                        }
-                    });
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(4.0),
+                            margin: UiRect::vertical(Val::Px(8.0)),
+                            ..default()
+                        })
+                        .with_children(|rows| {
+                            for action in Action::ALL {
+                                spawn_key_row(rows, ink, action, &bindings.name(action));
+                            }
+                        });
 
-                // Plain punctuation only: the default font has no dash of
-                // any kind and draws a missing glyph as an empty box.
-                label(panel, "the arrow keys always move, and escape always");
-                label(panel, "goes back; neither can be reassigned");
+                    // Plain punctuation only: the default font has no dash of
+                    // any kind and draws a missing glyph as an empty box.
+                    label(panel, ink, "the arrow keys always move, and escape always");
+                    label(panel, ink, "goes back; neither can be reassigned");
 
-                panel
-                    .spawn(Node {
-                        column_gap: Val::Px(8.0),
-                        margin: UiRect::top(Val::Px(16.0)),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        spawn_button(row, MenuButton::ResetKeys, "Defaults", 130.0);
-                        spawn_button(row, MenuButton::Back, "Back", 130.0);
-                    });
-            });
+                    panel
+                        .spawn(Node {
+                            column_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(10.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_button(row, ink, MenuButton::ResetKeys, "Defaults", 130.0);
+                            spawn_button(row, ink, MenuButton::Back, "Back", 130.0);
+                        });
+                });
         });
 }
 
 /// One action and the key it sits on, as a name on the left and a button on the
 /// right that arms the row when clicked.
-fn spawn_key_row(parent: &mut ChildSpawnerCommands, action: Action, key_name: &str) {
+fn spawn_key_row(parent: &mut ChildSpawnerCommands, ink: &Palette, action: Action, key_name: &str) {
     parent
         .spawn(Node {
             width: Val::Px(400.0),
@@ -923,15 +983,16 @@ fn spawn_key_row(parent: &mut ChildSpawnerCommands, action: Action, key_name: &s
                     font_size: FontSize::Px(18.0),
                     ..default()
                 },
-                TextColor(TEXT),
+                TextColor(ink.text),
             ));
             row.spawn(padded_button(
+                ink,
                 MenuButton::Rebind(action),
                 170.0,
                 KEY_ROW_PADDING,
             ))
             .with_children(|button| {
-                button.spawn((KeyText(action), button_label(key_name)));
+                button.spawn((KeyText(action), button_label(ink, key_name)));
             });
         });
 }
@@ -1041,7 +1102,7 @@ fn refresh_settings(
     bindings: Res<KeyBindings>,
     rebinding: Res<Rebinding>,
     mut keys: Query<(&KeyText, &mut Text)>,
-    mut buttons: Query<(&MenuButton, &mut BackgroundColor, &Interaction)>,
+    mut buttons: Query<(&MenuButton, &Highlight, &mut BackgroundColor, &Interaction)>,
 ) {
     if !bindings.is_changed() && !rebinding.is_changed() {
         return;
@@ -1056,13 +1117,13 @@ fn refresh_settings(
     }
 
     // The armed row stays lit, so it's clear which key is about to change.
-    for (button, mut color, interaction) in &mut buttons {
+    for (button, ink, mut color, interaction) in &mut buttons {
         if let MenuButton::Rebind(action) = button {
             if *interaction == Interaction::None {
                 *color = BackgroundColor(if rebinding.0 == Some(*action) {
-                    BUTTON_ON
+                    ink.armed
                 } else {
-                    BUTTON
+                    ink.idle
                 });
             }
         }
@@ -1089,34 +1150,37 @@ fn spawn_pause_menu(mut commands: Commands, hosting: Option<Res<Hosting>>) {
     // whenever there is a host would tell a player sailing alone that they are
     // about to strand somebody.
     let shared = hosting.is_some_and(|hosting| hosting.shared());
+    let ink = OVER_THE_WORLD;
     commands
         .spawn((
             Name::new("Pause menu"),
             DespawnOnExit(Helm::Paused),
-            screen(),
+            screen(&ink),
         ))
         .with_children(|screen| {
-            screen.spawn(panel(10.0)).with_children(|panel| {
-                heading(panel, "Paused", 6.0);
-                if shared {
-                    label(panel, "others can be sailing in this world, and");
-                    label(panel, "leaving closes it on them");
-                }
+            screen
+                .spawn(panel(&ink, 10.0, PANEL_PADDING))
+                .with_children(|panel| {
+                    heading(panel, &ink, "Paused", 6.0);
+                    if shared {
+                        label(panel, &ink, "others can be sailing in this world, and");
+                        label(panel, &ink, "leaving closes it on them");
+                    }
 
-                panel
-                    .spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        row_gap: Val::Px(8.0),
-                        margin: UiRect::top(Val::Px(20.0)),
-                        ..default()
-                    })
-                    .with_children(|rows| {
-                        spawn_button(rows, MenuButton::Resume, "Resume", 200.0);
-                        spawn_button(rows, MenuButton::Settings, "Controls", 200.0);
-                        spawn_button(rows, MenuButton::LeaveWorld, "Leave World", 200.0);
-                    });
-            });
+                    panel
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            row_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(20.0)),
+                            ..default()
+                        })
+                        .with_children(|rows| {
+                            spawn_button(rows, &ink, MenuButton::Resume, "Resume", 200.0);
+                            spawn_button(rows, &ink, MenuButton::Settings, "Controls", 200.0);
+                            spawn_button(rows, &ink, MenuButton::LeaveWorld, "Leave World", 200.0);
+                        });
+                });
         });
 }
 
@@ -1171,7 +1235,7 @@ fn helm_keys(
 // ---------------------------------------------------------------------------
 
 /// Full-screen, centred column that every menu screen is built inside.
-fn screen() -> impl Bundle {
+fn screen(ink: &Palette) -> impl Bundle {
     (
         Node {
             width: Val::Percent(100.0),
@@ -1180,45 +1244,89 @@ fn screen() -> impl Bundle {
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             row_gap: Val::Px(12.0),
+            // On paper the room a menu has is the *paper*, not the window:
+            // the sheet's edge is ruled just inside it, and a cartouche laid
+            // across that rule reads as a chart with a hole cut in it. The
+            // same margin the sheet's own furniture stands off by.
+            padding: UiRect::all(Val::Px(if ink.cartouche {
+                crate::chart::PAPER_MARGIN
+            } else {
+                0.0
+            })),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.05, 0.07, 0.09, 0.72)),
+        BackgroundColor(ink.behind),
     )
 }
 
-/// The bordered box a dialog is built inside — every screen but the main menu,
-/// which stands on open water rather than on a panel.
+/// The bordered box a menu is built inside.
 ///
-/// `row_gap` is the space between the rows stacked in it, and is the only
-/// thing the dialogs differ by: the controls screen packs a list of key rows
-/// and wants them tighter than a dialog of a few fields does.
-fn panel(row_gap: f32) -> impl Bundle {
+/// `row_gap` is the space between the rows stacked in it, and `pad` the room
+/// inside its rule. Both are the controls screen's doing: it packs a list of
+/// nine key rows and has to fit them between the sheet's own edges, where a
+/// dialog of a few fields has all the paper it wants.
+fn panel(ink: &Palette, row_gap: f32, pad: f32) -> impl Bundle {
     (
         Node {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
-            padding: UiRect::all(Val::Px(32.0)),
+            padding: UiRect::axes(Val::Px(32.0), Val::Px(pad)),
             border: UiRect::all(Val::Px(2.0)),
             row_gap: Val::Px(row_gap),
             ..default()
         },
-        BackgroundColor(PANEL),
-        BorderColor::all(EDGE),
+        BackgroundColor(ink.panel),
+        BorderColor::all(ink.edge),
     )
+}
+
+/// How much room a panel leaves inside its rule, above and below.
+const PANEL_PADDING: f32 = 32.0;
+
+/// And how much the controls screen leaves, which is as little as nine key
+/// rows and two lines of prose can be got into a sheet in.
+const CONTROLS_PADDING: f32 = 14.0;
+
+/// How far inside a cartouche's outer rule the second one runs, in pixels.
+const CARTOUCHE_INSET: f32 = 6.0;
+
+/// The second rule that makes a panel a cartouche.
+///
+/// Taken out of the flow and pinned inside the panel's padding, so it costs
+/// the contents no room and does not have to know how much there are of them.
+/// A double rule with the paper showing between the two is what an engraver
+/// puts a chart's title inside, and it is the whole difference between a box
+/// drawn on paper and a box laid over it.
+fn cartouche_rule(parent: &mut ChildSpawnerCommands, ink: &Palette) {
+    if !ink.cartouche {
+        return;
+    }
+    parent.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(CARTOUCHE_INSET),
+            top: Val::Px(CARTOUCHE_INSET),
+            right: Val::Px(CARTOUCHE_INSET),
+            bottom: Val::Px(CARTOUCHE_INSET),
+            border: UiRect::all(Val::Px(1.0)),
+            ..default()
+        },
+        BorderColor::all(ink.edge),
+    ));
 }
 
 /// A dialog's title, and how much room it keeps between itself and what
 /// follows — which is a whole line's worth on the dialogs that open with a
 /// field, and almost nothing on the controls screen, where the line under it
 /// is part of the same thought.
-fn heading(parent: &mut ChildSpawnerCommands, text: &str, below: f32) {
+fn heading(parent: &mut ChildSpawnerCommands, ink: &Palette, text: &str, below: f32) {
     parent.spawn((
         Text::new(text),
         TextFont {
             font_size: FontSize::Px(HEADING_SIZE),
             ..default()
         },
-        TextColor(TEXT),
+        TextColor(ink.text),
         Node {
             margin: UiRect::bottom(Val::Px(below)),
             ..default()
@@ -1230,7 +1338,7 @@ fn heading(parent: &mut ChildSpawnerCommands, text: &str, below: f32) {
 /// there is something to say, but spawned all the same: a line that appeared
 /// only when it had text would push the buttons under it down the moment the
 /// player pressed one.
-fn status_line(parent: &mut ChildSpawnerCommands) {
+fn status_line(parent: &mut ChildSpawnerCommands, ink: &Palette) {
     parent.spawn((
         StatusText,
         Text::new(""),
@@ -1238,7 +1346,7 @@ fn status_line(parent: &mut ChildSpawnerCommands) {
             font_size: FontSize::Px(15.0),
             ..default()
         },
-        TextColor(TEXT),
+        TextColor(ink.text),
         Node {
             margin: UiRect::top(Val::Px(8.0)),
             // Held open so an empty line still takes its room, for the reason
@@ -1249,21 +1357,21 @@ fn status_line(parent: &mut ChildSpawnerCommands) {
     ));
 }
 
-fn label(parent: &mut ChildSpawnerCommands, text: &str) {
+fn label(parent: &mut ChildSpawnerCommands, ink: &Palette, text: &str) {
     parent.spawn((
         Text::new(text),
         TextFont {
             font_size: FontSize::Px(15.0),
             ..default()
         },
-        TextColor(TEXT_DIM),
+        TextColor(ink.dim),
     ));
 }
 
 /// A menu button without its label, so that callers who need to mark the label
 /// — as the controls screen does, to rewrite it later — can spawn their own.
-fn button(action: MenuButton, width: f32) -> impl Bundle {
-    padded_button(action, width, 12.0)
+fn button(ink: &Palette, action: MenuButton, width: f32) -> impl Bundle {
+    padded_button(ink, action, width, 12.0)
 }
 
 /// How much shorter a key row's button is than a menu's.
@@ -1275,10 +1383,11 @@ fn button(action: MenuButton, width: f32) -> impl Bundle {
 /// being a tall one as well.
 const KEY_ROW_PADDING: f32 = 8.0;
 
-fn padded_button(action: MenuButton, width: f32, pad: f32) -> impl Bundle {
+fn padded_button(ink: &Palette, action: MenuButton, width: f32, pad: f32) -> impl Bundle {
     (
         Button,
         action,
+        ink.button,
         Node {
             width: Val::Px(width),
             padding: UiRect::axes(Val::Px(12.0), Val::Px(pad)),
@@ -1287,42 +1396,53 @@ fn padded_button(action: MenuButton, width: f32, pad: f32) -> impl Bundle {
             border: UiRect::all(Val::Px(1.0)),
             ..default()
         },
-        BackgroundColor(BUTTON),
-        BorderColor::all(EDGE),
+        BackgroundColor(ink.button.idle),
+        BorderColor::all(ink.edge),
     )
 }
 
-fn button_label(text: &str) -> impl Bundle {
+fn button_label(ink: &Palette, text: &str) -> impl Bundle {
     (
         Text::new(text),
         TextFont {
             font_size: FontSize::Px(19.0),
             ..default()
         },
-        TextColor(TEXT),
+        TextColor(ink.text),
         TextLayout::justify(Justify::Center),
     )
 }
 
-fn spawn_button(parent: &mut ChildSpawnerCommands, action: MenuButton, text: &str, width: f32) {
-    parent.spawn(button(action, width)).with_children(|button| {
-        button.spawn(button_label(text));
-    });
+fn spawn_button(
+    parent: &mut ChildSpawnerCommands,
+    ink: &Palette,
+    action: MenuButton,
+    text: &str,
+    width: f32,
+) {
+    parent
+        .spawn(button(ink, action, width))
+        .with_children(|button| {
+            button.spawn(button_label(ink, text));
+        });
 }
 
 fn highlight_buttons(
     rebinding: Res<Rebinding>,
-    mut buttons: Query<(&Interaction, &MenuButton, &mut BackgroundColor), Changed<Interaction>>,
+    mut buttons: Query<
+        (&Interaction, &MenuButton, &Highlight, &mut BackgroundColor),
+        Changed<Interaction>,
+    >,
 ) {
-    for (interaction, button, mut color) in &mut buttons {
+    for (interaction, button, ink, mut color) in &mut buttons {
         let idle = match button {
-            MenuButton::Rebind(action) if rebinding.0 == Some(*action) => BUTTON_ON,
-            _ => BUTTON,
+            MenuButton::Rebind(action) if rebinding.0 == Some(*action) => ink.armed,
+            _ => ink.idle,
         };
 
         *color = BackgroundColor(match interaction {
-            Interaction::Pressed => BUTTON_PRESS,
-            Interaction::Hovered => BUTTON_HOVER,
+            Interaction::Pressed => ink.press,
+            Interaction::Hovered => ink.hover,
             Interaction::None => idle,
         });
     }
