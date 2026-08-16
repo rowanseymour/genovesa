@@ -147,6 +147,14 @@ impl Hull {
     fn helm(&self) -> Vec3 {
         Vec3::new(0.0, self.quarterdeck, self.helm_station)
     }
+
+    /// Where the hull meets the water forward, in its own frame: the stem, on
+    /// the waterline. Not the forefoot — that is where the *keel* begins, a
+    /// good deal aft of the bow because the stem is raked — and the water is
+    /// parted at the bow.
+    fn stem(&self) -> Vec3 {
+        Vec3::new(0.0, 0.0, -self.length / 2.0)
+    }
 }
 
 /// The ship: the boat a world is entered aboard, and [`MODEL`]'s subject.
@@ -479,6 +487,30 @@ impl Boat {
     /// they stand at the helm rather than in the bilges.
     pub fn helm(&self) -> Vec3 {
         self.hull.helm()
+    }
+
+    /// Where the hull parts the water, in its own frame — see [`Hull::stem`].
+    /// The wake is laid from here rather than from the origin amidships, so
+    /// that the white water the hull is standing in is water its own bow
+    /// turned over a moment ago.
+    pub fn stem(&self) -> Vec3 {
+        self.hull.stem()
+    }
+
+    /// How wide a stretch of water the hull pushes aside, in metres — its
+    /// beam. What the wake is scaled off, a bigger hull leaving a broader
+    /// one; see [`crate::wake`].
+    pub fn beam(&self) -> f32 {
+        self.hull.beam
+    }
+
+    /// The way the hull is making, in metres a second — negative going
+    /// astern. The hull's own number rather than anything measured off its
+    /// transform, which is the point: a transform moves for reasons that are
+    /// not sailing, and [`crate::wake`] wants the speed the water is being
+    /// stirred at.
+    pub fn way(&self) -> f32 {
+        self.way
     }
 }
 
@@ -886,7 +918,7 @@ fn fly_the_pennant(
 /// applied last frame from the right and hangs the new one on, and [`steer`],
 /// multiplying its heel delta on from the right, keeps reaching the roll
 /// factor it always has.
-fn float(
+pub(crate) fn float(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
     sea: Res<sea::SeaConditions>,
