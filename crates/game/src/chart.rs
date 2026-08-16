@@ -22,20 +22,28 @@
 //! designed for a world with no edges.
 //!
 //! What makes that affordable is throwing the ground away and keeping only the
-//! line where it meets the sea:
+//! two lines worth drawing — where it meets the sea, and where the water over
+//! it reaches [`SHOAL_DEPTH`]:
 //!
 //! | held per chunk | a 1.5 km island, sailed right around |
 //! | --- | --- |
 //! | the height grid it arrived as | about a megabyte |
-//! | its coastline, simplified | a few kilobytes |
+//! | its coastline and its shoal line, simplified | a few kilobytes |
 //!
-//! Three things do that. Only *coastal* chunks hold anything at all — open
-//! water arrives as no payload whatever, and an island's interior has no
-//! sea-level crossing in it, so what is kept is a ring one chunk thick and not
-//! an island's worth of area. What is kept of that ring is simplified to
-//! [`TOLERANCE`], which the chart can afford: a bay owes the player its shape
-//! and not its rocks. And a point is a [`Mark`], two bytes, because half a
-//! metre is finer than any hand ever drew a shoreline.
+//! Three things do that. Only chunks with a crossing on them hold anything at
+//! all — open water arrives as no payload whatever, and an island's interior
+//! has neither line on it, so what is kept is a band a chunk or two thick round
+//! each island and not an island's worth of area. What is kept of it is
+//! simplified to [`TOLERANCE`], which the chart can afford: a bay owes the
+//! player its shape and not its rocks. And a point is a [`Mark`], two bytes,
+//! because half a metre is finer than any hand ever drew a shoreline.
+//!
+//! The second line roughly doubles what a coastal chunk holds, and it is worth
+//! it: it is the only *depth* on a sheet that is otherwise all outline, and it
+//! is the difference between a shore that plunges and a shore with a bank off
+//! it. It is drawn and nothing more — it rings nothing, names nothing and
+//! closes nothing, and every question the rest of this module asks about
+//! islands is asked of the waterline alone.
 //!
 //! The arithmetic that matters is the last column: a player who calls at a
 //! thousand islands is holding a few megabytes, which is a fraction of a single
@@ -104,11 +112,18 @@
 //! tones with no texture and no gradient anywhere in it, and a mottled sheet
 //! would be the only one of either. So the hand is in the line instead — a
 //! coast weighted heavier than the graticule under it, ticked on its landward
-//! side the way an engraved chart hatches its shores, and laid on one flat
+//! side the way an engraved chart hatches its shores, stippled on its seaward
+//! side where the water is shallow, and laid on one flat
 //! tone of parchment. The furniture is lettered in the serif the menus are
 //! set in; the islands are named in an italic of the Fell types (see
 //! [`NAME_FONT`]), which is the nearest a flat sheet comes to an engraver's
 //! hand.
+//!
+//! Outside all of it the sheet has an edge — a double rule just inside the
+//! window with the ruling's own graduations laid between the two lines, and the
+//! engraving covered over beyond it. A chart drawn to the window's own edge has
+//! no edge at all: the paper runs out wherever the player last dragged their
+//! mouse, which reads as a viewport rather than as a sheet.
 //!
 //! Under all of it is the rhumb net: roses standing on the ruling's own
 //! crossings, each throwing the thirty-two points of the compass across the
@@ -182,6 +197,19 @@ const SURVEYS_PER_FRAME: usize = 8;
 /// couple of hundred segments down to a handful, which is most of the reason a
 /// thousand islands fit in memory at once.
 const TOLERANCE: f32 = 3.0;
+
+/// How deep the water has to get before it stops being a shoal, in metres
+/// below the waterline.
+///
+/// The chart draws this line stippled, the way an engraved chart draws the
+/// limit of a bank — so it is not decoration but the one piece of *depth* on a
+/// sheet that is otherwise all outline, and it says where a hull would find
+/// the bottom. Three metres because it is deeper than any boat here draws and
+/// shallower than the shelf most coasts stand on: a shore whose ground plunges
+/// carries the line right against its own outline, and a shore with a bank off
+/// it carries the line out where the bank ends, which is the difference the
+/// player wants to see.
+const SHOAL_DEPTH: f32 = -3.0;
 
 /// The smallest closed shore worth keeping, as the longer side of what it
 /// encloses, in metres.
@@ -282,7 +310,7 @@ impl Coast {
 /// player has been.
 #[derive(Resource, Default)]
 pub struct Chart {
-    coasts: HashMap<IVec2, Vec<Coast>>,
+    soundings: HashMap<IVec2, Soundings>,
     /// What the player has christened their islands, keyed by [`Island::id`].
     /// Part of the chart rather than a resource of its own because it is the
     /// same kind of fact as the coasts: what *this* player holds about *this*
@@ -335,14 +363,18 @@ pub struct Island {
 impl Chart {
     /// Whether this chunk has been surveyed at all.
     pub fn surveyed(&self, chunk: IVec2) -> bool {
-        self.coasts.contains_key(&chunk)
+        self.soundings.contains_key(&chunk)
     }
 
     /// Counts what the chart holds — including, in [`ChartTally::islands`],
     /// the closed coastlines that are islands to claim.
     pub fn tally(&self) -> ChartTally {
-        let surveyed = self.coasts.len();
-        let coastal = self.coasts.values().filter(|runs| !runs.is_empty()).count();
+        let surveyed = self.soundings.len();
+        let coastal = self
+            .soundings
+            .values()
+            .filter(|found| !found.coast.is_empty())
+            .count();
         let mut islands = 0;
         let (complete, open) = self.coastlines(&mut |_, ring| {
             if measure(ring).is_island() {
@@ -418,8 +450,8 @@ impl Chart {
         // lattice — exact, so equality is equality.
         let mut starts: HashMap<IVec2, (IVec2, usize)> = HashMap::default();
         let mut ends: HashSet<IVec2> = HashSet::default();
-        for (&chunk, runs) in &self.coasts {
-            for (at, run) in runs.iter().enumerate() {
+        for (&chunk, found) in &self.soundings {
+            for (at, run) in found.coast.iter().enumerate() {
                 if run.closed {
                     // A ring inside one chunk closed the moment it was drawn.
                     complete += 1;
@@ -435,7 +467,7 @@ impl Chart {
         // Follows a shore from one run for as long as the links hold, and
         // says which runs it passed through.
         let end_of = |key: (IVec2, usize)| {
-            let run = &self.coasts[&key.0][key.1];
+            let run = &self.soundings[&key.0].coast[key.1];
             run_steps(key.0, run.marks[run.marks.len() - 1])
         };
         let mut walked: HashSet<IVec2> = HashSet::default();
@@ -476,7 +508,7 @@ impl Chart {
             let chain = walk(key, &mut walked);
             complete += 1;
             let id = ring_id(chain.iter().flat_map(|&(chunk, at)| {
-                self.coasts[&chunk][at]
+                self.soundings[&chunk].coast[at]
                     .marks
                     .iter()
                     .map(move |&mark| run_steps(chunk, mark))
@@ -485,32 +517,31 @@ impl Chart {
                 id,
                 &mut chain
                     .iter()
-                    .flat_map(|&(chunk, at)| self.coasts[&chunk][at].points(chunk)),
+                    .flat_map(|&(chunk, at)| self.soundings[&chunk].coast[at].points(chunk)),
             );
         }
 
         (complete, open)
     }
 
-    /// Every run of coast within a rectangle of the world.
+    /// Everything surveyed within a rectangle of the world, chunk by chunk.
     ///
     /// The rectangle is what keeps drawing bounded. A chart of a long voyage
     /// holds far more coastline than a sheet can show, so the mesh is built
     /// from a window on it rather than from everything ever seen — and the cost
     /// of drawing follows how much paper there is rather than how far the
     /// player has sailed.
-    fn within(&self, window: Rect) -> impl Iterator<Item = (IVec2, &Coast)> {
+    fn within(&self, window: Rect) -> impl Iterator<Item = (IVec2, &Soundings)> {
         let lower = chunk_at(window.min);
         let upper = chunk_at(window.max);
         (lower.y..=upper.y)
             .flat_map(move |z| (lower.x..=upper.x).map(move |x| IVec2::new(x, z)))
-            .filter_map(|chunk| Some((chunk, self.coasts.get(&chunk)?)))
-            .flat_map(|(chunk, runs)| runs.iter().map(move |run| (chunk, run)))
+            .filter_map(|chunk| Some((chunk, self.soundings.get(&chunk)?)))
     }
 
     /// Records what one chunk's ground turned out to hold.
-    fn record(&mut self, chunk: IVec2, runs: Vec<Coast>) {
-        self.coasts.insert(chunk, runs);
+    fn record(&mut self, chunk: IVec2, found: Soundings) {
+        self.soundings.insert(chunk, found);
     }
 }
 
@@ -610,22 +641,22 @@ enum Axis {
 }
 
 impl Crossing {
-    /// Where the waterline cuts this edge, in chunk-local metres.
+    /// Where the given level cuts this edge, in chunk-local metres.
     ///
     /// Straight linear interpolation between the two corner heights, which is
     /// what the mesh does between the same two corners — so the line on the
     /// chart is the line the player could walk to.
-    fn at(self, heights: &[f32]) -> Vec2 {
+    fn at(self, heights: &[f32], level: f32) -> Vec2 {
         let corner = |ix: usize, iz: usize| heights[iz * FACET_VERTS + ix];
         let near = corner(self.ix, self.iz);
         let far = match self.along {
             Axis::X => corner(self.ix + 1, self.iz),
             Axis::Z => corner(self.ix, self.iz + 1),
         };
-        // The two corners straddle the waterline — one at or above it, the
-        // other strictly below — so the difference is never zero and this never
+        // The two corners straddle the level — one at or above it, the other
+        // strictly below — so the difference is never zero and this never
         // divides by one.
-        let t = near / (near - far);
+        let t = (near - level) / (near - far);
         let along = match self.along {
             Axis::X => Vec2::new(t, 0.0),
             Axis::Z => Vec2::new(0.0, t),
@@ -634,11 +665,11 @@ impl Crossing {
     }
 }
 
-/// Whether a corner height is land. At the waterline counts as land, so that a
-/// corner sitting exactly at zero belongs to one side rather than to neither
-/// and the classification is total.
-fn is_land(height: f32) -> bool {
-    height >= 0.0
+/// Whether a corner height is on the shallow side of a level. Sitting exactly
+/// on it counts as shallow, so that a corner at the level belongs to one side
+/// rather than to neither and the classification is total.
+fn is_above(height: f32, level: f32) -> bool {
+    height >= level
 }
 
 /// The directed contour segments crossing one cell of the facet grid.
@@ -654,7 +685,7 @@ fn is_land(height: f32) -> bool {
 /// two alike and different — where the cell can be read as two capes or as one
 /// isthmus. They are settled on the cell's own average, which is the nearest
 /// thing to asking the height field what is actually in the middle of it.
-fn segments(cell: (usize, usize), heights: &[f32]) -> Vec<(Crossing, Crossing)> {
+fn segments(cell: (usize, usize), heights: &[f32], level: f32) -> Vec<(Crossing, Crossing)> {
     let (ix, iz) = cell;
     let corner = |cx: usize, cz: usize| heights[cz * FACET_VERTS + cx];
     let (tl, tr) = (corner(ix, iz), corner(ix + 1, iz));
@@ -681,12 +712,12 @@ fn segments(cell: (usize, usize), heights: &[f32]) -> Vec<(Crossing, Crossing)> 
         along: Axis::Z,
     };
 
-    let case = u8::from(is_land(tl))
-        | u8::from(is_land(tr)) << 1
-        | u8::from(is_land(br)) << 2
-        | u8::from(is_land(bl)) << 3;
+    let case = u8::from(is_above(tl, level))
+        | u8::from(is_above(tr, level)) << 1
+        | u8::from(is_above(br, level)) << 2
+        | u8::from(is_above(bl, level)) << 3;
     // How a saddle is read: land through the middle, or sea through it.
-    let middle_is_land = is_land((tl + tr + bl + br) / 4.0);
+    let middle_is_land = is_above((tl + tr + bl + br) / 4.0, level);
 
     match case {
         0 | 15 => Vec::new(),
@@ -713,12 +744,36 @@ fn segments(cell: (usize, usize), heights: &[f32]) -> Vec<(Crossing, Crossing)> 
     }
 }
 
-/// Every run of waterline across one chunk's height grid, ready to be kept.
+/// What one walk of a chunk's height grid is worth keeping: the waterline, and
+/// the edge of the shallows outside it.
+///
+/// The two are held together because they are found together and go stale
+/// together — a chunk is surveyed once, and either both its lines are known or
+/// neither is.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Soundings {
+    /// Where the ground meets the sea. The line the chart is *about*: what the
+    /// islands are measured from, what the ticks hang off, what closes.
+    coast: Vec<Coast>,
+    /// Where the water reaches [`SHOAL_DEPTH`]. Drawn and nothing else — it
+    /// rings nothing, names nothing and closes nothing.
+    shoal: Vec<Coast>,
+}
+
+/// Both lines of one chunk's ground, ready to be kept.
+pub fn survey(heights: &[f32]) -> Soundings {
+    Soundings {
+        coast: contour(heights, 0.0),
+        shoal: contour(heights, SHOAL_DEPTH),
+    }
+}
+
+/// Every run of one level across one chunk's height grid.
 ///
 /// The whole survey: contour, chain, simplify, quantise. A chunk with no
 /// crossing in it — open water, or ground well inland — comes back empty, which
 /// is the common answer and costs one walk of the grid and nothing else.
-pub fn survey(heights: &[f32]) -> Vec<Coast> {
+fn contour(heights: &[f32], level: f32) -> Vec<Coast> {
     // Where each crossing leads, and what led to it. Both are functions rather
     // than fan-outs: an interior edge is shared by exactly two cells, and the
     // land-on-the-left convention makes it the end of one cell's segment and
@@ -730,7 +785,7 @@ pub fn survey(heights: &[f32]) -> Vec<Coast> {
     let mut starts: Vec<Crossing> = Vec::new();
     for iz in 0..FACET_QUADS {
         for ix in 0..FACET_QUADS {
-            for (from, to) in segments((ix, iz), heights) {
+            for (from, to) in segments((ix, iz), heights, level) {
                 next.insert(from, to);
                 previous.insert(to);
                 starts.push(from);
@@ -780,7 +835,7 @@ pub fn survey(heights: &[f32]) -> Vec<Coast> {
     }
 
     let build = |run: Vec<Crossing>, closed: bool| {
-        let points: Vec<Vec2> = run.iter().map(|c| c.at(heights)).collect();
+        let points: Vec<Vec2> = run.iter().map(|c| c.at(heights, level)).collect();
         if closed && spread(&points) < LEAST_ISLET {
             return None;
         }
@@ -972,6 +1027,19 @@ const GRATICULE_WEIGHT: f32 = 1.0;
 const TICK_SPACING: f32 = 9.0;
 const TICK_LENGTH: f32 = 4.5;
 
+/// The stipple along the edge of the shallows: how far apart the dots fall
+/// along the line, how big each is, and how far off the line they may scatter
+/// — all in pixels, for the reason the weights are.
+///
+/// Scattered rather than laid exactly on the line, because a shoal has no
+/// edge: the line is where the ground happens to pass three metres down, and a
+/// ruled dotted line would claim a precision the sounding does not have. A
+/// ragged band of dots says *shallow about here*, which is the truth, and it is
+/// also what an engraver's stipple looks like.
+const SHOAL_SPACING: f32 = 5.5;
+const SHOAL_DOT: f32 = 1.5;
+const SHOAL_SCATTER: f32 = 3.0;
+
 /// The hand the islands are named in: an italic cut of the Fell types, the
 /// letterforms of the seventeenth-century press — the nearest a flat sheet
 /// comes to the lettering on an engraved chart. Not the menus' serif, which
@@ -1084,6 +1152,25 @@ const ROSE_WEIGHT: f32 = 1.0;
 /// circle on the sheet — the corner rose's band — reads as round.
 const CIRCLE_FACETS: usize = 64;
 
+/// The sheet's edge, in pixels: how far in from the window the outer rule
+/// runs, how wide the graduated band inside it is, and how heavily both rules
+/// are ruled.
+///
+/// A neatline is the edge of the drawing, and a chart drawn to the window's
+/// own edge has none — the paper simply runs out wherever the player last
+/// dragged their mouse, which reads as a viewport rather than as a sheet. The
+/// band is what the engraving would carry a scale in; here it carries the
+/// ruling's own graduation, so the edge measures the same thing the paper is
+/// ruled by.
+const NEATLINE_INSET: f32 = 10.0;
+const NEATLINE_BAND: f32 = 7.0;
+const NEATLINE_WEIGHT: f32 = 1.2;
+
+/// How many graduations of the band go to one square of the ruling. Ten, so a
+/// square is five inked cells and five of paper — fine enough to read as a
+/// scale and coarse enough that the cells never close up into a grey rule.
+const NEATLINE_CELLS: f32 = 10.0;
+
 /// How much bigger than the window the drawn sheet is built, each way.
 ///
 /// The mesh is built for a window and the camera pans freely inside it, which
@@ -1161,6 +1248,9 @@ struct CornerRose;
 /// — a material per pan would be a new asset per pan.
 #[derive(Resource)]
 struct Inks {
+    /// Not an ink at all: the parchment, for the one drawing that covers
+    ///rather than marks — see [`sheet_edge`].
+    paper: Handle<ColorMaterial>,
     coast: Handle<ColorMaterial>,
     ruling: Handle<ColorMaterial>,
     /// The lit half of a rose's star, and the circles round it.
@@ -1221,6 +1311,7 @@ impl Plugin for ChartPlugin {
                     hold_the_sheet,
                     engrave,
                     rule_the_scale,
+                    rule_the_edge,
                     pin_the_rose,
                     mark_the_reader,
                 )
@@ -1308,6 +1399,7 @@ fn unroll(
     }
 
     let inks = Inks {
+        paper: materials.add(ColorMaterial::from_color(PAPER)),
         coast: materials.add(ColorMaterial::from_color(INK)),
         ruling: materials.add(ColorMaterial::from_color(INK_FAINT)),
         dim: materials.add(ColorMaterial::from_color(INK_DIM)),
@@ -1345,6 +1437,7 @@ fn unroll(
         DespawnOnExit(Helm::Chart),
     ));
 
+    sheet_edge(&mut commands, &mut meshes, &inks);
     corner_rose(&mut commands, &mut meshes, &inks);
     commands.insert_resource(inks);
     furniture(&mut commands, sheet);
@@ -1592,18 +1685,40 @@ fn engrave(
         }
     }
 
+    // The shallows under the shore, so a coast is never drawn through its own
+    // stipple.
+    let mut shallows = Strokes::default();
     let mut shore = Strokes::default();
-    for (chunk, coast) in chart.within(covered) {
-        let points: Vec<Vec2> = coast.points(chunk).map(on_the_sheet).collect();
-        shore.run(&points, coast.closed, paper(COAST_WEIGHT));
-        ticks(
-            &mut shore,
-            &points,
-            coast.closed,
-            paper(TICK_SPACING),
-            paper(TICK_LENGTH),
-            paper(TICK_WEIGHT),
-        );
+    for (chunk, found) in chart.within(covered) {
+        for (nth, bank) in found.shoal.iter().enumerate() {
+            let points: Vec<Vec2> = bank.points(chunk).map(on_the_sheet).collect();
+            stipple(
+                &mut shallows,
+                &points,
+                bank.closed,
+                scramble((chunk.x as u32) ^ (chunk.y as u32).rotate_left(16) ^ nth as u32),
+                (paper(SHOAL_SPACING), paper(SHOAL_DOT), paper(SHOAL_SCATTER)),
+            );
+        }
+        for coast in &found.coast {
+            let points: Vec<Vec2> = coast.points(chunk).map(on_the_sheet).collect();
+            shore.run(&points, coast.closed, paper(COAST_WEIGHT));
+            ticks(
+                &mut shore,
+                &points,
+                coast.closed,
+                paper(TICK_SPACING),
+                paper(TICK_LENGTH),
+                paper(TICK_WEIGHT),
+            );
+        }
+    }
+    if let Some(mesh) = shallows.mesh() {
+        let mesh = engraver.meshes.add(mesh);
+        let ink = engraver.inks.dim.clone();
+        engraver
+            .commands
+            .spawn(engraving("Chart shallows", mesh, ink, 0.9));
     }
     if let Some(mesh) = shore.mesh() {
         let mesh = engraver.meshes.add(mesh);
@@ -1960,6 +2075,23 @@ impl Strokes {
         }
     }
 
+    /// A filled rectangle — the one thing here that is not a stroke, and only
+    /// ever used for a solid block: the neatline's graduations, and the paper
+    /// laid over the engraving outside it.
+    fn quad(&mut self, rect: Rect) {
+        let (nw, se) = (
+            Vec2::new(rect.min.x, rect.max.y),
+            Vec2::new(rect.max.x, rect.min.y),
+        );
+        self.triangle(rect.min, se, rect.max);
+        self.triangle(rect.min, rect.max, nw);
+    }
+
+    /// One dot of a stipple.
+    fn dot(&mut self, at: Vec2, size: f32) {
+        self.quad(Rect::from_center_size(at, Vec2::splat(size)));
+    }
+
     /// One straight stroke of the given width.
     fn segment(&mut self, from: Vec2, to: Vec2, width: f32) {
         let along = to - from;
@@ -1996,26 +2128,30 @@ impl Strokes {
 
     /// The mesh, or `None` where nothing was drawn.
     fn mesh(self) -> Option<Mesh> {
-        (!self.positions.is_empty()).then(|| {
-            Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::default(),
-            )
-            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
-        })
+        let drawn = !self.positions.is_empty();
+        drawn.then(move || self.drawn())
+    }
+
+    /// The mesh whether anything was drawn or not — for the layers that are
+    /// always on the sheet and have their mesh written over in place rather
+    /// than being respawned.
+    fn drawn(self) -> Mesh {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
     }
 }
 
-/// The landward ticks along a shore.
+/// Walks a line at an even pace, handing back each footfall and the direction
+/// of travel there.
 ///
-/// Laid at an even spacing measured *along the line* rather than one per point,
-/// so the hatching reads as an even comb whatever the survey happened to leave:
-/// a run simplified down to four points would otherwise wear four ticks spread
-/// across a kilometre.
-///
-/// Which way they hang is the survey's business and not this function's — the
-/// runs arrive with land on the left, so left is where the ticks go.
-fn ticks(out: &mut Strokes, points: &[Vec2], closed: bool, spacing: f32, length: f32, width: f32) {
+/// Measured *along the line* rather than one step per point, which is what
+/// keeps the shore's ticks an even comb and the shoal's stipple an even scatter
+/// whatever the survey happened to leave: a run simplified down to four points
+/// would otherwise wear four ticks spread across a kilometre.
+fn paced(points: &[Vec2], closed: bool, spacing: f32, mut footfall: impl FnMut(Vec2, Vec2)) {
     if points.len() < 2 || spacing <= 0.0 {
         return;
     }
@@ -2037,16 +2173,57 @@ fn ticks(out: &mut Strokes, points: &[Vec2], closed: bool, spacing: f32, length:
             continue;
         }
         let forward = step / run;
-        // The sheet's y climbs, so the left hand of a heading is its
-        // anticlockwise quarter turn — which is what `perp` gives.
-        let inland = forward.perp();
         while walked < run {
-            let foot = pair[0] + forward * walked;
-            out.segment(foot, foot + inland * length, width);
+            footfall(pair[0] + forward * walked, forward);
             walked += spacing;
         }
         walked -= run;
     }
+}
+
+/// The landward ticks along a shore.
+///
+/// Which way they hang is the survey's business and not this function's — the
+/// runs arrive with land on the left, so left is where the ticks go. The
+/// sheet's y climbs, so the left hand of a heading is its anticlockwise quarter
+/// turn, which is what `perp` gives.
+fn ticks(out: &mut Strokes, points: &[Vec2], closed: bool, spacing: f32, length: f32, width: f32) {
+    paced(points, closed, spacing, |foot, forward| {
+        out.segment(foot, foot + forward.perp() * length, width);
+    });
+}
+
+/// The stipple along the edge of the shallows.
+///
+/// Dots rather than a line, scattered across the line rather than laid on it —
+/// see [`SHOAL_SCATTER`] for why a shoal is not entitled to a ruled edge. The
+/// scatter is a hash of the dot's number and the run it belongs to, so a
+/// stretch of bank is stippled the same way every time the sheet is rebuilt;
+/// a stipple that reshuffled on a pan would read as the paper crawling.
+fn stipple(
+    out: &mut Strokes,
+    points: &[Vec2],
+    closed: bool,
+    seed: u32,
+    (spacing, size, scatter): (f32, f32, f32),
+) {
+    let mut nth = 0u32;
+    paced(points, closed, spacing, |foot, forward| {
+        nth += 1;
+        let off = scramble(seed.wrapping_add(nth.wrapping_mul(0x85EB_CA6B)));
+        let off = (off >> 16) as f32 / u16::MAX as f32 - 0.5;
+        out.dot(foot + forward.perp() * scatter * off, size);
+    });
+}
+
+/// A small integer hash, for the handful of places here that want a number
+/// that is the same every time but looks like it isn't: the roses' nudge off
+/// their lattice, and the scatter of a stipple.
+fn scramble(of: u32) -> u32 {
+    let mut hash = of.wrapping_mul(0x9E37_79B9);
+    hash ^= hash >> 15;
+    hash = hash.wrapping_mul(0x2545_F491);
+    hash ^ (hash >> 13)
 }
 
 /// The ruled grid under everything, at whichever round spacing falls far enough
@@ -2207,12 +2384,8 @@ fn rhumb_roses(on_paper: Rect, spacing: f32) -> Vec<Vec2> {
 /// worse than a lattice. This way a rose belongs to its patch of sea, and a
 /// stretch of water can be recognised by the net over it.
 fn rose_nudge(square: IVec2) -> Vec2 {
-    let mut hash = (square.x as u32)
-        .wrapping_mul(0x9E37_79B9)
-        .wrapping_add((square.y as u32).wrapping_mul(0x85EB_CA6B));
-    hash ^= hash >> 15;
-    hash = hash.wrapping_mul(0x2545_F491);
-    hash ^= hash >> 13;
+    let hash =
+        scramble((square.x as u32).wrapping_add((square.y as u32).wrapping_mul(0x85EB_CA6B)));
     let spread = |bits: u32| (bits as f32 / u16::MAX as f32 - 0.5) * 2.0 * RHUMB_NUDGE;
     Vec2::new(spread(hash >> 16), spread(hash & 0xFFFF))
 }
@@ -2325,8 +2498,10 @@ fn distance_label(metres: f32) -> String {
 // The furniture
 // ---------------------------------------------------------------------------
 
-/// How far the instruments sit in from their corners.
-const FURNITURE_MARGIN: f32 = 16.0;
+/// How far the instruments sit in from the window — measured clear of the
+/// sheet's edge rather than from the window itself, so a rose and a scale bar
+/// stand *on the paper* rather than on the neatline drawn round it.
+const FURNITURE_MARGIN: f32 = NEATLINE_INSET + NEATLINE_BAND + 14.0;
 
 /// The bar in the sheet's corner that says how far a distance reaches across
 /// the paper.
@@ -2511,6 +2686,157 @@ fn rose_corner(view: &ChartView, size: Vec2) -> Vec2 {
     on_the_sheet(view.centre) + corner * view.metres_per_pixel
 }
 
+/// The two rules of the sheet's edge and the graduations between them, and the
+/// paper that hides the engraving outside them.
+#[derive(Component)]
+struct SheetEdge;
+#[derive(Component)]
+struct SheetMask;
+
+/// The sheet's edge: a double rule just inside the window with the ruling's own
+/// graduations laid between the two lines, and the engraving outside it covered
+/// over.
+///
+/// Both are one entity apiece with their mesh written over in place, because
+/// this is the one drawing on the sheet that changes every time the view moves
+/// at all. The engraving can be built for a window and panned about inside it —
+/// that is what makes dragging free — but the edge is *at* the window, so it
+/// has to be re-ruled whenever the paper slides under it. It is a hundred-odd
+/// triangles; respawning an entity and leaking a mesh asset per frame of a
+/// drag is what writing in place avoids.
+fn sheet_edge(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) {
+    let layer = |name: &'static str, ink: Handle<ColorMaterial>, z: f32, mesh: Handle<Mesh>| {
+        (
+            Name::new(name),
+            ChartSheet,
+            Mesh2d(mesh),
+            MeshMaterial2d(ink),
+            Transform::from_xyz(0.0, 0.0, z),
+            DespawnOnExit(Helm::Chart),
+        )
+    };
+    let mut blank = || meshes.add(Strokes::default().drawn());
+    let (mask, rules) = (blank(), blank());
+    commands.spawn((
+        SheetMask,
+        layer("Chart edge, masked", inks.paper.clone(), 2.4, mask),
+    ));
+    commands.spawn((
+        SheetEdge,
+        layer("Chart edge", inks.coast.clone(), 2.5, rules),
+    ));
+}
+
+/// Draws the edge for the window the sheet is showing.
+///
+/// `window` arrives already on the paper. The mask goes on first and covers
+/// everything outside the inner rule — the engraving is built half a window
+/// wider than the view (see [`SHEET_MARGIN`]), so without it a coast would run
+/// out past the neatline and the sheet would have no edge at all, only a line
+/// drawn across it.
+fn neatline(edge: &mut Strokes, mask: &mut Strokes, window: Rect, cell: f32, on_paper: f32) {
+    let outer = window.inflate(-NEATLINE_INSET * on_paper);
+    let inner = outer.inflate(-NEATLINE_BAND * on_paper);
+    if inner.is_empty() {
+        return;
+    }
+
+    // Four strips: the top and bottom run the window's whole width and take the
+    // corners with them, and the sides fill in between.
+    let (low, high) = (window.min, window.max);
+    for strip in [
+        Rect::new(low.x, inner.max.y, high.x, high.y),
+        Rect::new(low.x, low.y, high.x, inner.min.y),
+        Rect::new(low.x, inner.min.y, inner.min.x, inner.max.y),
+        Rect::new(inner.max.x, inner.min.y, high.x, inner.max.y),
+    ] {
+        mask.quad(strip);
+    }
+
+    let weight = NEATLINE_WEIGHT * on_paper;
+    for rect in [outer, inner] {
+        let corners = [
+            rect.min,
+            Vec2::new(rect.max.x, rect.min.y),
+            rect.max,
+            Vec2::new(rect.min.x, rect.max.y),
+        ];
+        edge.run(&corners, true, weight);
+    }
+
+    // The graduations, counted off the paper's own lattice rather than off the
+    // window, so they hold still as the sheet is dragged under them and the
+    // cells of the top edge stand over the cells of the bottom.
+    let inked = |at: f32| ((at / cell).floor() as i64).rem_euclid(2) == 0;
+    let first = |at: f32| (at / cell).floor() * cell;
+
+    let mut x = first(outer.min.x);
+    while x < outer.max.x {
+        if inked(x + cell / 2.0) {
+            let (from, to) = (x.max(outer.min.x), (x + cell).min(outer.max.x));
+            edge.quad(Rect::new(from, outer.min.y, to, inner.min.y));
+            edge.quad(Rect::new(from, inner.max.y, to, outer.max.y));
+        }
+        x += cell;
+    }
+    // The sides run between the inner rule's corners, leaving the corners
+    // themselves to the top and bottom — which is what stops a corner cell
+    // being inked twice over and reading heavier than the rest.
+    let mut y = first(inner.min.y);
+    while y < inner.max.y {
+        if inked(y + cell / 2.0) {
+            let (from, to) = (y.max(inner.min.y), (y + cell).min(inner.max.y));
+            edge.quad(Rect::new(outer.min.x, from, inner.min.x, to));
+            edge.quad(Rect::new(inner.max.x, from, outer.max.x, to));
+        }
+        y += cell;
+    }
+}
+
+/// Re-rules the sheet's edge for wherever the window has got to.
+fn rule_the_edge(
+    view: Res<ChartView>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut ruled: Local<Option<Vec2>>,
+    sheet: Query<&Camera, With<ChartSheet>>,
+    edges: Query<&Mesh2d, With<SheetEdge>>,
+    masks: Query<&Mesh2d, With<SheetMask>>,
+) {
+    let Some(size) = sheet
+        .single()
+        .ok()
+        .and_then(|camera| camera.logical_viewport_size())
+    else {
+        return;
+    };
+    // Nothing to write into yet, or nothing left: forgetting what was ruled is
+    // what makes the sheet's *next* opening draw its edge. The meshes are new
+    // and blank each time the chart is unrolled, and the view need not have
+    // changed since it was last put down.
+    let (Ok(rules), Ok(cover)) = (edges.single(), masks.single()) else {
+        *ruled = None;
+        return;
+    };
+    // The window is what this is drawn for, so a resize is as much a reason to
+    // re-rule as a pan is.
+    if !view.is_changed() && *ruled == Some(size) {
+        return;
+    }
+    *ruled = Some(size);
+
+    let showing = window(&view, size);
+    let on_paper = Rect::from_corners(on_the_sheet(showing.min), on_the_sheet(showing.max));
+    let cell = round_distance(GRATICULE_GAP * view.metres_per_pixel) / NEATLINE_CELLS;
+    let (mut edge, mut mask) = (Strokes::default(), Strokes::default());
+    neatline(&mut edge, &mut mask, on_paper, cell, view.metres_per_pixel);
+
+    for (drawn, strokes) in [(rules, edge), (cover, mask)] {
+        if let Some(mut slot) = meshes.get_mut(&drawn.0) {
+            *slot = strokes.drawn();
+        }
+    }
+}
+
 /// The bar of the scale, and its label.
 #[derive(Component)]
 struct ScaleRule;
@@ -2564,18 +2890,24 @@ mod tests {
         vec![height; FACET_VERTS * FACET_VERTS]
     }
 
+    /// The waterline alone, for the tests that are about the contour walk
+    /// rather than about what a chunk is worth keeping.
+    fn waterline(heights: &[f32]) -> Vec<Coast> {
+        contour(heights, 0.0)
+    }
+
     #[test]
     fn open_water_and_open_country_hold_no_coast() {
         // The common answers, and the ones that have to cost nothing: a chunk
         // with no waterline crossing it holds no coast at all, whichever side
         // of the waterline it is on.
-        assert!(survey(&all(-8.0)).is_empty());
-        assert!(survey(&all(40.0)).is_empty());
+        assert!(waterline(&all(-8.0)).is_empty());
+        assert!(waterline(&all(40.0)).is_empty());
     }
 
     #[test]
     fn a_shore_is_found_where_the_ground_meets_the_sea() {
-        let runs = survey(&a_north_shore(50.0));
+        let runs = waterline(&a_north_shore(50.0));
         assert_eq!(runs.len(), 1, "one shore, one run");
         assert!(!runs[0].closed, "a shore crossing the chunk does not close");
 
@@ -2592,7 +2924,7 @@ mod tests {
         // The storage argument in one assertion: a chunk's waterline is
         // sixty-four cells of contour, and what is kept of a straight one is
         // its two ends.
-        let runs = survey(&a_north_shore(50.0));
+        let runs = waterline(&a_north_shore(50.0));
         assert!(
             runs[0].marks.len() <= 4,
             "a straight shore kept {} points",
@@ -2605,7 +2937,7 @@ mod tests {
         // What lets two chunks' strokes meet: an open run starts and ends
         // exactly on the chunk's boundary, so the neighbour's own run begins
         // where this one stopped.
-        let runs = survey(&a_north_shore(50.0));
+        let runs = waterline(&a_north_shore(50.0));
         let marks = &runs[0].marks;
         for end in [marks[0], marks[marks.len() - 1]] {
             assert!(
@@ -2620,7 +2952,7 @@ mod tests {
         // The convention the shore ticks hang off. This shore has land to the
         // north — falling z — so a walk with land on its left hand runs east,
         // in the direction of rising x.
-        let runs = survey(&a_north_shore(50.0));
+        let runs = waterline(&a_north_shore(50.0));
         let marks = &runs[0].marks;
         assert!(
             marks[marks.len() - 1].x > marks[0].x,
@@ -2648,7 +2980,7 @@ mod tests {
         // A cone in the middle of the chunk: its waterline is a ring that
         // never reaches an edge, which is the one case a run has to close.
         let middle = Vec2::splat(CHUNK_METRES / 2.0);
-        let runs = survey(&a_cone(IVec2::ZERO, middle, 30.0));
+        let runs = waterline(&a_cone(IVec2::ZERO, middle, 30.0));
         assert_eq!(runs.len(), 1);
         assert!(runs[0].closed, "an islet's shore has to close");
         for point in runs[0].points(IVec2::ZERO) {
@@ -2665,8 +2997,8 @@ mod tests {
         // it. The same shore surveyed in two chunks side by side has to leave
         // the first exactly where it enters the second.
         let heights = a_north_shore(50.0);
-        let west = survey(&heights);
-        let east = survey(&heights);
+        let west = waterline(&heights);
+        let east = waterline(&heights);
 
         let leaving = west[0].points(IVec2::ZERO).last().expect("an end");
         let arriving = east[0].points(IVec2::new(1, 0)).next().expect("a start");
@@ -2840,7 +3172,12 @@ mod tests {
         chart.record(IVec2::new(60, 0), runs);
 
         let near = Rect::from_corners(Vec2::new(-100.0, -100.0), Vec2::new(200.0, 200.0));
-        assert_eq!(chart.within(near).count(), 1);
+        let drawn: usize = chart
+            .within(near)
+            .map(|(_, found)| found.coast.len() + found.shoal.len())
+            .sum();
+        assert_eq!(chart.within(near).count(), 1, "one chunk of paper");
+        assert!(drawn > 0 && drawn < 4, "{drawn} runs from one chunk");
     }
 
     #[test]
@@ -3308,7 +3645,7 @@ mod tests {
         let mut app = keyed_app();
         app.world_mut()
             .resource_mut::<Chart>()
-            .record(IVec2::ZERO, Vec::new());
+            .record(IVec2::ZERO, Soundings::default());
         assert!(app.world().resource::<Chart>().surveyed(IVec2::ZERO));
 
         app.world_mut()
@@ -3507,6 +3844,166 @@ mod tests {
             .map(|point| Vec2::new(point[0], point[1]).length())
             .fold(f32::MIN, f32::max);
         assert!((reach - 40.0).abs() < 1e-3, "the star reached {reach}");
+    }
+
+    #[test]
+    fn a_survey_keeps_the_waterline_and_the_shoal_outside_it() {
+        // A cone standing out of the water: the waterline rings it, and the
+        // shoal line rings that — wider, because the ground goes on shelving
+        // down after it has left the air.
+        let middle = Vec2::splat(CHUNK_METRES / 2.0);
+        let found = survey(&a_cone(IVec2::ZERO, middle, 30.0));
+        assert_eq!(found.coast.len(), 1, "one shore");
+        assert_eq!(found.shoal.len(), 1, "one bank");
+
+        let reach = |runs: &[Coast]| {
+            runs[0]
+                .points(IVec2::ZERO)
+                .map(|point| point.distance(middle))
+                .fold(f32::MIN, f32::max)
+        };
+        assert!(
+            reach(&found.shoal) > reach(&found.coast) + 1.0,
+            "the shoal line at {} did not stand outside the shore at {}",
+            reach(&found.shoal),
+            reach(&found.coast)
+        );
+
+        // Ground that never gets near the waterline has neither line on it,
+        // which is what keeps the second one affordable — see the module docs.
+        assert_eq!(survey(&all(-80.0)), Soundings::default());
+        assert_eq!(survey(&all(40.0)), Soundings::default());
+    }
+
+    #[test]
+    fn the_shoal_line_is_drawn_and_nothing_else() {
+        // It rings nothing and closes nothing: an island is still the
+        // waterline's business, and a bank around one adds no coastline to
+        // the tally and no second island to name.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+        chart.record(
+            IVec2::new(1, 0),
+            survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
+        );
+
+        assert_eq!(chart.islands().len(), 1);
+        assert_eq!(chart.tally().complete, 1);
+        assert!(
+            chart
+                .within(Rect::from_corners(Vec2::ZERO, Vec2::splat(CHUNK_METRES)))
+                .any(|(_, found)| !found.shoal.is_empty()),
+            "the bank was surveyed but never kept"
+        );
+    }
+
+    #[test]
+    fn a_stipple_scatters_the_same_way_every_time() {
+        // The engraving is rebuilt whenever the view leaves the window it was
+        // drawn for. A stipple that reshuffled on a pan would read as the
+        // paper crawling, so the scatter is a hash and not a random number.
+        let line: Vec<Vec2> = (0..40).map(|at| Vec2::new(at as f32 * 4.0, 0.0)).collect();
+        let stippled = |seed| {
+            let mut out = Strokes::default();
+            stipple(&mut out, &line, false, seed, (5.0, 1.5, 3.0));
+            out.positions
+        };
+        assert_eq!(stippled(7), stippled(7));
+        assert_ne!(stippled(7), stippled(8), "every run stippled alike");
+
+        // And it stays a band along the line rather than wandering off it.
+        let dots = stippled(7);
+        assert!(!dots.is_empty());
+        for dot in &dots {
+            assert!(
+                dot[1].abs() <= 3.0 / 2.0 + 1.5,
+                "a dot strayed {} from the line",
+                dot[1]
+            );
+        }
+    }
+
+    #[test]
+    fn the_edge_is_ruled_inside_the_window_and_covers_what_is_outside() {
+        let window = Rect::from_corners(Vec2::new(-600.0, -400.0), Vec2::new(600.0, 400.0));
+        let (mut edge, mut mask) = (Strokes::default(), Strokes::default());
+        neatline(&mut edge, &mut mask, window, 25.0, 1.0);
+
+        // Nothing is drawn outside the window — the edge is furniture at the
+        // window, not another thing hanging off the paper.
+        for drawn in edge.positions.iter().chain(mask.positions.iter()) {
+            let at = Vec2::new(drawn[0], drawn[1]);
+            assert!(
+                window.inflate(1.0).contains(at),
+                "{at:?} was drawn outside the window"
+            );
+        }
+
+        // And every scrap of window outside the inner rule is covered, all the
+        // way round. The engraving is built half a window wider than the view,
+        // so anywhere the mask misses is somewhere a coast can run out past the
+        // neatline — the sides are the easy ones to leave out.
+        let inner = window.inflate(-(NEATLINE_INSET + NEATLINE_BAND));
+        for edge in [0.5, 12.0, 16.5] {
+            for at in [
+                Vec2::new(window.min.x + edge, 0.0),
+                Vec2::new(window.max.x - edge, 0.0),
+                Vec2::new(0.0, window.min.y + edge),
+                Vec2::new(0.0, window.max.y - edge),
+                window.min + edge,
+                window.max - edge,
+            ] {
+                assert!(!inner.contains(at), "{at:?} is inside the drawing");
+                assert!(masked(&mask, at), "{at:?} was left uncovered");
+            }
+        }
+        // What is inside the rule is emphatically not covered.
+        assert!(!masked(&mask, Vec2::ZERO));
+    }
+
+    /// Whether a point falls under any quad of a mask.
+    fn masked(mask: &Strokes, at: Vec2) -> bool {
+        mask.positions.chunks(6).any(|quad| {
+            let corner = |pick: fn(Vec2, Vec2) -> Vec2, start| {
+                quad.iter()
+                    .map(|point| Vec2::new(point[0], point[1]))
+                    .fold(start, pick)
+            };
+            Rect::from_corners(
+                corner(Vec2::min, Vec2::splat(f32::INFINITY)),
+                corner(Vec2::max, Vec2::splat(f32::NEG_INFINITY)),
+            )
+            .contains(at)
+        })
+    }
+
+    #[test]
+    fn the_graduations_hold_still_as_the_sheet_is_dragged() {
+        // They are counted off the paper's own lattice, so dragging the sheet
+        // by a whole cell draws the very same ladder one cell along — which is
+        // what makes the edge read as a rule laid on the paper rather than as
+        // a pattern painted on the glass.
+        let cell = 25.0;
+        let window = Rect::from_corners(Vec2::new(-600.0, -400.0), Vec2::new(600.0, 400.0));
+        let ruled = |shift: f32| {
+            let moved = Rect::from_corners(
+                window.min + Vec2::new(shift, 0.0),
+                window.max + Vec2::new(shift, 0.0),
+            );
+            let (mut edge, mut mask) = (Strokes::default(), Strokes::default());
+            neatline(&mut edge, &mut mask, moved, cell, 1.0);
+            edge.positions
+        };
+        let here = ruled(0.0);
+        let along = ruled(cell * 2.0);
+        assert_eq!(here.len(), along.len());
+        for (a, b) in here.iter().zip(&along) {
+            assert!(
+                (b[0] - a[0] - cell * 2.0).abs() < 1e-3 && (b[1] - a[1]).abs() < 1e-3,
+                "the ladder drew differently two cells along"
+            );
+        }
     }
 
     #[test]
