@@ -38,7 +38,7 @@ pub use ground::{ChunkPayload, Shade, Surface, Tone};
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
 /// and hangs up — which is the whole of version negotiation.
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 
 /// How long one turn of the world's day takes, in seconds — sunrise to
 /// sunrise, ten minutes of it.
@@ -121,6 +121,45 @@ impl std::fmt::Display for PlayerId {
     }
 }
 
+/// A world, as distinct from a seed: minted at random when a world is first
+/// made, and carried by it for life — through saves, rehosts and changes of
+/// address. Two worlds grown from one seed are two worlds with two histories,
+/// and this is the fact that tells them apart.
+///
+/// It crosses the wire when the seed never does because a client needs to
+/// know *which world this is* without being told how to make it: what a
+/// client keeps of a world — its chart, its token — has to be keyed on
+/// something, and the server's address cannot be it, since a world moved to
+/// another host is meant to still be the same world.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WorldId(pub u64);
+
+/// Spelled as sixteen hex digits — the form a client's files for a world are
+/// named in, chosen because it is fixed-width and legal in a filename on
+/// every platform.
+impl std::fmt::Display for WorldId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+impl std::str::FromStr for WorldId {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        u64::from_str_radix(s, 16).map(Self)
+    }
+}
+
+/// One player's standing in one world: dealt by the server on a first visit
+/// (see [`ToClient::Welcome`]), presented on the next (see
+/// [`ToServer::Papers`]), and the whole of how a returning player is known.
+/// There are no accounts; holding the token *is* being that player, to that
+/// world. A secret between one client's files and one world's, so it has no
+/// `Display` — nothing anywhere should be printing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Token(pub u64);
+
 /// A beast, as the server counts them: dealt out as players are — in order of
 /// appearance, never reused within a session, meaningless across sessions.
 ///
@@ -189,7 +228,24 @@ impl BeastKind {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToServer {
     /// The first message on any connection, and never sent again.
+    ///
+    /// A server that speaks this version answers with which world this is
+    /// ([`ToClient::World`]), waits for the client's [`ToServer::Papers`],
+    /// and only then grants the session — so the handshake is four words
+    /// long, two in each direction, and ends with [`ToClient::Welcome`].
     Hello { version: u16 },
+    /// The client's papers for this world, shown once the server has said
+    /// which world it is: the token dealt on an earlier visit, or nothing,
+    /// which is what being new here looks like.
+    ///
+    /// Always the second thing a client says, and the server waits for it
+    /// before any welcome — a returning player re-enters as themselves,
+    /// where they left off, rather than as a stranger on the spawn. A token
+    /// the server does not recognise is not an offence, just a stranger
+    /// after all: the world's memory and the client's can part ways
+    /// honestly, a world file lost or the world rebuilt, and the join
+    /// simply starts them afresh.
+    Papers { token: Option<Token> },
     /// Where the player now is.
     Move { position: Vec2 },
     /// Ground, please — one chunk of it, named by its coordinate on the world
@@ -232,22 +288,38 @@ pub enum ToServer {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToClient {
     /// The session, granted: who the client is, where the world is entered,
-    /// and which way to look when it opens.
+    /// which way to look when it opens, and the token this player holds the
+    /// world by.
     ///
     /// The seed is not here, and that is the point — a client has no use for
     /// one, having nothing to generate. `facing` is a ground point the view
     /// opens towards, so that a player arrives looking at the island they
     /// were put down beside rather than out to sea; a server with nothing in
     /// particular to look at sends the spawn itself, which names no direction.
+    /// For a returning player (see [`ToServer::Papers`]) the spawn is not the
+    /// world's but their own — wherever the world last saw them.
+    ///
+    /// `token` is the presented one if the server recognised it, and a fresh
+    /// one dealt on the spot if not. A client keeps whatever arrives here,
+    /// filed under the world's id: it is the name the next visit will be
+    /// known by.
     Welcome {
         id: PlayerId,
         spawn: Vec2,
         facing: Vec2,
+        token: Token,
     },
     /// The version the server speaks, sent instead of a welcome when the
     /// client's is not it. The connection closes after.
     Refused {
         version: u16,
+    },
+    /// Which world this is — the answer to a hello, and the question the
+    /// papers answer. Sent before the welcome, not with it, because it is
+    /// what the client needs in order to say who it is here: its token for
+    /// this world, if it holds one, is filed under this id.
+    World {
+        id: WorldId,
     },
     /// Someone is in the world: sent once for each player already present
     /// when a client joins, and to everyone else when one arrives.
@@ -401,6 +473,18 @@ impl ToServer {
                 payload.push(4);
                 put_str(&mut payload, line);
             }
+            Self::Papers { token } => {
+                payload.push(5);
+                // A flag byte rather than a reserved value, because every
+                // u64 is a token somebody could legitimately hold.
+                match token {
+                    None => payload.push(0),
+                    Some(token) => {
+                        payload.push(1);
+                        put_u64(&mut payload, token.0);
+                    }
+                }
+            }
         }
         write_frame(to, &payload, MAX_CLIENT_FRAME)
     }
@@ -423,6 +507,13 @@ impl ToServer {
             4 => Self::Command {
                 line: payload.str()?,
             },
+            5 => Self::Papers {
+                token: match payload.u8()? {
+                    0 => None,
+                    1 => Some(Token(payload.u64()?)),
+                    flag => return Err(corrupt(format!("papers flagged {flag}"))),
+                },
+            },
             tag => return Err(corrupt(format!("unknown client message tag {tag}"))),
         };
         payload.finish()?;
@@ -435,15 +526,25 @@ impl ToClient {
     pub fn write(&self, to: &mut impl Write) -> io::Result<()> {
         let mut payload = Vec::new();
         match self {
-            Self::Welcome { id, spawn, facing } => {
+            Self::Welcome {
+                id,
+                spawn,
+                facing,
+                token,
+            } => {
                 payload.push(0);
                 put_u32(&mut payload, id.0);
                 put_vec2(&mut payload, *spawn);
                 put_vec2(&mut payload, *facing);
+                put_u64(&mut payload, token.0);
             }
             Self::Refused { version } => {
                 payload.push(1);
                 put_u16(&mut payload, *version);
+            }
+            Self::World { id } => {
+                payload.push(12);
+                put_u64(&mut payload, id.0);
             }
             Self::Joined { id, position } => {
                 payload.push(2);
@@ -531,6 +632,7 @@ impl ToClient {
                 id: PlayerId(payload.u32()?),
                 spawn: payload.vec2()?,
                 facing: payload.vec2()?,
+                token: Token(payload.u64()?),
             },
             1 => Self::Refused {
                 version: payload.u16()?,
@@ -587,6 +689,9 @@ impl ToClient {
                     .map(|_| payload.str())
                     .collect::<io::Result<_>>()?,
             },
+            12 => Self::World {
+                id: WorldId(payload.u64()?),
+            },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
         payload.finish()?;
@@ -642,6 +747,10 @@ fn put_u16(out: &mut Vec<u8>, value: u16) {
 }
 
 fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -706,6 +815,12 @@ impl<'a> Payload<'a> {
     fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_le_bytes(
             self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
         ))
     }
 
@@ -828,6 +943,10 @@ mod tests {
             ToServer::Command {
                 line: "spawn shark".to_string(),
             },
+            ToServer::Papers { token: None },
+            ToServer::Papers {
+                token: Some(Token(0x0102_0304_0506_0708)),
+            },
         ] {
             let bytes = bytes_of_client(&message);
             assert_eq!(ToServer::read(&mut bytes.as_slice()).unwrap(), message);
@@ -838,8 +957,12 @@ mod tests {
                 id: PlayerId(3),
                 spawn: at,
                 facing: Vec2::new(-1.0, 2.0),
+                token: Token(0x0102_0304_0506_0708),
             },
             ToClient::Refused { version: 9 },
+            ToClient::World {
+                id: WorldId(0x0807_0605_0403_0201),
+            },
             ToClient::Joined {
                 id: PlayerId(1),
                 position: at,
@@ -958,21 +1081,49 @@ mod tests {
                 0x68, 0x69, // "hi", as the UTF-8 it already was
             ],
         );
+        assert_eq!(
+            bytes_of_client(&ToServer::Papers { token: None }),
+            [2, 0, 5, 0],
+            "empty papers: length 2, tag 5, and the flag saying so"
+        );
+        assert_eq!(
+            bytes_of_client(&ToServer::Papers {
+                token: Some(Token(0x0102_0304_0506_0708)),
+            }),
+            [
+                10, 0, // length
+                5, // tag
+                1, // a token follows
+                8, 7, 6, 5, 4, 3, 2, 1, // the token, LE
+            ],
+        );
 
         assert_eq!(
             bytes_of_server(&ToClient::Welcome {
                 id: PlayerId(7),
                 spawn: Vec2::new(1.5, -2.0),
                 facing: Vec2::new(-2.0, 1.5),
+                token: Token(0x0102_0304_0506_0708),
             }),
             [
-                21, 0, // length
+                29, 0, // length
                 0, // tag
                 7, 0, 0, 0, // id
                 0, 0, 0xC0, 0x3F, // spawn x = 1.5
                 0, 0, 0, 0xC0, // spawn z = -2.0
                 0, 0, 0, 0xC0, // facing x = -2.0 — the spawn's axes swapped,
                 0, 0, 0xC0, 0x3F, // facing z = 1.5, so a confused pair shows
+                8, 7, 6, 5, 4, 3, 2, 1, // the token dealt, LE
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::World {
+                id: WorldId(0x0807_0605_0403_0201),
+            }),
+            [
+                9, 0,  // length
+                12, // tag
+                1, 2, 3, 4, 5, 6, 7, 8, // the id, LE
             ],
         );
         assert_eq!(
@@ -1348,6 +1499,10 @@ mod tests {
         let mut unknown_beast = vec![22, 0, 8, 7, 0, 0, 0, 200];
         unknown_beast.extend([0; 16]);
         assert!(ToClient::read(&mut unknown_beast.as_slice()).is_err());
+
+        // Papers whose flag byte is neither kind of answer.
+        let bad_papers = [10, 0, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(ToServer::read(&mut bad_papers.as_slice()).is_err());
 
         // A chunk whose flag byte is none of the three kinds of answer.
         let mut bad_flag = vec![10, 0, 5];

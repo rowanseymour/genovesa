@@ -1021,7 +1021,8 @@ mod tests {
         // hours, a boat lying still in it, and the key held down. The client
         // asks, the server runs its clock, and this machine's own sky follows
         // it out of the night.
-        let session = Session::open(WorldConfig { seed: 5 }, Reach::Alone, 0.19)
+        crate::testing::quarantine_data_dir();
+        let session = Session::open(WorldConfig { seed: 5 }, Reach::Alone, 0.19, false)
             .expect("a world to lie at anchor in");
         let mut app = sky_app();
         app.add_plugins(crate::net::NetPlugin);

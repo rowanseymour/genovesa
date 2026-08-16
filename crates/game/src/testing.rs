@@ -36,6 +36,20 @@ use crate::{AppState, Helm};
 /// frame and the tests get the ramp a player would.
 pub const FRAME: Duration = Duration::from_millis(16);
 
+/// Points `GENOVESA_DATA` at a directory of this test process's own, once,
+/// so nothing a test keeps — a world file, a logbook — lands among the
+/// player's real ones. Called by every test helper whose app could reach
+/// the data directory; idempotent, and the directory is shared by the whole
+/// process, exactly as the real one would be.
+pub fn quarantine_data_dir() {
+    use std::sync::OnceLock;
+    static QUARANTINE: OnceLock<std::path::PathBuf> = OnceLock::new();
+    let dir = QUARANTINE.get_or_init(|| {
+        std::env::temp_dir().join(format!("genovesa-test-data-{}", std::process::id()))
+    });
+    std::env::set_var("GENOVESA_DATA", dir);
+}
+
 /// A headless app already in a match, with the boat and player systems
 /// running — the world as the movement tests know it, shared here because
 /// the boat's tests and the player's want exactly the same one.
@@ -52,6 +66,15 @@ pub const FRAME: Duration = Duration::from_millis(16);
 /// render app to read a glTF with — and the figure's own tests stand a
 /// stand-in clip up in their place.
 pub fn world_app() -> App {
+    let mut app = world_app_ashore_of_entry();
+    enter_world(&mut app);
+    app
+}
+
+/// The same app, stopped one step short of entering the world — for the
+/// tests that have to put something in place first, the way a real run
+/// inserts the logbook before the match opens. Finish with [`enter_world`].
+pub fn world_app_ashore_of_entry() -> App {
     let mut app = App::new();
     app.add_plugins((
         TaskPoolPlugin::default(),
@@ -75,11 +98,15 @@ pub fn world_app() -> App {
     .init_asset::<bevy::world_serialization::WorldAsset>()
     .init_resource::<Assets<StandardMaterial>>();
     app.update();
+    app
+}
+
+/// Crosses into the world — see [`world_app_ashore_of_entry`].
+pub fn enter_world(app: &mut App) {
     app.world_mut()
         .resource_mut::<NextState<AppState>>()
         .set(AppState::InWorld);
     app.update();
-    app
 }
 
 /// How long a test waits before calling something a failure rather than a

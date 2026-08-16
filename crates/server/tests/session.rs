@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{dequantize, CHUNK_METRES};
-use protocol::{BeastId, BeastKind, PlayerId, ToClient, ToServer, PROTOCOL_VERSION};
+use protocol::{BeastId, BeastKind, PlayerId, ToClient, ToServer, Token, PROTOCOL_VERSION};
 use server::{Host, Server, WorldConfig};
 use world::archipelago::Archipelago;
 
@@ -71,12 +71,33 @@ impl Client {
     }
 
     fn join(addr: SocketAddr) -> (Self, PlayerId, Vec2, Vec2) {
+        let (client, id, spawn, facing, _token) = Self::join_presenting(addr, None);
+        (client, id, spawn, facing)
+    }
+
+    /// The whole handshake, papers and all: hello, hear which world, present
+    /// the token (or none), and take the welcome — with the token it dealt,
+    /// which is what a returning join presents next time.
+    fn join_presenting(
+        addr: SocketAddr,
+        presenting: Option<Token>,
+    ) -> (Self, PlayerId, Vec2, Vec2, Token) {
         let client = Self::connect(addr);
         client.say(ToServer::Hello {
             version: PROTOCOL_VERSION,
         });
         match client.hear() {
-            ToClient::Welcome { id, spawn, facing } => (client, id, spawn, facing),
+            ToClient::World { .. } => {}
+            other => panic!("expected to hear which world, heard {other:?}"),
+        }
+        client.say(ToServer::Papers { token: presenting });
+        match client.hear() {
+            ToClient::Welcome {
+                id,
+                spawn,
+                facing,
+                token,
+            } => (client, id, spawn, facing, token),
             other => panic!("expected a welcome, heard {other:?}"),
         }
     }
@@ -179,6 +200,29 @@ impl Client {
             }
         }
     }
+
+    /// Which world stands at this address — the handshake as far as the
+    /// server naming itself, and no further.
+    fn which_world(addr: SocketAddr) -> protocol::WorldId {
+        let client = Self::connect(addr);
+        client.say(ToServer::Hello {
+            version: PROTOCOL_VERSION,
+        });
+        match client.hear() {
+            ToClient::World { id } => id,
+            other => panic!("expected to hear which world, heard {other:?}"),
+        }
+    }
+}
+
+/// A directory of this test's own under the system's temporary space, so
+/// parallel tests cannot see each other's worlds.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir()
+        .join("genovesa-session-tests")
+        .join(format!("{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp space");
+    dir
 }
 
 #[test]
@@ -216,6 +260,11 @@ fn a_newcomer_is_told_the_sky_before_anything_else_happens() {
     client.say(ToServer::Hello {
         version: PROTOCOL_VERSION,
     });
+    match ToClient::read(&mut &client.0).expect("read") {
+        ToClient::World { .. } => {}
+        other => panic!("expected to hear which world, heard {other:?}"),
+    }
+    client.say(ToServer::Papers { token: None });
     match ToClient::read(&mut &client.0).expect("read") {
         ToClient::Welcome { .. } => {}
         other => panic!("expected a welcome, heard {other:?}"),
@@ -684,6 +733,136 @@ fn a_night_stops_running_off_once_the_asking_stops() {
     assert!(
         moved < 0.02,
         "the day moved {moved} from {before} to {after} with nobody asking"
+    );
+}
+
+#[test]
+fn a_stranger_and_a_token_nobody_dealt_both_enter_fresh() {
+    // A token this world never dealt is not an offence, just a stranger
+    // after all: the join starts them on the spawn with fresh papers, as if
+    // they had presented nothing.
+    let addr = host(7);
+    let entry = behind_the_curtain(7).spawn().expect("somewhere to enter");
+    let (_client, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(Token(12_345)));
+    assert_ne!(dealt, Token(12_345), "a token nobody dealt was believed");
+    assert!(
+        spawn.distance(entry.point) <= server::SPAWN_SCATTER,
+        "a stranger was put down somewhere other than the spawn"
+    );
+}
+
+#[test]
+fn two_worlds_from_one_seed_are_two_worlds() {
+    // The seed is the geography, not the identity: a client's memory of one
+    // world must not be answered by another that merely shares its islands.
+    let one = Client::which_world(host(7));
+    let other = Client::which_world(host(7));
+    assert_ne!(one, other);
+}
+
+#[test]
+fn leaving_and_rejoining_with_papers_resumes_in_place() {
+    // Within one session, no file involved: the world remembers where it
+    // last saw each token it dealt, so leaving and coming back is re-entry,
+    // not arrival.
+    let addr = host(1);
+    let (alice, ..) = Client::join(addr);
+    let (bob, b, _, _, bobs_token) = Client::join_presenting(addr, None);
+    let _ = alice.hear(); // Bob's arrival
+
+    let out = Vec2::new(640.0, -320.0);
+    bob.say(ToServer::Move { position: out });
+    let _ = alice.hear(); // the move
+    drop(bob);
+    // Alice hearing the departure is what guarantees it is filed: the world
+    // remembers a leaver before anyone is told they left.
+    assert_eq!(alice.hear(), ToClient::Left { id: b });
+
+    let (_bob, _id, spawn, facing, dealt) = Client::join_presenting(addr, Some(bobs_token));
+    assert_eq!(spawn, out, "Bob was not put back where the world saw him");
+    assert_eq!(
+        facing, out,
+        "a resumed player's facing should name no direction"
+    );
+    assert_eq!(dealt, bobs_token, "recognised papers were re-dealt");
+
+    // The same papers presented while their holder is aboard are somebody's
+    // copied file: the second arrival enters as a stranger rather than
+    // being refused — or worse, being resumed onto the first one's spot.
+    let (_copy, _c, elsewhere, _f, fresh) = Client::join_presenting(addr, Some(bobs_token));
+    assert_ne!(fresh, bobs_token, "one token was aboard twice");
+    assert_ne!(elsewhere, out, "the copy was resumed onto the original");
+}
+
+#[test]
+fn a_kept_world_reopens_where_it_left_off() {
+    // The whole story: a world kept to a file, sailed, left, reopened — and
+    // it is the same world, at the same hour, with the player where the
+    // world last saw them.
+    let path = scratch("kept").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .opening_at(0.5)
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+    let world_before = Client::which_world(addr);
+
+    let (client, _id, _spawn, _facing, token) = Client::join_presenting(addr, None);
+    let out = Vec2::new(2_048.0, -512.0);
+    client.say(ToServer::Move { position: out });
+    // An answered chunk is proof the move was processed: one connection,
+    // read in order. (Hearing the time would prove nothing — the sky is
+    // another thread's telling.)
+    let _ = client.ask_for(IVec2::new(5_000, 5_000));
+    drop(client);
+    // Dropping the host is leaving the world: the closing save has happened
+    // by the time the drop returns.
+    drop(host);
+
+    let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
+    assert_eq!(again.seed(), 7, "the file forgot which world it keeps");
+    let addr = again.local_addr().expect("addr");
+    let _host = again.spawn().expect("spawn");
+
+    // Same world — the id a client keys its own files by survives the
+    // reopening...
+    assert_eq!(Client::which_world(addr), world_before);
+
+    // ...same player, back where the world last saw them...
+    let (client, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(token));
+    assert_eq!(spawn, out, "the world forgot where it last saw its player");
+    assert_eq!(dealt, token, "kept papers were re-dealt");
+
+    // ...and the same afternoon: the clock stands where it stood, moved only
+    // by the seconds the world was actually open. While it was closed, no
+    // time passed at all — which is what makes quitting mid-storm and
+    // reloading land back in the storm.
+    let hour = client.hear_the_time();
+    assert!(
+        (0.5..0.53).contains(&hour),
+        "the world reopened at {hour} rather than the afternoon it closed on"
+    );
+}
+
+#[test]
+fn a_kept_world_cannot_be_hosted_twice_at_once() {
+    // Two processes writing one file would be two histories under one name;
+    // the world's lock makes the second host an error instead.
+    let path = scratch("locked").join("one.world");
+    let holding = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 1 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    assert!(
+        Server::reopen(("127.0.0.1", 0), &path).is_err(),
+        "one world came to be hosted twice"
+    );
+    drop(holding);
+    assert!(
+        Server::reopen(("127.0.0.1", 0), &path).is_ok(),
+        "the lock outlived the session holding it"
     );
 }
 

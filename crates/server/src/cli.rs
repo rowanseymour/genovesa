@@ -1,5 +1,7 @@
 //! The server binary's command line: a port to listen on and a world to host.
 
+use std::path::PathBuf;
+
 use protocol::DEFAULT_PORT;
 
 use crate::{random_seed, WorldConfig, OPENING};
@@ -8,9 +10,19 @@ use crate::{random_seed, WorldConfig, OPENING};
 pub struct Args {
     pub port: u16,
     pub config: WorldConfig,
+    /// Whether `--seed` was actually said, as opposed to the random one
+    /// every run fills in — what lets the binary refuse a seed aimed at a
+    /// world that already has one.
+    pub seed_chosen: bool,
+    /// The file to keep the world in — reopened if it exists, begun if not.
+    /// Without it the world lives exactly as long as the process.
+    pub world: Option<PathBuf>,
     /// What time of day the world opens at, as a phase of the day — see
-    /// `protocol::ToClient::Daylight`.
-    pub opening: f32,
+    /// `protocol::ToClient::Daylight`. `None` is nothing asked: a fresh
+    /// world opens in the morning, and a reopened one where its clock
+    /// stands — so the default cannot be a number here without winding
+    /// every kept world to it.
+    pub opening: Option<f32>,
 }
 
 /// Built rather than written out so the defaults it quotes are read from the
@@ -23,11 +35,16 @@ Genovesa server — hosts a shared world for game clients to join.
 Usage: server [options]
 
 Options:
-  --port <n>   port to listen on [default: {DEFAULT_PORT}]
-  --seed <n>   the world to host [default: a new one every run, which the
-               server names as it starts]
-  --time <h>   the hour the world opens at, from 0 to 24 [default: {opens},
-               a morning]
+  --port <n>     port to listen on [default: {DEFAULT_PORT}]
+  --seed <n>     the world to host [default: a new one every run, which the
+                 server names as it starts]
+  --world <file> keep the world in this file: reopened if it exists — the
+                 same islands, the clock and the players where they were —
+                 and begun if not [default: the world lasts as long as the
+                 process]
+  --time <h>     the hour the world opens at, from 0 to 24 [default: {opens},
+                 a morning — or, reopening a kept world, wherever its clock
+                 stands; given anyway, the clock winds forward to that hour]
 
 The world is generated here and handed out a chunk at a time. Clients need
 know nothing about it — not the seed, not the layout — which is why the seed
@@ -57,7 +74,9 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         config: WorldConfig {
             seed: random_seed(),
         },
-        opening: OPENING,
+        seed_chosen: false,
+        world: None,
+        opening: None,
     };
 
     let mut rest = argv.iter();
@@ -75,8 +94,10 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                 args.config.seed = value
                     .parse()
                     .map_err(|_| format!("`{value}` is not a seed"))?;
+                args.seed_chosen = true;
             }
-            "--time" => args.opening = hour(value)?,
+            "--world" => args.world = Some(PathBuf::from(value)),
+            "--time" => args.opening = Some(hour(value)?),
             other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
         }
     }
@@ -125,16 +146,31 @@ mod tests {
         let args = parse_args("--port 4000 --seed 7").expect("should parse");
         assert_eq!(args.port, 4000);
         assert_eq!(args.config.seed, 7);
+        assert!(args.seed_chosen, "a seed said out loud went unnoticed");
+        assert!(
+            !parse_args("").expect("should parse").seed_chosen,
+            "a seed nobody chose claimed to be chosen"
+        );
+    }
+
+    #[test]
+    fn takes_a_world_file() {
+        let args = parse_args("--world islands.world").expect("should parse");
+        assert_eq!(args.world, Some(PathBuf::from("islands.world")));
+        assert_eq!(parse_args("").expect("should parse").world, None);
     }
 
     #[test]
     fn a_world_can_be_opened_at_any_hour() {
         // Midnight either end, and noon in the middle: the hour is a phase of
-        // the day by the time anything else sees it.
-        assert_eq!(parse_args("--time 0").expect("should parse").opening, 0.0);
-        assert_eq!(parse_args("--time 12").expect("should parse").opening, 0.5);
-        assert_eq!(parse_args("--time 24").expect("should parse").opening, 0.0);
-        assert_eq!(parse_args("").expect("should parse").opening, OPENING);
+        // the day by the time anything else sees it. And no `--time` is no
+        // opinion — a kept world's own clock must not be overruled by a
+        // default.
+        let opened_at = |line: &str| parse_args(line).expect("should parse").opening;
+        assert_eq!(opened_at("--time 0"), Some(0.0));
+        assert_eq!(opened_at("--time 12"), Some(0.5));
+        assert_eq!(opened_at("--time 24"), Some(0.0));
+        assert_eq!(opened_at(""), None);
 
         assert!(parse_args("--time midnight").is_err());
         assert!(parse_args("--time 25").is_err(), "not an hour of any day");

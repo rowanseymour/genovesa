@@ -30,6 +30,7 @@ use bevy::prelude::*;
 
 use crate::bindings::KeyBindings;
 use crate::camera::View;
+use crate::logbook::{Berth, Logbook};
 use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
@@ -388,13 +389,27 @@ impl Plugin for BoatPlugin {
 /// identity like the meshes: aboard *is* being in the hierarchy — see
 /// [`crate::player`] — so they stand wherever the hull carries them and go
 /// down with the ship when the world is left.
+///
+/// A world this machine remembers can override the ceremony — see
+/// [`Berth`]: a resumed visit puts the hull back on its own heading, and one
+/// left from ashore puts the boat at its anchorage and the player on their
+/// own feet where the server said they stand, exactly as
+/// [`crate::player::embark_or_land`] would have left them.
 fn launch(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     assets: Res<AssetServer>,
     view: Res<View>,
+    logbook: Option<Res<Logbook>>,
 ) {
+    let berth = logbook.as_ref().and_then(|logbook| logbook.berth);
+    let entered = view.focus.xz();
+    let (boat_at, boat_yaw) = match berth {
+        None => (entered, view.yaw),
+        Some(Berth::Aboard { heading }) => (entered, heading),
+        Some(Berth::Ashore { boat, heading, .. }) => (boat, heading),
+    };
     // The file's own materials are ignored, and the meshes are pulled out of it
     // one at a time rather than the whole scene being spawned. glTF materials
     // are PBR — a roughness, a metalness, a specular response — and the look
@@ -414,64 +429,82 @@ fn launch(
         ..matte(PENNANT_COLOR)
     });
 
-    commands.spawn((
-        Name::new("Boat"),
-        Boat::ship(),
-        DespawnOnExit(AppState::InWorld),
-        // A rotation of `yaw` about the vertical takes -Z to the camera's own
-        // forward, so the boat starts pointing away from the viewer.
-        Transform::from_xyz(view.focus.x, 0.0, view.focus.z)
-            .with_rotation(Quat::from_rotation_y(view.yaw)),
-        // Carried by the parent because the children inherit it: without one
-        // here there is nothing for their own visibility to be computed
-        // against, and a boat whose meshes are on entities of their own would
-        // never be drawn.
-        Visibility::default(),
-        children![
-            (
-                Name::new("Hull"),
-                Mesh3d(assets.load(model_mesh(MODEL, HULL_MESH))),
-                MeshMaterial3d(hull_material),
-            ),
-            (
-                Name::new("Spar"),
-                Mesh3d(assets.load(model_mesh(MODEL, SPAR_MESH))),
-                MeshMaterial3d(spar_material),
-            ),
-            // Tied to the masthead and pointed by [`fly_the_pennant`]. The
-            // one piece of the boat that is not in the file: a flag is a
-            // shape that has to be *aimed*, and aiming it means knowing where
-            // its tie is, which a mesh out of Blender does not say.
-            (
-                Name::new("Pennant"),
-                Pennant {
-                    // Astern until the first frame says otherwise, which is
-                    // where a flag on a boat at rest in still air would lie
-                    // anyway.
-                    bearing: 0.0,
-                },
-                Mesh3d(meshes.add(pennant_mesh())),
-                MeshMaterial3d(pennant_material),
-                Transform::from_xyz(0.0, SHIP.masthead, SHIP.masthead_station),
-            ),
-            // The figure itself is hung under this by `figure::dress`, which
-            // is the player's own business rather than the boat's; what the
-            // boat says is where a person aboard stands, which is on its
-            // deck. The visibility is so that figure inherits cleanly from
-            // its siblings.
-            (
+    let boat = commands
+        .spawn((
+            Name::new("Boat"),
+            Boat::ship(),
+            DespawnOnExit(AppState::InWorld),
+            // A rotation of `yaw` about the vertical takes -Z to the camera's own
+            // forward, so the boat starts pointing away from the viewer.
+            Transform::from_xyz(boat_at.x, 0.0, boat_at.y)
+                .with_rotation(Quat::from_rotation_y(boat_yaw)),
+            // Carried by the parent because the children inherit it: without one
+            // here there is nothing for their own visibility to be computed
+            // against, and a boat whose meshes are on entities of their own would
+            // never be drawn.
+            Visibility::default(),
+            children![
+                (
+                    Name::new("Hull"),
+                    Mesh3d(assets.load(model_mesh(MODEL, HULL_MESH))),
+                    MeshMaterial3d(hull_material),
+                ),
+                (
+                    Name::new("Spar"),
+                    Mesh3d(assets.load(model_mesh(MODEL, SPAR_MESH))),
+                    MeshMaterial3d(spar_material),
+                ),
+                // Tied to the masthead and pointed by [`fly_the_pennant`]. The
+                // one piece of the boat that is not in the file: a flag is a
+                // shape that has to be *aimed*, and aiming it means knowing where
+                // its tie is, which a mesh out of Blender does not say.
+                (
+                    Name::new("Pennant"),
+                    Pennant {
+                        // Astern until the first frame says otherwise, which is
+                        // where a flag on a boat at rest in still air would lie
+                        // anyway.
+                        bearing: 0.0,
+                    },
+                    Mesh3d(meshes.add(pennant_mesh())),
+                    MeshMaterial3d(pennant_material),
+                    Transform::from_xyz(0.0, SHIP.masthead, SHIP.masthead_station),
+                ),
+            ],
+        ))
+        .id();
+
+    // The figure itself is hung under the player by `figure::dress`, which
+    // is the player's own business rather than the boat's. Aboard, the player
+    // is a child of the hull, standing on its deck — aboard *is* being in
+    // the hierarchy. Ashore they stand on their own transform with a
+    // `DespawnOnExit` of their own, exactly as stepping off the gunwale
+    // leaves them.
+    match berth {
+        Some(Berth::Ashore { height, facing, .. }) => {
+            commands.spawn((
+                Name::new("Player"),
+                Player,
+                DespawnOnExit(AppState::InWorld),
+                Transform::from_xyz(entered.x, height, entered.y)
+                    .with_rotation(Quat::from_rotation_y(facing)),
+                Visibility::default(),
+            ));
+        }
+        _ => {
+            commands.entity(boat).with_child((
                 Name::new("Player"),
                 Player,
                 Transform::from_xyz(0.0, SHIP.deck, 0.0),
                 Visibility::default(),
-            )
-        ],
-    ));
+            ));
+        }
+    }
 
     // Said out loud for the same reason a run without a seed says which world
     // it picked: a placeholder nobody can find is indistinguishable from one
     // that never spawned, and `--focus` takes exactly these two numbers.
-    info!("boat launched at {}, {}", view.focus.x, view.focus.z);
+    info!("boat launched at {}, {}", boat_at.x, boat_at.y);
 }
 
 /// The pennant, as a shape: a burgee tied at the origin, so that everything
