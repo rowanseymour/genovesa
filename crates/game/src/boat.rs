@@ -1199,8 +1199,8 @@ mod tests {
     use super::*;
     use crate::bindings::Action;
     use crate::testing::{
-        assert_model_draws, assert_model_is_painted, elapsed, hold, rebind, run_frames, set_wind,
-        test_ground, triangles, world_app, TEST_ISLAND_REACH,
+        assert_model_draws, assert_model_is_painted, assert_rigid_skin, clip_names, elapsed, hold,
+        rebind, run_frames, set_wind, test_ground, triangles, world_app, TEST_ISLAND_REACH,
     };
 
     /// Frames enough for the ease to be indistinguishable from settled —
@@ -1423,6 +1423,35 @@ mod tests {
             girth < PENNANT_TIE_OFF,
             "the spar reaches {girth} m from its axis, past the pennant's {PENNANT_TIE_OFF} m tie"
         );
+    }
+
+    /// The next hull along, as a file: `assets-src/models/rowboat/`.
+    ///
+    /// Nothing spawns one yet, and it is named here rather than beside
+    /// [`MODEL`] for that reason — but a master is a thing an afternoon in
+    /// Blender can quietly break, and the conditions below are exactly the
+    /// ones nothing else would report.
+    const ROWBOAT: &str = "models/rowboat.glb";
+
+    #[test]
+    fn the_rowboat_is_a_boat_fit_to_draw() {
+        // One mesh carrying its own colours, like the figure — the oars move
+        // under the boat's own skin rather than being meshes of their own, so
+        // there is one shape here and not three.
+        assert_model_draws(ROWBOAT, &[(0, "rowboat")]);
+        assert_model_is_painted(ROWBOAT, 0);
+        // And rigged, so the same rule the figure lives by applies: a vertex
+        // shared between bones bends its facet as the oars swing, and a
+        // gradient across a facet is the one thing this look cannot have.
+        assert_rigid_skin(ROWBOAT);
+    }
+
+    #[test]
+    fn the_rowboat_ships_its_oars_and_pulls_them() {
+        // The two states a boat with oars in it has, and the order a clip is
+        // asked for by. Renaming an action in Blender is a keystroke, and the
+        // boat that came back would row with its oars lying in the bilges.
+        assert_eq!(clip_names(ROWBOAT), ["stowed", "stroke"]);
     }
 
     #[test]
