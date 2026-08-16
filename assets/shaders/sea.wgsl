@@ -24,6 +24,10 @@
     view_transformations::position_world_to_clip,
 }
 
+// How many points of track a wake arrives as — the twin of `wake::TRAIL`,
+// which `the_shader_walks_the_whole_track` holds this line to.
+const TRAIL: i32 = 34;
+
 struct SeaParams {
     // Per deep wave: xy is heading times wavenumber, z angular frequency,
     // w amplitude.
@@ -57,6 +61,19 @@ struct SeaParams {
     // The depth window: xy the world coordinates of its corner, z one over
     // its extent, w the depth a full texel encodes.
     window: vec4<f32>,
+    // The wake's band: x the half-width of the water a hull turns over at its
+    // stem, y how far the arms open per metre run, z how thick an arm is, w
+    // how long a wake lasts.
+    wash: vec4<f32>,
+    // The boil and what wears it away: x how fast it widens in metres per
+    // second of age, y how many seconds of it there are, z the cell of the
+    // field an ageing wake breaks up on, w the least way that leaves a mark.
+    boil: vec4<f32>,
+    // Where the wake could possibly be: xy the least corner, zw the greatest.
+    wake_bounds: vec4<f32>,
+    // The hull's track, newest first: xy where its stem was, z how many
+    // seconds ago, w the way it was making then.
+    wake: array<vec4<f32>, TRAIL>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> sea: SeaParams;
@@ -205,6 +222,84 @@ fn gustiness(at: vec2<f32>) -> f32 {
     return field * 2.0 - 1.0;
 }
 
+// The white a boat's wake lays down here — the twin of nothing, this being
+// the one piece of foam the Rust side never has to agree about, since no
+// hull rides it. `sea.wake` is the hull's track, newest first; `wake.rs` owns
+// every constant it is read with, and the module doc there is where the shape
+// is argued.
+//
+// The whole of the shape comes from one question: how far is this water from
+// the line the boat sailed, and how long ago was the nearest bit of that line
+// laid down? Distance gives the two arms and the boil their edges, age takes
+// both of them away again.
+fn wake_foam(at: vec2<f32>) -> f32 {
+    // Water the wake cannot reach is off in two comparisons rather than
+    // thirty-two segments. The box is most of the ocean, and the branch is
+    // coherent over it — whole tiles of the screen take it together.
+    if (any(at < sea.wake_bounds.xy) || any(at > sea.wake_bounds.zw)) {
+        return 0.0;
+    }
+
+    // The nearest point of the track, and what the track was doing there.
+    // Slots past the end of a short track repeat its last point, which makes
+    // a segment of no length — hence the guard on the projection rather than
+    // a count of live points.
+    var nearest = 1e9;
+    var age = 0.0;
+    var way = 0.0;
+    for (var i = 1; i < TRAIL; i++) {
+        let newer = sea.wake[i - 1];
+        let older = sea.wake[i];
+        let along = older.xy - newer.xy;
+        let run = dot(along, along);
+        let raw = select(0.0, dot(at - newer.xy, along) / run, run > 1e-6);
+        // The track begins at the stem, and the first segment does not round
+        // its end off: water forward of the stem has not been sailed through
+        // yet, and treating distance-to-the-end as the shape puts a cap of
+        // foam across the bow of a boat that has not made it. Only the first
+        // — an older segment whose own curve has brought it round in front of
+        // the bow is wake the boat really did lay, and still shows.
+        if (i == 1 && raw < 0.0) {
+            continue;
+        }
+        let t = clamp(raw, 0.0, 1.0);
+        let reach = distance(at, mix(newer.xy, older.xy, t));
+        if (reach < nearest) {
+            nearest = reach;
+            age = mix(newer.z, older.z, t);
+            way = mix(newer.w, older.w, t);
+        }
+    }
+
+    // What age does to any of it. Not a fade: the foam is thresholded against
+    // the same value noise the whitecaps' bar wanders on, so old white goes to
+    // patches and then to nothing, and every edge in it stays as hard as every
+    // other edge on this water. Fresh foam clears a threshold of zero
+    // everywhere, which is why nothing near the hull needs a special case.
+    // Both shapes are worn away by the one field, at their own rates — a
+    // second field would only mean two patterns of holes crossing each other.
+    let mottle = value_noise(at / sea.boil.z);
+
+    // The band the wake opens into: the hull's shoulder at the stem, spreading
+    // at a fixed angle down the track — so the arms diverge with distance
+    // run, which is way times age, and a boat crawling throws a narrow one.
+    let half = sea.wash.x + sea.wash.y * way * age;
+    let arms = step(half - sea.wash.z, nearest) * step(nearest, half)
+        * step(age / sea.wash.w, mottle);
+    // The boil: the water the hull is itself turning over, filled rather than
+    // outlined, widening on its own clock rather than with distance run, and
+    // breaking up on a life of its own — see `wake::BOIL`. Given a hard end
+    // instead it finishes on a ruled line drawn across the wake, which is the
+    // one shape water never makes.
+    let boil = step(nearest, sea.wash.x + sea.boil.x * age)
+        * step(age / sea.boil.y, mottle);
+
+    // Under the way it takes to stir the water, nothing at all — including
+    // the stretch of a dying wake nearest the hull, which is how a wake
+    // retreats down its own track as a boat glides to a stop.
+    return max(arms, boil) * step(sea.boil.w, way);
+}
+
 // Height of the swell above the flat waterline — the twin of `sea::swell`.
 // `globals.time` is `Time::elapsed_secs_wrapped`, the clock the Rust side
 // samples too.
@@ -330,13 +425,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         * (1.0 - shore_weight(depth))
         * waving;
 
-    // One white for both, the shallows' and the open sea's: they are the same
-    // water doing the same thing, and two whites would read as two materials.
-    // Not quite white, and nearly opaque — foam hides what is under it.
+    // One white for all three, the shallows', the open sea's and the boat's:
+    // they are the same water doing the same thing, and three whites would
+    // read as three materials. Not quite white, and nearly opaque — foam
+    // hides what is under it.
     pbr_input.material.base_color = mix(
         pbr_input.material.base_color,
         vec4(0.82, 0.87, 0.88, 0.97),
-        max(foam, cap),
+        max(max(foam, cap), wake_foam(at)),
     );
 
     pbr_input.material.base_color =

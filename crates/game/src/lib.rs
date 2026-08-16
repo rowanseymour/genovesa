@@ -27,6 +27,7 @@ pub mod sea;
 pub mod sky;
 pub mod terrain;
 pub mod trees;
+pub mod wake;
 pub mod wildlife;
 
 #[cfg(test)]

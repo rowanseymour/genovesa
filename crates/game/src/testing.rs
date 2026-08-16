@@ -28,6 +28,7 @@ use crate::boat::BoatPlugin;
 use crate::camera::View;
 use crate::player::PlayerPlugin;
 use crate::terrain::Ground;
+use crate::wake::WakePlugin;
 use crate::{AppState, Helm};
 
 /// How long every test frame lasts in a [`world_app`]. Headless frames take
@@ -60,6 +61,11 @@ pub fn world_app() -> App {
         StatesPlugin,
         bevy::animation::AnimationPlugin,
         BoatPlugin,
+        // Nothing here draws a sea for it to be painted on, so all the wake
+        // does in these tests is keep its track — which is what a test of a
+        // boat's wake wants to look at, and what every other test here wants
+        // running over the hulls it sails without ever noticing it.
+        WakePlugin,
         PlayerPlugin,
     ))
     .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))

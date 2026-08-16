@@ -421,6 +421,31 @@ pub struct SeaExtension {
     /// [`DEPTH_RANGE`]. Rewritten whenever the window scrolls.
     #[uniform(100)]
     window: Vec4,
+    /// The wake's band: `x` the half-width of the water a hull turns over at
+    /// its stem, `y` how far the arms open per metre run, `z` how thick an
+    /// arm is, `w` how long a wake lasts.
+    #[uniform(100)]
+    pub(crate) wash: Vec4,
+    /// The boil and what wears it away: `x` how fast it widens in metres per
+    /// second of age, `y` how many seconds of it there are, `z` the cell of
+    /// the field an ageing wake breaks up on, `w` the least way that leaves
+    /// any mark at all.
+    #[uniform(100)]
+    pub(crate) boil: Vec4,
+    /// Where the wake could possibly be: `xy` the least corner, `zw` the
+    /// greatest. Water outside it rejects the wake in two comparisons rather
+    /// than walking the track, and a box with its least corner past its
+    /// greatest — which is what this opens as — is water with no wake on it
+    /// at all.
+    #[uniform(100)]
+    pub(crate) wake_bounds: Vec4,
+    /// The hull's track, newest first: `xy` where its stem was, `z` how many
+    /// seconds ago, `w` the way it was making then. Written by
+    /// [`crate::wake`], which owns every number in these last four fields and
+    /// is where the reasoning for all of them lives; the sea only carries
+    /// them to the shader that paints the foam.
+    #[uniform(100)]
+    pub(crate) wake: [Vec4; crate::wake::TRAIL],
     /// The depth window itself — see [`DepthWindow`], which owns the scroll
     /// and the sweep that keep it current.
     #[texture(101)]
@@ -451,6 +476,13 @@ impl SeaExtension {
             caps: Vec4::new(WHITECAP.0, WHITECAP.1, WHITECAP.2, 0.0),
             breaking: Vec4::new(BREAKING_FIELD.0, BREAKING_FIELD.1, 0.0, 0.0),
             window: Self::window_uniform(origin),
+            // No boat has been anywhere yet. The empty box is what makes the
+            // rest of this safe to leave at zero: nothing reads a track it is
+            // never allowed to be inside the bounds of.
+            wash: Vec4::ZERO,
+            boil: Vec4::ZERO,
+            wake_bounds: Vec4::new(1.0, 1.0, -1.0, -1.0),
+            wake: [Vec4::ZERO; crate::wake::TRAIL],
             depth,
         }
     }
@@ -826,6 +858,14 @@ impl DepthWindow {
             origin: Self::origin_under(focus),
             sweep: 0,
         }
+    }
+
+    /// The sea's own material — the one asset the water is drawn out of, and
+    /// so the one place anything with something to tell the water writes it.
+    /// The wake has no window of its own to hang a handle on and reaches it
+    /// through here; see [`crate::wake`].
+    pub(crate) fn material(&self) -> &Handle<SeaMaterial> {
+        &self.material
     }
 
     /// The window origin that centres the window on a focus, on the lattice.

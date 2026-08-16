@@ -30,6 +30,7 @@ use game::player::PlayerPlugin;
 use game::sky::SkyPlugin;
 use game::terrain::TerrainPlugin;
 use game::trees::TreesPlugin;
+use game::wake::WakePlugin;
 use game::wildlife::WildlifePlugin;
 use game::{AppState, Helm, WINDOW};
 
@@ -136,6 +137,8 @@ fn run(args: Args, session: Option<Session>) {
             WildlifePlugin,
             BeastsPlugin,
             BoatPlugin,
+            // The white water the boat leaves, painted by the sea itself.
+            WakePlugin,
             PlayerPlugin,
             MapCameraPlugin,
             CompassPlugin,
