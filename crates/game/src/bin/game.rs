@@ -90,7 +90,7 @@ fn main() -> ExitCode {
 fn run(args: Args, session: Option<Session>) {
     let mut app = App::new();
 
-    app.add_plugins(DefaultPlugins.set(window_plugin(&args)));
+    app.add_plugins(DefaultPlugins.set(window_plugin(&args)).set(asset_plugin()));
 
     // Capturing has no window, so nothing drives the frame loop — winit's
     // runner has no events to wait on. Run frames back to back instead, as
@@ -171,6 +171,46 @@ fn run(args: Args, session: Option<Session>) {
         ));
 
     app.run();
+}
+
+/// Where to read assets from, which is only ever a question inside a bundle.
+///
+/// Bevy resolves `assets/` against `BEVY_ASSET_ROOT`, then `CARGO_MANIFEST_DIR`,
+/// and failing both against the directory holding the executable. Under cargo
+/// the first is set — `.cargo/config.toml` points it at the workspace root, so
+/// that the assets beside the crates are the ones a run reads — and a
+/// double-clicked application has neither, leaving it looking beside the binary
+/// in `Contents/MacOS`. That is not where they are: macOS puts everything a
+/// program only reads in `Contents/Resources`, and it is the bundle's shape
+/// that has to give, not Apple's.
+fn asset_plugin() -> AssetPlugin {
+    let mut plugin = AssetPlugin::default();
+    #[cfg(target_os = "macos")]
+    if let Some(bundled) = bundled_assets() {
+        plugin.file_path = bundled;
+    }
+    plugin
+}
+
+/// The assets in the bundle this is running from, if it is running from one.
+///
+/// An absolute path rather than a `../Resources/assets` relative to wherever
+/// Bevy was going to look, because then it is the whole answer: a bundle that
+/// happens to be launched with `BEVY_ASSET_ROOT` set in the environment reads
+/// its own assets rather than half of somebody else's checkout's.
+#[cfg(target_os = "macos")]
+fn bundled_assets() -> Option<String> {
+    // .../Genovesa.app/Contents/MacOS/Genovesa, and nothing else counts: a bare
+    // binary run out of `target/release` is not in a bundle and must keep
+    // falling through to the environment the way every other platform does.
+    let exe = std::env::current_exe().ok()?;
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    if macos.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
+        return None;
+    }
+    let assets = contents.join("Resources/assets");
+    Some(assets.to_string_lossy().into_owned())
 }
 
 /// A window to play in, or none at all when the run is only here to write
