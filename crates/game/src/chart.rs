@@ -110,6 +110,17 @@
 //! [`NAME_FONT`]), which is the nearest a flat sheet comes to an engraver's
 //! hand.
 //!
+//! Under all of it is the rhumb net: roses standing on the ruling's own
+//! crossings, each throwing the thirty-two points of the compass across the
+//! paper (see [`rhumbs`]). It is the sheet's whole character and none of its
+//! content, so it is ruled fainter than anything that runs over it, and its
+//! rays are graded — the principal winds ruled, the quarter winds dashed — so
+//! that a dozen roses' worth of rays reads as a net rather than as a haze. The
+//! roses themselves are drawn in two flat tones, each point of the star split
+//! down its own axis (see [`star`]): a hatched engraving is what that is
+//! imitating, and two tones meeting on an edge is the only way to draw a lit
+//! thing on a sheet with no gradients on it.
+//!
 //! A coast that has not been closed is not closed on the sheet either. Half an
 //! island is drawn as half an island, the line simply stopping where the survey
 //! did — which is what a partly run coastline looked like on a real chart, and
@@ -130,7 +141,6 @@ use protocol::ground::{chunk_at, CHUNK_METRES, FACET_METRES, FACET_QUADS, FACET_
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::MapCamera;
-use crate::compass::Rose;
 use crate::player::PlayerPlace;
 use crate::terrain::Ground;
 use crate::{AppState, Helm};
@@ -939,13 +949,15 @@ fn take_soundings(
 ///
 /// Flat tones like everything else in this world — see the module docs on why
 /// there is no paper here to be stained. The coast is the darkest thing on the
-/// sheet and the graticule under it the faintest, so that the two read as
-/// drawing and ruling rather than as two kinds of line. The reader's own mark
-/// is the one thing in another colour, which is how the eye finds it.
+/// sheet, the graticule under it fainter and the rhumb net under that fainter
+/// again, so the three read as drawing, ruling and net rather than as three
+/// kinds of line. The reader's own mark is the one thing in another colour,
+/// which is how the eye finds it.
 const PAPER: Color = Color::srgb(0.85, 0.79, 0.64);
 const INK: Color = Color::srgb(0.24, 0.17, 0.11);
 const INK_DIM: Color = Color::srgb(0.46, 0.37, 0.26);
 const INK_FAINT: Color = Color::srgba(0.40, 0.31, 0.21, 0.40);
+const INK_GHOST: Color = Color::srgba(0.40, 0.31, 0.21, 0.22);
 const MARK_INK: Color = Color::srgb(0.55, 0.16, 0.12);
 
 /// How wide the sheet's lines are drawn, in pixels — pixels rather than metres
@@ -1023,6 +1035,55 @@ const ROUND_DISTANCES: [f32; 8] = [
 const GRATICULE_GAP: f32 = 110.0;
 const SCALE_BAR_LEAST: f32 = 110.0;
 
+/// How many graticule squares apart the roses that throw the rhumbs stand.
+///
+/// A whole number of squares rather than a spacing of its own, so the roses
+/// keep step with the ruling however the zoom moves it — they are nudged off
+/// the crossings themselves (see [`rose_nudge`]), but by a fraction of a
+/// square, so the two lattices are still one lattice.
+///
+/// Six, which is what keeps two or three roses in a window at every zoom. The
+/// count matters more than it sounds: a net thrown from one rose is a sunburst
+/// and reads as decoration, and it is rays from *different* roses crossing each
+/// other that make a sheet look navigated. Many more than three and the paper
+/// is a cobweb with a coast somewhere under it.
+const RHUMB_SQUARES: f32 = 6.0;
+
+/// How many bearings each rose throws — the thirty-two points of the compass,
+/// as a chart of this hand would carry.
+const RHUMB_BEARINGS: usize = 32;
+
+/// How heavily a rhumb is ruled, in pixels, and the mark and gap of a dashed
+/// one — both for the reason the other weights are in pixels.
+const RHUMB_WEIGHT: f32 = 1.0;
+const RHUMB_DASH: (f32, f32) = (13.0, 10.0);
+
+/// How far the longest points of a rose on the paper reach, in pixels. Small:
+/// it is where the net comes from and not a thing to be read off, and every one
+/// of them is saying what the corner rose already said.
+const PAPER_ROSE: f32 = 22.0;
+
+/// The rose in the corner, in pixels: how far the longest points of its star
+/// reach, how wide the graduated band outside them runs, how far beyond that
+/// the letters sit and how large they are set.
+///
+/// Bigger than the plain lettered circle it replaces, because a sixteen-point
+/// star has detail in it that a circle did not: at the old diameter the half
+/// winds closed up into a blur.
+const ROSE_REACH: f32 = 40.0;
+const ROSE_BAND: f32 = 7.0;
+const ROSE_LETTER_GAP: f32 = 12.0;
+const ROSE_LETTERS: f32 = 14.0;
+/// How much room the whole rose takes from its middle, letters and all.
+const ROSE_EXTENT: f32 = ROSE_REACH + ROSE_BAND + ROSE_LETTER_GAP + ROSE_LETTERS / 2.0;
+
+/// How heavily a rose's own circles and ticks are ruled, in pixels.
+const ROSE_WEIGHT: f32 = 1.0;
+
+/// How many segments a drawn circle is bent from. Enough that the largest
+/// circle on the sheet — the corner rose's band — reads as round.
+const CIRCLE_FACETS: usize = 64;
+
 /// How much bigger than the window the drawn sheet is built, each way.
 ///
 /// The mesh is built for a window and the camera pans freely inside it, which
@@ -1091,12 +1152,21 @@ struct Engraving;
 #[derive(Component)]
 struct OwnMark;
 
-/// The three inks, made once when the sheet is unrolled rather than on every
-/// rebuild — a material per pan would be a new asset per pan.
+/// Marks the rose in the corner, which is pinned to the window while the paper
+/// slides under it.
+#[derive(Component)]
+struct CornerRose;
+
+/// The inks, made once when the sheet is unrolled rather than on every rebuild
+/// — a material per pan would be a new asset per pan.
 #[derive(Resource)]
 struct Inks {
     coast: Handle<ColorMaterial>,
     ruling: Handle<ColorMaterial>,
+    /// The lit half of a rose's star, and the circles round it.
+    dim: Handle<ColorMaterial>,
+    /// The rhumb net, under everything.
+    rhumb: Handle<ColorMaterial>,
     mark: Handle<ColorMaterial>,
 }
 
@@ -1151,6 +1221,7 @@ impl Plugin for ChartPlugin {
                     hold_the_sheet,
                     engrave,
                     rule_the_scale,
+                    pin_the_rose,
                     mark_the_reader,
                 )
                     .chain()
@@ -1218,6 +1289,7 @@ fn no_sheet_yet(sheets: Query<(), With<ChartSheet>>) -> bool {
 fn unroll(
     mut commands: Commands,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<AssetServer>,
     mut view: ResMut<ChartView>,
     place: PlayerPlace,
@@ -1235,11 +1307,13 @@ fn unroll(
         target = world_target.clone();
     }
 
-    commands.insert_resource(Inks {
+    let inks = Inks {
         coast: materials.add(ColorMaterial::from_color(INK)),
         ruling: materials.add(ColorMaterial::from_color(INK_FAINT)),
+        dim: materials.add(ColorMaterial::from_color(INK_DIM)),
+        rhumb: materials.add(ColorMaterial::from_color(INK_GHOST)),
         mark: materials.add(ColorMaterial::from_color(MARK_INK)),
-    });
+    };
     commands.insert_resource(Lettering(assets.load(NAME_FONT)));
 
     let sheet = commands
@@ -1271,6 +1345,8 @@ fn unroll(
         DespawnOnExit(Helm::Chart),
     ));
 
+    corner_rose(&mut commands, &mut meshes, &inks);
+    commands.insert_resource(inks);
     furniture(&mut commands, sheet);
 }
 
@@ -1454,9 +1530,42 @@ fn engrave(
     let covered = Rect::from_corners(showing.min - margin, showing.max + margin);
     let metres_per_pixel = view.metres_per_pixel;
     let paper = |pixels: f32| pixels * metres_per_pixel;
+    let on_paper = Rect::from_corners(on_the_sheet(covered.min), on_the_sheet(covered.max));
 
-    // The ruling first and underneath: it is the paper's own, and the coast is
-    // drawn on top of it.
+    // The net first and furthest under: the rhumbs are the first thing on the
+    // paper and the last thing to be read, so everything else is drawn over
+    // them.
+    let spacing = rhumb_spacing(metres_per_pixel);
+    let mut net = Strokes::default();
+    let mut inked = Strokes::default();
+    let mut dimmed = Strokes::default();
+    for centre in rhumb_roses(on_paper, spacing) {
+        rhumbs(
+            &mut net,
+            on_paper,
+            centre,
+            paper(PAPER_ROSE),
+            paper(RHUMB_WEIGHT),
+            (paper(RHUMB_DASH.0), paper(RHUMB_DASH.1)),
+        );
+        star(&mut inked, &mut dimmed, centre, paper(PAPER_ROSE));
+        circle(
+            &mut dimmed,
+            centre,
+            paper(PAPER_ROSE),
+            paper(ROSE_WEIGHT * 0.8),
+        );
+    }
+    if let Some(mesh) = net.mesh() {
+        let mesh = engraver.meshes.add(mesh);
+        let ink = engraver.inks.rhumb.clone();
+        engraver
+            .commands
+            .spawn(engraving("Chart rhumbs", mesh, ink, 0.0));
+    }
+
+    // The ruling over the net and under the coast: it is the paper's own, and
+    // the coast is drawn on top of it.
     let mut ruling = Strokes::default();
     graticule(
         &mut ruling,
@@ -1469,7 +1578,18 @@ fn engrave(
         let ink = engraver.inks.ruling.clone();
         engraver
             .commands
-            .spawn(engraving("Chart graticule", mesh, ink, 0.0));
+            .spawn(engraving("Chart graticule", mesh, ink, 0.5));
+    }
+
+    // The roses themselves, over their own net and the ruling both.
+    for (strokes, ink, name) in [
+        (inked, engraver.inks.coast.clone(), "Chart roses"),
+        (dimmed, engraver.inks.dim.clone(), "Chart roses, lit"),
+    ] {
+        if let Some(mesh) = strokes.mesh() {
+            let mesh = engraver.meshes.add(mesh);
+            engraver.commands.spawn(engraving(name, mesh, ink, 0.75));
+        }
     }
 
     let mut shore = Strokes::default();
@@ -1501,7 +1621,6 @@ fn engrave(
     // window — a chain can cross any number of chunks, so a ring cannot be
     // closed from a window's worth — and only the lettering that lands on
     // the paper is spawned.
-    let on_paper = Rect::from_corners(on_the_sheet(covered.min), on_the_sheet(covered.max));
     for island in chart.islands() {
         if !on_paper.contains(island.centre) {
             continue;
@@ -1957,6 +2076,231 @@ fn graticule(out: &mut Strokes, covered: Rect, metres_per_pixel: f32, width: f32
     }
 }
 
+// ---------------------------------------------------------------------------
+// Roses, and the net they throw
+// ---------------------------------------------------------------------------
+
+/// A point of the compass as a direction on the sheet: `turns` clockwise from
+/// north, north being up.
+fn wind(turns: f32) -> Vec2 {
+    let angle = turns * std::f32::consts::TAU;
+    Vec2::new(angle.sin(), angle.cos())
+}
+
+/// The orders of point a rose's star is built from: where the first of them
+/// lies and how far apart they stand, both in turns clockwise from north, then
+/// how far the point reaches as a fraction of the rose's radius and how wide it
+/// is at the hub.
+///
+/// Three orders, sixteen points: four cardinals reaching the rim, four
+/// intercardinals well short of it, and eight half winds shorter again. The
+/// falling-off is what lets the eye count the rose without reading it — the
+/// longest four are north, east, south and west and no arithmetic is needed to
+/// see which.
+const POINT_ORDERS: [(f32, f32, f32, f32); 3] = [
+    (0.0, 0.25, 1.0, 0.115),
+    (0.125, 0.25, 0.70, 0.085),
+    (0.0625, 0.125, 0.48, 0.060),
+];
+
+/// The star of a rose: sixteen kite points, each split down its own axis so one
+/// half goes to `dark` and the other to `light`.
+///
+/// That split is the whole trick, and it is why a rose is drawn rather than
+/// ruled. An engraved rose looks lit from one side, and on real paper that is
+/// done with hatching — which this sheet cannot have, being flat tones with no
+/// texture anywhere in it. Two flat tones meeting on each point's axis gives
+/// the same reading with nothing shaded: every point turns its dark half the
+/// same way round the card, so the star reads as a solid thing catching light
+/// rather than as sixteen flat triangles.
+///
+/// Two sinks rather than one because a tone is a material and a material is a
+/// mesh — so the caller draws every rose's dark halves into one and every
+/// rose's light halves into the other, and the sheet costs two meshes however
+/// many roses stand on it.
+fn star(dark: &mut Strokes, light: &mut Strokes, centre: Vec2, radius: f32) {
+    for (first, step, reach, width) in POINT_ORDERS {
+        let mut turns = first;
+        while turns < 1.0 {
+            let along = wind(turns);
+            let apex = centre + along * reach * radius;
+            let across = along.perp() * width * radius;
+            dark.triangle(centre, apex, centre - across);
+            light.triangle(centre, apex, centre + across);
+            turns += step;
+        }
+    }
+}
+
+/// A circle, bent from [`CIRCLE_FACETS`] straight strokes.
+fn circle(out: &mut Strokes, centre: Vec2, radius: f32, width: f32) {
+    let points: Vec<Vec2> = (0..CIRCLE_FACETS)
+        .map(|facet| centre + wind(facet as f32 / CIRCLE_FACETS as f32) * radius)
+        .collect();
+    out.run(&points, true, width);
+}
+
+/// The graduated band round a rose: two circles with the thirty-two winds
+/// ticked between them, the eight principal ones ticked the whole way across.
+///
+/// It is what makes the difference between a star drawn on paper and an
+/// instrument: a rose without a rim is a decoration, and a rim a bearing could
+/// in principle be counted round is a rose.
+fn band(out: &mut Strokes, centre: Vec2, inner: f32, outer: f32, width: f32) {
+    circle(out, centre, inner, width);
+    circle(out, centre, outer, width);
+    for point in 0..RHUMB_BEARINGS {
+        let along = wind(point as f32 / RHUMB_BEARINGS as f32);
+        let principal = point % 4 == 0;
+        let from = if principal {
+            inner
+        } else {
+            inner + (outer - inner) * 0.45
+        };
+        out.segment(
+            centre + along * from,
+            centre + along * outer,
+            width * if principal { 1.3 } else { 0.8 },
+        );
+    }
+}
+
+/// How far apart the roses that throw the rhumbs stand, in metres of paper: a
+/// whole number of graticule squares, so a rose lands on a crossing of the
+/// ruling — see [`RHUMB_SQUARES`].
+fn rhumb_spacing(metres_per_pixel: f32) -> f32 {
+    round_distance(GRATICULE_GAP * metres_per_pixel) * RHUMB_SQUARES
+}
+
+/// How far off its square's crossing a rose may be nudged, as a fraction of the
+/// square — see [`rose_nudge`].
+const RHUMB_NUDGE: f32 = 0.28;
+
+/// Where those roses stand on the stretch of paper being drawn.
+fn rhumb_roses(on_paper: Rect, spacing: f32) -> Vec<Vec2> {
+    let square = |v: f32| (v / spacing).ceil() as i32;
+    let mut roses = Vec::new();
+    let mut ix = square(on_paper.min.x);
+    while (ix as f32) * spacing <= on_paper.max.x {
+        let mut iy = square(on_paper.min.y);
+        while (iy as f32) * spacing <= on_paper.max.y {
+            let square = IVec2::new(ix, iy);
+            roses.push((square.as_vec2() + rose_nudge(square)) * spacing);
+            iy += 1;
+        }
+        ix += 1;
+    }
+    roses
+}
+
+/// How far a rose stands off its square's crossing, in squares.
+///
+/// A chart drawn from an exact lattice does not look like a chart. On a perfect
+/// grid every rose's diagonal runs straight into its neighbour's and its
+/// east–west line into the ruling, so thirty-two bearings from a dozen roses
+/// collapse into one X repeated across the paper — regular in a way no net
+/// thrown by hand ever was, and the same everywhere the player goes.
+///
+/// The nudge is a hash of the square and not a random number, which is the
+/// whole reason it can exist: the sheet is rebuilt every time the view leaves
+/// its window, and a rose that stood somewhere else after a pan would be far
+/// worse than a lattice. This way a rose belongs to its patch of sea, and a
+/// stretch of water can be recognised by the net over it.
+fn rose_nudge(square: IVec2) -> Vec2 {
+    let mut hash = (square.x as u32)
+        .wrapping_mul(0x9E37_79B9)
+        .wrapping_add((square.y as u32).wrapping_mul(0x85EB_CA6B));
+    hash ^= hash >> 15;
+    hash = hash.wrapping_mul(0x2545_F491);
+    hash ^= hash >> 13;
+    let spread = |bits: u32| (bits as f32 / u16::MAX as f32 - 0.5) * 2.0 * RHUMB_NUDGE;
+    Vec2::new(spread(hash >> 16), spread(hash & 0xFFFF))
+}
+
+/// The bearings one rose throws across the paper.
+///
+/// Thirty-two of them, and not all alike: the eight principal winds are ruled
+/// at full weight, the eight half winds lighter, and the sixteen quarter winds
+/// dashed. That grain is the difference between a net and a wash — thirty-two
+/// identical rays from a dozen roses is a grey haze over the sheet, while a net
+/// that gets fainter as it gets finer can be followed by eye from any rose to
+/// any other.
+///
+/// Each ray is clipped to the paper being drawn and starts clear of the rose's
+/// own star, so what gets built is bounded by the sheet rather than by the
+/// world — the net is infinite in the same sense the chart is, which is to say
+/// it is drawn as far as there is paper and no further.
+fn rhumbs(out: &mut Strokes, on_paper: Rect, centre: Vec2, hub: f32, width: f32, dash: (f32, f32)) {
+    for point in 0..RHUMB_BEARINGS {
+        let along = wind(point as f32 / RHUMB_BEARINGS as f32);
+        let Some((near, far)) = ray_across(on_paper, centre, along) else {
+            continue;
+        };
+        let near = near.max(hub);
+        if near >= far {
+            continue;
+        }
+        match point % 4 {
+            0 => out.segment(centre + along * near, centre + along * far, width),
+            2 => out.segment(centre + along * near, centre + along * far, width * 0.7),
+            _ => dashes(out, centre, along, (near, far), dash, width * 0.7),
+        }
+    }
+}
+
+/// Where a ray leaving `from` along `along` enters and leaves a rectangle, as
+/// distances from `from` — `None` where it never gets there at all.
+///
+/// The near end is never behind the start: a rose outside the paper still
+/// throws its rays across it, but it does not throw them backwards.
+fn ray_across(rect: Rect, from: Vec2, along: Vec2) -> Option<(f32, f32)> {
+    let mut near = 0.0f32;
+    let mut far = f32::INFINITY;
+    for axis in 0..2 {
+        let (start, step) = (from[axis], along[axis]);
+        let (low, high) = (rect.min[axis], rect.max[axis]);
+        if step.abs() < f32::EPSILON {
+            if start < low || start > high {
+                return None;
+            }
+        } else {
+            let (a, b) = ((low - start) / step, (high - start) / step);
+            near = near.max(a.min(b));
+            far = far.min(a.max(b));
+        }
+    }
+    (far > near).then_some((near, far))
+}
+
+/// A dashed stretch of a ray.
+///
+/// The dashes are counted from the rose rather than from wherever the paper's
+/// edge happened to cut the ray, so that neighbouring bearings break at the
+/// same distances out and the net's dashes fall into rings. Counted the other
+/// way they would land anywhere, and sixteen rays of unrelated dashes read as
+/// dirt on the sheet.
+fn dashes(
+    out: &mut Strokes,
+    from: Vec2,
+    along: Vec2,
+    (near, far): (f32, f32),
+    (mark, gap): (f32, f32),
+    width: f32,
+) {
+    let step = mark + gap;
+    if step <= 0.0 {
+        return;
+    }
+    let mut at = (near / step).floor() * step;
+    while at < far {
+        let (start, end) = (at.max(near), (at + mark).min(far));
+        if end > start {
+            out.segment(from + along * start, from + along * end, width);
+        }
+        at += step;
+    }
+}
+
 /// The smallest round distance at least this many metres. The ladder runs out
 /// at its top rather than inventing a rung, because past that the whole sheet
 /// is one square of the grid anyway.
@@ -1981,18 +2325,18 @@ fn distance_label(metres: f32) -> String {
 // The furniture
 // ---------------------------------------------------------------------------
 
-/// Diameter of the rose, and how far the instruments sit in from their corners.
-const ROSE_SIZE: f32 = 84.0;
+/// How far the instruments sit in from their corners.
 const FURNITURE_MARGIN: f32 = 16.0;
 
-/// The instruments in the sheet's corners: the rose that says north is up, and
-/// the bar that says how far a distance reaches across the paper.
+/// The bar in the sheet's corner that says how far a distance reaches across
+/// the paper.
 ///
-/// Built as UI rather than drawn into the mesh because they are pinned to the
-/// window and not to the world — the whole point of them being that they do not
-/// move when the sheet does. They are given the sheet's own camera so they are
-/// drawn in its pass, over the engraving; the world's own instruments are left
-/// alone and simply painted over.
+/// Built as UI rather than drawn into the mesh because it is pinned to the
+/// window and not to the world — the whole point of it being that it does not
+/// move when the sheet does. It is given the sheet's own camera so it is drawn
+/// in that pass, over the engraving; the world's own instruments are left alone
+/// and simply painted over. The rose in the other corner is pinned the same way
+/// but drawn otherwise — see [`corner_rose`].
 fn furniture(commands: &mut Commands, sheet: Entity) {
     commands
         .spawn((
@@ -2008,37 +2352,6 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
             DespawnOnExit(Helm::Chart),
         ))
         .with_children(|sheet| {
-            // The rose. Flat, unlike the world's compass, which lies
-            // foreshortened on the sea because a bearing read off it is meant
-            // to be carried out into the picture. Nothing is foreshortened on a
-            // chart and nothing on this one turns: it is here to say that north
-            // is up and stays up, so it is drawn once and never touched again.
-            sheet
-                .spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        right: Val::Px(FURNITURE_MARGIN),
-                        bottom: Val::Px(FURNITURE_MARGIN),
-                        width: Val::Px(ROSE_SIZE),
-                        height: Val::Px(ROSE_SIZE),
-                        border: UiRect::all(Val::Px(1.0)),
-                        border_radius: BorderRadius::MAX,
-                        ..default()
-                    },
-                    BorderColor::all(INK_DIM),
-                ))
-                .with_children(|face| {
-                    Rose {
-                        ink: INK,
-                        dim: INK_DIM,
-                        cross: INK_FAINT,
-                        letters: 16.0,
-                        inset: 6.0,
-                        arm: 22.0,
-                    }
-                    .draw(face);
-                });
-
             // The scale bar. Its length is set as the sheet is drawn — see
             // [`rule_the_scale`] — because it is the one piece of furniture that
             // has to change with the zoom, that being the whole of what it is
@@ -2080,6 +2393,122 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
                 ],
             ));
         });
+}
+
+/// The rose in the corner: a sixteen-point star in its graduated band, lettered
+/// at the four cardinals.
+///
+/// Flat, unlike the world's compass, which lies foreshortened on the sea
+/// because a bearing read off it is meant to be carried out into the picture.
+/// Nothing is foreshortened on a chart and nothing on this one turns: it is
+/// here to say that north is up and stays up, so it is drawn once, at the size
+/// it will always be, and only its transform is touched again.
+///
+/// Engraved rather than built from boxes the way the world's compass is. That
+/// is not a preference: a kite point is a triangle and the UI layer has only
+/// rectangles, so a star drawn there would have to be a spike rose, which is a
+/// different and poorer thing. Being a mesh means it lives in the sheet's own
+/// space rather than the window's, and [`pin_the_rose`] does the job the UI
+/// layer would have done — which is the whole cost of the change, and it is one
+/// short system.
+fn corner_rose(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) {
+    let mut inked = Strokes::default();
+    let mut dimmed = Strokes::default();
+    star(&mut inked, &mut dimmed, Vec2::ZERO, ROSE_REACH);
+    band(
+        &mut dimmed,
+        Vec2::ZERO,
+        ROSE_REACH,
+        ROSE_REACH + ROSE_BAND,
+        ROSE_WEIGHT,
+    );
+
+    let rose = commands
+        .spawn((
+            Name::new("Chart rose"),
+            CornerRose,
+            ChartSheet,
+            Transform::default(),
+            Visibility::Visible,
+            DespawnOnExit(Helm::Chart),
+        ))
+        .id();
+
+    for (strokes, ink) in [(inked, &inks.coast), (dimmed, &inks.dim)] {
+        if let Some(mesh) = strokes.mesh() {
+            commands.spawn((
+                Mesh2d(meshes.add(mesh)),
+                MeshMaterial2d(ink.clone()),
+                Transform::default(),
+                ChildOf(rose),
+            ));
+        }
+    }
+
+    // The letters, outside the band because the star fills the disc. N in the
+    // reading ink and the other three dimmed, as on the world's compass and for
+    // the same reason: they are what make N mean north rather than "this way".
+    let out = ROSE_REACH + ROSE_BAND + ROSE_LETTER_GAP;
+    for (letter, turns, ink) in [
+        ("N", 0.0, INK),
+        ("E", 0.25, INK_DIM),
+        ("S", 0.5, INK_DIM),
+        ("W", 0.75, INK_DIM),
+    ] {
+        commands.spawn((
+            Text2d::new(letter),
+            // The serif the menus and the scale bar resolve, for the reason
+            // they do: this is chart furniture, and the machine's serif is the
+            // hand charts are lettered in. Not the islands' italic, which is a
+            // hand writing *on* the paper.
+            TextFont {
+                font: FontSource::Serif,
+                font_size: FontSize::Px(ROSE_LETTERS),
+                ..default()
+            },
+            TextColor(ink),
+            Transform::from_translation((wind(turns) * out).extend(0.1)),
+            ChildOf(rose),
+        ));
+    }
+}
+
+/// Keeps the rose in the corner of the window.
+///
+/// It is furniture, pinned like the scale bar — but it is drawn in the sheet's
+/// space rather than the window's (see [`corner_rose`]), so where the window's
+/// corner has got to has to be worked out rather than declared. The sheet's
+/// middle is the view's centre and a pixel is [`ChartView::metres_per_pixel`]
+/// metres of paper, which is the whole of the arithmetic; the same scale on the
+/// transform is what holds the rose at its drawn size through a zoom, exactly
+/// as the reader's own mark is held.
+fn pin_the_rose(
+    view: Res<ChartView>,
+    sheet: Query<&Camera, With<ChartSheet>>,
+    mut roses: Query<&mut Transform, With<CornerRose>>,
+) {
+    let Some(size) = sheet
+        .single()
+        .ok()
+        .and_then(|camera| camera.logical_viewport_size())
+    else {
+        return;
+    };
+    let at = rose_corner(&view, size);
+    for mut transform in &mut roses {
+        // Over the coast and the lettering both: it is furniture standing on
+        // the sheet, and a shore drawn through it would read as an error.
+        transform.translation = at.extend(3.0);
+        transform.scale = Vec3::splat(view.metres_per_pixel);
+    }
+}
+
+/// Where the rose's middle falls on the paper, for a view and a window: the
+/// sheet's own middle, plus the corner in pixels of paper.
+fn rose_corner(view: &ChartView, size: Vec2) -> Vec2 {
+    let inset = ROSE_EXTENT + FURNITURE_MARGIN;
+    let corner = Vec2::new(size.x / 2.0 - inset, inset - size.y / 2.0);
+    on_the_sheet(view.centre) + corner * view.metres_per_pixel
 }
 
 /// The bar of the scale, and its label.
@@ -2931,5 +3360,174 @@ mod tests {
         let across: Vec<f32> = strokes.positions.iter().map(|point| point[1]).collect();
         assert_eq!(across.iter().copied().fold(f32::MIN, f32::max), 1.0);
         assert_eq!(across.iter().copied().fold(f32::MAX, f32::min), -1.0);
+    }
+
+    /// How many straight strokes a run of triangles came from.
+    fn segments(strokes: &Strokes) -> usize {
+        strokes.positions.len() / 6
+    }
+
+    #[test]
+    fn the_roses_keep_step_with_the_ruling() {
+        // The two lattices are one lattice, at every rung of the zoom: a rose
+        // stands a whole number of graticule squares from its neighbour, so
+        // the net does not drift against the ruling as the sheet is zoomed.
+        for zoom in [MIN_METRES_PER_PIXEL, 4.0, 17.0, MAX_METRES_PER_PIXEL] {
+            let square = round_distance(GRATICULE_GAP * zoom);
+            let squares = rhumb_spacing(zoom) / square;
+            assert_eq!(squares, RHUMB_SQUARES, "at {zoom} m to the pixel");
+        }
+    }
+
+    #[test]
+    fn a_rose_stands_off_its_crossing_but_never_far() {
+        // Nudged, or the net is a repeating X — but by a fraction of a square,
+        // so a rose still belongs to the crossing it came from.
+        let spacing = 1000.0;
+        let paper = Rect::from_corners(Vec2::ZERO, Vec2::splat(6000.0));
+        let roses = rhumb_roses(paper, spacing);
+        assert!(roses.len() > 20, "a lattice of {} roses", roses.len());
+
+        let mut nudged = 0;
+        for rose in &roses {
+            let off = *rose / spacing - (*rose / spacing).round();
+            assert!(
+                off.abs().max_element() <= RHUMB_NUDGE + 1e-4,
+                "{rose:?} strayed {off:?} squares off its crossing"
+            );
+            if off.abs().max_element() > 0.05 {
+                nudged += 1;
+            }
+        }
+        assert!(
+            nudged > roses.len() / 2,
+            "only {nudged} of {} roses moved at all",
+            roses.len()
+        );
+    }
+
+    #[test]
+    fn a_rose_stands_in_the_same_place_however_the_sheet_is_cut() {
+        // The sheet is rebuilt whenever the view leaves the window it was
+        // drawn for, and the rebuild covers a different stretch of paper. A
+        // rose that moved between two such cuts would swim about the sea as
+        // the player panned, which is the one thing the nudge must not do.
+        let spacing = 1000.0;
+        let first = rhumb_roses(Rect::from_corners(Vec2::ZERO, Vec2::splat(6000.0)), spacing);
+        let second = rhumb_roses(
+            Rect::from_corners(Vec2::splat(2500.0), Vec2::splat(9000.0)),
+            spacing,
+        );
+
+        let shared: Vec<&Vec2> = first
+            .iter()
+            .filter(|rose| second.iter().any(|other| other.abs_diff_eq(**rose, 1e-3)))
+            .collect();
+        let overlap = Rect::from_corners(Vec2::splat(3000.0), Vec2::splat(5500.0));
+        let expected = first.iter().filter(|rose| overlap.contains(**rose)).count();
+        assert!(
+            shared.len() >= expected && expected > 0,
+            "{} roses agreed where {expected} were drawn twice",
+            shared.len()
+        );
+    }
+
+    #[test]
+    fn a_ray_is_clipped_to_the_paper_and_never_runs_backwards() {
+        let paper = Rect::from_corners(Vec2::ZERO, Vec2::splat(10.0));
+        let east = Vec2::new(1.0, 0.0);
+
+        // From a rose on the paper: nothing behind it, and it stops at the edge.
+        assert_eq!(ray_across(paper, Vec2::splat(5.0), east), Some((0.0, 5.0)));
+        // From one off the paper: it starts where it arrives.
+        assert_eq!(
+            ray_across(paper, Vec2::new(-5.0, 5.0), east),
+            Some((5.0, 15.0))
+        );
+        // And a bearing that never gets there draws nothing at all, whether it
+        // runs parallel to the sheet or away from it.
+        assert_eq!(ray_across(paper, Vec2::new(-5.0, 20.0), east), None);
+        assert_eq!(
+            ray_across(paper, Vec2::splat(20.0), Vec2::splat(0.5f32.sqrt())),
+            None
+        );
+    }
+
+    #[test]
+    fn the_dashes_of_a_ray_are_counted_from_its_rose() {
+        // Whole dashes on the beat from the rose, so that neighbouring
+        // bearings break together — see `dashes`.
+        let mut whole = Strokes::default();
+        dashes(
+            &mut whole,
+            Vec2::ZERO,
+            Vec2::new(1.0, 0.0),
+            (0.0, 100.0),
+            (10.0, 10.0),
+            1.0,
+        );
+        assert_eq!(segments(&whole), 5);
+        let along: Vec<f32> = whole.positions.iter().map(|point| point[0]).collect();
+        assert_eq!(along.iter().copied().fold(f32::MIN, f32::max), 90.0);
+
+        // A ray whose near end lands mid-gap keeps the same beat rather than
+        // starting a new one there.
+        let mut cut = Strokes::default();
+        dashes(
+            &mut cut,
+            Vec2::ZERO,
+            Vec2::new(1.0, 0.0),
+            (15.0, 100.0),
+            (10.0, 10.0),
+            1.0,
+        );
+        let start = cut
+            .positions
+            .iter()
+            .map(|point| point[0])
+            .fold(f32::MAX, f32::min);
+        assert_eq!(start, 20.0, "the beat restarted at the cut");
+    }
+
+    #[test]
+    fn a_star_is_drawn_in_two_halves() {
+        // Sixteen points, each split down its axis — one half to each tone,
+        // which is what stands in for an engraver's hatching. Neither sink may
+        // be short: a point with only one half drawn is a point missing.
+        let (mut dark, mut light) = (Strokes::default(), Strokes::default());
+        star(&mut dark, &mut light, Vec2::ZERO, 40.0);
+        assert_eq!(dark.positions.len(), 16 * 3);
+        assert_eq!(light.positions.len(), 16 * 3);
+
+        // The four longest reach the rim, and nothing overruns it — the band
+        // is ruled at exactly that radius.
+        let reach = dark
+            .positions
+            .iter()
+            .map(|point| Vec2::new(point[0], point[1]).length())
+            .fold(f32::MIN, f32::max);
+        assert!((reach - 40.0).abs() < 1e-3, "the star reached {reach}");
+    }
+
+    #[test]
+    fn the_rose_keeps_its_corner_through_a_zoom() {
+        // Furniture: it sits the same number of *pixels* in from the same
+        // corner however much world the sheet is showing.
+        let size = Vec2::new(1280.0, 720.0);
+        for zoom in [MIN_METRES_PER_PIXEL, DEFAULT_METRES_PER_PIXEL, 40.0] {
+            let view = ChartView {
+                centre: Vec2::new(-345.0, -445.0),
+                metres_per_pixel: zoom,
+                opened: true,
+            };
+            let off = (rose_corner(&view, size) - on_the_sheet(view.centre)) / zoom;
+            assert!(
+                (off.x - (size.x / 2.0 - ROSE_EXTENT - FURNITURE_MARGIN)).abs() < 1e-3
+                    && (off.y + (size.y / 2.0 - ROSE_EXTENT - FURNITURE_MARGIN)).abs() < 1e-3,
+                "at {zoom} m to the pixel the rose sat {off:?} pixels off the middle"
+            );
+            // The bottom right of the sheet, which is where it is drawn.
+            assert!(off.x > 0.0 && off.y < 0.0);
+        }
     }
 }
