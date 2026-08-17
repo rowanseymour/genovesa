@@ -32,15 +32,39 @@
 //! answers "the wind is off my starboard bow" in a glance, where two
 //! instruments would leave the player doing the subtraction. That it costs
 //! nothing to draw is the smaller half of the argument.
+//!
+//! And a third: a ring of marks round the rim, one arc for every stretch of
+//! coast within sight. This camera looks *down*, so land a few hundred metres
+//! off can be outside the picture entirely while the player is close enough to
+//! walk up its beach — which makes finding the next island a matter of sailing
+//! at random until one turns up. The ring answers the question the picture
+//! cannot: something is over there, and it is that way.
+//!
+//! It marks what has not been charted louder than what has, because the
+//! problem is finding *new* islands and a bearing to somewhere already
+//! surveyed is worth having without competing. And it reaches exactly as far
+//! as the haze does — see [`SIGHT`]. The card is an instrument, not a second
+//! sight: it says what the player could have noticed and did not, and nothing
+//! about what is over the horizon.
+//!
+//! Nothing about it crosses the wire. The sweep reads the chunks this machine
+//! was already sent, so a client written against the protocol alone would
+//! carry the same ring for the same nothing — which is the arrangement the
+//! chart is built on too.
+
+use std::f32::consts::TAU;
 
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource};
 use bevy::ui::{UiTransform, Val2};
 
-use protocol::ground::NORTH;
+use protocol::ground::{CHUNK_METRES, NORTH};
 
 use crate::camera::{MapCamera, PITCH};
+use crate::chart::Chart;
+use crate::player::PlayerPlace;
 use crate::sea::SeaConditions;
+use crate::terrain::Ground;
 use crate::AppState;
 
 /// Diameter of the face, in pixels — an instrument, not a map: big enough to
@@ -48,15 +72,22 @@ use crate::AppState;
 /// The letters take a fixed bite out of the rim whatever the face is, so this
 /// is really the size of what is left in the middle: at sixty-four there was
 /// no room to lay an arrow across the card without it fouling them.
-const FACE_SIZE: f32 = 88.0;
+///
+/// It was eighty-eight before the card carried land. The ring wants the outer
+/// band to itself and a letter has a size it is legible at, so the face had to
+/// grow by about what the ring takes rather than the letters shrinking into
+/// it. Larger again was tried and lost: at a hundred and sixty the letters are
+/// the same size in a much wider face, and the middle goes hollow.
+const FACE_SIZE: f32 = 128.0;
 /// How far the face sits in from the corner of the window.
 const MARGIN: f32 = 12.0;
-/// The cardinal letters' size.
+/// The cardinal letters' size. Not scaled with the face — see [`FACE_SIZE`].
 const LETTER_SIZE: f32 = 13.0;
-/// How far the letters sit in from the rim.
-const INSET: f32 = 4.0;
+/// How far the letters sit in from the rim, which is the outer band given over
+/// to the land ring — see [`RING_INSET`].
+const INSET: f32 = 13.0;
 /// How long each arm of the centre cross runs, short of the letters.
-const CROSS_ARM: f32 = 14.0;
+const CROSS_ARM: f32 = 20.0;
 
 /// The wind the arm is drawn at its full reach for, in metres per second — a
 /// fresh breeze rather than the hardest wind there is. Where the scale ends
@@ -81,7 +112,7 @@ const CALM: f32 = 0.5;
 /// reading laid over the rose, not a hand touching its rim — and the near end
 /// is a stub rather than nothing, so a dying wind shrinks towards a point
 /// while the fade takes it.
-const ARM: (f32, f32) = (10.0, 25.0);
+const ARM: (f32, f32) = (14.5, 36.0);
 
 /// The arm's thickness, in pixels: heavier than the cross, which is
 /// furniture, and lighter than a letter.
@@ -89,7 +120,7 @@ const ARM_WIDTH: f32 = 2.0;
 
 /// Each barb of the arrowhead: how long it runs, in pixels, and how far off
 /// the shaft it is turned, in radians.
-const BARB: (f32, f32) = (7.0, 0.55);
+const BARB: (f32, f32) = (10.0, 0.55);
 
 // The same furniture the menus are drawn with — one edge colour, one ink, one
 // dimmed ink — so the instrument reads as a piece of the same chart.
@@ -101,15 +132,303 @@ const INK_DIM: Color = Color::srgb(0.60, 0.60, 0.55);
 /// than either ink.
 const CROSS: Color = Color::srgba(0.60, 0.60, 0.55, 0.45);
 
+/// How far out land is marked, in metres.
+///
+/// The haze closes the picture at [`crate::HAZE_END`], so this is exactly
+/// what is out there to be seen: the ring says what the player *could* have
+/// noticed and did not, rather than seeing past the edge of the world. It has
+/// to stay inside [`crate::terrain::STREAM_RADIUS`] or the sweep would be
+/// asking about ground this machine was never sent — which is the assertion
+/// below, since the two constants are set for different reasons and nothing
+/// else would notice them crossing.
+const SIGHT: f32 = crate::HAZE_END;
+const _: () = assert!(SIGHT <= crate::terrain::STREAM_RADIUS);
+
+/// How many sectors the horizon is cut into.
+///
+/// The ring is a fixed pool of marks, one per sector, inked or left blank as
+/// the sweep finds land — rather than marks spawned and despawned as coast
+/// comes and goes, which is churn in the UI tree for a reading that changes
+/// with every step anyway. Forty-eight is 7.5° apiece: fine enough that an
+/// island's arc has a shape, coarse enough that a distant islet still lights
+/// a mark rather than a hairline.
+const SECTORS: usize = 48;
+
+/// How far in from the rim the ring is drawn, and so how much of the outer
+/// band the letters give up to it — see [`INSET`], which is the other half of
+/// the same arrangement.
+const RING_INSET: f32 = 6.0;
+/// Where the marks lie, as a distance from the middle of the card.
+const RING: f32 = FACE_SIZE / 2.0 - RING_INSET;
+
+/// How thick a mark lies on the rim: for land the chart has not been to, and
+/// for land it has.
+///
+/// Two channels rather than one, and both saying the same thing. Dimmed alone
+/// was not enough: a near island subtends a great deal of rim, and a long arc
+/// in [`INK_DIM`] sits close enough to [`EDGE`] to read as the border drawn
+/// heavier rather than as coast. Thinner as well as dimmer separates them.
+const BAND: (f32, f32) = (4.0, 2.0);
+
+/// No chunk may claim more than this much of the horizon on its own.
+///
+/// Standing on land, the chunk underfoot subtends everything, and the
+/// arithmetic in [`subtends`] has nothing sensible to say about a square the
+/// player is inside. Its neighbours fill the rest in honestly, so clamping
+/// loses nothing and keeps one chunk from painting the whole ring.
+const WIDEST: f32 = TAU / 6.0;
+
+/// How far the player moves before the ring is swept again, in metres.
+///
+/// The sweep walks every chunk within [`SIGHT`] and scans each one's height
+/// grid, which is not work worth doing sixty times a second for an answer
+/// that is already quantised to [`SECTORS`]: four metres moves a bearing by
+/// less than a sector at any range the ring is drawn for, so nothing visible
+/// waits on it. Ground arriving or coast being charted re-sweeps regardless —
+/// both change the answer without the player having moved.
+const STEP: f32 = 4.0;
+
+/// Land the player has not charted: the reading the ring exists for, in the
+/// card's own reading ink.
+const NEW_LAND: Color = INK;
+/// Land already on the chart. Still marked, because a bearing to somewhere
+/// known is worth having, but it must not compete with the other.
+const KNOWN_LAND: Color = INK_DIM;
+
+/// The mark filling one sector of the ring, by index.
+#[derive(Component)]
+struct LandMark(usize);
+
+/// What the ring was last swept against, so that standing still costs nothing.
+#[derive(Resource, Default)]
+struct Swept {
+    /// Where the player stood, if the ring has ever been swept.
+    at: Option<Vec2>,
+    /// How many chunks of ground this machine held at the time — see
+    /// [`mark_the_land`] for why the count and not a change tick.
+    held: usize,
+}
+
+/// What the sweep found in one sector: how far off the nearest land in it is,
+/// and whether the chart has been there.
+#[derive(Clone, Copy)]
+struct Sighting {
+    distance: f32,
+    surveyed: bool,
+}
+
+/// The ring: [`SECTORS`] marks laid round the rim, all blank until
+/// [`mark_the_land`] inks them.
+///
+/// Children of the *card*, like the wind arm and for the same reason: the card
+/// already carries the turn from the world to the view, so a mark's own
+/// rotation is a bearing and nothing else. And because the card sits inside
+/// the squashed face, a mark lands on the same ellipse the rim is drawn as —
+/// which puts it in the picture where the ground it stands for is. The
+/// foreshortening is doing real work here rather than only looking right.
+///
+/// Each mark is a bar lying *along* the rim rather than a tick standing off
+/// it, so a run of them across the arc an island subtends reads as one band:
+/// how much rim it takes says how much of the horizon that island fills, and
+/// near and far separate without a second channel spent on saying so. Radial
+/// ticks were tried and read as graduation — a protractor's degree marks,
+/// furniture rather than a reading.
+fn spawn_ring(card: &mut ChildSpawnerCommands) {
+    // Wide enough to meet its neighbours: the chord a sector cuts across the
+    // ring, plus a hair, so a run of marks is an arc and not a row of dashes.
+    let chord = 2.0 * RING * (TAU / SECTORS as f32 / 2.0).sin() + 1.0;
+    for sector in 0..SECTORS {
+        card.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            UiTransform {
+                rotation: Rot2::radians(sector as f32 * TAU / SECTORS as f32),
+                ..UiTransform::IDENTITY
+            },
+        ))
+        .with_children(|spot| {
+            spot.spawn((
+                LandMark(sector),
+                Node {
+                    width: Val::Px(chord),
+                    height: Val::Px(BAND.0),
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+                UiTransform {
+                    translation: Val2::px(0.0, -RING),
+                    ..UiTransform::IDENTITY
+                },
+            ));
+        });
+    }
+}
+
+/// The bearing of a direction on the card: clockwise from north, the way
+/// [`arm_bearing`] takes one and the way [`UiTransform`] turns.
+fn bearing(direction: Vec2) -> f32 {
+    let east = Vec2::new(-NORTH.y, NORTH.x);
+    f32::atan2(direction.dot(east), direction.dot(NORTH))
+}
+
+/// Which sector a bearing falls in.
+fn sector_of(bearing: f32) -> usize {
+    let turn = (bearing / TAU).rem_euclid(1.0);
+    ((turn * SECTORS as f32) as usize).min(SECTORS - 1)
+}
+
+/// The arc one chunk of ground subtends from `at`: its middle bearing, and
+/// how far its corners reach either side of that.
+///
+/// Taken relative to the middle rather than as four bearings in their own
+/// right, so a chunk lying across north — where bearings wrap — needs no
+/// special case. Clamped to [`WIDEST`].
+fn subtends(at: Vec2, chunk: IVec2) -> (f32, f32) {
+    let corner = chunk.as_vec2() * CHUNK_METRES;
+    let middle = bearing(corner + CHUNK_METRES / 2.0 - at);
+    let mut widest: f32 = 0.0;
+    for x in [corner.x, corner.x + CHUNK_METRES] {
+        for y in [corner.y, corner.y + CHUNK_METRES] {
+            let offset = bearing(Vec2::new(x, y) - at) - middle;
+            // Back into (-pi, pi]: the difference of two bearings is an angle
+            // rather than a bearing, and a chunk either side of north would
+            // otherwise read as most of a turn wide.
+            let offset = offset - TAU * (offset / TAU).round();
+            widest = widest.max(offset.abs());
+        }
+    }
+    (middle, widest.min(WIDEST))
+}
+
+/// What land there is round the player, by sector: the nearest in each, and
+/// whether the chart has it.
+///
+/// Read off the chunks this machine was already sent, so the ring costs the
+/// session nothing — a client written against the protocol alone could draw
+/// the same one. A chunk counts as land only where some corner of it stands
+/// above the sea: the server sends a payload for the shelf around an island
+/// as well as for the island, and a ring lighting up for drowned ground would
+/// be marking water.
+///
+/// The *nearest* land wins a sector rather than the newest, which decides the
+/// one case where the two disagree: a charted island with something unknown
+/// behind it. The near shore is what a player looking that way would find, so
+/// the ring says so — the same thing the eye would, if the camera let it see
+/// that far.
+fn land_in_sight(ground: &Ground, chart: &Chart, at: Vec2) -> [Option<Sighting>; SECTORS] {
+    let mut found = [None; SECTORS];
+    let reach = (SIGHT / CHUNK_METRES).ceil() as i32;
+    let home = (at / CHUNK_METRES).floor().as_ivec2();
+    for dz in -reach..=reach {
+        for dx in -reach..=reach {
+            let chunk = home + IVec2::new(dx, dz);
+            let Some((_, peak)) = ground.peak(chunk) else {
+                continue;
+            };
+            if peak <= 0.0 {
+                continue;
+            }
+            let corner = chunk.as_vec2() * CHUNK_METRES;
+            let distance = at.clamp(corner, corner + CHUNK_METRES).distance(at);
+            if distance > SIGHT {
+                continue;
+            }
+            let sighting = Sighting {
+                distance,
+                surveyed: chart.surveyed(chunk),
+            };
+            let (middle, half) = subtends(at, chunk);
+            // Walked in whole sectors rather than in radians, so both ends of
+            // the arc are certainly lit whatever it rounds to.
+            let first = sector_of(middle - half) as i32;
+            let steps = ((2.0 * half) / (TAU / SECTORS as f32)).ceil() as i32;
+            for step in 0..=steps {
+                let sector = (first + step).rem_euclid(SECTORS as i32) as usize;
+                if found[sector].is_none_or(|had: Sighting| distance < had.distance) {
+                    found[sector] = Some(sighting);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// How one sector is drawn: its ink, and how thick a band it lays on the rim.
+fn mark_drawn(sighting: Option<Sighting>) -> (Color, f32) {
+    match sighting {
+        None => (Color::NONE, BAND.1),
+        Some(seen) if seen.surveyed => (KNOWN_LAND, BAND.1),
+        Some(_) => (NEW_LAND, BAND.0),
+    }
+}
+
+/// Sweeps the ground round the player and inks the ring for what it finds.
+///
+/// Held off until the player has moved [`STEP`], or until more ground has
+/// arrived — a client that drops anchor while its neighbourhood is still
+/// coming in must not hold a ring drawn before the island did.
+///
+/// The count of chunks held, rather than [`DetectChanges::is_changed`] on
+/// [`Ground`]: `terrain`'s streaming takes it as `ResMut` and walks it every
+/// frame whether or not anything came, so the change tick is always set and a
+/// guard on it would quietly never fire. Counting is honest about what the
+/// sweep actually depends on. It cannot tell an arrival from a departure in
+/// the same frame, but a chunk only leaves when the player has moved far
+/// enough to have tripped [`STEP`] several times over.
+///
+/// Coast being charted needs no signal of its own: the chart only surveys
+/// what comes within its own radius of the player, so a mark changing from
+/// new to known is always something the player moved to earn.
+fn mark_the_land(
+    ground: Res<Ground>,
+    chart: Res<Chart>,
+    player: PlayerPlace,
+    mut swept: ResMut<Swept>,
+    mut marks: Query<(&LandMark, &mut Node, &mut BackgroundColor)>,
+) {
+    let Some(at) = player.on_the_map() else {
+        return;
+    };
+    let held = ground.tally().ground;
+    let stood_still = swept
+        .at
+        .is_some_and(|last| last.distance_squared(at) < STEP * STEP);
+    if stood_still && held == swept.held {
+        return;
+    }
+    swept.at = Some(at);
+    swept.held = held;
+
+    let sightings = land_in_sight(&ground, &chart, at);
+    for (mark, mut node, mut colour) in &mut marks {
+        let (ink, band) = mark_drawn(sightings[mark.0]);
+        node.height = Val::Px(band);
+        *colour = BackgroundColor(ink);
+    }
+}
 pub struct CompassPlugin;
 
 impl Plugin for CompassPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SeaConditions>()
+            .init_resource::<Swept>()
             .add_systems(OnEnter(AppState::InWorld), spawn_compass)
             .add_systems(
                 Update,
-                (turn_card, point_the_arm).run_if(in_state(AppState::InWorld)),
+                (
+                    (turn_card, point_the_arm),
+                    // The ring reads both, and both come and go with the
+                    // world — as the chart's own survey does.
+                    mark_the_land
+                        .run_if(resource_exists::<Chart>.and_then(resource_exists::<Ground>)),
+                )
+                    .run_if(in_state(AppState::InWorld)),
             );
     }
 }
@@ -136,7 +455,11 @@ struct WindShaft;
 #[derive(Component)]
 struct WindInk;
 
-fn spawn_compass(mut commands: Commands) {
+fn spawn_compass(mut commands: Commands, mut swept: ResMut<Swept>) {
+    // A new world is a new sweep: the ring respawns blank, and a position
+    // left over from the last one would hold it that way until the player
+    // had moved.
+    *swept = Swept::default();
     commands
         .spawn((
             Name::new("Compass"),
@@ -183,6 +506,7 @@ fn spawn_compass(mut commands: Commands) {
                 // than it bought the arm.
                 spawn_cross(card);
                 spawn_arm(card);
+                spawn_ring(card);
                 spawn_letters(card);
             });
         });
@@ -458,6 +782,27 @@ mod tests {
     use bevy::input::mouse::AccumulatedMouseScroll;
     use bevy::state::app::StatesPlugin;
     use bevy::time::TimePlugin;
+    use protocol::ground::{quantize, ChunkPayload, Surface, Tone, FACET_TRIS, FACET_VERTS};
+
+    /// A chunk standing well clear of the water.
+    fn a_hill() -> ChunkPayload {
+        payload(40.0)
+    }
+
+    /// A chunk of sea bed: ground the server sent, with none of it above the
+    /// waterline.
+    fn a_shoal() -> ChunkPayload {
+        payload(-3.0)
+    }
+
+    fn payload(height: f32) -> ChunkPayload {
+        ChunkPayload {
+            heights: vec![quantize(height); FACET_VERTS * FACET_VERTS],
+            surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
+            water: None,
+            plants: Vec::new(),
+        }
+    }
 
     /// A headless app with the camera to read and the compass to point,
     /// already dropped into a match.
@@ -621,6 +966,111 @@ mod tests {
             .expect("the shaft should exist")
             .height;
         assert_eq!(shaft, Val::Px(arm_reach(wind.length()).0));
+    }
+
+    /// The sign conventions the ring shares with the arm, checked where they
+    /// are cheap to check: a mark drawn on the wrong side of the card is
+    /// exactly the mistake a screenshot would be read straight past.
+    #[test]
+    fn a_chunk_lights_the_sector_it_lies_in() {
+        // Standing in the middle of chunk zero, so a chunk straight up the
+        // grid is straight north rather than half a chunk off it.
+        let at = Vec2::splat(CHUNK_METRES / 2.0);
+
+        // Ten chunks due north, which is `-Y` — the top of the card, and so
+        // sector zero.
+        let (middle, half) = subtends(at, IVec2::new(0, -10));
+        assert!(middle.abs() < 1e-5, "north did not read as straight up");
+        assert!(half > 0.0 && half < WIDEST);
+        assert_eq!(sector_of(middle), 0);
+
+        // And ten chunks due east, a quarter of the way round clockwise.
+        assert_eq!(sector_of(subtends(at, IVec2::new(10, 0)).0), SECTORS / 4);
+
+        // A chunk lying across north spans the wrap without claiming most of
+        // the horizon — the bug the middle-relative arithmetic is there for.
+        let (_, across) = subtends(at, IVec2::new(-1, -10));
+        assert!(
+            across < 0.2,
+            "a chunk near north subtended {across} radians"
+        );
+    }
+
+    /// Uncharted land is the louder mark on both channels, which is the whole
+    /// reason the ring is drawn.
+    #[test]
+    fn charted_land_is_drawn_quieter_than_new() {
+        let new = mark_drawn(Some(Sighting {
+            distance: 800.0,
+            surveyed: false,
+        }));
+        let known = mark_drawn(Some(Sighting {
+            distance: 100.0,
+            surveyed: true,
+        }));
+        assert_eq!(new.0, NEW_LAND);
+        assert_eq!(known.0, KNOWN_LAND);
+        assert!(new.1 > known.1, "new land drew no heavier than charted");
+        // Distance decides nothing about how a mark is drawn: the near one
+        // above is the quiet one. An arc faded by range was tried and drew the
+        // land most worth noticing faintest.
+        assert_eq!(mark_drawn(None).0, Color::NONE);
+    }
+
+    /// A hill on one chunk lights the sectors it stands in and no others.
+    #[test]
+    fn a_sweep_marks_the_bearing_land_lies_on() {
+        let mut ground = Ground::default();
+        // Due east of the origin, well inside sight.
+        let island = IVec2::new(3, 0);
+        ground.deliver(island, Some(a_hill()));
+
+        let found = land_in_sight(&ground, &Chart::default(), Vec2::splat(CHUNK_METRES / 2.0));
+        let lit: Vec<usize> = (0..SECTORS).filter(|s| found[*s].is_some()).collect();
+        assert!(!lit.is_empty(), "land due east lit nothing");
+        assert!(
+            lit.contains(&(SECTORS / 4)),
+            "land due east lit {lit:?} rather than the east sector"
+        );
+        // Nothing anywhere else on the card: an unswept ocean must not read
+        // as coast.
+        for quarter in [0, SECTORS / 2, 3 * SECTORS / 4] {
+            assert!(
+                found[quarter].is_none(),
+                "sector {quarter} lit with no land"
+            );
+        }
+        // Nothing charted, so all of it reads as new.
+        assert!(lit.iter().all(|s| !found[*s].unwrap().surveyed));
+    }
+
+    /// The two answers the sweep must refuse: drowned ground, and land past
+    /// the haze.
+    #[test]
+    fn only_land_within_sight_is_marked() {
+        let at = Vec2::splat(CHUNK_METRES / 2.0);
+        let chart = Chart::default();
+
+        // A chunk the server sent for the shelf around an island, every corner
+        // of it under water. Ground, but not land.
+        let mut shelf = Ground::default();
+        shelf.deliver(IVec2::new(3, 0), Some(a_shoal()));
+        assert!(
+            land_in_sight(&shelf, &chart, at)
+                .iter()
+                .all(Option::is_none),
+            "drowned ground was marked as coast"
+        );
+
+        // And an island past the haze, which the player has no way of having
+        // seen — the card would be claiming second sight.
+        let beyond = (SIGHT / CHUNK_METRES).ceil() as i32 + 1;
+        let mut far = Ground::default();
+        far.deliver(IVec2::new(beyond, 0), Some(a_hill()));
+        assert!(
+            land_in_sight(&far, &chart, at).iter().all(Option::is_none),
+            "land past the haze was marked"
+        );
     }
 
     #[test]

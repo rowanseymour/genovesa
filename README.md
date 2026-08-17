@@ -103,6 +103,13 @@ compass in the corner carries an arrow along the wind beside its north, for
 when the bearing itself is the question. Under way the two disagree, which is
 the difference between a flag and an instrument.
 
+Its rim carries the land within sight as well: an arc for every stretch of
+coast near enough to make out, and the brightest of them are the shores not on
+the chart yet. This camera looks down rather than out, so an island a few
+hundred metres off can be outside the picture altogether — near enough to walk
+up the beach of, and nothing on screen to say so. Without the ring the next
+landfall is a matter of sailing at random until one turns up.
+
 The look is flat-shaded facets in a small fixed palette — no textures and no
 gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
 height field is sampled, so the facets read as deliberate shapes.
