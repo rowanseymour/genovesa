@@ -235,7 +235,9 @@ cargo run --bin server -- --seed 7
 
 A world opened from the menu is *kept*: leave it and it is still there,
 offered again from the menu — the same islands, the clock where it stood, the
-player where the world last saw them. Time only passes while a world is open,
+player where the world last saw them. The menu keeps five such worlds at a
+time, each of them offered with the press that throws it away, so a sixth waits
+on discarding one. Time only passes while a world is open,
 so a gale quit out of is a gale returned to, and nothing in a world can be
 dodged by leaving it. Returning players are known by a token their own machine
 keeps, dealt on first visit; there are no accounts. A dedicated server keeps a

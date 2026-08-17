@@ -329,6 +329,9 @@ pub(crate) fn load(path: &Path) -> io::Result<WorldRecord> {
 /// shows, and the path that reopens the one chosen.
 pub struct KeptWorld {
     pub path: PathBuf,
+    /// Which world this is — the name the client keeps its own papers for the
+    /// place under, so that discarding a world can take them with it.
+    pub id: WorldId,
     /// Empty for a world nobody has named.
     pub name: String,
     /// World-seconds lived — see [`WorldRecord::age`]. What a listing turns
@@ -360,6 +363,7 @@ pub fn kept_worlds(dir: &Path) -> Vec<KeptWorld> {
                 .unwrap_or(UNIX_EPOCH);
             Some(KeptWorld {
                 path,
+                id: record.id,
                 name: record.name,
                 age: record.age,
                 kept,
@@ -368,6 +372,37 @@ pub fn kept_worlds(dir: &Path) -> Vec<KeptWorld> {
         .collect();
     worlds.sort_by_key(|world| std::cmp::Reverse(world.kept));
     worlds
+}
+
+/// Throws a kept world away: the file, the backup behind it, and the lock
+/// beside it, so nothing of the place is left to list or to recover.
+///
+/// Held before it is deleted, and for the same reason hosting holds it: a
+/// world open in another process is a history still being written, and taking
+/// the file out from under it would leave that session saving to a name
+/// nobody will ever read again. A world being hosted therefore refuses to be
+/// discarded, in the words [`Keeper::hold`] refuses in.
+///
+/// The lock goes last, after the hold is dropped: on Windows a file still
+/// open cannot be deleted, and the hold is what has it open.
+pub fn discard(path: &Path) -> io::Result<()> {
+    let held = Keeper::hold(path)?;
+    let mut outcome = remove(path);
+    for suffix in ["old", "new"] {
+        outcome = outcome.and(remove(&sibling(path, suffix)));
+    }
+    drop(held);
+    outcome.and(remove(&sibling(path, "lock")))
+}
+
+/// Deletes a file, counting one that was never there as done — a world saved
+/// only once has no `.old`, and a discard must not complain about the file it
+/// was spared.
+fn remove(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        outcome => outcome,
+    }
 }
 
 /// Where this machine keeps what outlives a run: the platform's own place
@@ -1524,6 +1559,48 @@ mod tests {
 
         // And nowhere at all is simply no worlds.
         assert!(kept_worlds(&dir.join("nowhere")).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_discarded_world_leaves_nothing_behind() {
+        let dir = scratch();
+        let path = dir.join("gone.world");
+        {
+            let keeper = Keeper::hold(&path).expect("hold");
+            // Twice, so there is a backup to be thrown away as well.
+            keeper.save(&a_record()).expect("save");
+            keeper.save(&a_record()).expect("save");
+        }
+        assert_eq!(kept_worlds(&dir).len(), 1);
+
+        discard(&path).expect("discard");
+        assert!(kept_worlds(&dir).is_empty(), "the world is still listed");
+        let left: Vec<PathBuf> = fs::read_dir(&dir)
+            .expect("read")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert!(left.is_empty(), "the discard left files behind: {left:?}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_hosted_world_refuses_to_be_discarded() {
+        // Deleting the file under a running session would leave it saving a
+        // history to a name nothing will read again.
+        let dir = scratch();
+        let path = dir.join("busy.world");
+        let held = Keeper::hold(&path).expect("hold");
+        held.save(&a_record()).expect("save");
+
+        assert!(discard(&path).is_err(), "a hosted world was discarded");
+        assert_eq!(kept_worlds(&dir).len(), 1, "and yet something went");
+
+        // And once the host has let go, it goes.
+        drop(held);
+        discard(&path).expect("discard");
+        assert!(kept_worlds(&dir).is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 
