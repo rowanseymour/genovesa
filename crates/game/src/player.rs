@@ -133,14 +133,20 @@ pub struct Player;
 #[derive(Component)]
 pub struct Unsettled;
 
+/// The walkers still waiting for ground to stand on, as a query — see
+/// [`Unsettled`]. Not aboard anything: a player on a deck stands on the
+/// deck, and the hull's own transform is not theirs to write.
+type Waiting<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static mut Transform),
+    (With<Player>, With<Unsettled>, Without<ChildOf>),
+>;
+
 /// Settles an [`Unsettled`] walker onto the ground once it has arrived.
 /// Height only: where they stand is the server's word, and which way they
 /// face was entry's guess to make.
-fn find_footing(
-    mut commands: Commands,
-    ground: Option<Res<Ground>>,
-    mut walkers: Query<(Entity, &mut Transform), (With<Player>, With<Unsettled>, Without<ChildOf>)>,
-) {
+fn find_footing(mut commands: Commands, ground: Option<Res<Ground>>, mut walkers: Waiting) {
     for (walker, mut place) in &mut walkers {
         let standing = ground
             .as_ref()
@@ -338,6 +344,22 @@ fn wading(ground: Option<&Ground>, at: Vec2) -> f32 {
     }
 }
 
+/// Every hull the gunwale key might mean, as a query: where each lies, the
+/// sailing state of the one this player steers — the others have none — and
+/// the name it answers to on the wire, which is how a served world's helm is
+/// told apart from a local one's.
+type Vessels<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Transform,
+        Option<&'static mut Boat>,
+        Option<&'static HullId>,
+    ),
+    With<Vessel>,
+>;
+
 /// Crosses the gunwale, whichever way the player is facing it: ashore it
 /// boards the nearest boat in reach, aboard it steps off onto the nearest
 /// walkable ground. One key for both because they are one threshold, and
@@ -361,6 +383,7 @@ fn wading(ground: Option<&Ground>, at: Vec2) -> f32 {
 /// hierarchy at the identity, the marker comes off, and the helm answers
 /// again — with the sails as the player left them, making sail being a
 /// deliberate act rather than a side effect of stepping aboard.
+#[allow(clippy::too_many_arguments)]
 fn embark_or_land(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
@@ -369,7 +392,7 @@ fn embark_or_land(
     online: Option<Res<Online>>,
     mut fleet: ResMut<Fleet>,
     players: Query<(Entity, &Transform, Option<&ChildOf>), With<Player>>,
-    mut vessels: Query<(Entity, &Transform, Option<&mut Boat>, Option<&HullId>), With<Vessel>>,
+    mut vessels: Vessels,
 ) {
     if !keys.just_pressed(bindings.key(Action::Board)) {
         return;

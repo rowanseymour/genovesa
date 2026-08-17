@@ -525,8 +525,14 @@ fn players_meet_move_and_part() {
     );
 
     // Bob steps ashore first — an arrival is seated at a helm, and a
-    // helmsman's `Move` is quietly ignored. The step off is itself a move
-    // everyone hears.
+    // helmsman's `Move` is quietly ignored: one can honestly cross a
+    // boarding grant on the wire, and believing it would walk him off a deck
+    // everyone else can see him standing on. So the wander below changes
+    // nothing anybody hears, and the step off — which is itself a move
+    // everyone hears — is the first word about him, from where he really is.
+    bob.say(ToServer::Move {
+        position: bobs_spawn + Vec2::new(300.0, 300.0),
+    });
     bob.say(ToServer::Disembark {
         position: bobs_spawn,
     });
@@ -1073,6 +1079,135 @@ fn a_taken_boat_is_not_resumed_into() {
     assert_eq!(spawn, far, "Alice did not return where she was");
     assert_ne!(aboard, Some(a_boat), "one helm held two players");
     assert!(aboard.is_some(), "Alice was left standing on open water");
+}
+
+#[test]
+fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
+    // The same memory, and a boat that is nobody's again by the time she
+    // comes back — but lying somewhere else. Being seated back into it would
+    // teleport her across the water to wherever a stranger abandoned it, so
+    // the world puts her down where she stood, in a hull of her own.
+    let addr = host(1);
+    let (alice, a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
+    let a_boat = a_boat.expect("aboard");
+    let (bob, b, bobs_spawn, _t, _b_boat) = Client::join_aboard(addr, None);
+
+    // Alice sails out and hangs up at the helm. Bob hearing her leave is
+    // what says the helm is free before he asks for it.
+    let far = alices_spawn + Vec2::new(600.0, 0.0);
+    alice.say(ToServer::Helm {
+        position: far,
+        heading: 1.0,
+    });
+    drop(alice);
+    // Bob was introduced to her on arriving; her session read the helm
+    // report before it read the end of her line, so hearing the leaving
+    // after that is hearing both.
+    assert!(matches!(bob.hear(), ToClient::Joined { id, .. } if id == a));
+    assert_eq!(bob.hear(), ToClient::Left { id: a });
+
+    // Bob takes her boat, sails it well clear of where she left it, and
+    // steps off — leaving it free, and nowhere near her memory of it.
+    bob.say(ToServer::Disembark {
+        position: bobs_spawn,
+    });
+    bob.say(ToServer::Move {
+        position: far + Vec2::new(1.0, 0.0),
+    });
+    bob.say(ToServer::Board { boat: a_boat });
+    let moored = far + Vec2::new(0.0, 400.0);
+    bob.say(ToServer::Helm {
+        position: moored,
+        heading: 2.0,
+    });
+    bob.say(ToServer::Disembark {
+        position: moored + Vec2::new(2.0, 0.0),
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (told, at, _h, occupant) = bob.hear_a_boat();
+        if told == a_boat && occupant.is_none() && at == moored {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the boat was never left free somewhere else"
+        );
+    }
+    let _ = b;
+
+    let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
+    assert_eq!(spawn, far, "Alice did not return where she was");
+    assert_ne!(
+        aboard,
+        Some(a_boat),
+        "Alice was dragged to where her old boat had got to"
+    );
+    assert!(aboard.is_some(), "Alice was left standing on open water");
+}
+
+#[test]
+fn a_hull_nobody_ever_touched_is_handed_to_the_next_arrival() {
+    // What bounds the fleet against a client that joins and hangs up in a
+    // loop: the boat minted for an arrival who did nothing with it is the
+    // boat the next arrival is handed, rather than another being minted.
+    let addr = host(1);
+    // A watcher, so the leaving can be *heard* to have been dealt with
+    // before the next arrival knocks — a hull is only spare once its keeper
+    // is off the roster. Their own hull is occupied throughout, so it is
+    // never the one handed on.
+    let (watcher, _w, _spawn, _t, watchers) = Client::join_aboard(addr, None);
+    let watchers = watchers.expect("aboard");
+
+    let (alice, a, _spawn, _t, first) = Client::join_aboard(addr, None);
+    let first = first.expect("a newcomer's story starts aboard");
+    assert_ne!(first, watchers, "two players were dealt one hull");
+    drop(alice);
+    // Her arrival, then her departure — the watcher's own hull's tellings
+    // are not among these, [`Client::hear`] passing over the boats.
+    assert!(matches!(watcher.hear(), ToClient::Joined { id, .. } if id == a));
+    assert_eq!(watcher.hear(), ToClient::Left { id: a });
+
+    let (_bob, _b, _spawn, _t, second) = Client::join_aboard(addr, None);
+    assert_eq!(
+        second,
+        Some(first),
+        "the world minted a second hull rather than handing on the untouched one"
+    );
+}
+
+#[test]
+fn a_hull_somebody_stepped_off_is_not_handed_to_the_next_arrival() {
+    // A boat pulled up on a beach by a player who is still in the world is
+    // theirs to come back to, whether or not they ever sailed it. Handing it
+    // to a newcomer because no helm report had moved it would take it out
+    // from under somebody standing beside it.
+    let addr = host(1);
+    let (alice, _a, alices_spawn, _t, parked) = Client::join_aboard(addr, None);
+    let parked = parked.expect("aboard");
+    alice.say(ToServer::Disembark {
+        position: alices_spawn,
+    });
+    // Heard back before the next arrival knocks: the step ashore reaches
+    // everyone, the one who took it included.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (told, _at, _h, occupant) = alice.hear_a_boat();
+        if told == parked && occupant.is_none() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the step ashore was never told"
+        );
+    }
+
+    let (_bob, _b, _spawn, _t, bobs) = Client::join_aboard(addr, None);
+    assert_ne!(
+        bobs,
+        Some(parked),
+        "a newcomer was handed the boat somebody had parked and walked away from"
+    );
 }
 
 #[test]

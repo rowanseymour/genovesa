@@ -57,6 +57,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// altogether is noticed rather than buffered forever. A full queue at this
 /// depth is a few megabytes and several seconds of a client saying nothing,
 /// which is not "briefly behind" — see [`post`], which hangs up on it.
+///
+/// The arrival's burst is also one word per boat in the world, the whole
+/// fleet being introduced at the door, so this is the ceiling any future
+/// sizing of the fleet has to be read against: a world holding boats in the
+/// hundreds would be a world whose newcomers arrive into a full outbox.
 const OUTBOX_DEPTH: usize = 256;
 
 /// How many chunk requests may be waiting to be generated, across the whole
@@ -111,6 +116,17 @@ const BOARD_GRANT: f32 = 12.0;
 /// somebody else in the meantime, and its old keeper enters in a fresh hull
 /// rather than being teleported to wherever their old one was abandoned.
 const KEPT_BERTH: f32 = 16.0;
+
+/// How far from where an arrival is being put down a free hull nobody has
+/// ever touched may lie and still be handed to them rather than a new one
+/// minted, in metres — see [`BoatState::virgin`].
+///
+/// Wide enough to swallow the whole spawn scatter several times over, so the
+/// join-and-hang-up loop this exists to bound is handed the same boat back
+/// every time however the arrivals are strewn; narrow enough that a returner
+/// entering on some far coast gets a hull where *they* are rather than being
+/// pointed at one waiting off the entry island.
+const SPARE_BERTH: f32 = 64.0;
 
 /// How often a listening server looks up from its accept to see whether it
 /// has been asked to stop.
@@ -346,13 +362,21 @@ pub(crate) struct BoatState {
     pub(crate) position: Vec2,
     pub(crate) heading: f32,
     pub(crate) occupant: Option<PlayerId>,
-    /// Whether no helm report has ever moved this hull — a boat minted for
-    /// an arrival and never sailed. A virgin hull lying free is offered to
-    /// the next arrival instead of minting another, which is what bounds
-    /// the fleet against a client that joins and hangs up in a loop: the
-    /// loop is handed the same boat every time. Session-local — a loaded
-    /// boat is not virgin, its being in the file at all meaning somebody's
-    /// story touched it.
+    /// Whether nobody has ever done anything with this hull — a boat minted
+    /// for an arrival who never sailed it, never boarded it and never
+    /// stepped off it. A virgin hull lying free is offered to the next
+    /// arrival instead of minting another, which is what bounds the fleet
+    /// against a client that joins and hangs up in a loop: the loop is
+    /// handed the same boat every time. Session-local — a loaded boat is not
+    /// virgin, its being in the file at all meaning somebody's story touched
+    /// it.
+    ///
+    /// Cleared by all three of sailing, boarding and stepping off, because
+    /// any of them makes the hull somebody's: a boat a live player parked on
+    /// a beach and walked away from must not be handed out from under them
+    /// on the strength of never having been *reported* moved. The loop this
+    /// bounds does none of the three — it joins and hangs up — so the bound
+    /// costs nothing.
     pub(crate) virgin: bool,
 }
 
@@ -1167,13 +1191,16 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         {
             let mut boats = shared.boats.lock().expect("no poisoned lock");
             let fresh_hull = |boats: &mut HashMap<BoatId, BoatState>, at: Vec2| {
-                // A virgin hull lying free near the spawn is this arrival's
-                // before any new one is minted — see [`BoatState::virgin`]:
+                // A virgin hull lying free where this arrival is being put
+                // down is theirs before any new one is minted — see
+                // [`BoatState::virgin`] and [`SPARE_BERTH`]:
                 // it is what keeps a join-and-hang-up loop from growing the
                 // fleet, and it reads as the world having a boat ready
                 // rather than conjuring one.
                 let handed_down = boats.iter_mut().find(|(_, boat)| {
-                    boat.virgin && boat.occupant.is_none() && boat.position.distance(at) <= 64.0
+                    boat.virgin
+                        && boat.occupant.is_none()
+                        && boat.position.distance(at) <= SPARE_BERTH
                 });
                 if let Some((&boat, state)) = handed_down {
                     state.occupant = Some(id);
@@ -1391,6 +1418,9 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                         && state.position.distance(player.position) <= BOARD_GRANT;
                     if granted {
                         state.occupant = Some(id);
+                        // Taken up, so no longer the spare hull the spawn
+                        // hands to arrivals — see [`BoatState::virgin`].
+                        state.virgin = false;
                         player.aboard = Some(boat);
                         player.position = state.position;
                     }
@@ -1426,6 +1456,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                             let mut boats = shared.boats.lock().expect("no poisoned lock");
                             let state = boats.get_mut(&boat).expect("a boat once boarded exists");
                             state.occupant = None;
+                            // Somebody's, and left where they left it: a hull
+                            // parked ashore is not spare, whether or not it
+                            // was ever sailed — see [`BoatState::virgin`].
+                            state.virgin = false;
                             ToClient::Boat {
                                 id: boat,
                                 kind: state.kind,

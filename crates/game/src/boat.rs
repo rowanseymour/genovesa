@@ -546,6 +546,14 @@ pub struct HullId(pub BoatId);
 #[derive(Component)]
 pub struct Vessel;
 
+/// Every hull in the world, as the fittings hung off one read it: the
+/// transform it rides at, and its sailing state where there is one — which
+/// is only ever this player's own, a told hull's way and canvas being no
+/// part of what crosses the wire. `F` keeps the query clear of whichever
+/// fitting is doing the reading, a child's transform being a transform.
+type Hulls<'w, 's, F> =
+    Query<'w, 's, (Option<&'static Boat>, &'static Transform), (With<Vessel>, F)>;
+
 /// Where the server last put a hull nobody here is steering, and how it was
 /// pointed — eased towards, like a marker; [`moor`] is what does the easing
 /// and keeps the hull riding the swell meanwhile. Present on every hull but
@@ -1023,18 +1031,26 @@ fn sail_trim(bow: Vec2, wind: Vec2) -> f32 {
 /// and the sail state this frame's steering wrote. The rotation is about the
 /// sail's own local vertical, which *is* the mast however the hull heels and
 /// pitches, the sail being a child of it.
+///
+/// A hull with no [`Boat`] on it is nobody's here — another player's, told
+/// from the wire, or our own the moment we step off it — and its canvas is
+/// furled without asking. Whose sails those hulls have set is not on the
+/// wire at all, and reading the flag off a component that has just been
+/// taken away would leave a beached hull under full sail for as long as the
+/// schedule happened to order things that way.
 fn trim_the_sails(
     conditions: Res<sea::SeaConditions>,
-    boats: Query<(&Boat, &Transform), Without<Sail>>,
+    boats: Hulls<Without<Sail>>,
     mut sails: Query<(&ChildOf, &mut Transform, &mut Visibility), With<Sail>>,
 ) {
     for (of, mut transform, mut visibility) in &mut sails {
         let Ok((boat, hull)) = boats.get(of.parent()) else {
             continue;
         };
+        let set = boat.is_some_and(Boat::sails_set);
         // Written only on change, so an idle boat's sail is as unwritten as
         // the rest of it.
-        let shown = if boat.sails_set() {
+        let shown = if set {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -1042,7 +1058,7 @@ fn trim_the_sails(
         if *visibility != shown {
             *visibility = shown;
         }
-        if boat.sails_set() {
+        if set {
             let trimmed = Quat::from_rotation_y(sail_trim(hull.forward().xz(), conditions.wind()));
             if transform.rotation != trimmed {
                 transform.rotation = trimmed;
@@ -1095,7 +1111,7 @@ fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
 fn fly_the_pennant(
     time: Res<Time>,
     conditions: Res<sea::SeaConditions>,
-    boats: Query<(Option<&Boat>, &Transform), (With<Vessel>, Without<Pennant>)>,
+    boats: Hulls<Without<Pennant>>,
     mut pennants: Query<(&mut Pennant, &ChildOf, &mut Transform)>,
 ) {
     for (mut pennant, of, mut transform) in &mut pennants {
@@ -2092,6 +2108,26 @@ mod tests {
 
         tap(&mut app, KeyCode::ArrowDown);
         assert_eq!(sail_shown(&mut app), Visibility::Hidden);
+
+        // And a hull that stops being anybody's here furls whatever it was
+        // carrying: the sails go up again, then the [`Boat`] comes off, as
+        // stepping ashore takes it off — see [`Fleet::hand_back`]. Nothing
+        // is left to say the canvas is set, so it is not drawn set, and the
+        // hulls the wire tells us about are all in this state.
+        tap(&mut app, KeyCode::ArrowUp);
+        assert_eq!(sail_shown(&mut app), Visibility::Inherited);
+        let hull = app
+            .world_mut()
+            .query_filtered::<Entity, With<Boat>>()
+            .single(app.world())
+            .expect("a match should have a boat in it");
+        app.world_mut().entity_mut(hull).remove::<Boat>();
+        run_frames(&mut app, 1);
+        assert_eq!(
+            sail_shown(&mut app),
+            Visibility::Hidden,
+            "an abandoned hull was left riding under canvas"
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@
 //! There is no second, quieter implementation of a session to play alone
 //! against, and no way at all to be in a world without a server making it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -51,6 +51,11 @@ const REPORT_INTERVAL: f32 = 0.1;
 /// Metres of movement below which nothing is reported — a player standing
 /// still costs the wire nothing.
 const REPORT_THRESHOLD: f32 = 0.25;
+
+/// Radians of swing below which nothing is reported — a hull holding its
+/// course costs the wire nothing either. Small, because a bearing is what
+/// another client draws a whole ship along.
+const REPORT_SWING: f32 = 0.02;
 
 /// How long a report may spend trying to reach the server. Reports are written
 /// straight from the schedule, so this is time the player would spend watching
@@ -579,8 +584,11 @@ impl Plugin for NetPlugin {
                     receive,
                     ask_for_ground,
                     report_position,
-                    place_markers,
+                    // Shading before placing, so that a marker coming back
+                    // out from under a hull is put where it belongs before
+                    // the same frame stands it on the ground there.
                     shade_markers,
+                    place_markers,
                 )
                     .chain()
                     .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Online>)),
@@ -804,6 +812,19 @@ fn ask_for_ground(online: Res<Online>, ground: Option<ResMut<Ground>>) {
     }
 }
 
+/// How far apart two bearings are, in radians, the short way round the
+/// circle — never more than half a turn.
+///
+/// Taken this way because a yaw comes off `atan2` and is cut at due south,
+/// where +π and -π are the same bearing: a raw difference between two of
+/// them is up to a whole turn for a hull that never moved its helm, and the
+/// hull holding the one course that straddles the cut reported itself
+/// turning at every interval of the voyage.
+fn swing(from: f32, to: f32) -> f32 {
+    let round = (to - from).rem_euclid(std::f32::consts::TAU);
+    round.min(std::f32::consts::TAU - round)
+}
+
 /// Tells the server where the player is: where whatever carries them is —
 /// the boat they are aboard, or one day their own feet — resolved through
 /// [`PlayerPlace`] so this system never learns which.
@@ -826,7 +847,7 @@ fn report_position(
         // A hull turning in place is moving news even though it goes
         // nowhere: the heading is drawn, so it reports on the same terms as
         // the position.
-        let turned = (yaw - reported_yaw).abs() > 0.02;
+        let turned = swing(reported_yaw, yaw) > REPORT_SWING;
         if now - reported_at < REPORT_INTERVAL
             || (reported.distance(position) < REPORT_THRESHOLD && !turned)
         {
@@ -875,16 +896,45 @@ fn enter_afoot(
 /// Hides the capsule of anyone at a helm: their boat is their marker, told
 /// and drawn in full, and a capsule riding its deck would be clutter over
 /// the one thing on screen that already says who is where.
+///
+/// And puts a marker back where its player is the moment it comes out from
+/// under the hull again, rather than letting [`place_markers`] ease it
+/// there. Nothing is reported afoot while a player is at a helm — their
+/// position crosses as the boat's — so a hidden marker's target sits at the
+/// spot they boarded at, however far they then sailed. Eased, a player
+/// stepping ashore after a voyage would be a capsule skating across the
+/// water from the far side of it; the crossing is not a movement anybody
+/// made, so it is not one to animate.
 fn shade_markers(
     fleet: Res<crate::boat::Fleet>,
-    mut markers: Query<(&RemotePlayer, &mut Visibility)>,
+    mut markers: Query<(Ref<RemotePlayer>, &mut Visibility, &mut Transform)>,
+    // Who has been under a hull and is not yet standing where they stepped
+    // off. A player who leaves the world while still at one stays in here,
+    // which is a handful of bytes for as long as the session lasts and
+    // nothing else: ids are dealt once each, so the name never comes round
+    // again to be wrongly snapped.
+    mut adrift: Local<HashSet<PlayerId>>,
 ) {
-    for (player, mut visibility) in &mut markers {
-        *visibility = if fleet.crewed(player.id) {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
+    for (player, mut visibility, mut transform) in &mut markers {
+        if fleet.crewed(player.id) {
+            *visibility = Visibility::Hidden;
+            adrift.insert(player.id);
+            continue;
+        }
+        if adrift.contains(&player.id) {
+            transform.translation.x = player.target.x;
+            transform.translation.z = player.target.y;
+            // Held until a word about the player themself lands, because
+            // the two arrive as two: the helm is told free and the step
+            // ashore follows, and a frame that read only the first would
+            // snap to the boarding point and then glide the whole voyage
+            // anyway. Until then the snap is to a target the marker is
+            // already standing on, which costs nothing.
+            if player.is_changed() {
+                adrift.remove(&player.id);
+            }
+        }
+        *visibility = Visibility::Inherited;
     }
 }
 
@@ -1227,23 +1277,65 @@ mod tests {
                 .is_ok_and(|(_, visibility)| *visibility == Visibility::Hidden)
         });
 
-        // They step ashore: the helm is told free, and the capsule stands
-        // again — a walker is a capsule, having no hull to be.
+        // They sail away and step ashore: the helm is told free, and the
+        // capsule stands again — a walker is a capsule, having no hull to be
+        // — where they now are rather than where they boarded. Nothing was
+        // reported afoot for the whole voyage, their position having crossed
+        // as the boat's, so a marker eased towards this would come skating
+        // across half a sea nobody walked.
+        let ashore = Vec2::new(604.0, -195.0);
         (ToClient::Boat {
             id: BoatId(3),
             kind: protocol::BoatKind::Sloop,
-            position: Vec2::new(4.0, 5.0),
+            position: Vec2::new(600.0, -200.0),
             heading: 0.5,
             occupant: None,
         })
         .write(&mut &server)
         .expect("boat freed");
-        run_until(&mut app, "the walker's capsule stands again", |app| {
-            app.world_mut()
-                .query::<(&RemotePlayer, &Visibility)>()
-                .single(app.world())
-                .is_ok_and(|(_, visibility)| *visibility == Visibility::Inherited)
+        (ToClient::Moved {
+            id: PlayerId(9),
+            position: ashore,
+        })
+        .write(&mut &server)
+        .expect("moved");
+        // Waited for by the step ashore rather than by the freeing of the
+        // helm, the two being two words: the frame this lands on is the
+        // frame the marker must already be standing on the beach.
+        run_until(&mut app, "the step ashore is heard", |app| {
+            markers(app) == [(PlayerId(9), ashore)]
         });
+        let (visibility, standing) = app
+            .world_mut()
+            .query_filtered::<(&Visibility, &Transform), With<RemotePlayer>>()
+            .single(app.world())
+            .expect("the one marker");
+        assert_eq!(
+            *visibility,
+            Visibility::Inherited,
+            "the walker's capsule never stood again"
+        );
+        assert_eq!(
+            standing.translation.xz(),
+            ashore,
+            "the capsule is gliding in from where they boarded"
+        );
+    }
+
+    #[test]
+    fn a_bearing_is_never_more_than_half_a_turn_from_another() {
+        use std::f32::consts::{PI, TAU};
+
+        // The cut: a hull holding a course a hair either side of due south
+        // has barely moved, whatever the two numbers look like.
+        assert!(swing(PI - 0.001, -PI + 0.001) < 0.01);
+        assert!(swing(-PI + 0.001, PI - 0.001) < 0.01);
+        // A real swing is still a real swing, either way round...
+        assert!((swing(0.0, 1.0) - 1.0).abs() < 1e-5);
+        assert!((swing(1.0, 0.0) - 1.0).abs() < 1e-5);
+        // ...and half a turn is as far apart as two bearings get.
+        assert!((swing(0.0, PI) - PI).abs() < 1e-5);
+        assert!(swing(0.3, 0.3 + TAU) < 1e-5);
     }
 
     #[test]
