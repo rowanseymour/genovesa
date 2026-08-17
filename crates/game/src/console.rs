@@ -37,7 +37,8 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::debug::{Toggles, BACKDROP, REACH, SWITCHES, TEXT};
+use crate::boat::HullKind;
+use crate::debug::{Toggles, BACKDROP, BOAT, REACH, SWITCHES, TEXT};
 use crate::net::Online;
 use crate::Helm;
 
@@ -243,7 +244,7 @@ fn variables() -> Vec<&'static str> {
     SWITCHES
         .iter()
         .map(|switch| switch.name)
-        .chain(std::iter::once(REACH))
+        .chain([REACH, BOAT])
         .collect()
 }
 
@@ -277,6 +278,7 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
         }
         [var] => read(var, toggles).unwrap_or_else(|| no_such(var)),
         [var, value] if *var == REACH => reach(value, &mut toggles.reach),
+        [var, value] if *var == BOAT => boat(value, &mut toggles.boat),
         [var, value] => match toggles.switch(var) {
             Some(state) => switch(var, value, state),
             None => no_such(var),
@@ -291,6 +293,9 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
 fn read(var: &str, toggles: &mut Toggles) -> Option<String> {
     if var == REACH {
         return Some(format!("{REACH} {:.0}m", toggles.reach));
+    }
+    if var == BOAT {
+        return Some(format!("{BOAT} {}", toggles.boat.name()));
     }
     toggles.switch(var).map(|on| onoff(var, *on))
 }
@@ -337,6 +342,20 @@ fn reach(value: &str, state: &mut f32) -> String {
             format!("reach {metres:.0}m")
         }
         None => "`reach` is metres — `set reach 450`, or `set reach default`".to_string(),
+    }
+}
+
+/// Sets which kind of boat this client rigs its own hull as — the dev
+/// stand-in for the rowboat being dealt by the world; see
+/// [`crate::debug::Toggles::boat`]. Answered with the state it is now in,
+/// like every other write here.
+fn boat(value: &str, state: &mut HullKind) -> String {
+    match HullKind::named(value) {
+        Some(kind) => {
+            *state = kind;
+            format!("{BOAT} {}", kind.name())
+        }
+        None => format!("`{BOAT}` is ship or rowboat — `set boat rowboat`"),
     }
 }
 
@@ -544,7 +563,7 @@ mod tests {
         };
         assert_eq!(
             set(&[], &mut toggles),
-            "stats off / shadows on / haze on / wireframe on / reach 900m"
+            "stats off / shadows on / haze on / wireframe on / reach 900m / boat ship"
         );
         assert_eq!(set(&["haze"], &mut toggles), "haze on");
     }
@@ -793,7 +812,7 @@ mod tests {
         assert!(app
             .world()
             .resource::<Console>()
-            .said("stats  shadows  haze  wireframe  reach"));
+            .said("stats  shadows  haze  wireframe  reach  boat"));
     }
 
     #[test]

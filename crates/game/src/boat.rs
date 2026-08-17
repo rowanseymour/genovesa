@@ -5,9 +5,13 @@
 //! — riding this boat as a child of it, and the boat is one of the vehicles
 //! they will get about in rather than the player's own shape. What *kind* of
 //! boat an entity is lives in its [`Hull`]: the dimensions and manners the
-//! rules below are written against, ship-sized today ([`SHIP`]) and
-//! rowboat-sized next, so a new kind of boat is a new `Hull` and a new model,
-//! not a new module.
+//! rules below are written against — the ship ([`SHIP`]) and the rowing boat
+//! ([`ROWBOAT`]) — so a new kind of boat is a new `Hull` and a new model, not
+//! a new module. The rowboat is not in the game's flow yet: nothing in the
+//! world deals one out, and the only way aboard is the dev switch —
+//! `set boat rowboat` at the console, or `--boat rowboat` on the command
+//! line — which [`refit`] serves by re-rigging the player's own hull in
+//! place.
 //!
 //! A hull is modelled rather than drawn here: [`MODEL`] is a glTF file built
 //! from a Blender master under `assets-src/`, and this module spawns its
@@ -24,6 +28,7 @@
 //! [`float`] put it down by simply setting the height of the surface it is on.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::gltf::GltfAssetLabel;
 use bevy::math::Vec3Swizzles;
 use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::HashMap;
@@ -33,6 +38,7 @@ use protocol::{BoatId, PlayerId};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
+use crate::debug::Toggles;
 use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
@@ -43,6 +49,13 @@ use crate::{eased, matte, model_mesh, AppState, Helm};
 /// look depends on are written down.
 const MODEL: &str = "models/boat.glb";
 
+/// The rowing boat, as a file: `assets-src/models/rowboat/`. Rigged, unlike
+/// the ship — the oars move under the boat's own skin — so it cannot be
+/// pulled apart mesh by mesh the way [`MODEL`] is: a skinned mesh has to
+/// arrive as a whole scene or it is a shape with no skeleton behind it, the
+/// same rule the figure and the sharks live by.
+const ROWBOAT_MODEL: &str = "models/rowboat.glb";
+
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —
 /// which means reordering the objects in Blender would silently swap the hull
@@ -50,6 +63,53 @@ const MODEL: &str = "models/boat.glb";
 /// stops that being found by looking at it.
 const HULL_MESH: usize = 0;
 const SPAR_MESH: usize = 1;
+
+/// The kinds of boat there are — which [`Hull`] a hull answers to, and which
+/// model it is rigged with. What the dev switch names, and one day what the
+/// wire will say about a hull; until then every told hull is a ship.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HullKind {
+    #[default]
+    Ship,
+    Rowboat,
+}
+
+impl HullKind {
+    /// The dimensions and manners this kind of boat is driven by.
+    fn hull(self) -> &'static Hull {
+        match self {
+            HullKind::Ship => &SHIP,
+            HullKind::Rowboat => &ROWBOAT,
+        }
+    }
+
+    /// The word the console knows this kind by — `set boat rowboat`.
+    pub fn name(self) -> &'static str {
+        match self {
+            HullKind::Ship => "ship",
+            HullKind::Rowboat => "rowboat",
+        }
+    }
+
+    /// The kind a word names, or `None` for a word that names no boat.
+    pub fn named(name: &str) -> Option<Self> {
+        [HullKind::Ship, HullKind::Rowboat]
+            .into_iter()
+            .find(|kind| kind.name() == name)
+    }
+}
+
+/// A mast, as the fittings need it: the masthead the pennant is tied at, in
+/// metres above the waterline, and its station on the same axis as the
+/// keel's. On [`Hull`] as an `Option` because a mast is the one piece of a
+/// boat a kind can simply not have — the rowboat is an open boat with
+/// nothing standing in it — and everything hung off one (the pennant, the
+/// sail, the wind as throttle) goes with it.
+#[derive(Clone, Copy)]
+struct Mast {
+    head: f32,
+    station: f32,
+}
 
 /// The dimensions and manners of one kind of boat — everything [`float`],
 /// [`steer`] and [`grounding`] need to know to drive one. This is a boat's
@@ -70,29 +130,36 @@ struct Hull {
     /// but what makes it the game's business rather than the model's is
     /// [`Hull::grounding_draft`], which is measured from it.
     draft: f32,
-    /// The quarterdeck: the raised deck aft, in metres above the waterline,
-    /// and the helm's station on it — where somebody aboard stands, beside
-    /// the tiller. A player is put down here rather than at the hull's
-    /// origin, which is the waterline and so is knee-deep in the bilges.
-    /// The model's numbers rather than the game's to choose, like the draft:
-    /// held to the file by `the_model_is_the_hull_the_keel_is_probed_along`.
-    /// The main deck's own height is *not* here — nothing below the sail's
-    /// corners reads it, so it belongs to the model alone.
-    quarterdeck: f32,
+    /// Where somebody aboard stands: metres above the waterline, and the
+    /// station on the keel's axis. The ship's is its quarterdeck, beside the
+    /// tiller; the rowboat's is its sole, amidships. A player is put down
+    /// here rather than at the hull's origin, which is the waterline and so
+    /// is knee-deep in the bilges. The model's numbers rather than the
+    /// game's to choose, like the draft: held to the file by
+    /// `the_model_is_the_hull_the_keel_is_probed_along`. The ship's main
+    /// deck height is *not* here — nothing below the sail's corners reads
+    /// it, so it belongs to the model alone.
+    helm_deck: f32,
     helm_station: f32,
     /// Where the keel begins and ends, in metres from amidships — negative
     /// forward, the same axis the hull is modelled on. [`grounding`] probes
     /// along these, so what runs aground is the line that is drawn.
     forefoot_station: f32,
     heel_station: f32,
-    /// The masthead: metres above the waterline, and metres from amidships on
-    /// the same axis as the keel's stations. The pennant is tied on here, so
-    /// like the deck and the draft these are the model's numbers rather than
-    /// the game's to choose — a mast re-cut in Blender and not re-measured
-    /// here would fly its pennant in mid-air beside the spar, which is what
-    /// `the_model_flies_a_pennant_from_its_masthead` is for.
-    masthead: f32,
-    masthead_station: f32,
+    /// The masthead, where there is a mast: the pennant is tied on at its
+    /// head, so like the deck and the draft its numbers are the model's
+    /// rather than the game's to choose — a mast re-cut in Blender and not
+    /// re-measured here would fly its pennant in mid-air beside the spar,
+    /// which is what `the_model_flies_a_pennant_from_its_masthead` is for.
+    /// `None` is an unsparred boat: no pennant, no sail, and the wind is no
+    /// longer the throttle — see [`steer`].
+    mast: Option<Mast>,
+    /// The waterline footprint the sea is cut away inside, for a hull that
+    /// is *open* — looked into from above, with its sole below the water
+    /// outside. `None` is a closed hull whose deck hides its insides — the
+    /// ship — which needs no hole and gets none. See [`OpenHull`] for the
+    /// shape and [`cut_the_water`] for what is done with it.
+    open_footprint: Option<OpenHull>,
     /// Metres per second under way.
     speed: f32,
     /// Metres per second going astern.
@@ -145,10 +212,10 @@ impl Hull {
         self.draft - KEEL_BITE
     }
 
-    /// Where somebody aboard stands, in the hull's own frame: at the helm,
-    /// on the quarterdeck, forward of the tiller.
+    /// Where somebody aboard stands, in the hull's own frame — see
+    /// [`Hull::helm_deck`].
     fn helm(&self) -> Vec3 {
-        Vec3::new(0.0, self.quarterdeck, self.helm_station)
+        Vec3::new(0.0, self.helm_deck, self.helm_station)
     }
 
     /// Where the hull meets the water forward, in its own frame: the stem, on
@@ -169,10 +236,11 @@ const SHIP: Hull = Hull {
     length: 7.0,
     beam: 2.4,
     draft: 0.8,
-    // The step up aft and the spot on it just forward of the tiller's grip —
-    // the model's numbers. The station keeps the helmsman clear of the boom,
-    // which sweeps the main deck and nothing abaft the step.
-    quarterdeck: 1.2,
+    // The quarterdeck's step up aft and the spot on it just forward of the
+    // tiller's grip — the model's numbers. The station keeps the helmsman
+    // clear of the boom, which sweeps the main deck and nothing abaft the
+    // step.
+    helm_deck: 1.2,
     helm_station: 2.6,
     // The forefoot stops short of the bow, which is what gives the stem its
     // rake; the heel runs right aft to the transom.
@@ -180,8 +248,12 @@ const SHIP: Hull = Hull {
     heel_station: 7.0 * 0.5,
     // Six metres of mast, stepped forward of amidships — the model's, not a
     // choice made here.
-    masthead: 6.9,
-    masthead_station: -1.05,
+    mast: Some(Mast {
+        head: 6.9,
+        station: -1.05,
+    }),
+    // A closed hull: the deck hides the inside, so the sea needs no hole.
+    open_footprint: None,
     // Brisk beyond honesty for a seven-metre hull, but the ship is how the
     // world is crossed: at this speed the ground in view at the default zoom
     // slides by in a few seconds, and the next island is minutes away rather
@@ -205,6 +277,67 @@ const SHIP: Hull = Hull {
     heel_response: 0.4,
     // And the lift of the whole hull much slower than its roll.
     sway_response: 0.9,
+};
+
+/// The rowing boat: the small end of the fleet, and [`ROWBOAT_MODEL`]'s
+/// subject. Nothing in the world deals one out yet — see the module doc —
+/// so these numbers serve the dev switch; the dimensions are the model's,
+/// and `the_rowboat_model_is_the_dinghy_the_game_floats` holds the file to
+/// them the way the ship's tests hold its.
+const ROWBOAT: Hull = Hull {
+    // A dinghy rather than a skiff: the model was recut smaller and
+    // shallower the day the sea learned to cut a hole around an open hull —
+    // its NOTES carry the story.
+    length: 3.2,
+    beam: 1.3,
+    draft: 0.25,
+    // Standing on the sole, abaft the rowing thwart — an open boat is stood
+    // in wherever the thwarts are not, and this keeps the figure clear of
+    // the middle one until somebody is seated at it. The sole is *below*
+    // the waterline, the way a real one's is, which is the whole of what
+    // the sea's hole buys.
+    helm_deck: -0.1,
+    helm_station: 0.65,
+    // The keel is rockered: deepest a little abaft amidships, rising to the
+    // forefoot forward and carried aft to the transom's skeg. The probes
+    // read the full draft along all of it, which errs a few centimetres
+    // shy at the rockered ends — the right side to miss on.
+    forefoot_station: -1.1,
+    heel_station: 1.6,
+    // An open boat: nothing stands in it, so nothing flies from it and no
+    // wind drives it.
+    mast: None,
+    // And being open, the sea is cut away inside it. The numbers are the
+    // model's waterline outline read a few centimetres above the water —
+    // the swell stands that much higher against the planking — and the
+    // couple of centimetres they overreach the hull hide under the
+    // freeboard from every angle this camera has.
+    open_footprint: Some(OpenHull {
+        semi_bow: 1.9,
+        semi_stern: 1.6,
+        semi_beam: 0.6,
+        abaft: 0.29,
+        bow_fullness: 1.7,
+        stern_fullness: 2.2,
+        transom: 1.31,
+    }),
+    // Rowed: a strong steady pull, and about what a real skiff makes — the
+    // pace the world is *not* crossed at, the ship being how anyone goes
+    // anywhere far.
+    speed: 3.0,
+    // Backing water is half a pull.
+    astern_speed: 1.5,
+    // A few hundred kilos gathers way in a stroke or two and glides a
+    // length; the ship's numbers, scaled by feel rather than by physics.
+    way_response: 0.8,
+    // Nimble: a rowboat spins nearly in its own length.
+    turn_rate: 2.5,
+    // Barely: no keel gripping the water means little to lean against, and
+    // a dinghy is turned flat.
+    heel_at_full_turn: 0.06,
+    heel_response: 0.25,
+    // Light enough to follow the chop closer than the ship does.
+    sway_response: 0.5,
 };
 
 /// How much of the keel the ground is allowed to take before a hull is
@@ -431,30 +564,39 @@ const FLUTTER: (f32, f32) = (0.16, 7.0);
 /// numbers these systems wrote themselves is work for nothing.
 #[derive(Component)]
 pub struct Boat {
+    kind: HullKind,
     hull: Hull,
     way: f32,
     heel: f32,
     pitch: f32,
     roll: f32,
-    /// Whether the sails are set. Set, the wind is the throttle — see
-    /// [`sail_drive`]; furled, the target way is zero, the hull glides to a
-    /// stop and holds station, and that holding is the whole of "anchored"
-    /// here — the crew drops the hook, nothing simulates it.
+    /// Whether the boat is being driven. On the ship this is the sails: set,
+    /// the wind is the throttle — see [`sail_drive`]; furled, the target way
+    /// is zero, the hull glides to a stop and holds station, and that
+    /// holding is the whole of "anchored" here — the crew drops the hook,
+    /// nothing simulates it. On the rowboat the same flag is the oars being
+    /// pulled, on the same keys.
     sails_set: bool,
 }
 
 impl Boat {
-    /// The ship a world is entered aboard, at rest — sails furled, a world
-    /// being entered at anchor.
-    pub fn ship() -> Self {
+    /// A boat of a kind, at rest — sails furled, oars shipped, the state a
+    /// world is entered in.
+    pub fn of(kind: HullKind) -> Self {
         Self {
-            hull: SHIP,
+            kind,
+            hull: *kind.hull(),
             way: 0.0,
             heel: 0.0,
             pitch: 0.0,
             roll: 0.0,
             sails_set: false,
         }
+    }
+
+    /// Which kind of boat this is — what the dev switch compares against.
+    pub fn kind(&self) -> HullKind {
+        self.kind
     }
 
     /// Sets the sails: the wind has the hull until [`furl`] takes it back.
@@ -486,7 +628,7 @@ impl Boat {
     }
 
     /// Where somebody aboard stands, in the hull's own frame — see
-    /// [`Hull::quarterdeck`]. What a player boarding is put down at, so that
+    /// [`Hull::helm_deck`]. What a player boarding is put down at, so that
     /// they stand at the helm rather than in the bilges.
     pub fn helm(&self) -> Vec3 {
         self.hull.helm()
@@ -532,6 +674,53 @@ struct Pennant {
 /// under a furl nobody is watching for long anyway.
 #[derive(Component)]
 struct Sail;
+
+/// A piece a hull is dressed in for its kind — meshes, cloth, the rowboat's
+/// scene — as opposed to the children that are *aboard* it, the player most
+/// of all. What [`refit`] strips and restores when the dev switch changes
+/// what the boat is.
+#[derive(Component)]
+struct Fitting;
+
+/// A hull the sea is cut away inside — the shape of the hole, which is the
+/// hull's waterline outline as a superellipse in its own frame. Sized so the
+/// edge lands within the planking's thickness at the waterline: a hair too
+/// wide shows a dark sliver of missing sea against the topsides, a hair too
+/// narrow a sliver of sea inside the bilges, and of the two the sliver
+/// outside is the one the hull's own freeboard hides.
+///
+/// On the boat entity itself rather than among its fittings, and read off
+/// the entity rather than off [`Boat`], so a moored open hull keeps its
+/// hole after its `Boat` comes off with the crew. [`cut_the_water`] is what
+/// reads it.
+/// The outline is two superellipse halves sharing their beam at the widest
+/// station, cut square at the transom — because one ellipse cannot be a
+/// boat: fat enough for the transom's corners it wraps whole metres of
+/// clear water round the bow, fine enough for the bow it pinches at the
+/// quarters and lets slivers of sea into the sternsheets.
+#[derive(Component, Clone, Copy)]
+struct OpenHull {
+    /// Metres from the widest station forward to where the outline closes
+    /// at the stem, and aft to where the stern half *would* close — the
+    /// transom cuts it off first, which is what keeps the stern half wide
+    /// through the quarters without the hole trailing off astern.
+    semi_bow: f32,
+    semi_stern: f32,
+    /// Half the footprint's width at the widest station.
+    semi_beam: f32,
+    /// How far abaft amidships the widest station sits, in metres — a
+    /// hull's widest section rarely being amidships exactly.
+    abaft: f32,
+    /// How full-bodied each end's outline is: superellipse exponents.
+    /// `2.0` is a true ellipse; lower pinches towards a lens, which is a
+    /// fine bow, and higher squares out towards the corners, which is a
+    /// stern with a transom coming.
+    bow_fullness: f32,
+    stern_fullness: f32,
+    /// Metres from the widest station aft to the transom, where the
+    /// outline is cut square whatever the stern half is doing.
+    transom: f32,
+}
 
 /// The name a hull answers to on the wire — see [`protocol::BoatId`]. Only
 /// the hulls a server told us about carry one: a world with no server behind
@@ -655,7 +844,10 @@ impl Fleet {
                 // all, entry aboard being a player who begins on a deck.
                 self.helmed = Some(id);
                 commands.entity(hull).remove::<ToldHull>().insert((
-                    Boat::ship(),
+                    // Every hull the wire deals is a ship — the rowboat is
+                    // not in the game's flow yet, and [`refit`] re-rigs this
+                    // one if the dev switch asks.
+                    Boat::of(HullKind::Ship),
                     Transform::from_xyz(position.x, 0.0, position.y)
                         .with_rotation(Quat::from_rotation_y(heading)),
                 ));
@@ -723,6 +915,9 @@ impl Plugin for BoatPlugin {
         // and the boat's own tests run without any terrain at all.
         app.init_resource::<sea::SeaConditions>()
             .init_resource::<Fleet>()
+            // The dev switch reads these, and a capture run has no console
+            // to have initialised them.
+            .init_resource::<Toggles>()
             // Cleared with the world it described: the next world's hulls
             // are new tellings, and a fleet carried over would pin their
             // ids to entities that no longer exist.
@@ -746,6 +941,9 @@ impl Plugin for BoatPlugin {
                 // had written it would leave the cloth a frame behind the
                 // mast it hangs on.
                 (
+                    // The dev boat switch first, so a frame that changes the
+                    // kind sails and floats the hull it settled on.
+                    refit,
                     steer.run_if(in_state(Helm::Sailing)),
                     float,
                     fly_the_pennant,
@@ -753,6 +951,9 @@ impl Plugin for BoatPlugin {
                     // The hulls nobody here is steering, ridden after the
                     // one that is: same water, same frame.
                     moor,
+                    // And the hole in the sea last, once every hull — sailed
+                    // or moored — is where this frame leaves it.
+                    cut_the_water,
                 )
                     .chain()
                     .run_if(in_state(AppState::InWorld)),
@@ -784,12 +985,15 @@ fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
             .with_rotation(Quat::from_rotation_y(view.yaw)),
         None,
     );
-    commands.entity(boat).insert(Boat::ship()).with_child((
-        Name::new("Player"),
-        Player,
-        Transform::from_translation(SHIP.helm()),
-        Visibility::default(),
-    ));
+    commands
+        .entity(boat)
+        .insert(Boat::of(HullKind::Ship))
+        .with_child((
+            Name::new("Player"),
+            Player,
+            Transform::from_translation(SHIP.helm()),
+            Visibility::default(),
+        ));
 
     // Said out loud for the same reason a run without a seed says which world
     // it picked: a placeholder nobody can find is indistinguishable from one
@@ -815,13 +1019,61 @@ fn spawn_hull(
     pose: Transform,
     named: Option<BoatId>,
 ) -> Entity {
-    // The model carries its own colours on its facets — see the master's
-    // NOTES — so the timber is drawn with one white matte that does nothing
-    // but let them through, the same way every painted model here is. The
-    // file's PBR materials are still ignored: lit the way the file asked for,
-    // the hull would be the one surface in the world with a highlight on it.
-    // The cloth materials are drawn from both faces — left single-sided the
-    // pennant would wink out every time the wind put its back to the camera.
+    let hull = commands
+        .spawn((
+            Name::new("Boat"),
+            Vessel,
+            DespawnOnExit(AppState::InWorld),
+            pose,
+            // Carried by the parent because the children inherit it: without
+            // one here there is nothing for their own visibility to be
+            // computed against, and a boat whose meshes are on entities of
+            // their own would never be drawn.
+            Visibility::default(),
+        ))
+        .id();
+    rig(commands, kit, hull, HullKind::Ship);
+    if let Some(id) = named {
+        commands.entity(hull).insert(HullId(id));
+    }
+    hull
+}
+
+/// Hangs a kind of boat's pieces under a bare hull entity — everything that
+/// makes the entity *look* like a boat, marked [`Fitting`] so that [`refit`]
+/// can take one kind off and put another on.
+fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: HullKind) {
+    // The rowboat is rigged and so has to arrive as a whole scene — see
+    // [`ROWBOAT_MODEL`]. The file's own materials come along with it, and
+    // `models::paint` dresses the meshes in the shared white matte as they
+    // turn up, the same way the figure's and the sharks' are.
+    if kind == HullKind::Rowboat {
+        let open = ROWBOAT
+            .open_footprint
+            .expect("the rowboat is an open boat");
+        commands
+            .entity(hull)
+            .insert(open)
+            .with_child((
+                Name::new("Rowboat"),
+                Fitting,
+                WorldAssetRoot(
+                    kit.assets
+                        .load(GltfAssetLabel::Scene(0).from_asset(ROWBOAT_MODEL)),
+                ),
+            ));
+        return;
+    }
+    commands.entity(hull).remove::<OpenHull>();
+
+    // The ship's model carries its own colours on its facets — see the
+    // master's NOTES — so the timber is drawn with one white matte that does
+    // nothing but let them through, the same way every painted model here is.
+    // The file's PBR materials are still ignored: lit the way the file asked
+    // for, the hull would be the one surface in the world with a highlight on
+    // it. The cloth materials are drawn from both faces — left single-sided
+    // the pennant would wink out every time the wind put its back to the
+    // camera.
     let fittings = kit
         .fittings
         .get_or_insert_with(|| Fittings {
@@ -840,64 +1092,152 @@ fn spawn_hull(
             sail_mesh: kit.meshes.add(sail_mesh()),
         })
         .clone();
+    let mast = SHIP.mast.expect("the ship is masted");
 
-    let hull = commands
-        .spawn((
-            Name::new("Boat"),
-            Vessel,
-            DespawnOnExit(AppState::InWorld),
-            pose,
-            // Carried by the parent because the children inherit it: without
-            // one here there is nothing for their own visibility to be
-            // computed against, and a boat whose meshes are on entities of
-            // their own would never be drawn.
-            Visibility::default(),
-            children![
-                (
-                    Name::new("Hull"),
-                    Mesh3d(kit.assets.load(model_mesh(MODEL, HULL_MESH))),
-                    MeshMaterial3d(fittings.painted.clone()),
-                ),
-                (
-                    Name::new("Spar"),
-                    Mesh3d(kit.assets.load(model_mesh(MODEL, SPAR_MESH))),
-                    MeshMaterial3d(fittings.painted),
-                ),
-                // Tied to the masthead and pointed by [`fly_the_pennant`]. The
-                // one piece of the boat that is not in the file: a flag is a
-                // shape that has to be *aimed*, and aiming it means knowing where
-                // its tie is, which a mesh out of Blender does not say.
-                (
-                    Name::new("Pennant"),
-                    Pennant {
-                        // Astern until the first frame says otherwise, which is
-                        // where a flag on a boat at rest in still air would lie
-                        // anyway.
-                        bearing: 0.0,
-                    },
-                    Mesh3d(fittings.pennant_mesh),
-                    MeshMaterial3d(fittings.pennant_material),
-                    Transform::from_xyz(0.0, SHIP.masthead, SHIP.masthead_station),
-                ),
-                // The sail, at the mast's foot so its rotation is a turn about
-                // the mast, and hidden because a world is entered at anchor —
-                // [`trim_the_sails`] shows it while the sails are set and lays
-                // the boom where the wind asks.
-                (
-                    Name::new("Sail"),
-                    Sail,
-                    Mesh3d(fittings.sail_mesh),
-                    MeshMaterial3d(fittings.sail_material),
-                    Transform::from_xyz(0.0, 0.0, SHIP.masthead_station),
-                    Visibility::Hidden,
-                ),
-            ],
-        ))
-        .id();
-    if let Some(id) = named {
-        commands.entity(hull).insert(HullId(id));
+    commands.entity(hull).with_children(|children| {
+        children.spawn((
+            Name::new("Hull"),
+            Fitting,
+            Mesh3d(kit.assets.load(model_mesh(MODEL, HULL_MESH))),
+            MeshMaterial3d(fittings.painted.clone()),
+        ));
+        children.spawn((
+            Name::new("Spar"),
+            Fitting,
+            Mesh3d(kit.assets.load(model_mesh(MODEL, SPAR_MESH))),
+            MeshMaterial3d(fittings.painted),
+        ));
+        // Tied to the masthead and pointed by [`fly_the_pennant`]. The one
+        // piece of the boat that is not in the file: a flag is a shape that
+        // has to be *aimed*, and aiming it means knowing where its tie is,
+        // which a mesh out of Blender does not say.
+        children.spawn((
+            Name::new("Pennant"),
+            Fitting,
+            Pennant {
+                // Astern until the first frame says otherwise, which is
+                // where a flag on a boat at rest in still air would lie
+                // anyway.
+                bearing: 0.0,
+            },
+            Mesh3d(fittings.pennant_mesh),
+            MeshMaterial3d(fittings.pennant_material),
+            Transform::from_xyz(0.0, mast.head, mast.station),
+        ));
+        // The sail, at the mast's foot so its rotation is a turn about the
+        // mast, and hidden because a world is entered at anchor —
+        // [`trim_the_sails`] shows it while the sails are set and lays the
+        // boom where the wind asks.
+        children.spawn((
+            Name::new("Sail"),
+            Fitting,
+            Sail,
+            Mesh3d(fittings.sail_mesh),
+            MeshMaterial3d(fittings.sail_material),
+            Transform::from_xyz(0.0, 0.0, mast.station),
+            Visibility::Hidden,
+        ));
+    });
+}
+
+/// Re-rigs the player's own boat when the dev switch says it is the wrong
+/// kind: the old fittings come off, the new kind's go on, the hull's manners
+/// change with it, and whoever is aboard is stood at the new hull's helm.
+///
+/// Temporary in intent — the switch exists so the rowboat can be seen in the
+/// water at all — and honest in shape: what crosses the wire never mentions
+/// the kind, so under a server this is one client redressing its own hull
+/// and everyone else still sees a ship.
+fn refit(
+    mut commands: Commands,
+    mut kit: HullKit,
+    toggles: Res<Toggles>,
+    mut boats: Query<(Entity, &mut Boat, &Children)>,
+    fittings: Query<(), With<Fitting>>,
+    players: Query<(Entity, &ChildOf), With<Player>>,
+) {
+    for (hull, mut boat, children) in &mut boats {
+        if boat.kind() == toggles.boat {
+            continue;
+        }
+        for child in children {
+            if fittings.contains(*child) {
+                commands.entity(*child).despawn();
+            }
+        }
+        // The dynamics carry over rather than resetting: [`float`] and
+        // [`steer`] strip the tilt they applied last frame by the angles
+        // stored here, so zeroing them under a transform still wearing them
+        // would leave the new boat permanently heeled.
+        *boat = Boat {
+            way: boat.way,
+            heel: boat.heel,
+            pitch: boat.pitch,
+            roll: boat.roll,
+            sails_set: boat.sails_set,
+            ..Boat::of(toggles.boat)
+        };
+        rig(&mut commands, &mut kit, hull, toggles.boat);
+        for (player, of) in &players {
+            if of.parent() == hull {
+                commands
+                    .entity(player)
+                    .insert(Transform::from_translation(boat.helm()));
+            }
+        }
     }
-    hull
+}
+
+/// Tells the sea where not to be: the waterline footprint of any open hull,
+/// written into the sea's material, whose fragment shader discards the water
+/// inside it. That is the whole trick that lets the rowboat's sole sit below
+/// the waterline the way a real one's does — the sea is one sheet drawn
+/// straight through everything, and without the hole it stands in the
+/// bilges of any boat that is looked into.
+///
+/// The material is reached through the depth window, and written through the
+/// same read-compare-write two-step as the wake — see
+/// [`crate::wake::lay_the_wake`], whose arrangement this borrows — so a hull
+/// lying still re-uploads nothing.
+///
+/// One hole, because the dev switch makes at most one open hull. The day
+/// the world deals rowboats out, this grows a dimension exactly the way the
+/// wake's track will.
+fn cut_the_water(
+    hulls: Query<(&Transform, &OpenHull)>,
+    window: Option<Res<sea::DepthWindow>>,
+    materials: Option<ResMut<Assets<sea::SeaMaterial>>>,
+) {
+    let (Some(window), Some(mut materials)) = (window, materials) else {
+        return;
+    };
+    let (hole, axes, shape) = match hulls.iter().next() {
+        Some((transform, open)) => {
+            let ahead = transform.forward().xz().normalize_or(Vec2::NEG_Y);
+            // The footprint's own centre — the widest station — rather than
+            // the hull's origin, so the shader tests each half from where
+            // the two meet.
+            let centre = transform.translation.xz() - ahead * open.abaft;
+            (
+                Vec4::new(centre.x, centre.y, ahead.x, ahead.y),
+                Vec4::new(open.semi_bow, open.semi_stern, open.semi_beam, 1.0),
+                Vec4::new(open.bow_fullness, open.stern_fullness, open.transom, 0.0),
+            )
+        }
+        None => (Vec4::ZERO, Vec4::ZERO, Vec4::ZERO),
+    };
+    let stale = materials.get(window.material()).is_some_and(|material| {
+        material.extension.hole != hole
+            || material.extension.hole_axes != axes
+            || material.extension.hole_shape != shape
+    });
+    if stale {
+        if let Some(mut material) = materials.get_mut(window.material()) {
+            material.extension.hole = hole;
+            material.extension.hole_axes = axes;
+            material.extension.hole_shape = shape;
+        }
+    }
 }
 
 /// Rides the moored hulls: eases each towards where the server last put it,
@@ -1124,10 +1464,14 @@ fn fly_the_pennant(
         // and a hull under somebody else's sail being a knot or two off in
         // its flag is nothing a passing witness can measure.
         let way = boat.map_or(0.0, |boat| boat.way);
-        let masthead = boat.map_or_else(
-            || Vec3::new(0.0, SHIP.masthead, SHIP.masthead_station),
-            |boat| Vec3::new(0.0, boat.hull.masthead, boat.hull.masthead_station),
-        );
+        // A pennant is only ever spawned on a masted rig, and a hull with no
+        // [`Boat`] is a told hull, which is always a ship — so the mast is
+        // there to be read; the `continue` is for the frame a refit has
+        // despawned the flag but the query still holds it.
+        let Some(mast) = boat.map_or(SHIP.mast, |boat| boat.hull.mast) else {
+            continue;
+        };
+        let masthead = Vec3::new(0.0, mast.head, mast.station);
         let apparent = conditions.wind() - hull.forward().xz() * way;
         let (bearing, droop) = pennant_pose(apparent, pennant.bearing);
         pennant.bearing = bearing;
@@ -1439,7 +1783,13 @@ fn steer(
     // frame settled on — the same rule the grounding poses live by.
     let astern = !boat.sails_set && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
     let target = if boat.sails_set {
-        hull.speed * sail_drive(transform.forward().xz(), conditions.wind())
+        match hull.mast {
+            Some(_) => hull.speed * sail_drive(transform.forward().xz(), conditions.wind()),
+            // Rowed: the oars pull whatever the wind is doing. A flat
+            // drive for now — when the stroke is worked into the game the
+            // surge will belong to the animation.
+            None => hull.speed,
+        }
     } else if astern {
         -hull.astern_speed
     } else {
@@ -1657,14 +2007,14 @@ mod tests {
         // shin-deep in timber, or walking on air.
         let plane: Vec<&Vec3> = corners
             .iter()
-            .filter(|c| (c.y - SHIP.quarterdeck).abs() < 1e-4)
+            .filter(|c| (c.y - SHIP.helm_deck).abs() < 1e-4)
             .collect();
         let fore = plane.iter().map(|c| c.z).fold(f32::MAX, f32::min);
         let aft = plane.iter().map(|c| c.z).fold(f32::MIN, f32::max);
         assert!(
             (fore..=aft).contains(&SHIP.helm_station),
             "no quarterdeck at {} under the helm at {}",
-            SHIP.quarterdeck,
+            SHIP.helm_deck,
             SHIP.helm_station
         );
 
@@ -1674,8 +2024,9 @@ mod tests {
         // deck furniture. The companionway lives with this rule; the
         // quarterdeck, the tiller and the stem head stand outside the circle
         // or under the cloth instead.
+        let mast = SHIP.mast.expect("the ship is masted");
         for corner in &corners {
-            let reach = Vec2::new(corner.x, corner.z - SHIP.masthead_station).length();
+            let reach = Vec2::new(corner.x, corner.z - mast.station).length();
             assert!(
                 reach >= SAIL_CLEW.z || corner.y < SAIL_TACK.y,
                 "{corner} stands into the boom's sweep, {reach} m from the mast"
@@ -1693,11 +2044,12 @@ mod tests {
             .into_iter()
             .flatten()
             .collect();
+        let mast = SHIP.mast.expect("the ship is masted");
         let top = corners.iter().map(|c| c.y).fold(f32::MIN, f32::max);
         assert!(
-            (top - SHIP.masthead).abs() < 1e-4,
+            (top - mast.head).abs() < 1e-4,
             "the model's masthead is {top} above the waterline, not {}",
-            SHIP.masthead
+            mast.head
         );
 
         let (forward, aft) = corners
@@ -1705,9 +2057,9 @@ mod tests {
             .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
         let stepped = (forward + aft) * 0.5;
         assert!(
-            (stepped - SHIP.masthead_station).abs() < 1e-4,
+            (stepped - mast.station).abs() < 1e-4,
             "the mast stands at {stepped}, not {}",
-            SHIP.masthead_station
+            mast.station
         );
 
         // And the tie stands off the axis by more than the spar's own half
@@ -1723,25 +2075,67 @@ mod tests {
         );
     }
 
-    /// The next hull along, as a file: `assets-src/models/rowboat/`.
-    ///
-    /// Nothing spawns one yet, and it is named here rather than beside
-    /// [`MODEL`] for that reason — but a master is a thing an afternoon in
-    /// Blender can quietly break, and the conditions below are exactly the
-    /// ones nothing else would report.
-    const ROWBOAT: &str = "models/rowboat.glb";
-
     #[test]
     fn the_rowboat_is_a_boat_fit_to_draw() {
         // One mesh carrying its own colours, like the figure — the oars move
         // under the boat's own skin rather than being meshes of their own, so
         // there is one shape here and not three.
-        assert_model_draws(ROWBOAT, &[(0, "rowboat")]);
-        assert_model_is_painted(ROWBOAT, 0);
+        assert_model_draws(ROWBOAT_MODEL, &[(0, "rowboat")]);
+        assert_model_is_painted(ROWBOAT_MODEL, 0);
         // And rigged, so the same rule the figure lives by applies: a vertex
         // shared between bones bends its facet as the oars swing, and a
         // gradient across a facet is the one thing this look cannot have.
-        assert_rigid_skin(ROWBOAT);
+        assert_rigid_skin(ROWBOAT_MODEL);
+    }
+
+    #[test]
+    fn the_rowboat_model_is_the_dinghy_the_game_floats() {
+        // What `grounding`, `float` and the sea's hole assume of a shape
+        // they never look at, the way the ship's own test pins its. The one
+        // mesh holds the oars too, but nothing of an oar reaches the
+        // extremes measured here: the blades hang shy of the keel's depth,
+        // and lie athwartships shy of the stem and transom.
+        let corners: Vec<Vec3> = triangles(ROWBOAT_MODEL, 0, "POSITION")
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let lowest = corners.iter().map(|c| c.y).fold(f32::MAX, f32::min);
+        assert!(
+            (lowest + ROWBOAT.draft).abs() < 1e-3,
+            "the model's keel is {lowest} below the waterline, not {}",
+            -ROWBOAT.draft
+        );
+
+        let half = ROWBOAT.length * 0.5;
+        let (bow, transom) = corners
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
+        assert!(
+            (bow + half).abs() < 1e-3 && (transom - half).abs() < 1e-3,
+            "the model runs {bow}..{transom}, not a {}m hull about amidships",
+            ROWBOAT.length
+        );
+
+        // The sole — below the waterline, which is what the sea's hole is
+        // for — is where anybody aboard stands: a plane of corners at
+        // exactly the helm deck's height, spanning the helm's station.
+        let plane: Vec<&Vec3> = corners
+            .iter()
+            .filter(|c| (c.y - ROWBOAT.helm_deck).abs() < 1e-3)
+            .collect();
+        assert!(
+            ROWBOAT.helm_deck < -0.05,
+            "the sole is back above the waterline — is the sea's hole still earning its keep?"
+        );
+        let fore = plane.iter().map(|c| c.z).fold(f32::MAX, f32::min);
+        let aft = plane.iter().map(|c| c.z).fold(f32::MIN, f32::max);
+        assert!(
+            (fore..=aft).contains(&ROWBOAT.helm_station),
+            "no sole at {} under the helm at {}",
+            ROWBOAT.helm_deck,
+            ROWBOAT.helm_station
+        );
     }
 
     #[test]
@@ -1749,7 +2143,7 @@ mod tests {
         // The two states a boat with oars in it has, and the order a clip is
         // asked for by. Renaming an action in Blender is a keystroke, and the
         // boat that came back would row with its oars lying in the bilges.
-        assert_eq!(clip_names(ROWBOAT), ["stowed", "stroke"]);
+        assert_eq!(clip_names(ROWBOAT_MODEL), ["stowed", "stroke"]);
     }
 
     #[test]
