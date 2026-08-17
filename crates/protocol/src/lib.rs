@@ -29,6 +29,7 @@
 //! older clients to turn away, only whatever was built from this checkout.
 
 pub mod ground;
+pub mod survey;
 
 use std::io::{self, Read, Write};
 

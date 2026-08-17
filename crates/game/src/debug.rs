@@ -38,9 +38,10 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::camera::{MapCamera, View};
-use crate::chart::{Chart, ChartTally};
+use crate::chart::Chart;
 use crate::net::Hosting;
 use crate::terrain::{Ground, Tally};
+use protocol::survey::SurveyTally;
 
 pub(crate) const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
 pub(crate) const BACKDROP: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
@@ -227,7 +228,7 @@ struct WorldUnder<'w> {
 struct Held<'a> {
     ground: Option<&'a Tally>,
     /// What the chart holds, counted — see [`Chart::tally`].
-    charted: Option<ChartTally>,
+    charted: Option<SurveyTally>,
 }
 
 /// Makes the scene agree with [`Toggles`].
@@ -703,7 +704,7 @@ mod tests {
                 &counts,
                 Held {
                     ground: Some(&tally),
-                    charted: Some(ChartTally {
+                    charted: Some(SurveyTally {
                         surveyed: 96,
                         coastal: 21,
                         complete: 3,

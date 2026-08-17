@@ -28,9 +28,10 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
+use protocol::survey::{Coast, Mark, Soundings};
 use protocol::{Token, WorldId};
 
-use crate::chart::{Chart, Coast, Soundings};
+use crate::chart::Chart;
 use crate::net::Session;
 use crate::AppState;
 
@@ -362,7 +363,7 @@ fn runs_line(value: &str) -> Result<(IVec2, Vec<Coast>), String> {
             .map(|i| {
                 let pair = |at: usize| u8::from_str_radix(&marks[at..at + 2], 16);
                 match (pair(i * 4), pair(i * 4 + 2)) {
-                    (Ok(x), Ok(z)) => Ok(crate::chart::Mark::unpack([x, z])),
+                    (Ok(x), Ok(z)) => Ok(Mark::unpack([x, z])),
                     _ => Err("marks that are not hex".to_string()),
                 }
             })
@@ -381,7 +382,6 @@ fn whole(value: &str) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chart::Mark;
 
     fn a_book() -> Logbook {
         Logbook {

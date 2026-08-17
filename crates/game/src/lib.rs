@@ -45,7 +45,15 @@ pub const SKY: Color = Color::srgb(0.63, 0.80, 0.93);
 
 /// Distance from the eye at which aerial haze starts to take the ground over,
 /// in metres.
-pub const HAZE_START: f32 = 320.0;
+///
+/// The same number the survey records coast out to, and deliberately one
+/// number rather than two that happen to agree: the edge of what is worth
+/// recording and the edge of what can be made out are the same edge — coast
+/// beyond it is already dissolving into the air, so there is nothing there a
+/// player could claim to have seen. It lives on the wire's crate rather than
+/// here because the recording half of it is something both ends must agree on
+/// (see [`protocol::survey::SIGHT_RADIUS`]), and the haze follows it.
+pub const HAZE_START: f32 = protocol::survey::SIGHT_RADIUS;
 /// Distance at which the haze has fully replaced the ground with [`SKY`]. This
 /// is the edge of what the camera can see at all, whatever it is pointed at, so
 /// anything the picture depends on has to reach at least this far — the sun's
