@@ -11,6 +11,7 @@ pub mod backdrop;
 pub mod beasts;
 pub mod bindings;
 pub mod boat;
+pub mod cairn;
 pub mod camera;
 pub mod capture;
 pub mod chart;

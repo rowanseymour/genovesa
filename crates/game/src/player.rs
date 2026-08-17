@@ -37,6 +37,7 @@ use protocol::ground::FACET_METRES;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::{Boat, Fleet, HullId, Vessel};
+use crate::chart::Chart;
 use crate::figure::FigurePlugin;
 use crate::net::Online;
 use crate::terrain::Ground;
@@ -257,7 +258,7 @@ impl Plugin for PlayerPlugin {
             .init_resource::<Fleet>()
             .add_systems(
                 Update,
-                (embark_or_land, walk)
+                (embark_or_land, claim_the_island, walk)
                     .chain()
                     .in_set(Afoot)
                     .run_if(in_state(Helm::Sailing)),
@@ -265,6 +266,50 @@ impl Plugin for PlayerPlugin {
             // Outside the pause and the helm's own set: a walker waiting
             // for their ground should find it even while the menu is up.
             .add_systems(Update, find_footing.run_if(in_state(AppState::InWorld)));
+    }
+}
+
+/// Stands a cairn on the island underfoot: the claim, asked for.
+///
+/// The client asks and the server rules. It could not do otherwise — a claim
+/// is settled against the coast the *world* has watched this player sail, and
+/// this side's chart is a drawing of what it was told, not evidence. So what
+/// this does is ask on the two counts a player can see for themselves: they
+/// are on their own feet, and the sheet says they have closed the ring they
+/// are standing inside. A refusal is silent, and deserves to be: the two
+/// honest ways to earn one are a coast that looked closed here and did not
+/// close there, and an island somebody claimed while you were walking up to
+/// it — and the second answers itself, since the refusal carries the cairn
+/// that beat you to it.
+///
+/// Asking from a boat is not offered at all. A cairn is built by somebody
+/// standing on the ground with stones in their hands, and the key that would
+/// have done it from the helm is a key that says the world is a menu.
+fn claim_the_island(
+    keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
+    online: Option<Res<Online>>,
+    chart: Option<Res<Chart>>,
+    players: Query<(&Transform, Option<&ChildOf>), With<Player>>,
+) {
+    if !keys.just_pressed(bindings.key(Action::Claim)) {
+        return;
+    }
+    let (Some(online), Some(chart)) = (online, chart) else {
+        return;
+    };
+    // Afoot: a player aboard is a child of their hull.
+    let Ok((place, None)) = players.single() else {
+        return;
+    };
+    let standing = Vec2::new(place.translation.x, place.translation.z);
+    // Asked of the sheet's own survey, which is the same arithmetic the
+    // server will use on the same question — see `protocol::survey`. That is
+    // what makes this an ask worth making rather than a guess: where the two
+    // disagree it is because the world has seen more coast than this client
+    // has been told of yet, and a moment later it will have been.
+    if let Some(island) = chart.island_under(standing) {
+        online.connection.claim(island);
     }
 }
 

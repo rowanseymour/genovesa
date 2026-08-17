@@ -35,11 +35,14 @@ pub enum Action {
     /// One key for both directions again: it lays the chart over the world and
     /// takes it off — see `chart::chart_key`.
     Chart,
+    /// Stands a cairn on the island underfoot, claiming it — see
+    /// `player::claim_the_island`. Only offered where it would be granted.
+    Claim,
 }
 
 impl Action {
     /// Every action, in the order the settings screen lists them.
-    pub const ALL: [Action; 9] = [
+    pub const ALL: [Action; 10] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::SteerLeft,
@@ -49,6 +52,7 @@ impl Action {
         Action::TurnLeft,
         Action::TurnRight,
         Action::Chart,
+        Action::Claim,
     ];
 
     /// How the settings screen names the action. The last two say "view"
@@ -66,12 +70,13 @@ impl Action {
             Action::TurnLeft => "Turn view left",
             Action::TurnRight => "Turn view right",
             Action::Chart => "Chart",
+            Action::Claim => "Claim island",
         }
     }
 
     /// Where the action starts out: WASD to drive, F to step ashore or
-    /// aboard, R to wait a night out, M for the chart, and Q/E to turn the
-    /// view — WASD and Q/E being what the game had before any of this was
+    /// aboard, R to wait a night out, M for the chart, C to claim, and Q/E to
+    /// turn the view — WASD and Q/E being what the game had before any of this was
     /// configurable.
     pub fn default_key(self) -> KeyCode {
         match self {
@@ -84,6 +89,7 @@ impl Action {
             Action::TurnLeft => KeyCode::KeyQ,
             Action::TurnRight => KeyCode::KeyE,
             Action::Chart => KeyCode::KeyM,
+            Action::Claim => KeyCode::KeyC,
         }
     }
 

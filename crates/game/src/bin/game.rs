@@ -17,6 +17,7 @@ use game::ambience::AmbiencePlugin;
 use game::backdrop::BackdropPlugin;
 use game::beasts::BeastsPlugin;
 use game::boat::BoatPlugin;
+use game::cairn::CairnPlugin;
 use game::camera::MapCameraPlugin;
 use game::capture::CapturePlugin;
 use game::chart::ChartPlugin;
@@ -150,7 +151,9 @@ fn run(args: Args, session: Option<Session>) {
             TreesPlugin,
             WildlifePlugin,
             BeastsPlugin,
-            BoatPlugin,
+            // The boats, and the cairns a claim leaves standing. Paired only
+            // because a plugin tuple holds fifteen.
+            (BoatPlugin, CairnPlugin),
             // The white water the boat leaves, painted by the sea itself.
             WakePlugin,
             PlayerPlugin,

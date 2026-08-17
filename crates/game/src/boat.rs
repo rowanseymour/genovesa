@@ -1461,7 +1461,7 @@ fn trim_the_sails(
 /// The droop is the whole of the strength reading — flat out in a blow, dead
 /// down in a calm, and everything between — so a player who never looks at
 /// the corner of the screen still knows what the wind is doing.
-fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
+pub(crate) fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
     let (full, sag) = PENNANT_FLIES;
     let hard = (apparent.length() / full).clamp(0.0, 1.0);
     let bearing = if apparent.length() > PENNANT_CALM {
