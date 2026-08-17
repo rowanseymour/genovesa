@@ -325,11 +325,7 @@ impl Ground {
     /// counted rather than asked about.
     pub fn tally(&self) -> Tally {
         Tally {
-            ground: self
-                .chunks
-                .values()
-                .filter(|chunk| matches!(chunk, Chunk::Land { .. }))
-                .count(),
+            ground: self.land_held(),
             ocean: self
                 .chunks
                 .values()
@@ -337,6 +333,16 @@ impl Ground {
                 .count(),
             requested: self.outstanding.len() + self.to_ask.len(),
         }
+    }
+
+    /// How many chunks of ground are held — [`Tally::ground`] on its own, for
+    /// the caller that wants only that and wants it every frame. Counting the
+    /// whole tally to read one field walks the map three times over.
+    pub fn land_held(&self) -> usize {
+        self.chunks
+            .values()
+            .filter(|chunk| matches!(chunk, Chunk::Land { .. }))
+            .count()
     }
 
     /// The height of the surface at a world point: the ground where it stands
@@ -409,6 +415,20 @@ impl Ground {
             (highest / FACET_VERTS) as f32,
         ) * FACET_METRES;
         Some((chunk.as_vec2() * CHUNK_METRES + local, height))
+    }
+
+    /// Whether any corner of one chunk stands above the waterline. `false` for
+    /// open water, for chunks that have not arrived, and for the drowned shelf
+    /// the server sends around an island.
+    ///
+    /// [`Ground::peak`] answers this as well, but it reads the whole grid to
+    /// find the highest corner and a caller asking only whether there is land
+    /// here is done at the first corner above the water.
+    pub fn above_water(&self, chunk: IVec2) -> bool {
+        let Some(Chunk::Land { heights, .. }) = self.chunks.get(&chunk) else {
+            return false;
+        };
+        heights.iter().any(|height| *height > 0.0)
     }
 }
 

@@ -383,10 +383,17 @@ impl Chart {
         self.soundings.contains_key(&chunk)
     }
 
+    /// How many chunks have been surveyed — [`ChartTally::surveyed`] on its
+    /// own, for the caller that wants only that and wants it every frame.
+    /// [`Chart::tally`] walks every coastline to fill the rest of its fields.
+    pub fn surveys(&self) -> usize {
+        self.soundings.len()
+    }
+
     /// Counts what the chart holds — including, in [`ChartTally::islands`],
     /// the closed coastlines that are islands to claim.
     pub fn tally(&self) -> ChartTally {
-        let surveyed = self.soundings.len();
+        let surveyed = self.surveys();
         let coastal = self
             .soundings
             .values()
