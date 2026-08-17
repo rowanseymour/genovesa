@@ -702,11 +702,14 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     fields.next().ok_or("a cairn with half a position")?,
                 );
                 let island = IVec2::new(whole(x)?, whole(z)?);
-                // The reach everything else here is held to, in marks — an
-                // island is named by a point on the mark lattice, so this is
-                // the same test the positions get, read in the units the
-                // identity is written in.
-                if !crate::reachable(island.as_vec2() * protocol::survey::MARK_STEP) {
+                // The reach everything else here is held to, asked of the chunk
+                // the identity stands in — see [`crate::island_in_the_world`],
+                // which is the same test the granting end applies. Not of the
+                // metres the identity works out to: the lattice is a rounded
+                // 255 steps to the chunk, so that arithmetic refuses the outer
+                // chunks a survey may honestly reach, and a claim refused here
+                // is a whole world that will not open.
+                if !crate::island_in_the_world(island) {
                     return Err(format!("nobody ever sailed round {island}"));
                 }
                 let at = Vec2::new(finite(ax)?, finite(az)?);
@@ -929,10 +932,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_world_survives_the_round_trip() {
-        let record = a_record();
-        let read = parse(&compose(&record)).expect("parse what was composed");
+    /// Writes a world down, reads it back, and says the two are one world.
+    ///
+    /// Composing sorts — each player's survey, the boats, the claims, the
+    /// beasts — so everything here is compared as content rather than as
+    /// order.
+    fn round_trips(record: &WorldRecord) {
+        let read = parse(&compose(record))
+            .unwrap_or_else(|why| panic!("what was composed will not parse: {why}"));
         assert_eq!(read.id, record.id);
         assert_eq!(read.seed, record.seed);
         assert_eq!(read.name, record.name);
@@ -973,6 +980,203 @@ mod tests {
             beasts
         };
         assert_eq!(sorted(read.beasts), sorted(record.beasts.clone()));
+    }
+
+    #[test]
+    fn a_world_survives_the_round_trip() {
+        round_trips(&a_record());
+    }
+
+    /// The furthest chunk the world resolves over, and so the furthest ground
+    /// anybody may have surveyed — see [`crate::in_the_world`]. Worked out
+    /// rather than written down, so that moving [`crate::MAX_RANGE`] moves the
+    /// edge these tests are about.
+    fn the_last_chunk() -> i32 {
+        let brink = (crate::MAX_RANGE / protocol::ground::CHUNK_METRES) as i32;
+        assert!(
+            crate::in_the_world(IVec2::splat(brink))
+                && !crate::in_the_world(IVec2::splat(brink + 1)),
+            "the edge of the world is not where this test thinks it is"
+        );
+        brink
+    }
+
+    /// A world holding, in every field that has an edge, a value standing on
+    /// it: the furthest a player or a hull may be, the furthest chunk anybody
+    /// may have surveyed, the outermost island there can be an identity for,
+    /// and beasts at and bound for the brink.
+    fn a_record_at_the_edge() -> WorldRecord {
+        let brink = the_last_chunk();
+        let far = Vec2::splat(crate::MAX_RANGE);
+        let steps = u8::MAX as i32;
+        // The outermost identity the lattice carries inside the world: the last
+        // mark of the last chunk. One step further is the boundary, and a
+        // boundary belongs to the chunk beyond it — see
+        // [`protocol::survey::chunk_of`].
+        let last_ring = IVec2::splat(brink * steps + steps - 1);
+        // A name at exactly the length the wire allows, with spaces in it and
+        // letters that cost more than a byte: what a claim's line has to carry
+        // through going last on it.
+        let long = format!("Ilha {}!", "ô".repeat(45));
+        assert_eq!(long.len(), protocol::NAME_BYTES);
+        assert!(protocol::island_name(&long).is_some(), "not a name at all");
+
+        WorldRecord {
+            id: WorldId(u64::MAX),
+            seed: u32::MAX,
+            name: "Ilha do Príncipe".to_string(),
+            // A phase runs from the stroke of midnight up to but not including
+            // the next, so the edge to stand on is the stroke.
+            opening: 0.0,
+            age: f32::MAX,
+            players: HashMap::from([
+                (
+                    Token(u64::MAX),
+                    PlayerRecord {
+                        position: far,
+                        aboard: Some(BoatId(u64::MAX)),
+                        // Both far corners, and two chunks of one column, so
+                        // that the column shorthand is exercised out here too.
+                        surveyed: vec![
+                            IVec2::splat(-brink),
+                            IVec2::splat(brink),
+                            IVec2::new(brink, brink - 1),
+                        ],
+                    },
+                ),
+                (
+                    Token(0),
+                    PlayerRecord {
+                        position: -far,
+                        aboard: None,
+                        surveyed: Vec::new(),
+                    },
+                ),
+            ]),
+            boats: vec![BoatRecord {
+                id: BoatId(u64::MAX),
+                kind: BoatKind::Sloop,
+                position: -far,
+                heading: f32::MAX,
+            }],
+            claims: vec![
+                ClaimRecord {
+                    island: last_ring,
+                    by: Token(u64::MAX),
+                    at: far,
+                    name: long,
+                },
+                ClaimRecord {
+                    island: IVec2::splat(-brink * steps),
+                    by: Token(0),
+                    at: -far,
+                    name: String::new(),
+                },
+            ],
+            beasts: vec![
+                BeastRecord {
+                    kind: BeastKind::Shark,
+                    position: far,
+                    goal: None,
+                    left: u32::MAX,
+                },
+                BeastRecord {
+                    kind: BeastKind::Whale,
+                    position: -far,
+                    goal: Some(far),
+                    left: 0,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn what_the_world_writes_it_can_read_back() {
+        // The invariant the whole file rests on, said once and in one place:
+        // **anything [`compose`] writes, [`parse`] takes back**.
+        //
+        // Four times now a writer has been able to emit something its own
+        // reader refuses — a surveyed chunk past the edge, a beast past it, a
+        // beast's goal past it, an island's identity past it — and none of them
+        // cost the field they were about. They cost the world: the file will
+        // not parse, [`load`] falls back to the copy beside it, the session is
+        // quietly gone, and the next save takes the copy too. Each was found
+        // one at a time, by somebody sailing to the brink.
+        //
+        // So this stands where the shape of the file is, rather than beside any
+        // one of them. Add a field to a world file and it belongs in
+        // [`a_record_at_the_edge`], standing on whatever edge it has.
+        round_trips(&a_record_at_the_edge());
+    }
+
+    #[test]
+    fn what_the_world_must_not_write_is_filtered_where_it_is_made() {
+        // The other half of that contract, and the half that cannot be met
+        // here. These compose into lines the reader refuses, and one refused
+        // line is the whole world — so what keeps them out of the file is that
+        // they never reach [`compose`]: `beasts::Flock::records` drops a beast
+        // past the edge or making for past it, and `Shared::record` drops a
+        // claim whose island the lattice cannot carry back. This says what
+        // those filters are for, so that the next field's writer knows it owes
+        // one.
+        let brink = the_last_chunk();
+        let past = crate::MAX_RANGE + 1.0;
+        let beyond = (brink + 1) * u8::MAX as i32;
+        for (record, what) in [
+            (
+                WorldRecord {
+                    beasts: vec![BeastRecord {
+                        kind: BeastKind::Shark,
+                        position: Vec2::new(past, 0.0),
+                        goal: None,
+                        left: 1,
+                    }],
+                    ..a_record()
+                },
+                "a beast swimming past the end of the world",
+            ),
+            (
+                WorldRecord {
+                    beasts: vec![BeastRecord {
+                        kind: BeastKind::Whale,
+                        position: Vec2::ZERO,
+                        goal: Some(Vec2::new(past, 0.0)),
+                        left: 1,
+                    }],
+                    ..a_record()
+                },
+                "a beast making for past the end of the world",
+            ),
+            (
+                WorldRecord {
+                    claims: vec![ClaimRecord {
+                        island: IVec2::splat(beyond),
+                        by: Token(7),
+                        at: Vec2::ZERO,
+                        name: String::new(),
+                    }],
+                    ..a_record()
+                },
+                "an island nobody could have sailed round",
+            ),
+            (
+                WorldRecord {
+                    claims: vec![ClaimRecord {
+                        island: IVec2::ZERO,
+                        by: Token(7),
+                        at: Vec2::new(past, 0.0),
+                        name: String::new(),
+                    }],
+                    ..a_record()
+                },
+                "a cairn standing past the end of the world",
+            ),
+        ] {
+            assert!(
+                parse(&compose(&record)).is_err(),
+                "{what} was written down as though it could be read back"
+            );
+        }
     }
 
     #[test]

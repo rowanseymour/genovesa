@@ -1741,6 +1741,11 @@ fn raise(habitat: &'static Habitat, shared: &Shared, player: Vec2, entropy: u32)
         // there is one the world's own file cannot write down — see
         // [`Flock::records`]. A spot that is off the map makes way for the
         // next, exactly as one with the wrong water under it does.
+        //
+        // Here for the cheapness of it, the ring spot being the one point both
+        // kinds have before any sounding is done; the candidate is held to it
+        // whole below, which is the check that actually covers the two points a
+        // beast is written down as.
         if !crate::reachable(on_the_ring) {
             return None;
         }
@@ -1748,10 +1753,10 @@ fn raise(habitat: &'static Habitat, shared: &Shared, player: Vec2, entropy: u32)
             return None;
         }
 
-        match habitat.journey {
+        let raised = match habitat.journey {
             Some(far) => {
                 let bound = journey(shared, habitat, on_the_ring, player, far, entropy)?;
-                Some(Beast::born(habitat, on_the_ring, Some(bound), entropy))
+                Beast::born(habitat, on_the_ring, Some(bound), entropy)
             }
             None => {
                 let born = sound_out(
@@ -1770,9 +1775,18 @@ fn raise(habitat: &'static Habitat, shared: &Shared, player: Vec2, entropy: u32)
                 // that keeps it minded, and a ring spot that cannot offer one
                 // makes way for the next.
                 (born.distance(player) <= habitat.waters)
-                    .then(|| Beast::born(habitat, born, Some(on_the_ring), entropy))
+                    .then(|| Beast::born(habitat, born, Some(on_the_ring), entropy))?
             }
-        }
+        };
+        // Where it is *and* where it is going, because the file writes both and
+        // the reader refuses either past the edge. The ring spot is only one of
+        // the two, and which one it is differs by kind: a traveller is born
+        // there and bound somewhere a course length off, a shark is born out in
+        // the deep and bound for there. Each kind's second point comes from a
+        // sounding that walks outward from the first, so the edge is exactly
+        // where a sounding will have gone looking.
+        (crate::reachable(raised.position) && raised.goal.is_none_or(crate::reachable))
+            .then_some(raised)
     })
 }
 

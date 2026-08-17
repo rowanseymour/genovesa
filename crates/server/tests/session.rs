@@ -2006,6 +2006,38 @@ fn only_the_claimant_may_name_the_island() {
 }
 
 #[test]
+fn an_ask_inside_the_pace_is_answered_late_rather_than_dropped() {
+    // The pacing on claims and names is there to stop one client filling
+    // everybody's outbox, and it holds the rate down by making the asker
+    // wait. What it must never do is swallow the ask: from the far end of a
+    // socket, silence is indistinguishable from a refusal, from a message
+    // lost, or from a server that has stopped listening, and a client cannot
+    // be asked to tell those apart. So every one of these gets an answer —
+    // the later ones a quarter-second late, which nobody sailing will notice.
+    let addr = host(CLAIMABLE);
+    let (client, _token, island, ashore) = sail_round_the_island(addr, None);
+    client.say(ToServer::Disembark { position: ashore });
+
+    // The first is the grant, and pays the pace. The rest arrive well inside
+    // it — a claim on an island now held, and two names in a row — and the
+    // count is what is being asserted: four asks, four cairns back.
+    client.say(ToServer::Claim { island });
+    client.say(ToServer::Claim { island });
+    for name in ["Ilha Verde", "Ilha Vermelha"] {
+        client.say(ToServer::Name {
+            island,
+            name: name.to_string(),
+        });
+    }
+
+    for ask in 0..4 {
+        let (told, _at, _name, yours) = client.hear_a_cairn();
+        assert_eq!(told, island, "ask {ask} was answered about another island");
+        assert!(yours, "ask {ask} lost the claimant their own claim");
+    }
+}
+
+#[test]
 fn a_name_the_wire_will_not_carry_leaves_the_cairn_as_it_was() {
     // A name is a refusal or a name; it is never half a name, and never an
     // erasure. Whatever is offered, the cairn goes on saying what it said.

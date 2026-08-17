@@ -695,6 +695,11 @@ impl Survey {
     /// A point in a lagoon counts as on the island: the water in the middle of
     /// a place is part of the place, and somebody who has run the whole outer
     /// shore has earned it either way.
+    ///
+    /// Two rings of the same reach are settled by identity, for the reason
+    /// [`Survey::islands`] sorts by it: the rings arrive in a hash map's order,
+    /// and the answer to this is what a claim is granted on. It must not be one
+    /// island on one run and its neighbour on the next.
     pub fn island_under(&self, at: Vec2) -> Option<Island> {
         let mut under: Option<Island> = None;
         self.coastlines(&mut |id, ring| {
@@ -708,7 +713,14 @@ impl Survey {
                 centre: measured.centre,
                 extent: measured.extent,
             };
-            if under.is_none_or(|held| island.extent < held.extent) {
+            let smaller = under.is_none_or(|held| {
+                island
+                    .extent
+                    .total_cmp(&held.extent)
+                    .then_with(|| (island.id.x, island.id.y).cmp(&(held.id.x, held.id.y)))
+                    .is_lt()
+            });
+            if smaller {
                 under = Some(island);
             }
         });
@@ -753,6 +765,24 @@ fn run_steps(chunk: IVec2, mark: Mark) -> IVec2 {
     chunk
         .saturating_mul(IVec2::splat(u8::MAX as i32))
         .saturating_add(IVec2::new(mark.x as i32, mark.z as i32))
+}
+
+/// Which chunk a point on the step lattice stands in — [`run_steps`] read
+/// backwards.
+///
+/// What wants this is whoever holds an island's identity and no survey to look
+/// it up in. An identity is a lattice point (see [`Survey::coastlines`]), and
+/// the one question anybody asks of a bare one is whether it names ground
+/// somebody could have been to — which is a question about chunks, and has to
+/// be asked in chunks. Working the point back to metres and asking there
+/// instead puts the answer a tenth of a metre out at the far edge of the
+/// world, because [`MARK_STEP`] is a rounded 128/255, and refuses the very
+/// chunks a survey may honestly reach.
+///
+/// A mark sitting exactly on a chunk's far boundary answers with the
+/// neighbour, the two being one point of ground under two names.
+pub fn chunk_of(point: IVec2) -> IVec2 {
+    point.div_euclid(IVec2::splat(u8::MAX as i32))
 }
 
 /// The least of a ring's points on the step lattice, west before south — the
@@ -1716,5 +1746,60 @@ mod tests {
 
         assert_eq!(counted(&kept), (1, 0, 0), "a skerry counted as an island");
         assert_eq!(kept.island_under(middle), None);
+    }
+
+    /// A ring of land with water inside it — an atoll, and the shape that has
+    /// two closed coastlines to a name: the outer one running round the land,
+    /// the inner one running round the lagoon the other way about.
+    fn an_atoll(chunk: IVec2, middle: Vec2, lagoon: f32, shore: f32) -> Vec<f32> {
+        let base = chunk.as_vec2() * CHUNK_METRES;
+        (0..FACET_VERTS * FACET_VERTS)
+            .map(|i| {
+                let local =
+                    Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32) * FACET_METRES;
+                let out = (base + local).distance(middle);
+                (shore - out).min(out - lagoon)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_water_in_the_middle_of_a_place_is_part_of_the_place() {
+        // Standing in an atoll's lagoon is standing on the atoll. Somebody who
+        // has run the whole outer shore has earned the whole of what it rings,
+        // and the lagoon is not a hole in their claim — which matters, because
+        // the ring around a lagoon is a closed coastline in its own right and
+        // the one running the other way about. Telling those two apart is what
+        // the signed area is for, and this is where it earns its keep.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES);
+        let mut kept = Survey::default();
+        for chunk in [
+            IVec2::ZERO,
+            IVec2::new(1, 0),
+            IVec2::new(0, 1),
+            IVec2::new(1, 1),
+        ] {
+            kept.record(chunk, survey(&an_atoll(chunk, middle, 40.0, 90.0)));
+        }
+
+        // Two coastlines closed, and exactly one of them an island: the lagoon
+        // rings water, so it is coast to draw and nobody's ground to stand on.
+        let (complete, open, islands) = counted(&kept);
+        assert_eq!((complete, open), (2, 0), "an atoll is two closed shores");
+        assert_eq!(islands, 1, "the lagoon counted as an island of its own");
+
+        let atoll = kept.islands()[0];
+        assert_eq!(
+            kept.island_under(middle).map(|found| found.id),
+            Some(atoll.id),
+            "the lagoon is a hole in its own island"
+        );
+        // And the land itself, out between the lagoon and the sea, is the same
+        // island — not some second one found by the inner ring.
+        assert_eq!(
+            kept.island_under(middle + Vec2::new(65.0, 0.0))
+                .map(|found| found.id),
+            Some(atoll.id)
+        );
     }
 }

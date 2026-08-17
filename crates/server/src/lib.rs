@@ -227,14 +227,24 @@ const SURVEY_SLAB: usize = 64;
 /// visiting — is a slice of its own.
 const CAIRN_SIGHT: f32 = 1_536.0;
 
-/// How often one player's claim is settled, at most.
+/// How often one player may have a cairn raised or rewritten, at most.
 ///
-/// Settling one means walking every coastline that player has surveyed. That
-/// is arithmetic rather than generation — the soundings are already in hand,
-/// see [`Surveyed`] — but it grows with the voyage, and a client can ask as
-/// fast as it can write. A cairn is built by hand, so a quarter of a second
-/// between asks is nothing to a player and everything to a pestering client.
-const CLAIM_PACE: Duration = Duration::from_millis(250);
+/// Two different costs, one pace, because both are bought with the same word
+/// from the same client and a cairn is hand-carved either way: a quarter of a
+/// second between asks is nothing to a player and everything to a pestering
+/// one.
+///
+/// Settling a claim means walking every coastline that player has surveyed.
+/// That is arithmetic rather than generation — the soundings are already in
+/// hand, see [`Surveyed`] — but it grows with the voyage, and a client can ask
+/// as fast as it can write.
+///
+/// Christening one costs the walk nothing and costs everybody else something:
+/// a granted name is told to every player within [`CAIRN_SIGHT`] of the cairn,
+/// and an outbox that fills is a connection shut down (see [`post`]). Unpaced,
+/// one client alternating two perfectly good names could hang up on every
+/// player standing near its island.
+const CAIRN_PACE: Duration = Duration::from_millis(250);
 
 /// How far from the origin a reported position may be, in metres. The world
 /// crate measures where `f32` ground stops being exactly the ground at about
@@ -1150,6 +1160,14 @@ impl Shared {
             let claims = self.claims.lock().expect("no poisoned lock");
             claims
                 .iter()
+                // Nothing the file could not be read back saying, on the terms
+                // the beasts are held to — see `beasts::Flock::records`, and
+                // [`island_in_the_world`] for what it costs to get this wrong.
+                // Nothing granted since the fix can fail this; it is the
+                // guarantee rather than the fix, and it is the guarantee that
+                // matters, because a claim the reader refuses takes the whole
+                // world with it.
+                .filter(|(island, claim)| island_in_the_world(**island) && reachable(claim.at))
                 .map(|(island, claim)| keeper::ClaimRecord {
                     island: *island,
                     by: claim.by,
@@ -1604,11 +1622,15 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // with the roster in hand.
     tell_the_cairns_about(&shared, id, put_down);
 
-    // When this player's last claim was settled — see [`CLAIM_PACE`]. A
-    // connection's own local, like the [`Wake`]: it is about the rate this
-    // thread is being asked to work at, and nothing shared has business with
-    // it. Nothing yet, so the first ask of a session is answered at once.
+    // When this player last had a cairn raised, and when they last had one
+    // rewritten — see [`CAIRN_PACE`]. A connection's own locals, like the
+    // [`Wake`]: they are about the rate this thread is being asked to work at,
+    // and nothing shared has business with them. Two clocks rather than one,
+    // because the two rules about what pays are not the same rule and each
+    // reads where it is applied. Nothing yet, so the first ask of a session is
+    // answered at once.
     let mut asked_to_claim: Option<Instant> = None;
+    let mut asked_to_name: Option<Instant> = None;
 
     // Relay and take orders for ground until the line drops. Anything else
     // ends the session too: after a framing error nothing later on the stream
@@ -1779,24 +1801,40 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             }
             Ok(ToServer::Claim { island }) => {
                 // Paced rather than answered as fast as it is asked — see
-                // [`CLAIM_PACE`] — and an ask inside the pace is dropped on
-                // the floor, there being nothing to say about one that was
-                // never looked at.
+                // [`CAIRN_PACE`] — by waiting out what is left of it rather
+                // than by dropping the ask. A client that asks too soon is
+                // answered late; it is never answered with silence, which
+                // would leave an honest one unable to tell a refusal from a
+                // message that went nowhere. The waiting is done on this
+                // connection's own thread, so the only session it slows is
+                // the one asking.
                 //
                 // Only an ask that actually walked the coastlines pays the
                 // pace, which is why the clock is set from what came back
                 // rather than from having asked. What is being rationed is
-                // that walk; an ask the session answered off the roster alone
-                // — from somebody at a helm, say — cost nothing, and charging
-                // it would mean a player who asked from the deck and then
-                // stepped ashore went unanswered for a beat.
-                if asked_to_claim.is_none_or(|since| since.elapsed() >= CLAIM_PACE)
-                    && settle_a_claim(&shared, id, island)
-                {
+                // that walk; an ask the session answered off the roster or the
+                // claims alone — from somebody at a helm, or after an island
+                // somebody already holds — cost nothing, and charging it would
+                // mean a player who asked from the deck and then stepped
+                // ashore waited for no reason.
+                wait_out(asked_to_claim, CAIRN_PACE);
+                if settle_a_claim(&shared, id, island) {
                     asked_to_claim = Some(Instant::now());
                 }
             }
-            Ok(ToServer::Name { island, name }) => christen(&shared, id, island, &name),
+            Ok(ToServer::Name { island, name }) => {
+                // Paced on the claim's terms and for the same reason, one word
+                // of it being as cheap to say as the other — see
+                // [`CAIRN_PACE`], which is where the two costs are written up.
+                // What pays is a christening that was actually granted, that
+                // being the one that goes to everybody near the cairn; a
+                // refusal reaches its asker and nobody else, and is answered
+                // as promptly as the last grant allows.
+                wait_out(asked_to_name, CAIRN_PACE);
+                if christen(&shared, id, island, &name) {
+                    asked_to_name = Some(Instant::now());
+                }
+            }
             Ok(ToServer::WantDawn) => {
                 // Noted rather than acted on: whether the night actually
                 // runs depends on what everyone else wants — see
@@ -1931,14 +1969,26 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
 /// A refusal is posted to the asker alone and never broadcast: the world is
 /// otherwise exactly as they last heard it, and a refusal every other player's
 /// outbox carried would be a client able to pester the whole roster. Where the
-/// refusal is that somebody got there first, what goes back is that cairn,
-/// which is how a picture corrects itself — the same idiom as a refused
-/// boarding, where the boat's own state is the whole of the answer. Where it
-/// is anything else there is no state to send, and the answer is silence.
+/// refusal is that somebody got there first, what goes back is that cairn —
+/// the same idiom as a refused boarding, where the boat's own state is the
+/// whole of the answer — provided the asker is standing near enough to be
+/// looking at it, which is [`tell_the_asker`]'s business. Where there is no
+/// state to send, or nobody near enough to be sent it, the answer is silence.
+///
+/// The claims are asked *before* the coastlines are walked, and that order is
+/// the whole of what stops a pestering client. An island somebody already holds
+/// is settled by the claims alone, and asking after one is exactly what a
+/// hostile client would repeat: the walk is what the pace exists to ration, so
+/// an ask that cannot possibly need it must not buy one. It also keeps the
+/// survey's own lock — which the saves and the backfill queue behind — held for
+/// the shortest time the question allows.
 ///
 /// The locks are taken one at a time and in this order for the reason written
-/// on [`Shared::claims`]: the roster, let go; the survey, let go; the claims,
-/// let go; and only then the roster again, to tell people.
+/// on [`Shared::claims`]: the roster, let go; the claims, let go; the survey,
+/// let go; the claims again, let go; and only then the roster, to tell people.
+/// The claims being asked twice is not a race: the second hold is the one that
+/// decides, so two players walking the same shore at once still leave one
+/// cairn, whichever of them reaches the insertion first.
 ///
 /// Says whether the survey was walked, which is the expensive half and the
 /// only half worth pacing — see the read loop, which is where the pacing is.
@@ -1957,22 +2007,43 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
         return false;
     };
 
-    // The survey is only asked of somebody who could be building a cairn,
-    // which saves walking a voyage's coastlines for a helmsman's ask.
-    let stands_on = afoot
-        && surveyed
-            .lock()
-            .expect("no poisoned lock")
-            .island_under(at)
-            .is_some_and(|found| found.id == island);
+    // Somebody's already — theirs or another's, and either way the cairn that
+    // stands there is the answer and no coastline needs walking to find it.
+    let held = shared
+        .claims
+        .lock()
+        .expect("no poisoned lock")
+        .get(&island)
+        .cloned();
+    if let Some(claim) = held {
+        let players = shared.players.lock().expect("no poisoned lock");
+        tell_the_asker(&players, id, island, &claim);
+        return false;
+    }
+    // Nor for somebody who could not be building a cairn wherever they are:
+    // one is built by a player standing on the ground, not sailing past.
+    if !afoot {
+        return false;
+    }
+
+    let stands_on = surveyed
+        .lock()
+        .expect("no poisoned lock")
+        .island_under(at)
+        .is_some_and(|found| found.id == island);
 
     let (told, granted) = {
         let mut claims = shared.claims.lock().expect("no poisoned lock");
         match claims.get(&island) {
-            // Somebody's already — theirs or another's, and either way the
-            // cairn that stands there is the answer.
+            // Claimed while this ask was walking the shore, which is the only
+            // way it gets here: the answer is that cairn, as it would have
+            // been a moment earlier.
             Some(held) => (Some(held.clone()), false),
-            None if stands_on => {
+            // Earned, and the identity is one the world's own file can carry
+            // back — see [`island_in_the_world`]. A ring closed out at the
+            // very brink of the world is refused rather than granted and lost,
+            // a claim the reader cannot read being a world that will not open.
+            None if stands_on && island_in_the_world(island) => {
                 let raised = Claim {
                     by: token,
                     at,
@@ -1982,24 +2053,23 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
                 (Some(raised), true)
             }
             // Nothing there, and nothing earned: an island this player has
-            // not been round, or is not standing on, or is not ashore at all.
+            // not been round, or is not standing on.
             None => (None, false),
         }
     };
 
-    let Some(claim) = told else {
-        return afoot;
-    };
-    let players = shared.players.lock().expect("no poisoned lock");
-    if granted {
-        (shared.report)(&format!("{id} claimed an island"));
-        tell_the_cairn(&players, island, &claim, id);
-    } else if let Some(player) = players.get(&id) {
-        post(player, cairn_told_to(player, island, &claim));
+    if let Some(claim) = told {
+        let players = shared.players.lock().expect("no poisoned lock");
+        if granted {
+            (shared.report)(&format!("{id} claimed an island"));
+            tell_the_cairn(&players, island, &claim, id);
+        } else {
+            tell_the_asker(&players, id, island, &claim);
+        }
     }
-    // Walked exactly when the asker was afoot — `stands_on` above is the only
-    // question the survey is asked, and it short-circuits on that.
-    afoot
+    // The shore was walked: everything that gets this far is an afoot asker
+    // after an island nobody held.
+    true
 }
 
 /// Christens a claimed island, if the asker is the one holding the claim.
@@ -2012,25 +2082,29 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
 ///
 /// An island nobody has claimed cannot be named at all, and there is no state
 /// to answer with, so that ask is met with silence.
-fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) {
+///
+/// Says whether the christening was granted, which is the half that reaches
+/// anybody but the asker and so the half worth pacing — see the read loop.
+fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) -> bool {
     let Some(token) = ({
         let players = shared.players.lock().expect("no poisoned lock");
         players.get(&id).map(|player| player.token)
     }) else {
-        return;
+        return false;
     };
 
     let (told, granted) = {
         let mut claims = shared.claims.lock().expect("no poisoned lock");
         let Some(claim) = claims.get_mut(&island) else {
-            return;
+            return false;
         };
         match protocol::island_name(name) {
-            // The name it already had is not news, and telling everybody
-            // nearby would be: a client is the one saying this, and one
-            // repeating itself must not be able to fill the outboxes of every
-            // player standing near the cairn. Answered to the asker alone,
-            // like any other ask that changed nothing.
+            // The name it already had is not news, so nobody nearby is told of
+            // it: this is a client's word, and a client repeating itself should
+            // not read as the cairn changing. It suppresses a repetition and
+            // nothing more — a client alternating two good names passes it
+            // every time — so what actually holds the rate down is
+            // [`CAIRN_PACE`], applied where the ask is read.
             Some(written) if claim.by == token && written != claim.name => {
                 claim.name = written;
                 (claim.clone(), true)
@@ -2044,9 +2118,10 @@ fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) {
     let players = shared.players.lock().expect("no poisoned lock");
     if granted {
         tell_the_cairn(&players, island, &told, id);
-    } else if let Some(player) = players.get(&id) {
-        post(player, cairn_told_to(player, island, &told));
+    } else {
+        tell_the_asker(&players, id, island, &told);
     }
+    granted
 }
 
 /// Tells a joining player the cairns standing near where they have been put
@@ -2069,6 +2144,29 @@ fn tell_the_cairns_about(shared: &Shared, id: PlayerId, at: Vec2) {
     };
     for (island, claim) in near {
         post(player, cairn_told_to(player, island, &claim));
+    }
+}
+
+/// Answers one asker with a cairn, if they are near enough to be looking at
+/// it — what a refusal that has state to show comes down to.
+///
+/// The gate is [`CAIRN_SIGHT`]'s own rule kept honestly. A refusal carrying the
+/// cairn is how a picture corrects itself for somebody standing there and
+/// finding it already taken; ungated it would be a client with an island's
+/// identity in hand reading off who holds it, what they called it and where
+/// their cairn stands, from anywhere in the world. Sailing round a coast is
+/// what earns an identity, so the leak is small — and who holds what is
+/// something a player is meant to find out by going there.
+fn tell_the_asker(
+    players: &HashMap<PlayerId, Player>,
+    asker: PlayerId,
+    island: IVec2,
+    claim: &Claim,
+) {
+    if let Some(player) = players.get(&asker) {
+        if player.position.distance(claim.at) <= CAIRN_SIGHT {
+            post(player, cairn_told_to(player, island, claim));
+        }
     }
 }
 
@@ -2418,6 +2516,21 @@ fn aimed(at: Vec2, toward: Vec2) -> f32 {
     f32::atan2(-along.x, -along.y)
 }
 
+/// Waits out whatever is left of `pace` since something last paid it.
+///
+/// How the paced asks are rationed — see [`CAIRN_PACE`]. A rate is held down
+/// here by making the asker wait rather than by throwing the ask away: a
+/// dropped ask is indistinguishable, from the far end of a socket, from one
+/// that was refused or one that was lost, and a client cannot be expected to
+/// tell those apart. Slowing the connection that asked is honest about what is
+/// happening and costs nobody else anything, this being that connection's own
+/// thread and no lock held while it sleeps.
+fn wait_out(since: Option<Instant>, pace: Duration) {
+    if let Some(left) = since.and_then(|paid| pace.checked_sub(paid.elapsed())) {
+        thread::sleep(left);
+    }
+}
+
 /// Whether a reported position is one a player could actually be standing at:
 /// finite, and inside the coordinate space the world resolves — see
 /// [`MAX_RANGE`]. A non-finite or absurd position would poison every machine
@@ -2435,6 +2548,20 @@ pub(crate) fn reachable(position: Vec2) -> bool {
 /// coordinates that no longer have a metre between them.
 pub(crate) fn in_the_world(chunk: IVec2) -> bool {
     reachable(chunk.as_vec2() * protocol::ground::CHUNK_METRES)
+}
+
+/// Whether an island's identity is one the world can keep: the [`in_the_world`]
+/// test, asked of the chunk the identity's lattice point falls in — see
+/// [`protocol::survey::chunk_of`].
+///
+/// Both ends of the world file ask exactly this, and that is the point of it
+/// being one function. Nothing that fails it is granted or written down (see
+/// [`settle_a_claim`] and [`Shared::record`]), and nothing that fails it is
+/// read back (see `keeper::parse`) — because a claim the reader refuses is not
+/// a claim lost but a *world* lost: the file will not parse, the opening falls
+/// back to the copy beside it, and the next save takes that too.
+pub(crate) fn island_in_the_world(island: IVec2) -> bool {
+    in_the_world(protocol::survey::chunk_of(island))
 }
 
 /// Puts a message in a player's outbox, or hangs up on them.
