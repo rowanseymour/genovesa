@@ -74,6 +74,19 @@ struct SeaParams {
     // The hull's track, newest first: xy where its stem was, z how many
     // seconds ago, w the way it was making then.
     wake: array<vec4<f32>, TRAIL>,
+    // The hole an open boat cuts in the surface: xy the centre of its
+    // waterline footprint — its widest station — and zw the way the hull is
+    // pointing.
+    hole: vec4<f32>,
+    // The footprint's reach from that centre: x forward to where the
+    // outline closes at the stem, y aft to where the stern piece would
+    // close, z half its width at the widest, w 1.0 while there is a boat to
+    // cut for.
+    hole_axes: vec4<f32>,
+    // Its shape: xy how full-bodied the bow and stern pieces are — their
+    // superellipse exponents — and z metres from the centre aft to the
+    // transom, where the outline is cut square.
+    hole_shape: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> sea: SeaParams;
@@ -253,15 +266,16 @@ fn wake_foam(at: vec2<f32>) -> f32 {
         let along = older.xy - newer.xy;
         let run = dot(along, along);
         let raw = select(0.0, dot(at - newer.xy, along) / run, run > 1e-6);
-        // The track begins at the stem, and the first segment does not round
-        // its end off: water forward of the stem has not been sailed through
-        // yet, and treating distance-to-the-end as the shape puts a cap of
-        // foam across the bow of a boat that has not made it. Only the first
-        // — an older segment whose own curve has brought it round in front of
-        // the bow is wake the boat really did lay, and still shows.
-        if (i == 1 && raw < 0.0) {
-            continue;
-        }
+        // The clamp rounds every end off. Water off either end of a segment
+        // is measured to the nearer point, so each joint of the track wears a
+        // cap — the same answer the neighbouring segment gives anyway — and
+        // the head wears a half-disc of white whose forward edge falls on the
+        // stem, because `wake.rs` lays the head that cap's radius abaft it.
+        // Both other shapes for the bow were tried: the head on the stem
+        // itself put the cap's white half a beam out in front of a boat that
+        // had not made it, and chopping the cap off ended the foam on a ruled
+        // line across the bow — the one shape water never makes. Rounded and
+        // set back, the wake opens from the bow point.
         let t = clamp(raw, 0.0, 1.0);
         let reach = distance(at, mix(newer.xy, older.xy, t));
         if (reach < nearest) {
@@ -339,6 +353,47 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    // The hole the hull cuts. An open boat is looked *into* from this
+    // camera, and the surface is one sheet drawn straight through
+    // everything — so without this the sea stands inside the bilges of any
+    // hull whose sole is where a real one's is. No water is drawn inside
+    // the hull's waterline footprint: two superellipse halves in the hull's
+    // own frame, sized by the Rust side so its edge lands within the
+    // planking, where the hull's own timber hides the seam from every angle
+    // that matters. Per fragment rather than per vertex because the whole
+    // boat is smaller than one sea facet.
+    //
+    // The circle is only a cheap first refusal, so it has to be a bound and
+    // not a guess: no point of the footprint is further from its centre
+    // than the beam plus its longer end, whichever end that is. Bounding on
+    // the bow alone would be a hole with its stern quietly cut off on the
+    // day some boat's transom reaches further aft than its stem does
+    // forward.
+    let hole_reach = sea.hole_axes.z + max(sea.hole_axes.x, sea.hole_shape.z);
+    if (sea.hole_axes.w > 0.5 && distance(in.world_position.xz, sea.hole.xy) < hole_reach) {
+        let rel = in.world_position.xz - sea.hole.xy;
+        let ahead = sea.hole.zw;
+        let along = dot(rel, ahead);
+        let athwart = abs(rel.x * ahead.y - rel.y * ahead.x);
+        // Two superellipse halves sharing their beam at the widest station,
+        // cut square at the transom — because one ellipse cannot be a boat:
+        // fat enough for the transom's corners it wraps whole metres of
+        // clear water at the bow, and fine enough for the bow it pinches at
+        // the quarters and lets slivers of sea into the sternsheets. The
+        // exponents say how full each end's body is; the water abaft the
+        // transom is ordinary sea, however far the stern piece would reach.
+        if (along > -sea.hole_shape.z) {
+            let bow = along > 0.0;
+            let semi = select(sea.hole_axes.y, sea.hole_axes.x, bow);
+            let fullness = select(sea.hole_shape.y, sea.hole_shape.x, bow);
+            let u = abs(along) / semi;
+            let v = athwart / sea.hole_axes.z;
+            if (pow(u, fullness) + pow(v, fullness) < 1.0) {
+                discard;
+            }
+        }
+    }
+
     // The facet's own normal, from how the displaced surface slopes across
     // this triangle. Screen-space derivatives are constant across a
     // triangle, so this is flat shading without duplicating any vertex —

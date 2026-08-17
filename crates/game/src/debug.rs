@@ -108,6 +108,11 @@ pub struct Toggles {
     /// the far edge of the shadows sits in plain sight is where the answer
     /// is.
     pub reach: f32,
+    /// `set boat` — which kind of boat this client rigs its own hull as.
+    /// A dev stand-in until the rowboat is in the game's flow: the choice
+    /// never crosses the wire, so everyone else still sees a ship. See
+    /// `boat::refit`, which is what acts on it.
+    pub boat: crate::boat::HullKind,
 }
 
 impl Default for Toggles {
@@ -118,6 +123,7 @@ impl Default for Toggles {
             haze: true,
             wireframe: false,
             reach: crate::HAZE_END,
+            boat: crate::boat::HullKind::default(),
         }
     }
 }
@@ -167,6 +173,10 @@ pub const SWITCHES: [Switch; 4] = [
 /// that would have to carry a second kind of value.
 pub const REACH: &str = "reach";
 
+/// The dev boat switch's name — a kind rather than on and off, so a special
+/// case beside [`REACH`] wherever the switches are walked.
+pub const BOAT: &str = "boat";
+
 impl Toggles {
     /// The boolean switch a name asks for, or `None` where the name is not
     /// one of them.
@@ -204,6 +214,9 @@ impl Toggles {
         }
         if self.reach != Self::default().reach {
             on.push(format!("shadow {REACH} {:.0}m", self.reach));
+        }
+        if self.boat != Self::default().boat {
+            on.push(format!("{BOAT} {}", self.boat.name()));
         }
         (!on.is_empty()).then(|| format!("debug: {}", on.join(" / ")))
     }
@@ -933,10 +946,11 @@ mod tests {
             haze: false,
             wireframe: true,
             reach: 225.0,
+            boat: crate::boat::HullKind::Rowboat,
         };
         assert_eq!(
             all.line().as_deref(),
-            Some("debug: no shadows / no haze / wireframe / shadow reach 225m")
+            Some("debug: no shadows / no haze / wireframe / shadow reach 225m / boat rowboat")
         );
 
         // And the reach only speaks up when it is not the world's own, since

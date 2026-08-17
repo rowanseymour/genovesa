@@ -238,6 +238,10 @@ impl Keeper {
         }
         let lock = OpenOptions::new()
             .create(true)
+            // Not truncated: the file is a lock and nothing more, so its
+            // contents are nobody's business — least of all this process's,
+            // which may be about to learn another process holds it.
+            .truncate(false)
             .write(true)
             .open(sibling(path, "lock"))?;
         match lock.try_lock() {
@@ -347,7 +351,7 @@ pub fn kept_worlds(dir: &Path) -> Vec<KeptWorld> {
             })
         })
         .collect();
-    worlds.sort_by(|a, b| b.kept.cmp(&a.kept));
+    worlds.sort_by_key(|world| std::cmp::Reverse(world.kept));
     worlds
 }
 

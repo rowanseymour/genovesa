@@ -1,26 +1,31 @@
 # The rowing boat
 
-Why the shape is what it is; the numbers are in the file. Four metres of open
-boat against the ship's seven — a working skiff, rowed rather than sailed, and
-the small end of what a player gets about in.
+Why the shape is what it is; the numbers are in the file. Three metres and a
+bit of open boat against the ship's seven — a dinghy, rowed rather than
+sailed, and the small end of what a player gets about in.
 
 - **An open boat, so it is two shells and not one.** The ship is a closed hull
   with a deck on top and nothing to see inside it; this one is looked *into*
   from a camera forty metres up, and the inside is most of what is looked at.
   So there is an outer skin, an inner one, and a flat gunwale capping the two
   together — which is also the only place the planking's thickness shows.
-- **The sole stands above the waterline.** This is the rule the proportions
-  are bent around, and it is not a mistake to be corrected towards realism:
-  the sea is one unbroken surface drawn straight through everything (see
-  `crates/game/src/sea.rs`), so an open boat with its floor where a real one
-  has it is a boat with the sea standing inside it. Eight centimetres of
-  freeboard on the sole is enough for the swell of an ordinary day; a hard
-  enough blow will still slop through, which is a fair thing for it to do.
-- **That is what makes it deep for its length.** Sole above the water, a
-  thwart to sit on above the sole, and a gunwale above that, and the boat is
-  two thirds of a metre from keel to rail. Lengthening it to four metres is
-  what buys those proportions back — shorter, and the same interior makes a
-  tub.
+- **The sole sits below the waterline, the way a real one's does.** It was
+  the other way for exactly one commit: the sea used to be one unbroken
+  surface drawn straight through everything, so the floor had to stand above
+  the water or the boat was drawn full of sea — and holding the sole up is
+  what forced the first cut deep, and long to carry the depth: a four-metre
+  skiff rather than the dinghy it started as. The sea now discards its
+  surface inside an open hull's waterline footprint (see `cut_the_water` and
+  the `OpenHull` it reads in `crates/game/src/boat.rs`), which is what let
+  this master be recut *back* to the dinghy: shorter, shallower, and dry
+  inside because the water knows to stay out rather than because the floor
+  ran from it.
+- **The footprint the sea is told is this file's outline.** The hole is two
+  superellipse halves cut square at the transom, and its numbers on
+  `ROWBOAT` in `boat.rs` were read off this hull's waterline a few
+  centimetres up, where the swell stands against the planking. Re-loft the
+  hull and those numbers are stale: too narrow and the sea leaks back into
+  the bilges, too wide and a moat of missing water shows round the bow.
 - **The widest point is a little abaft amidships**, the bow fine and the
   transom wide, so which way it is pointing reads from straight overhead. The
   sheer springs up to the stem and rises again at the transom.
@@ -70,10 +75,13 @@ The two are **states and not a dial**. Crossfading them sweeps the looms
 through the gunwale, which is what shipping the oars looks like and is fine
 taken briskly, but nothing should be left standing halfway.
 
-## What the game will want
+## What the game does with it
 
-Nothing loads this yet. When something does, the numbers it has to agree with
-are the ones a `Hull` in `crates/game/src/boat.rs` names — length, beam, the
-keel's depth and the stations it runs between, and where somebody aboard sits
-rather than stands, which here is the rowing thwart amidships. They are the
-model's to give and the game's to be pinned to, the way the ship's are.
+The world does not deal one out yet: the only way afloat is the dev switch —
+`set boat rowboat` at the console, `--boat rowboat` on a command line — which
+redresses the player's own hull on this client alone. The numbers the game
+holds this file to are the `ROWBOAT` hull's in `crates/game/src/boat.rs` —
+length, draft, the sole and the sea-hole footprint above — pinned by
+`the_rowboat_model_is_the_dinghy_the_game_floats` the way the ship's are.
+Still the file's to give and the game's to be pinned to; what is not settled
+yet is where somebody aboard *sits*, the rower not being rigged.
