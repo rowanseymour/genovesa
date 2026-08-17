@@ -427,12 +427,32 @@ fn compose(record: &WorldRecord) -> String {
         // A line of its own, because a voyage is thousands of chunks and a
         // player's own line should stay a line somebody can read. Sorted, on
         // the terms everything else here is: one state, one file.
+        //
+        // Written as columns — `x:z` and then how far north each further
+        // chunk of that column stands from the one before it — because what
+        // a survey actually is is a swath, and a swath sorted this way is
+        // runs of neighbours: nearly every step is a `1`. It costs a couple
+        // of characters a chunk where naming each in full costs a dozen, and
+        // it is still a line a person can read. Deliberately one number per
+        // chunk rather than first-and-last: a range would let a short file
+        // ask for an enormous survey, and nothing here should be able to
+        // grow in the reading.
         if !player.surveyed.is_empty() {
             let mut surveyed = player.surveyed.clone();
             surveyed.sort_by_key(|chunk| (chunk.x, chunk.y));
+            surveyed.dedup();
             let _ = write!(out, "surveyed {:016x}", token.0);
+            let mut column: Option<IVec2> = None;
             for chunk in surveyed {
-                let _ = write!(out, " {},{}", chunk.x, chunk.y);
+                match column {
+                    Some(before) if before.x == chunk.x => {
+                        let _ = write!(out, ",{}", chunk.y - before.y);
+                    }
+                    _ => {
+                        let _ = write!(out, " {}:{}", chunk.x, chunk.y);
+                    }
+                }
+                column = Some(chunk);
             }
             let _ = writeln!(out);
         }
@@ -529,7 +549,10 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 if !crate::reachable(position) {
                     return Err(format!("nobody was ever at {position}"));
                 }
-                players.insert(
+                // Once each, on the same terms the surveys are: a file
+                // naming one player twice cannot say which of the two the
+                // world went on with.
+                let told = players.insert(
                     Token(hex(token)?),
                     PlayerRecord {
                         position,
@@ -537,27 +560,62 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                         surveyed: Vec::new(),
                     },
                 );
+                if told.is_some() {
+                    return Err(format!("one player told twice: `{line}`"));
+                }
             }
+            // Columns of chunks, each `x:z` and then the steps north from
+            // there — see [`compose`] for the shape and why. Read strictly:
+            // the columns ascend, the steps never stand still or go back,
+            // and so a file that reads at all says every chunk once and
+            // says them in the one order a save would have written.
             "surveyed" => {
-                let (token, chunks) = value
+                let (token, columns) = value
                     .split_once(' ')
                     .ok_or_else(|| format!("a survey of nowhere: `{line}`"))?;
                 let mut surveyed = Vec::new();
-                for field in chunks.split(' ') {
-                    let (x, z) = field
-                        .split_once(',')
-                        .ok_or_else(|| format!("`{field}` is not a chunk"))?;
-                    let chunk = IVec2::new(whole(x)?, whole(z)?);
-                    // The same reach a position is held to, in chunks: an
-                    // edited file is the one other door coordinates arrive
-                    // through, and ground past where the world resolves is
-                    // ground nobody ever looked at.
-                    if !crate::in_the_world(chunk) {
-                        return Err(format!("nobody ever surveyed {chunk}"));
+                let mut previous: Option<i32> = None;
+                for column in columns.split(' ') {
+                    let (x, steps) = column
+                        .split_once(':')
+                        .ok_or_else(|| format!("`{column}` is not a column of survey"))?;
+                    let x = whole(x)?;
+                    if previous.is_some_and(|before| x <= before) {
+                        return Err(format!("a survey out of order at `{column}`"));
                     }
-                    surveyed.push(chunk);
+                    previous = Some(x);
+
+                    let mut z: Option<i32> = None;
+                    for step in steps.split(',') {
+                        let step = whole(step)?;
+                        let here = match z {
+                            None => step,
+                            Some(_) if step < 1 => {
+                                return Err(format!("a survey that steps nowhere: `{column}`"));
+                            }
+                            Some(before) => before
+                                .checked_add(step)
+                                .ok_or_else(|| format!("a survey off the numbers: `{column}`"))?,
+                        };
+                        z = Some(here);
+                        let chunk = IVec2::new(x, here);
+                        // The same reach a position is held to, in chunks: an
+                        // edited file is the one other door coordinates arrive
+                        // through, and ground past where the world resolves is
+                        // ground nobody ever looked at.
+                        if !crate::in_the_world(chunk) {
+                            return Err(format!("nobody ever surveyed {chunk}"));
+                        }
+                        surveyed.push(chunk);
+                    }
                 }
-                surveys.insert(Token(hex(token)?), surveyed);
+                // One line each, because a save writes one line each. Two
+                // for a token is a file this build only half understands —
+                // it cannot say which of them the world went on with — and
+                // half-understood is what this format refuses.
+                if surveys.insert(Token(hex(token)?), surveyed).is_some() {
+                    return Err(format!("one player's survey told twice: `{line}`"));
+                }
             }
             "boat" => {
                 let mut fields = value.split(' ');
@@ -777,6 +835,45 @@ mod tests {
     }
 
     #[test]
+    fn a_voyage_is_written_down_small() {
+        // What a survey costs the file. A voyage is a swath — a band of
+        // chunks either side of a way — so sorted into columns it is runs of
+        // neighbours, and the line says so instead of naming five figures of
+        // coordinate per chunk. The whole of it still reads back exactly:
+        // this is a shorter way of saying the same thing, not a rounder one.
+        let sailed: Vec<IVec2> = (0..400)
+            .flat_map(|x| (0..5).map(move |z| IVec2::new(x, 6_000 + z)))
+            .collect();
+        let mut record = a_record();
+        record.players.insert(
+            Token(0x5A11),
+            PlayerRecord {
+                position: Vec2::ZERO,
+                aboard: None,
+                surveyed: sailed.clone(),
+            },
+        );
+
+        let composed = compose(&record);
+        let line = composed
+            .lines()
+            .find(|line| line.starts_with("surveyed 0000000000005a11"))
+            .expect("the voyage was written down");
+        assert!(
+            line.len() < sailed.len() * 4,
+            "{} chunks took {} bytes to write down",
+            sailed.len(),
+            line.len()
+        );
+
+        let mut read = parse(&composed).expect("parse what was composed").players[&Token(0x5A11)]
+            .surveyed
+            .clone();
+        read.sort_by_key(|chunk| (chunk.x, chunk.y));
+        assert_eq!(read, sailed, "the voyage came back as somewhere else");
+    }
+
+    #[test]
     fn one_state_is_one_file() {
         // Byte for byte, however the map orders itself today: a save is
         // diffable against another save of the same moment.
@@ -843,11 +940,37 @@ mod tests {
             ),
             (
                 "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3 4\n",
-                "surveyed chunks with no comma between them",
+                "surveyed chunks that name no column",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 99999999,0\n",
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 99999999:0\n",
                 "a chunk past where the world resolves",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0,0\n",
+                "a survey stepping nowhere, which is one chunk twice",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:4,-1\n",
+                "a survey stepping back the way it came",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 5:0 3:0\n",
+                "survey columns out of order",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0 3:9\n",
+                "one column named twice",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                 player 1 0 0\nsurveyed 1 0:0\nsurveyed 1 4:4\n",
+                "one player's survey told twice",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                 player 1 0 0\nplayer 1 8 8\n",
+                "one player told twice",
             ),
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");

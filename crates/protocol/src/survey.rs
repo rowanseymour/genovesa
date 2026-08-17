@@ -100,6 +100,14 @@ use crate::ground::{chunk_at, CHUNK_METRES, FACET_METRES, FACET_QUADS, FACET_VER
 /// the one both ends must agree on.
 pub const SIGHT_RADIUS: f32 = 320.0;
 
+/// [`in_sight_along`] measures a chunk by its four corners, which is only the
+/// whole answer while no chunk can hide inside the radius — see the note there
+/// on why a way running clean through a square still comes back with a corner's
+/// distance. A radius shorter than a chunk's diagonal would quietly stop
+/// surveying the ground a fast hull ran straight over, which is a hole nothing
+/// would report, so the invariant is pinned rather than left to be remembered.
+const _: () = assert!(SIGHT_RADIUS * SIGHT_RADIUS >= 2.0 * CHUNK_METRES * CHUNK_METRES);
+
 /// How far a surveyed line may stray from the contour it was taken from, in
 /// metres.
 ///
@@ -274,6 +282,15 @@ pub fn in_sight(chunk: IVec2, at: Vec2) -> bool {
 /// apart. Both shapes are convex, so the nearest pair of points has a corner
 /// of one of them in it: the least of the two ends against the square and the
 /// square's four corners against the segment is the whole answer.
+///
+/// "Whole answer" for a *predicate*, and only that. A way that runs clean
+/// through the square, entering by one edge and leaving by another, is nought
+/// metres from it and comes back here as the distance to whichever corner is
+/// nearest — never more than the square's diagonal out. So this is a true
+/// distance where the two are apart and an overestimate where they overlap,
+/// and it answers correctly only because [`SIGHT_RADIUS`] is longer than that
+/// diagonal, which is pinned where the radius is set. Do not read the number
+/// out of it; read the answer.
 pub fn in_sight_along(chunk: IVec2, from: Vec2, to: Vec2) -> bool {
     let corner = chunk.as_vec2() * CHUNK_METRES;
     let (least, most) = (corner, corner + CHUNK_METRES);
@@ -384,6 +401,18 @@ impl Soundings {
                     _ => return None,
                 };
                 let (marks, after) = count(after)?;
+                // A run of fewer than two marks is not a line, and it is the
+                // same bar [`contour`] builds behind: everything downstream
+                // reads a run's first mark and its last without asking, so a
+                // run of none would take [`Survey::coastlines`] straight off
+                // the end of it. The contour cannot make one, which means a
+                // frame carrying one is a server saying something this code
+                // has no meaning for — refused here rather than carried into
+                // the drawing, where it would be a client crashed by whatever
+                // it was talking to.
+                if marks < 2 {
+                    return None;
+                }
                 let (packed, after) = after.split_at_checked(marks * 2)?;
                 runs.push(Coast::new(
                     packed
@@ -667,8 +696,17 @@ impl Survey {
 /// door land on the *same* integers — which is what lets
 /// [`Survey::coastlines`] follow a shore across chunks by equality rather than
 /// by tolerance.
+///
+/// Saturating, because the chunk comes off the wire and nothing on the way in
+/// holds it to the reach the world resolves over: a server naming a chunk out
+/// near [`i32::MAX`] would otherwise overflow this, which is a panic in a
+/// client for a message it merely received. Saturating puts such a chunk
+/// somewhere absurd where it links to nothing, which is the right amount of
+/// attention to pay it.
 fn run_steps(chunk: IVec2, mark: Mark) -> IVec2 {
-    chunk * u8::MAX as i32 + IVec2::new(mark.x as i32, mark.z as i32)
+    chunk
+        .saturating_mul(IVec2::splat(u8::MAX as i32))
+        .saturating_add(IVec2::new(mark.x as i32, mark.z as i32))
 }
 
 /// The least of a ring's points on the step lattice, west before south — the
@@ -1326,11 +1364,54 @@ mod tests {
         assert!(Soundings::take(&[1, 0, 0, 0]).is_none());
         assert!(Soundings::take(&[1, 0, 0, 0, 9, 1, 0, 5, 5]).is_none());
         assert!(Soundings::take(&[0, 0]).is_none());
+        // And a run with no line in it: the contour cannot make one, and
+        // everything downstream reads a run's ends without asking, so one
+        // arriving off the wire is a message to refuse rather than a shape
+        // to carry into the drawing.
+        assert!(
+            Soundings::take(&[1, 0, 0, 0, 0, 0, 0]).is_none(),
+            "a run of no marks"
+        );
+        assert!(
+            Soundings::take(&[1, 0, 0, 0, 0, 1, 0, 5, 5]).is_none(),
+            "a run of one mark"
+        );
+        // The shoal's runs are read by the same rule as the waterline's.
+        assert!(
+            Soundings::take(&[0, 0, 1, 0, 0, 1, 0, 5, 5]).is_none(),
+            "a shoal run of one mark"
+        );
         // And nothing at all is a chunk surveyed and found blank.
         assert_eq!(
             Soundings::take(&[0, 0, 0, 0]).expect("blank soundings").0,
             Soundings::default()
         );
+    }
+
+    #[test]
+    fn a_chunk_from_the_end_of_the_integers_is_read_without_falling_over() {
+        // Chunk coordinates arrive off the wire and nothing on the way in
+        // holds them to the reach the world resolves over. A survey naming a
+        // chunk out at the end of the integers has to come back as a chart
+        // nobody can steer by — not as a client that overflowed reading what
+        // it was sent.
+        let ring = Coast::new(
+            vec![
+                Mark::unpack([0, 0]),
+                Mark::unpack([200, 0]),
+                Mark::unpack([200, 200]),
+            ],
+            true,
+        );
+        let mut kept = Survey::default();
+        kept.record(
+            IVec2::splat(i32::MAX),
+            Soundings {
+                coast: vec![ring],
+                shoal: Vec::new(),
+            },
+        );
+        assert_eq!(kept.tally().complete, 1, "the ring was not even walked");
     }
 
     #[test]

@@ -1490,6 +1490,161 @@ fn a_returning_player_is_told_back_the_survey_they_left_with() {
     }
 }
 
+#[test]
+fn a_jump_no_hull_could_make_is_followed_only_so_far() {
+    // Nobody sails two kilometres between two position reports, and the
+    // survey does not pretend otherwise: what a client says it has done is
+    // followed at the pace somebody could have done it, and the rest of the
+    // way waits. Without that a client that never asks for a chunk can order
+    // a hundred of them worked out per twelve-byte report, as fast as it can
+    // write, on the connection's own thread and outside every bound the
+    // chunk path has.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let at_first = client.hear_the_survey(HashMap::new(), |charted| {
+        charted.len() >= in_sight_of(spawn).len()
+    });
+
+    // Twice as far as anyone is believed to have got.
+    let claimed = spawn + Vec2::new(2.0 * server::SURVEY_SWEEP, 0.0);
+    let believed = spawn + Vec2::new(server::SURVEY_SWEEP, 0.0);
+    client.say(ToServer::Helm {
+        position: claimed,
+        heading: 0.0,
+    });
+
+    // The way as far as it was believed is inked — this is the chunk a
+    // report short of the end of the allowance...
+    let reached = chunk_at(believed - Vec2::new(2.0 * CHUNK_METRES, 0.0));
+    let charted = client.hear_the_survey(at_first, |charted| charted.contains_key(&reached));
+    // ...and nothing beyond it is, the far end being water this client
+    // merely claimed to have crossed.
+    assert!(
+        !charted.contains_key(&chunk_at(claimed)),
+        "the survey followed a jump no hull could make all the way to {claimed}"
+    );
+    for chunk in charted.keys() {
+        assert!(
+            in_sight_along(*chunk, spawn, believed),
+            "{chunk} is off the way from {spawn} to as far as anyone got"
+        );
+    }
+}
+
+#[test]
+fn a_world_sailed_to_its_own_edge_opens_again() {
+    // The survey is only ever allowed to hold ground the world's own file
+    // will take back. A player standing just inside the edge of the
+    // coordinates has chunks within sight whose corners are past it — a
+    // legal position, an honest report — and a survey that recorded those
+    // would write a world file that this build then refuses to load, for
+    // ever, taking the backup with it at the next save.
+    let path = scratch("edge").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    // Out to where the world stops resolving. The survey does not follow the
+    // whole way — nobody sails that in a report — but the player is there,
+    // and the world files them there.
+    let brink = Vec2::new(1_279_999.0, 0.0);
+    let (client, _id, _spawn, _facing, token) = Client::join_presenting(addr, None);
+    client.say(ToServer::Helm {
+        position: brink,
+        heading: 0.0,
+    });
+    // Asked and answered before hanging up, which is what says the helm word
+    // was read: the session reads in order, so ground answered after it is
+    // ground answered after the position was taken.
+    client.ask_for(chunk_at(brink));
+    drop(client);
+    drop(host);
+
+    // Returning puts them down on the brink, and *that* is the survey that
+    // reaches past the edge. Twice, because one bad save is survivable: the
+    // file that will not parse falls back to the `.old` beside it, quietly
+    // losing whatever the session did. It is the second that leaves nothing
+    // to fall back to, which is what makes this a world lost rather than a
+    // world set back.
+    for visit in 0..2 {
+        let again = Server::reopen(("127.0.0.1", 0), &path).unwrap_or_else(|why| {
+            panic!("a world surveyed at its own edge would not reopen: {why}")
+        });
+        let addr = again.local_addr().expect("addr");
+        let host = again.spawn().expect("spawn");
+        let (client, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(token));
+        assert_eq!(dealt, token, "visit {visit}: kept papers were re-dealt");
+        assert_eq!(
+            spawn, brink,
+            "visit {visit}: the returner was not put down where they left"
+        );
+        client.hear_the_survey(HashMap::new(), |charted| !charted.is_empty());
+        drop(client);
+        drop(host);
+    }
+
+    Server::reopen(("127.0.0.1", 0), &path)
+        .expect("a world surveyed at its own edge would not open again");
+}
+
+#[test]
+fn a_player_may_hang_up_while_their_survey_is_still_being_told_back() {
+    // The backfill runs on a thread of its own and re-grows every island the
+    // returner has ever been near, which is seconds of work. Leaving in the
+    // middle of it is ordinary — it is what a client that reconnects does —
+    // and it must leave a world that goes on serving rather than one with a
+    // thread still grinding out a chart for nobody.
+    let path = scratch("backfill").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    let (client, _id, spawn, _facing, token) = Client::join_presenting(addr, None);
+    let out = spawn + Vec2::new(1_536.0, 0.0);
+    client.say(ToServer::Helm {
+        position: out,
+        heading: 0.0,
+    });
+    let sailed = client.hear_the_survey(HashMap::new(), |charted| {
+        in_sight_of(out)
+            .iter()
+            .all(|chunk| charted.contains_key(chunk))
+    });
+    assert!(
+        sailed.len() > 64,
+        "a voyage short enough to be told in one go"
+    );
+    drop(client);
+    drop(host);
+
+    let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
+    let addr = again.local_addr().expect("addr");
+    let host = again.spawn().expect("spawn");
+
+    // Several returns, each hung up on the moment the welcome lands — a
+    // reconnect loop, which is the shape that stacks these threads.
+    for _ in 0..4 {
+        let (client, _id, _spawn, _facing, _dealt) = Client::join_presenting(addr, Some(token));
+        drop(client);
+    }
+
+    // And the world is still a world: it welcomes somebody, tells them their
+    // chart, and answers for ground.
+    let (client, _id, spawn, _facing, _dealt) = Client::join_presenting(addr, Some(token));
+    client.hear_the_survey(HashMap::new(), |charted| !charted.is_empty());
+    // Which either has ground on it or is open water; what matters is that
+    // it is answered at all, the read having a deadline on it.
+    client.ask_for(chunk_at(spawn));
+    drop(client);
+    drop(host);
+}
+
 /// A point in the shallows a shark calls home, found by walking the line
 /// from open water to an island's middle with the test's own copy of the
 /// world — the strip where a coast shelves from the deep to the beach.
