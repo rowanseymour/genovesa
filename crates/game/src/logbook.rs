@@ -6,12 +6,11 @@
 //! to keep nothing a rejoin cannot answer. Two things remain here on their
 //! way to that. The **token** stays for good — it is the player's credential
 //! for a world, the client's half of a secret, and has to live with the
-//! client by definition. The **chart** stays only until claims land: the
-//! server will then track each player's survey for its own reasons (a claim
-//! has to be judged) and can serve the drawn coastline back on join, at
-//! which point this file is a token and nothing else. The berth this book
-//! once carried is already gone — boats are the server's entities now, told
-//! over the wire like the players and the beasts.
+//! client by definition. The **island names** stay until claims land: what a
+//! player calls an island is nothing the coast could tell anybody, so until
+//! a name can ride with a claim it is this machine's alone. The survey the
+//! book once carried is gone, and the berth before it: both are the world's
+//! now, told over the wire like the players, the boats and the beasts.
 //!
 //! Books are keyed by the [`WorldId`] the server names in its handshake —
 //! never by address, since a world moved to another host is meant to still
@@ -19,7 +18,9 @@
 //! versioned text, written whole beside the file and renamed over it, and a
 //! build refuses a file it only half-understands — except the keys a past
 //! format-1 build wrote and this one has outgrown, which are read past
-//! rather than refused: an old book's chart is still a chart.
+//! rather than refused: whatever else an old book holds, its token is still
+//! this player's name in that world, and losing it would make them a
+//! stranger where they have a history.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -30,7 +31,7 @@ use bevy::prelude::*;
 
 use protocol::{Token, WorldId};
 
-use crate::chart::{Chart, Coast, Soundings};
+use crate::chart::Chart;
 use crate::net::Session;
 use crate::AppState;
 
@@ -39,7 +40,7 @@ const FORMAT: u32 = 1;
 
 /// Seconds between writes while in the world. The closing write on the way
 /// out is the one that matters; these are insurance against never reaching
-/// it, priced by what a crash costs: half a minute of survey.
+/// it, priced by what a crash costs: half a minute of christenings.
 const KEEP_INTERVAL: f32 = 30.0;
 
 /// This machine's memory of the world the player is in. Present exactly
@@ -53,19 +54,16 @@ pub struct Logbook {
     path: Option<PathBuf>,
     /// The token this player holds the world by — presented next visit.
     token: Token,
-    /// The chart as of the last write — the working copy is the [`Chart`]
-    /// resource, read back in here each time the book is written.
-    soundings: Vec<(IVec2, Soundings)>,
-    /// And the names the player has written on it, by island id: the other
-    /// half of what the chart holds, and the half it would hurt most to
-    /// lose.
+    /// The names the player has written on their islands, by island id — the
+    /// working copy is the [`Chart`] resource, read back in here each time
+    /// the book is written.
     names: Vec<(IVec2, String)>,
 }
 
 impl Logbook {
-    /// The chart this world's book holds, for the survey to continue from.
+    /// A chart carrying this world's christenings, for the ink to arrive on.
     pub fn charted(&self) -> Chart {
-        Chart::from_entries(self.soundings.iter().cloned(), self.names.iter().cloned())
+        Chart::named(self.names.iter().cloned())
     }
 }
 
@@ -86,7 +84,6 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
         Read::Missing => Logbook {
             path: place_for(connection.world),
             token: connection.token,
-            soundings: Vec::new(),
             names: Vec::new(),
         },
         // A book that exists and cannot be read is left exactly where it is
@@ -96,7 +93,6 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
         Read::Refused => Logbook {
             path: None,
             token: connection.token,
-            soundings: Vec::new(),
             names: Vec::new(),
         },
     };
@@ -139,10 +135,9 @@ fn read(world: WorldId) -> Read {
         return Read::Missing;
     };
     match parse(&text) {
-        Ok((token, soundings, names)) => Read::Book(Logbook {
+        Ok((token, names)) => Read::Book(Logbook {
             path: Some(path),
             token,
-            soundings,
             names,
         }),
         Err(why) => {
@@ -201,7 +196,7 @@ fn close_the_log(mut commands: Commands, mut logbook: ResMut<Logbook>, chart: Op
 
 fn write_down(logbook: &mut Logbook, chart: Option<&Chart>) {
     if let Some(chart) = chart {
-        (logbook.soundings, logbook.names) = chart.entries();
+        logbook.names = chart.christenings();
     }
     let Some(path) = &logbook.path else {
         return;
@@ -226,23 +221,8 @@ fn compose(logbook: &Logbook) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "genovesa logbook {FORMAT}");
     let _ = writeln!(out, "token {:016x}", logbook.token.0);
-    // Sorted, so that one chart is one file, byte for byte, whatever order
-    // the survey's map hands its chunks out in. Every surveyed chunk gets a
-    // `coast` line even when it found nothing — surveyed-and-empty is worth
-    // remembering, or the survey would do the chunk again next visit — and a
-    // `shoal` line only when there is a shoal to draw.
-    let mut soundings: Vec<&(IVec2, Soundings)> = logbook.soundings.iter().collect();
-    soundings.sort_by_key(|(chunk, _)| (chunk.x, chunk.y));
-    for (chunk, found) in soundings {
-        let _ = write!(out, "coast {} {}", chunk.x, chunk.y);
-        put_runs(&mut out, &found.coast);
-        let _ = writeln!(out);
-        if !found.shoal.is_empty() {
-            let _ = write!(out, "shoal {} {}", chunk.x, chunk.y);
-            put_runs(&mut out, &found.shoal);
-            let _ = writeln!(out);
-        }
-    }
+    // Sorted, so that one book is one file, byte for byte, whatever order the
+    // chart's map hands its islands out in.
     let mut names: Vec<&(IVec2, String)> = logbook.names.iter().collect();
     names.sort_by_key(|(island, _)| (island.x, island.y));
     for (island, name) in names {
@@ -257,17 +237,7 @@ fn compose(logbook: &Logbook) -> String {
     out
 }
 
-fn put_runs(out: &mut String, runs: &[Coast]) {
-    for run in runs {
-        let _ = write!(out, " {}", if run.closed { 'c' } else { 'o' });
-        for mark in &run.marks {
-            let [x, z] = mark.pack();
-            let _ = write!(out, "{x:02x}{z:02x}");
-        }
-    }
-}
-
-type Parsed = (Token, Vec<(IVec2, Soundings)>, Vec<(IVec2, String)>);
+type Parsed = (Token, Vec<(IVec2, String)>);
 
 fn parse(text: &str) -> Result<Parsed, String> {
     let mut lines = text.lines();
@@ -278,7 +248,6 @@ fn parse(text: &str) -> Result<Parsed, String> {
     }
 
     let mut token = None;
-    let mut soundings: std::collections::HashMap<(i32, i32), Soundings> = Default::default();
     let mut names = Vec::new();
     for line in lines {
         if line.is_empty() {
@@ -295,17 +264,12 @@ fn parse(text: &str) -> Result<Parsed, String> {
                 ))
             }
             // Keys an earlier format-1 build wrote and this one has outgrown
-            // — the berth moved to the server with the boats. Read past, not
-            // refused: an old book's chart is still a chart.
-            "aboard" | "ashore" => {}
-            "coast" => {
-                let (chunk, runs) = runs_line(value)?;
-                soundings.entry((chunk.x, chunk.y)).or_default().coast = runs;
-            }
-            "shoal" => {
-                let (chunk, runs) = runs_line(value)?;
-                soundings.entry((chunk.x, chunk.y)).or_default().shoal = runs;
-            }
+            // — the berth moved to the server with the boats, and the survey
+            // after it. Read past, not refused: a book's token is this
+            // player's name in that world, and refusing the file over ink the
+            // world can hand back would make them a stranger where they have
+            // a history.
+            "aboard" | "ashore" | "coast" | "shoal" => {}
             "name" => {
                 let mut fields = value.splitn(3, ' ');
                 let island = IVec2::new(
@@ -321,55 +285,7 @@ fn parse(text: &str) -> Result<Parsed, String> {
             other => return Err(format!("unknown key `{other}`")),
         }
     }
-    Ok((
-        token.ok_or("no token")?,
-        soundings
-            .into_iter()
-            .map(|((x, y), found)| (IVec2::new(x, y), found))
-            .collect(),
-        names,
-    ))
-}
-
-/// One line of survey — `coast` and `shoal` share the shape: the chunk's
-/// coordinates, then each run as `c` (a ring) or `o` (open) followed by the
-/// marks as hex pairs. A `coast` with no runs is still an entry — surveyed,
-/// and found to be all water or all land.
-fn runs_line(value: &str) -> Result<(IVec2, Vec<Coast>), String> {
-    let mut fields = value.split(' ');
-    let chunk = IVec2::new(
-        whole(fields.next().ok_or("a coast with no chunk")?)?,
-        whole(fields.next().ok_or("a coast with half a chunk")?)?,
-    );
-    let mut runs = Vec::new();
-    for field in fields {
-        // Refused before it is sliced: `parse` is total everywhere else, and
-        // a stray double space or a non-ASCII byte must come back as a
-        // refusal rather than a slice out of char bounds.
-        if field.is_empty() || !field.is_ascii() {
-            return Err(format!("a run that is not a run: `{field}`"));
-        }
-        let (shape, marks) = field.split_at(1);
-        let closed = match shape {
-            "c" => true,
-            "o" => false,
-            other => return Err(format!("a run of unknown shape `{other}`")),
-        };
-        if marks.len() % 4 != 0 || marks.is_empty() {
-            return Err(format!("a run of {} hex digits", marks.len()));
-        }
-        let marks = (0..marks.len() / 4)
-            .map(|i| {
-                let pair = |at: usize| u8::from_str_radix(&marks[at..at + 2], 16);
-                match (pair(i * 4), pair(i * 4 + 2)) {
-                    (Ok(x), Ok(z)) => Ok(crate::chart::Mark::unpack([x, z])),
-                    _ => Err("marks that are not hex".to_string()),
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        runs.push(Coast::new(marks, closed));
-    }
-    Ok((chunk, runs))
+    Ok((token.ok_or("no token")?, names))
 }
 
 fn whole(value: &str) -> Result<i32, String> {
@@ -381,70 +297,46 @@ fn whole(value: &str) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chart::Mark;
 
     fn a_book() -> Logbook {
         Logbook {
             path: None,
             token: Token(0x00C0_FFEE_0000_0007),
-            soundings: vec![
-                (
-                    IVec2::new(3, -2),
-                    Soundings {
-                        coast: vec![
-                            Coast::new(
-                                vec![Mark::unpack([0, 17]), Mark::unpack([255, 254])],
-                                false,
-                            ),
-                            Coast::new(
-                                vec![
-                                    Mark::unpack([10, 10]),
-                                    Mark::unpack([20, 10]),
-                                    Mark::unpack([10, 20]),
-                                ],
-                                true,
-                            ),
-                        ],
-                        shoal: vec![Coast::new(
-                            vec![Mark::unpack([5, 5]), Mark::unpack([200, 5])],
-                            false,
-                        )],
-                    },
-                ),
-                // Surveyed and found to hold no coast at all — still worth a
-                // line, or the survey would do the chunk again next visit.
-                (IVec2::new(-8, 4), Soundings::default()),
+            names: vec![
+                (IVec2::new(701, -512), "Windward Reach".to_string()),
+                (IVec2::new(-8, 4), "Skull Rock".to_string()),
             ],
-            names: vec![(IVec2::new(701, -512), "Windward Reach".to_string())],
         }
     }
 
     #[test]
     fn a_logbook_survives_the_round_trip() {
         let book = a_book();
-        let (token, soundings, names) = parse(&compose(&book)).expect("parse what was composed");
+        let (token, names) = parse(&compose(&book)).expect("parse what was composed");
         assert_eq!(token, book.token);
-        // Composing sorts the entries — one chart, one file — so they come
-        // back in that order whatever order they were held in; sorting both
-        // sides makes the comparison about content alone.
-        let sorted = |mut entries: Vec<(IVec2, Soundings)>| {
-            entries.sort_by_key(|(chunk, _)| (chunk.x, chunk.y));
-            entries
+        // Composing sorts the names — one book, one file — so they come back
+        // in that order whatever order they were held in; sorting both sides
+        // makes the comparison about content alone.
+        let sorted = |mut names: Vec<(IVec2, String)>| {
+            names.sort_by_key(|(island, _)| (island.x, island.y));
+            names
         };
-        assert_eq!(sorted(soundings), sorted(book.soundings.clone()));
-        assert_eq!(names, book.names);
+        assert_eq!(sorted(names), sorted(book.names.clone()));
     }
 
     #[test]
-    fn an_old_books_berth_keys_are_read_past() {
-        // A format-1 book from before the berth moved to the server: its
-        // chart still counts, and the keys this build has outgrown are
-        // passed over rather than refused.
-        let (token, soundings, _names) =
-            parse("genovesa logbook 1\ntoken 2a\nashore 1 2 3 4 5 6 7\naboard 1.5\ncoast 0 0\n")
-                .expect("an old book still reads");
+    fn the_keys_of_an_older_book_are_read_past() {
+        // A format-1 book from before the berth moved to the server, and
+        // before the survey followed it: what this build has outgrown is
+        // passed over rather than refused, because the token on the second
+        // line is this player's name in that world.
+        let (token, names) = parse(concat!(
+            "genovesa logbook 1\ntoken 2a\nashore 1 2 3 4 5 6 7\naboard 1.5\n",
+            "coast 0 0 o0011fffe\nshoal 0 0 c0a0b\nname 3 4 Skull Rock\n",
+        ))
+        .expect("an old book still reads");
         assert_eq!(token, Token(0x2A));
-        assert_eq!(soundings.len(), 1);
+        assert_eq!(names, [(IVec2::new(3, 4), "Skull Rock".to_string())]);
     }
 
     #[test]
@@ -458,20 +350,12 @@ mod tests {
                 "a key this build has never heard of",
             ),
             (
-                "genovesa logbook 1\ntoken 1\ncoast 0 0 c123\n",
-                "a run of one and a half marks",
-            ),
-            (
-                "genovesa logbook 1\ntoken 1\ncoast 0 0  c0a0b\n",
-                "the empty run a doubled space makes",
-            ),
-            (
-                "genovesa logbook 1\ntoken 1\ncoast 0 0 c\u{20ac}1\n",
-                "marks that are not even ASCII",
-            ),
-            (
                 "genovesa logbook 1\ntoken 1\nname 1 2\n",
                 "a name with nothing written",
+            ),
+            (
+                "genovesa logbook 1\ntoken 1\nname 1 x Skull Rock\n",
+                "a name against half an island",
             ),
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");

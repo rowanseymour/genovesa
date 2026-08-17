@@ -1239,10 +1239,24 @@ impl Flock {
     /// A leaving beast is left out: an exit is finished under the water
     /// where nobody can watch it, so a world reopened without one reads
     /// exactly as a world it had already left.
+    ///
+    /// So is one that has got out past the world's own edge, or that is making
+    /// for somewhere past it — the reader checks where a beast is going as
+    /// well as where it is. A file may only say what it can be read back
+    /// saying, and the reader refuses a beast swimming where no player could
+    /// go, so a world that wrote one down would be a world that would not open
+    /// again. That is a far worse thing than a shark nobody sees leave. It
+    /// takes a player sailing to the very brink to make one at all, and
+    /// [`raise`] no longer will; this is the guarantee rather than the fix,
+    /// because a beast that swam out under its own steam would be just as
+    /// unreadable.
     fn records(&self) -> Vec<crate::keeper::BeastRecord> {
         self.beasts
             .values()
             .filter(|beast| beast.doing != Doing::Leaving)
+            .filter(|beast| {
+                crate::reachable(beast.position) && beast.goal.is_none_or(crate::reachable)
+            })
             .map(|beast| crate::keeper::BeastRecord {
                 kind: beast.habitat.kind,
                 position: beast.position,
@@ -1722,14 +1736,27 @@ fn raise(habitat: &'static Habitat, shared: &Shared, player: Vec2, entropy: u32)
         let out =
             habitat.ring.0 + unit(entropy, attempt * 2 + 2) * (habitat.ring.1 - habitat.ring.0);
         let on_the_ring = player + Vec2::from_angle(bearing) * out;
+        // Nothing swims past the end of the world. A player standing at the
+        // very brink has half their horizon outside it, and a beast raised out
+        // there is one the world's own file cannot write down — see
+        // [`Flock::records`]. A spot that is off the map makes way for the
+        // next, exactly as one with the wrong water under it does.
+        //
+        // Here for the cheapness of it, the ring spot being the one point both
+        // kinds have before any sounding is done; the candidate is held to it
+        // whole below, which is the check that actually covers the two points a
+        // beast is written down as.
+        if !crate::reachable(on_the_ring) {
+            return None;
+        }
         if !floor_in(shared, on_the_ring, habitat.band) {
             return None;
         }
 
-        match habitat.journey {
+        let raised = match habitat.journey {
             Some(far) => {
                 let bound = journey(shared, habitat, on_the_ring, player, far, entropy)?;
-                Some(Beast::born(habitat, on_the_ring, Some(bound), entropy))
+                Beast::born(habitat, on_the_ring, Some(bound), entropy)
             }
             None => {
                 let born = sound_out(
@@ -1748,9 +1775,18 @@ fn raise(habitat: &'static Habitat, shared: &Shared, player: Vec2, entropy: u32)
                 // that keeps it minded, and a ring spot that cannot offer one
                 // makes way for the next.
                 (born.distance(player) <= habitat.waters)
-                    .then(|| Beast::born(habitat, born, Some(on_the_ring), entropy))
+                    .then(|| Beast::born(habitat, born, Some(on_the_ring), entropy))?
             }
-        }
+        };
+        // Where it is *and* where it is going, because the file writes both and
+        // the reader refuses either past the edge. The ring spot is only one of
+        // the two, and which one it is differs by kind: a traveller is born
+        // there and bound somewhere a course length off, a shark is born out in
+        // the deep and bound for there. Each kind's second point comes from a
+        // sounding that walks outward from the first, so the edge is exactly
+        // where a sounding will have gone looking.
+        (crate::reachable(raised.position) && raised.goal.is_none_or(crate::reachable))
+            .then_some(raised)
     })
 }
 
@@ -1909,6 +1945,40 @@ mod tests {
             .expect("the shark is kept")
             .settle(Doing::Leaving, 1);
         assert_eq!(flock.records().len(), 1, "an exit was written down");
+    }
+
+    #[test]
+    fn nothing_past_the_end_of_the_world_is_written_down() {
+        // A world may only write what it can read back. The reader refuses a
+        // beast swimming — or making — for anywhere no player could go, so a
+        // beast out there has to be dropped rather than filed, or the world
+        // would not open again. It takes a player at the very brink to make
+        // one, which is exactly the player who would find their world gone.
+        let past = crate::MAX_RANGE + 500.0;
+        let over_the_edge = crate::keeper::BeastRecord {
+            kind: BeastKind::Shark,
+            position: Vec2::new(past, 0.0),
+            goal: None,
+            left: 500,
+        };
+        // And one swimming honestly enough, but *making* for out there: the
+        // reader checks where a beast is going as well as where it is, and
+        // this is the one the edge of the world actually produced.
+        let bound_over_the_edge = crate::keeper::BeastRecord {
+            kind: BeastKind::Whale,
+            position: Vec2::new(crate::MAX_RANGE - 500.0, 0.0),
+            goal: Some(Vec2::new(past, 0.0)),
+            left: 4_000,
+        };
+        let mut flock = Flock::new(1);
+        flock.adopt(&over_the_edge);
+        flock.adopt(&bound_over_the_edge);
+
+        assert_eq!(
+            flock.records(),
+            vec![],
+            "the world wrote down a beast it would refuse to read"
+        );
     }
 
     #[test]

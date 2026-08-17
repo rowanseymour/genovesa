@@ -1,14 +1,16 @@
 //! A server and its clients talking over real sockets: the handshake, the
 //! introductions, the relay, the ground, and leaving.
 
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{dequantize, CHUNK_METRES};
+use protocol::survey::{in_sight, in_sight_along, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{BeastId, BeastKind, PlayerId, ToClient, ToServer, Token, PROTOCOL_VERSION};
 use server::{Host, Server, WorldConfig};
-use world::archipelago::Archipelago;
+use world::archipelago::{Archipelago, IslandSpec};
 
 /// What a seed's world is, to a test that is allowed to know. A client never
 /// gets one of these — that is the whole point of the arrangement — so these
@@ -179,7 +181,9 @@ impl Client {
     /// that *are* about the sky or the beasts read for what they want with
     /// [`Client::hear_the_time`] and [`Client::hear_a_beast`]. The console
     /// vocabulary is skipped with them, being part of the same joining
-    /// chatter; the newcomer test reads it raw.
+    /// chatter; the newcomer test reads it raw. The survey too — every step
+    /// anybody takes may put more ink on their own chart, and the tests that
+    /// are about that read for it with [`Client::hear_the_survey`].
     fn hear(&self) -> ToClient {
         loop {
             match ToClient::read(&mut &self.0).expect("read") {
@@ -188,8 +192,83 @@ impl Client {
                 | ToClient::Beast { .. }
                 | ToClient::BeastGone { .. }
                 | ToClient::Boat { .. }
+                | ToClient::Surveyed { .. }
+                | ToClient::Cairn { .. }
                 | ToClient::Vocabulary { .. } => continue,
                 message => return message,
+            }
+        }
+    }
+
+    /// Every chunk this client has been told it has surveyed, gathered onto
+    /// `charted` until `enough` is happy with them — bounded like the beasts'
+    /// reader, since the rest of the session chatters on regardless and a
+    /// survey that never arrives must fail a test rather than hang it.
+    ///
+    /// Gathered *onto* what a test already holds, because a chunk is told
+    /// once: a survey read in two goes is two halves of one chart, and the
+    /// second go alone would look like ground that had gone missing.
+    fn hear_the_survey(
+        &self,
+        mut charted: HashMap<IVec2, Soundings>,
+        enough: impl Fn(&HashMap<IVec2, Soundings>) -> bool,
+    ) -> HashMap<IVec2, Soundings> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        if enough(&charted) {
+            return charted;
+        }
+        loop {
+            if let ToClient::Surveyed { found } = ToClient::read(&mut &self.0).expect("read") {
+                charted.extend(found);
+                if enough(&charted) {
+                    return charted;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "twenty seconds and the survey never came to {} chunks",
+                charted.len()
+            );
+        }
+    }
+
+    /// The next word about a cairn, ignoring everything else — bounded like
+    /// the beasts' reader, the session chattering on regardless.
+    fn hear_a_cairn(&self) -> (IVec2, Vec2, String, bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let ToClient::Cairn {
+                island,
+                at,
+                name,
+                yours,
+            } = ToClient::read(&mut &self.0).expect("read")
+            {
+                return (island, at, name, yours);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ten seconds and no word of any cairn"
+            );
+        }
+    }
+
+    /// Whether the session said nothing about any cairn — which is what a
+    /// refusal with no state to show sounds like.
+    ///
+    /// Silence cannot be waited for, so it is bracketed instead: `help` is
+    /// answered to the asker alone, and one client's words are read in the
+    /// order it says them, so a reply to a line typed after the ask is proof
+    /// that whatever the ask had to say has been said already.
+    fn nothing_was_said_about_a_cairn(&self) -> bool {
+        self.say(ToServer::Command {
+            line: "help".to_string(),
+        });
+        loop {
+            match ToClient::read(&mut &self.0).expect("read") {
+                ToClient::Cairn { .. } => return false,
+                ToClient::Reply { .. } => return true,
+                _ => {}
             }
         }
     }
@@ -268,10 +347,19 @@ impl Client {
 
 /// A directory of this test's own under the system's temporary space, so
 /// parallel tests cannot see each other's worlds.
+///
+/// Emptied on the way in, which matters more than it looks: the name carries
+/// the process id, nothing ever sweeps these up, and a system that has run
+/// these tests a few hundred times will hand a pid back out again eventually.
+/// A test that found the last run's world file still sitting there would open
+/// *that* world instead of making its own — and would fail with something
+/// about papers or a hour rather than anything to do with what it was testing,
+/// on a machine that had done nothing wrong except run the suite often enough.
 fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir()
         .join("genovesa-session-tests")
         .join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp space");
     dir
 }
@@ -1272,6 +1360,764 @@ fn a_kept_world_cannot_be_hosted_twice_at_once() {
     assert!(
         Server::reopen(("127.0.0.1", 0), &path).is_ok(),
         "the lock outlived the session holding it"
+    );
+}
+
+/// Every chunk within sight of a point, worked out the way the survey's own
+/// rule does — what a test expects to be told when a player stands still.
+fn in_sight_of(at: Vec2) -> Vec<IVec2> {
+    let reach = (SIGHT_RADIUS / CHUNK_METRES).ceil() as i32 + 2;
+    let home = chunk_at(at);
+    (-reach..=reach)
+        .flat_map(|dz| (-reach..=reach).map(move |dx| home + IVec2::new(dx, dz)))
+        .filter(|chunk| in_sight(*chunk, at))
+        .collect()
+}
+
+#[test]
+fn a_player_is_told_the_survey_of_where_they_are_put_down() {
+    // The survey is the world's: nobody has to look at anything to have it,
+    // and arriving is already having looked. Exactly the ground within sight
+    // of the spawn, and no more — the far side of the island they were put
+    // down beside is theirs to go round for.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let wanted = in_sight_of(spawn);
+
+    let charted = client.hear_the_survey(HashMap::new(), |charted| charted.len() >= wanted.len());
+    for chunk in &wanted {
+        assert!(charted.contains_key(chunk), "{chunk} was never surveyed");
+    }
+    for chunk in charted.keys() {
+        assert!(
+            in_sight(*chunk, spawn),
+            "{chunk} was surveyed from {spawn}, which cannot see it"
+        );
+    }
+    // And there is a coast in it: the world is entered a few dozen metres off
+    // one, so a survey of the spawn that found nothing found nothing wrong.
+    assert!(
+        charted.values().any(|ink| !ink.coast.is_empty()),
+        "the water off an island surveyed to no coast at all"
+    );
+}
+
+#[test]
+fn the_two_ends_survey_one_chunk_the_same_way() {
+    // The whole reason the server goes through a chunk's *payload* to survey
+    // it rather than asking the generator for its own heights. A client
+    // surveys what it was sent — heights the wire has rounded to sixteen bits
+    // — and a waterline traced across those is not quite the one traced
+    // across the numbers before them. Two ends that disagree about where a
+    // coast runs disagree about whether it closes, and so about whether
+    // anybody has been round it.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let charted = client.hear_the_survey(HashMap::new(), |charted| {
+        charted.len() >= in_sight_of(spawn).len()
+            && charted.values().any(|ink| !ink.coast.is_empty())
+    });
+
+    let (chunk, told) = charted
+        .iter()
+        .find(|(_, ink)| !ink.coast.is_empty())
+        .expect("some coast within sight of the spawn");
+    let ground = client.ask_for(*chunk).expect("ground under a coast");
+    let heights: Vec<f32> = ground.heights.iter().copied().map(dequantize).collect();
+    assert_eq!(
+        &protocol::survey::survey(&heights),
+        told,
+        "the server's {chunk} and a client's are two different coasts"
+    );
+}
+
+#[test]
+fn sailing_past_a_coast_earns_the_ground_it_passes() {
+    // The live half: a survey grows by going somewhere. What arrives is the
+    // ground the way brought into sight and nothing else — a voyage does not
+    // hand anybody the sea it did not cross.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let at_first = client.hear_the_survey(HashMap::new(), |charted| {
+        charted.len() >= in_sight_of(spawn).len()
+    });
+
+    // Half a kilometre along, which is several chunks of new water and, at
+    // the entry island's own coast, some new shore.
+    let out = spawn + Vec2::new(512.0, 0.0);
+    client.say(ToServer::Helm {
+        position: out,
+        heading: 0.0,
+    });
+
+    let wanted = in_sight_of(out);
+    let charted = client.hear_the_survey(at_first.clone(), |charted| {
+        wanted.iter().all(|chunk| charted.contains_key(chunk))
+    });
+    assert!(
+        charted.len() > at_first.len(),
+        "sailing half a kilometre earned nothing"
+    );
+    for chunk in charted.keys() {
+        assert!(
+            in_sight_along(*chunk, spawn, out),
+            "{chunk} is nowhere near the way from {spawn} to {out}"
+        );
+    }
+}
+
+#[test]
+fn a_crossing_between_two_reports_leaves_no_hole() {
+    // A hull under sail covers ground between one position report and the
+    // next, and the survey follows the way rather than its ends — or a fast
+    // boat would leave a stripe of unsurveyed water down the middle of its
+    // own wake.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let at_first = client.hear_the_survey(HashMap::new(), |charted| {
+        charted.len() >= in_sight_of(spawn).len()
+    });
+
+    let out = spawn + Vec2::new(1_536.0, 0.0);
+    let midway = chunk_at(spawn + (out - spawn) / 2.0);
+    assert!(
+        !in_sight(midway, spawn) && !in_sight(midway, out),
+        "the test's midpoint is visible from an end, and proves nothing"
+    );
+    client.say(ToServer::Helm {
+        position: out,
+        heading: 0.0,
+    });
+
+    let charted = client.hear_the_survey(at_first, |charted| charted.contains_key(&midway));
+    assert!(charted.contains_key(&midway));
+}
+
+#[test]
+fn a_returning_player_is_told_back_the_survey_they_left_with() {
+    // The world's memory of where somebody has been, kept to a file and
+    // handed back: the same chunks, and the same coast on them, worked out
+    // afresh from ground the world grew again. Only the coordinates are in
+    // the file — the ink being derived — so this is also the test that the
+    // deriving is stable.
+    let path = scratch("surveyed").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    let (client, _id, spawn, _facing, token) = Client::join_presenting(addr, None);
+    let out = spawn + Vec2::new(768.0, 0.0);
+    client.say(ToServer::Helm {
+        position: out,
+        heading: 0.0,
+    });
+    let wanted = in_sight_of(out);
+    let sailed = client.hear_the_survey(HashMap::new(), |charted| {
+        wanted.iter().all(|chunk| charted.contains_key(chunk))
+    });
+    drop(client);
+    // Dropping the host is leaving the world: the closing save has happened
+    // by the time the drop returns.
+    drop(host);
+
+    let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
+    let addr = again.local_addr().expect("addr");
+    let _host = again.spawn().expect("spawn");
+
+    let (client, _id, _spawn, _facing, dealt) = Client::join_presenting(addr, Some(token));
+    assert_eq!(dealt, token, "kept papers were re-dealt");
+    let told_back = client.hear_the_survey(HashMap::new(), |charted| {
+        sailed.keys().all(|chunk| charted.contains_key(chunk))
+    });
+    for (chunk, ink) in &sailed {
+        assert_eq!(
+            told_back.get(chunk),
+            Some(ink),
+            "{chunk} came back as a different coast"
+        );
+    }
+}
+
+#[test]
+fn a_jump_no_hull_could_make_is_followed_only_so_far() {
+    // Nobody sails two kilometres between two position reports, and the
+    // survey does not pretend otherwise: what a client says it has done is
+    // followed at the pace somebody could have done it, and the rest of the
+    // way waits. Without that a client that never asks for a chunk can order
+    // a hundred of them worked out per twelve-byte report, as fast as it can
+    // write, on the connection's own thread and outside every bound the
+    // chunk path has.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let at_first = client.hear_the_survey(HashMap::new(), |charted| {
+        charted.len() >= in_sight_of(spawn).len()
+    });
+
+    // Twice as far as anyone is believed to have got.
+    let claimed = spawn + Vec2::new(2.0 * server::SURVEY_SWEEP, 0.0);
+    let believed = spawn + Vec2::new(server::SURVEY_SWEEP, 0.0);
+    client.say(ToServer::Helm {
+        position: claimed,
+        heading: 0.0,
+    });
+
+    // The way as far as it was believed is inked — this is the chunk a
+    // report short of the end of the allowance...
+    let reached = chunk_at(believed - Vec2::new(2.0 * CHUNK_METRES, 0.0));
+    let charted = client.hear_the_survey(at_first, |charted| charted.contains_key(&reached));
+    // ...and nothing beyond it is, the far end being water this client
+    // merely claimed to have crossed.
+    assert!(
+        !charted.contains_key(&chunk_at(claimed)),
+        "the survey followed a jump no hull could make all the way to {claimed}"
+    );
+    for chunk in charted.keys() {
+        assert!(
+            in_sight_along(*chunk, spawn, believed),
+            "{chunk} is off the way from {spawn} to as far as anyone got"
+        );
+    }
+}
+
+#[test]
+fn a_world_sailed_to_its_own_edge_opens_again() {
+    // The survey is only ever allowed to hold ground the world's own file
+    // will take back. A player standing just inside the edge of the
+    // coordinates has chunks within sight whose corners are past it — a
+    // legal position, an honest report — and a survey that recorded those
+    // would write a world file that this build then refuses to load, for
+    // ever, taking the backup with it at the next save.
+    let path = scratch("edge").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    // Out to where the world stops resolving. The survey does not follow the
+    // whole way — nobody sails that in a report — but the player is there,
+    // and the world files them there.
+    let brink = Vec2::new(1_279_999.0, 0.0);
+    let (client, _id, _spawn, _facing, token) = Client::join_presenting(addr, None);
+    client.say(ToServer::Helm {
+        position: brink,
+        heading: 0.0,
+    });
+    // Asked and answered before hanging up, which is what says the helm word
+    // was read: the session reads in order, so ground answered after it is
+    // ground answered after the position was taken.
+    client.ask_for(chunk_at(brink));
+    drop(client);
+    drop(host);
+
+    // Returning puts them down on the brink, and *that* is the survey that
+    // reaches past the edge. Twice, because one bad save is survivable: the
+    // file that will not parse falls back to the `.old` beside it, quietly
+    // losing whatever the session did. It is the second that leaves nothing
+    // to fall back to, which is what makes this a world lost rather than a
+    // world set back.
+    for visit in 0..2 {
+        let again = Server::reopen(("127.0.0.1", 0), &path).unwrap_or_else(|why| {
+            panic!("a world surveyed at its own edge would not reopen: {why}")
+        });
+        let addr = again.local_addr().expect("addr");
+        let host = again.spawn().expect("spawn");
+        let (client, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(token));
+        assert_eq!(dealt, token, "visit {visit}: kept papers were re-dealt");
+        assert_eq!(
+            spawn, brink,
+            "visit {visit}: the returner was not put down where they left"
+        );
+        client.hear_the_survey(HashMap::new(), |charted| !charted.is_empty());
+        drop(client);
+        drop(host);
+    }
+
+    Server::reopen(("127.0.0.1", 0), &path)
+        .expect("a world surveyed at its own edge would not open again");
+}
+
+#[test]
+fn a_player_may_hang_up_while_their_survey_is_still_being_told_back() {
+    // The backfill runs on a thread of its own and re-grows every island the
+    // returner has ever been near, which is seconds of work. Leaving in the
+    // middle of it is ordinary — it is what a client that reconnects does —
+    // and it must leave a world that goes on serving rather than one with a
+    // thread still grinding out a chart for nobody.
+    let path = scratch("backfill").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    let (client, _id, spawn, _facing, token) = Client::join_presenting(addr, None);
+    let out = spawn + Vec2::new(1_536.0, 0.0);
+    client.say(ToServer::Helm {
+        position: out,
+        heading: 0.0,
+    });
+    let sailed = client.hear_the_survey(HashMap::new(), |charted| {
+        in_sight_of(out)
+            .iter()
+            .all(|chunk| charted.contains_key(chunk))
+    });
+    assert!(
+        sailed.len() > 64,
+        "a voyage short enough to be told in one go"
+    );
+    drop(client);
+    drop(host);
+
+    let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
+    let addr = again.local_addr().expect("addr");
+    let host = again.spawn().expect("spawn");
+
+    // Several returns, each hung up on the moment the welcome lands — a
+    // reconnect loop, which is the shape that stacks these threads.
+    for _ in 0..4 {
+        let (client, _id, _spawn, _facing, _dealt) = Client::join_presenting(addr, Some(token));
+        drop(client);
+    }
+
+    // And the world is still a world: it welcomes somebody, tells them their
+    // chart, and answers for ground.
+    let (client, _id, spawn, _facing, _dealt) = Client::join_presenting(addr, Some(token));
+    client.hear_the_survey(HashMap::new(), |charted| !charted.is_empty());
+    // Which either has ground on it or is open water; what matters is that
+    // it is answered at all, the read having a deadline on it.
+    client.ask_for(chunk_at(spawn));
+    drop(client);
+    drop(host);
+}
+
+// ---------------------------------------------------------------------------
+// Claiming an island
+// ---------------------------------------------------------------------------
+//
+// The fiddly part of these is that a claim is settled against the *server's*
+// survey, so a test cannot arrange one: it has to sail a client round a real
+// coast until the world has followed it all the way round. What that costs is
+// the two helpers below — one to find an island small enough to circle, one to
+// circle it — and both are deliberately coarse. See each for what it trades.
+
+/// The world a test is allowed to know, sampled for an island worth sailing
+/// round: the middle of its land, how far that land reaches, and a spot ashore
+/// well inside it.
+///
+/// The ground is sampled rather than the island's frame read, because a frame
+/// is the parcel an island was grown in and says little about how much of it is
+/// above water — half the parcels near a spawn hold nothing but a shoal — and
+/// what a claim is about is the waterline.
+///
+/// Bounded at both ends, and both bounds matter. Too small an island proves
+/// nothing: a coast a player can take in whole from the water off one side of
+/// it — which, at [`SIGHT_RADIUS`], is anything under a few hundred metres
+/// across — is one that closes without anybody going anywhere, so a test of
+/// having gone round it would pass without the going. Too big is a circuit a
+/// test spends minutes on. Between the two is a coast that has to be gone
+/// round and can be gone round in a coarse polygon.
+fn an_island_to_sail_round(world: &Archipelago, near: Vec2) -> (Vec2, f32, Vec2) {
+    let reach = Vec2::splat(2_048.0);
+    let mut about: Vec<IslandSpec> = world.islands_within(near - reach, near + reach);
+    about.sort_by(|a, b| {
+        a.centre()
+            .distance(near)
+            .total_cmp(&b.centre().distance(near))
+    });
+    about
+        .into_iter()
+        .find_map(|spec| {
+            let (least, most) = (
+                spec.centre() - spec.extent() / 2.0,
+                spec.centre() + spec.extent() / 2.0,
+            );
+            let mut land: Option<(Vec2, Vec2)> = None;
+            let mut summit = (f32::MIN, Vec2::ZERO);
+            let mut z = least.y;
+            while z <= most.y {
+                let mut x = least.x;
+                while x <= most.x {
+                    let at = Vec2::new(x, z);
+                    let height = world.height(x, z);
+                    if height > 0.0 {
+                        land = Some(match land {
+                            None => (at, at),
+                            Some((lo, hi)) => (lo.min(at), hi.max(at)),
+                        });
+                        if height > summit.0 {
+                            summit = (height, at);
+                        }
+                    }
+                    x += 16.0;
+                }
+                z += 16.0;
+            }
+            let (lo, hi) = land?;
+            let across = (hi - lo).max_element();
+            // Half a kilometre is comfortably past what a survey takes in
+            // from one side; three quarters is about as far as a test can
+            // afford to sail. The summit is the spot ashore, being the point
+            // furthest inside the waterline in every direction at once.
+            (512.0..=768.0)
+                .contains(&across)
+                .then_some(((lo + hi) / 2.0, across, summit.1))
+        })
+        .expect("an island of the right size within a couple of kilometres of the spawn")
+}
+
+/// Legs to a whole circuit of an island — enough that the polygon hugs the
+/// shore, few enough that a test is not a thousand round trips.
+const LEGS: usize = 24;
+
+/// Sails a client `legs` of the way round an island — [`LEGS`] of them being
+/// the whole circuit — and hands back everything it has been told it surveyed.
+///
+/// Coarse: straight legs rather than a course anybody would steer. The survey
+/// follows the *way* between two reports and not only their ends, so a polygon
+/// outside the shore inks the same band a circle would, and the test spends
+/// seconds rather than minutes.
+///
+/// The waiting is the part worth understanding. The survey follows a way only
+/// as far as it believes somebody could have sailed since the last report —
+/// see [`server::PLAUSIBLE_SPEED`] — and both crossing to the island and going
+/// round it spend that allowance. Sailed with none in hand, the survey follows
+/// in a straight line towards each report instead of round the shore, which is
+/// a stripe of coast nobody inked and a ring that never closes. So every leg
+/// is paid for in real seconds at the rate the allowance fills, and each waits
+/// to be told its own ground before the next is sailed — which is also what
+/// keeps a voyage's worth of batches from piling up in an outbox nobody is
+/// draining.
+fn sail_around(
+    client: &Client,
+    from: Vec2,
+    centre: Vec2,
+    reach: f32,
+    legs: usize,
+) -> HashMap<IVec2, Soundings> {
+    let leg = |turn: usize| {
+        let bearing = std::f32::consts::TAU * turn as f32 / LEGS as f32;
+        centre + Vec2::from_angle(bearing) * reach
+    };
+
+    let mut charted = HashMap::new();
+    let mut sailed = from;
+    for turn in 0..=legs {
+        let at = leg(turn);
+        std::thread::sleep(Duration::from_secs_f32(
+            sailed.distance(at) / server::PLAUSIBLE_SPEED,
+        ));
+        client.say(ToServer::Helm {
+            position: at,
+            heading: 0.0,
+        });
+        charted = client.hear_the_survey(charted, |charted| {
+            in_sight_of(at)
+                .iter()
+                .all(|chunk| charted.contains_key(chunk))
+        });
+        sailed = at;
+    }
+    charted
+}
+
+/// A spot ashore, found by walking in from the water until the test's own copy
+/// of the world says there is ground underfoot — where a client would judge
+/// its own footing before stepping off a boat.
+fn a_shore_to_step_out_onto(world: &Archipelago, offshore: Vec2, inland: Vec2) -> Vec2 {
+    (1..=64)
+        .map(|step| offshore + (inland - offshore) * (step as f32 / 64.0))
+        .find(|at| world.height(at.x, at.y) > 1.0)
+        .expect("a shore between the water and the middle of an island")
+}
+
+/// The survey a client has been told, as the survey it is — which is how a
+/// client will find the island it is standing on, and the same question the
+/// server settles a claim by.
+fn chart_of(charted: &HashMap<IVec2, Soundings>) -> Survey {
+    let mut survey = Survey::default();
+    for (chunk, ink) in charted {
+        survey.record(*chunk, ink.clone());
+    }
+    survey
+}
+
+/// The seed the claiming tests are sailed in. Chosen rather than arbitrary,
+/// and that is the whole of what is special about it: it puts an island of the
+/// size these tests want — see [`an_island_to_sail_round`] — a few hundred
+/// metres off the spawn, which is a coast a test can afford to go round.
+const CLAIMABLE: u32 = 7;
+
+/// How far outside the island's own reach a circuit is sailed, in metres. Off
+/// the shore, and well within [`SIGHT_RADIUS`] of it.
+const OFFING: f32 = 64.0;
+
+/// A client that has joined and sailed the whole way round that island: the
+/// papers it holds, the island's identity, and the spot ashore a claimant
+/// would stand on.
+fn sail_round_the_island(
+    addr: SocketAddr,
+    presenting: Option<Token>,
+) -> (Client, Token, IVec2, Vec2) {
+    let (client, _id, spawn, _facing, token) = Client::join_presenting(addr, presenting);
+    let world = behind_the_curtain(CLAIMABLE);
+    let (centre, across, ashore) = an_island_to_sail_round(&world, spawn);
+    let charted = sail_around(&client, spawn, centre, across / 2.0 + OFFING, LEGS);
+    let island = chart_of(&charted)
+        .island_under(ashore)
+        .expect("a coast sailed right round closes an island");
+    (client, token, island.id, ashore)
+}
+
+#[test]
+fn an_island_sailed_round_and_stood_upon_is_claimed() {
+    // The whole rule in one voyage. Going round it is half of it, and the
+    // half a client can see for itself; standing on it is the other, a cairn
+    // being built by somebody on the ground rather than sailing past.
+    let addr = host(CLAIMABLE);
+    let (client, _token, island, ashore) = sail_round_the_island(addr, None);
+
+    client.say(ToServer::Claim { island });
+    assert!(
+        client.nothing_was_said_about_a_cairn(),
+        "a cairn was raised by somebody who never left the helm"
+    );
+
+    client.say(ToServer::Disembark { position: ashore });
+    client.say(ToServer::Claim { island });
+    let (told, at, name, yours) = client.hear_a_cairn();
+    assert_eq!(told, island, "a cairn for some other island");
+    assert_eq!(
+        at, ashore,
+        "the cairn does not stand where the claimant did"
+    );
+    assert!(yours, "the claimant was not told the cairn was theirs");
+    assert_eq!(name, "", "an island nobody has christened came named");
+}
+
+#[test]
+fn part_of_a_coast_earns_nothing_even_from_the_beach() {
+    // The claim is settled against the coast the world has watched somebody
+    // go round, not against where they are standing: half a survey rings
+    // nothing, and there is nothing to be standing inside of.
+    let addr = host(CLAIMABLE);
+    let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
+
+    // Bob sails a quarter of the same circuit and turns back — the rest is
+    // coast nobody has shown him — and then steps ashore on the near side.
+    //
+    // Ashore *there*, and not on Alice's spot in the middle, which would not
+    // be the same test: an island small enough to be seen across from its own
+    // summit is one somebody standing on the summit has honestly seen the
+    // whole of, and its ring closes for them. The rule is about having seen
+    // the whole coast, and never about the manner of the seeing.
+    let (bob, _id, spawn, _facing) = Client::join(addr);
+    let world = behind_the_curtain(CLAIMABLE);
+    let (centre, across, _ashore) = an_island_to_sail_round(&world, spawn);
+    let reach = across / 2.0 + OFFING;
+    let charted = sail_around(&bob, spawn, centre, reach, LEGS / 4);
+    let offshore = centre + Vec2::from_angle(std::f32::consts::TAU / 4.0) * reach;
+    let landfall = a_shore_to_step_out_onto(&world, offshore, centre);
+    assert!(
+        chart_of(&charted).island_under(landfall).is_none(),
+        "a quarter of a coast closed an island"
+    );
+
+    bob.say(ToServer::Disembark { position: landfall });
+    bob.say(ToServer::Claim { island });
+    assert!(
+        bob.nothing_was_said_about_a_cairn(),
+        "a coast nobody had been round was claimed from the beach"
+    );
+
+    // And the island was there to be had all along, which is what says the
+    // refusal was about Bob's voyage rather than about this island.
+    alice.say(ToServer::Disembark { position: ashore });
+    alice.say(ToServer::Claim { island });
+    let (told, _at, _name, yours) = alice.hear_a_cairn();
+    assert_eq!((told, yours), (island, true));
+}
+
+#[test]
+fn a_second_claim_is_refused_and_told_the_cairn_that_is_there() {
+    // Two players who have both been all the way round it. The first has it,
+    // and what the second hears is the cairn already standing — the state
+    // being the whole of the answer, as a refused boarding's is.
+    let addr = host(CLAIMABLE);
+    let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
+    alice.say(ToServer::Disembark { position: ashore });
+    alice.say(ToServer::Claim { island });
+    let (_told, alices_cairn, _name, _yours) = alice.hear_a_cairn();
+
+    // Bob goes round it too and steps ashore somewhere else on it — his own
+    // spot, so that a cairn told him at Alice's is plainly hers and not his
+    // own ask coming back.
+    let (bob, _papers, _island, _summit) = sail_round_the_island(addr, None);
+    let world = behind_the_curtain(CLAIMABLE);
+    let (centre, across, _ashore) = an_island_to_sail_round(&world, alices_cairn);
+    let offshore = centre + Vec2::new(across / 2.0 + OFFING, 0.0);
+    let bobs_spot = a_shore_to_step_out_onto(&world, offshore, centre);
+    assert_ne!(bobs_spot, alices_cairn, "both players stood on one spot");
+    bob.say(ToServer::Disembark {
+        position: bobs_spot,
+    });
+    bob.say(ToServer::Claim { island });
+    let (told, at, _name, yours) = bob.hear_a_cairn();
+    assert_eq!(told, island);
+    assert_eq!(at, alices_cairn, "the cairn moved to the second asker");
+    assert!(
+        !yours,
+        "somebody else's cairn was told as this player's own"
+    );
+}
+
+#[test]
+fn only_the_claimant_may_name_the_island() {
+    let addr = host(CLAIMABLE);
+    let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
+    alice.say(ToServer::Disembark { position: ashore });
+    alice.say(ToServer::Claim { island });
+    let _ = alice.hear_a_cairn();
+
+    // A stranger's christening is refused, and what comes back is the cairn
+    // exactly as it stands — unnamed, and not his.
+    let (bob, _id, _spawn, _facing) = Client::join(addr);
+    bob.say(ToServer::Name {
+        island,
+        name: "Bob's Rock".to_string(),
+    });
+    let (told, _at, name, yours) = bob.hear_a_cairn();
+    assert_eq!(told, island);
+    assert_eq!(name, "", "a stranger wrote on somebody else's island");
+    assert!(!yours);
+
+    // The claimant's is granted, and rides with the cairn.
+    alice.say(ToServer::Name {
+        island,
+        name: "Ilha Verde".to_string(),
+    });
+    let (told, _at, name, yours) = alice.hear_a_cairn();
+    assert_eq!((told, name.as_str(), yours), (island, "Ilha Verde", true));
+}
+
+#[test]
+fn an_ask_inside_the_pace_is_answered_late_rather_than_dropped() {
+    // The pacing on claims and names is there to stop one client filling
+    // everybody's outbox, and it holds the rate down by making the asker
+    // wait. What it must never do is swallow the ask: from the far end of a
+    // socket, silence is indistinguishable from a refusal, from a message
+    // lost, or from a server that has stopped listening, and a client cannot
+    // be asked to tell those apart. So every one of these gets an answer —
+    // the later ones a quarter-second late, which nobody sailing will notice.
+    let addr = host(CLAIMABLE);
+    let (client, _token, island, ashore) = sail_round_the_island(addr, None);
+    client.say(ToServer::Disembark { position: ashore });
+
+    // The first is the grant, and pays the pace. The rest arrive well inside
+    // it — a claim on an island now held, and two names in a row — and the
+    // count is what is being asserted: four asks, four cairns back.
+    client.say(ToServer::Claim { island });
+    client.say(ToServer::Claim { island });
+    for name in ["Ilha Verde", "Ilha Vermelha"] {
+        client.say(ToServer::Name {
+            island,
+            name: name.to_string(),
+        });
+    }
+
+    for ask in 0..4 {
+        let (told, _at, _name, yours) = client.hear_a_cairn();
+        assert_eq!(told, island, "ask {ask} was answered about another island");
+        assert!(yours, "ask {ask} lost the claimant their own claim");
+    }
+}
+
+#[test]
+fn a_name_the_wire_will_not_carry_leaves_the_cairn_as_it_was() {
+    // A name is a refusal or a name; it is never half a name, and never an
+    // erasure. Whatever is offered, the cairn goes on saying what it said.
+    let addr = host(CLAIMABLE);
+    let (client, _token, island, ashore) = sail_round_the_island(addr, None);
+    client.say(ToServer::Disembark { position: ashore });
+    client.say(ToServer::Claim { island });
+    let _ = client.hear_a_cairn();
+    client.say(ToServer::Name {
+        island,
+        name: "Ilha Verde".to_string(),
+    });
+    assert_eq!(client.hear_a_cairn().2, "Ilha Verde");
+
+    for offered in [
+        "   ".to_string(),
+        "a".repeat(protocol::NAME_BYTES + 1),
+        "Ilha\nVerde".to_string(),
+    ] {
+        client.say(ToServer::Name {
+            island,
+            name: offered.clone(),
+        });
+        let (told, _at, name, yours) = client.hear_a_cairn();
+        assert_eq!(told, island);
+        assert!(yours, "the claimant stopped holding their own claim");
+        assert_eq!(
+            name,
+            "Ilha Verde",
+            "the cairn took `{}` for a name",
+            offered.escape_debug()
+        );
+    }
+}
+
+#[test]
+fn a_claim_and_its_name_survive_the_world_being_closed() {
+    // An island claimed is a thing another player is barred from, so of
+    // everything a world file keeps it is the part that has to come back
+    // exactly: the same island, the same holder, the same cairn, the same
+    // word on it.
+    let path = scratch("claims").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: CLAIMABLE })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    let (client, token, island, ashore) = sail_round_the_island(addr, None);
+    client.say(ToServer::Disembark { position: ashore });
+    client.say(ToServer::Claim { island });
+    let _ = client.hear_a_cairn();
+    client.say(ToServer::Name {
+        island,
+        name: "Ilha Verde".to_string(),
+    });
+    assert_eq!(client.hear_a_cairn().2, "Ilha Verde");
+    drop(client);
+    drop(host);
+
+    let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
+    let addr = again.local_addr().expect("addr");
+    let _host = again.spawn().expect("spawn");
+
+    // Put back down where they left, which is beside their own cairn: a
+    // joining player is told the cairns standing near them.
+    let (client, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(token));
+    assert_eq!(dealt, token, "kept papers were re-dealt");
+    assert_eq!(
+        spawn, ashore,
+        "the claimant was not put back on their island"
+    );
+    let (told, at, name, yours) = client.hear_a_cairn();
+    assert_eq!(told, island, "the world reopened on somebody else's island");
+    assert_eq!(at, ashore, "the cairn moved while the world was shut");
+    assert_eq!(name, "Ilha Verde", "the island forgot its name");
+    assert!(
+        yours,
+        "the claimant came back a stranger to their own claim"
     );
 }
 

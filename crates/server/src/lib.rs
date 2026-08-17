@@ -31,8 +31,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
+use protocol::ground::{chunk_at, dequantize};
+use protocol::survey::{in_sight_along, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
+    SURVEY_BATCH_BYTES,
 };
 use world::archipelago::Archipelago;
 
@@ -54,9 +57,18 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// of hundred at once, and a chunk of ground is sixteen kilobytes. So this
 /// has to be deep enough to hold an arrival's whole burst while the socket
 /// drains it, and shallow enough that a client which has stopped reading
-/// altogether is noticed rather than buffered forever. A full queue at this
-/// depth is a few megabytes and several seconds of a client saying nothing,
-/// which is not "briefly behind" — see [`post`], which hangs up on it.
+/// altogether is noticed rather than buffered forever.
+///
+/// What a full queue costs is worth stating in the worst case, because the
+/// worst case has grown: a message is now as long as the longest survey batch
+/// rather than as long as a chunk of ground — the better part of sixty
+/// kilobytes — so a queue full of those is some fifteen megabytes for one
+/// player. Nothing sends anywhere near it (a batch is filled to eight
+/// kilobytes, and the ceiling stands where a coast crossing every facet of a
+/// chunk would put it), but the number to size this against is the ceiling,
+/// not the ordinary. It is still the right trade: a queue this deep is
+/// several seconds of a client saying nothing, which is not "briefly behind"
+/// — see [`post`], which hangs up on it rather than holding the megabytes.
 ///
 /// The arrival's burst is also one word per boat in the world, the whole
 /// fleet being introduced at the door, so this is the ceiling any future
@@ -142,6 +154,98 @@ const SPARE_BERTH: f32 = 64.0;
 /// that doesn't work.
 const STOP_POLL: Duration = Duration::from_millis(10);
 
+/// The most way the survey will follow at once, in metres.
+///
+/// The survey follows the *way* between two reports and not just their ends —
+/// see [`protocol::survey::in_sight_along`], which is why. That only holds
+/// while the two are a report apart: a client says where it is several times
+/// a second, and no hull here makes two kilometres in that. A jump longer
+/// than this is not a voyage, it is a client that stopped talking or one that
+/// is lying, and running the survey along the whole of it would be inking
+/// water nobody crossed — and, since each new chunk is ground to be worked
+/// out, would be work a client could order by the megametre.
+///
+/// So this is the ceiling, and [`PLAUSIBLE_SPEED`] is the rate: what a player
+/// has in hand is that speed times the time since they were last believed,
+/// and it never banks past this. Waiting therefore buys a whole sweep and not
+/// a metre more, which is what keeps a client that says nothing for an hour
+/// from arriving with an hour's worth of work to order.
+///
+/// Public so a test of a jump no hull could make can pin how far it is
+/// followed without repeating the number.
+pub const SURVEY_SWEEP: f32 = 2_048.0;
+
+/// How fast a player may be believed to have travelled, in metres per second,
+/// as far as the survey is concerned.
+///
+/// The survey is where somebody has *been*, so what it costs to keep has an
+/// honest bound in the world: nobody sailed two kilometres in fifty
+/// milliseconds. Without one, a client that never asks for a chunk can order
+/// a hundred chunks of ground worked out per twelve-byte `Move` — on the
+/// connection thread, outside the worker pool and past every piece of
+/// backpressure the chunk path has — as fast as it can write. Bounding the
+/// way *per second* rather than per message is what makes that arithmetic
+/// about the world instead of about how fast a socket can be fed.
+///
+/// Twenty-odd times what the fastest hull here makes, and it wants to stay
+/// absurd: the number this is guarding against is a client asking for
+/// kilometres, and every metre of headroom is a lag spike, a stall on some
+/// far machine, or a legitimate catch-up that this must never clip. A voyage
+/// that touched it would be a voyage nobody sailed.
+///
+/// Public so that a test which has to sail a real coast can wait for its
+/// allowance at the rate the survey actually fills it, rather than sleeping on
+/// a guess that would rot the moment this number moved.
+pub const PLAUSIBLE_SPEED: f32 = 256.0;
+
+/// How many chunks of a returning player's survey are worked out between one
+/// look at whether there is still anybody to tell — see
+/// [`tell_the_survey_so_far`].
+///
+/// Not a size on the wire: that budget is [`SURVEY_BATCH_BYTES`], spent in
+/// exactly one place. This is a unit of *work*, because each of these chunks
+/// may mean growing an island, and it is how long the backfill can carry on
+/// for somebody who has already left. The chunks come sorted, so a slab is
+/// usually a stretch of one coast and the islands under it are grown once
+/// between them; sixty-four is milliseconds of that in the ordinary case and
+/// under a second in the worst.
+const SURVEY_SLAB: usize = 64;
+
+/// How near a cairn a player has to be to be told about it, in metres.
+///
+/// A cairn is a thing standing in the world rather than an announcement, so it
+/// is told to whoever could be looking at it: everybody nearby when one is
+/// raised or renamed, and everybody put down beside one when they join. Wide
+/// enough that a client has it before it has drawn the ground it stands on —
+/// a client streams something like a kilometre around its camera — and narrow
+/// enough that who holds what is something a player finds out by going there.
+///
+/// What this is deliberately not is a rule about *knowing*. A player who sails
+/// up to a claimed island mid-session hears nothing until they ask, and what
+/// answers them is the refusal, which carries the cairn that is already there.
+/// A chart that remembers the coasts it has passed — sighting, as against
+/// visiting — is a slice of its own.
+const CAIRN_SIGHT: f32 = 1_536.0;
+
+/// How often one player may have a cairn raised or rewritten, at most.
+///
+/// Two different costs, one pace, because both are bought with the same word
+/// from the same client and a cairn is hand-carved either way: a quarter of a
+/// second between asks is nothing to a player and everything to a pestering
+/// one.
+///
+/// Settling a claim means walking every coastline that player has surveyed.
+/// That is arithmetic rather than generation — the soundings are already in
+/// hand, see [`Surveyed`] — but it grows with the voyage, and a client can ask
+/// as fast as it can write.
+///
+/// Christening one costs the walk nothing and costs everybody else something:
+/// a granted name is told to every player within [`CAIRN_SIGHT`] of the cairn,
+/// and an outbox that fills is a connection shut down (see [`post`]). Unpaced,
+/// one client alternating two perfectly good names could hang up on every
+/// player standing near its island.
+const CAIRN_PACE: Duration = Duration::from_millis(250);
+
 /// How far from the origin a reported position may be, in metres. The world
 /// crate measures where `f32` ground stops being exactly the ground at about
 /// 1,280 km out (see its "How endless is endless"), and no honest client gets
@@ -198,6 +302,30 @@ const WIND_STEP: f32 = 0.25;
 /// `Server` is one type however it reports, and defaulted to silence: what a
 /// library does to somebody's stdout is not the library's decision.
 type Report = Box<dyn Fn(&str) + Send + Sync>;
+
+/// One player's survey, held behind a lock of its own rather than inside the
+/// roster's — see [`Player::surveyed`].
+///
+/// An hour's sailing is thousands of chunks, and the two things that want the
+/// whole of it — the periodic save and the departure — would otherwise copy
+/// it with the roster held, which is every other player's `Move` and `Helm`
+/// stopped for the length of the copy. The chunk path was built never to work
+/// under that lock and this is the same rule: what the roster hands out is a
+/// pointer, and the copying happens where nobody is waiting on it.
+///
+/// Lock order: this is a leaf, and the way it stays one is that everybody
+/// takes the roster, clones the handle, lets the roster go, and only then
+/// locks this. No thread ever holds both, so there is no order for the two to
+/// disagree about.
+///
+/// The ink is kept and not only the coordinates, which costs a few megabytes
+/// for a player who has called at a thousand islands and buys the one thing a
+/// bare list of chunks cannot answer: whether a coastline closes. A claim is
+/// settled by asking exactly that — see [`settle_a_claim`] — and asking it of
+/// a list would mean working every chunk of a whole voyage's ground out again,
+/// per ask, on the connection's own thread. The soundings are already in hand
+/// where they are recorded, so keeping them is free.
+type Surveyed = Arc<Mutex<Survey>>;
 
 /// A hosted world, listening for players.
 pub struct Server {
@@ -272,6 +400,17 @@ pub(crate) struct Shared {
     /// business (the saves) take it alone. That one-way rule is why the
     /// pair cannot deadlock.
     pub(crate) boats: Mutex<HashMap<BoatId, BoatState>>,
+    /// Every island anybody has claimed, by the identity of the ring that is
+    /// it — see [`protocol::survey::Island::id`]. What a cairn stands for, and
+    /// the whole of who may name what.
+    ///
+    /// Lock order: a leaf, like a player's survey, and held alone. Everything
+    /// a grant needs from the roster — where the asker is, whether they are
+    /// afoot — is read and let go before this is taken, and everything anybody
+    /// is told is posted after it has been let go again. So the one nesting
+    /// this session allows, the roster over the boats, has nothing to say
+    /// about this lock and cannot be got into an argument with it.
+    claims: Mutex<HashMap<IVec2, Claim>>,
     /// The file this world survives in, if it is being kept: `None` is an
     /// ephemeral world — a test's, or a dedicated server nobody asked to
     /// remember — which lives exactly as long as its process.
@@ -339,6 +478,20 @@ pub(crate) struct Player {
     /// The way to this player's ear: their writer thread drains this onto
     /// their socket.
     outbox: mpsc::SyncSender<ToClient>,
+    /// Every chunk this player has been near enough to look at — see
+    /// [`survey_the_way`], which is the only thing that adds to it, and
+    /// [`protocol::ToClient::Surveyed`], which is how they are told.
+    ///
+    /// The world's, not the client's: a claim is judged against a coastline
+    /// somebody has actually closed, so which ground that is has to be a fact
+    /// the server holds rather than one a client reports. Loaded from the
+    /// world's memory of this token at the door and filed back there on the
+    /// way out, so a voyage outlives the visit that made it.
+    ///
+    /// Behind a lock of its own, and see [`Surveyed`] for why: the roster is
+    /// held by everything a player does, and this is the one thing on it that
+    /// is big enough to be worth not copying there.
+    surveyed: Surveyed,
     /// This player's socket, kept only so that the session can hang up on
     /// somebody who has stopped reading it — see [`post`].
     line: TcpStream,
@@ -352,6 +505,27 @@ impl Player {
         self.waiting_since
             .is_some_and(|asked| now.duration_since(asked) < WAIT_LAPSE)
     }
+}
+
+/// One island claimed, as the session holds it: whose it is, where their cairn
+/// stands, and what they have christened it.
+///
+/// An island is claimed by a player who has sailed the whole way round it and
+/// then stood on it — see [`settle_a_claim`], which is where that is judged
+/// against the world's own survey of them rather than against anything a
+/// client says.
+#[derive(Clone)]
+struct Claim {
+    /// The token it belongs to, and never the player id: a claim outlives the
+    /// visit that made it, where an id is good for one session. It is also a
+    /// credential, so it never leaves this process — see
+    /// [`ToClient::Cairn`]'s `yours`, which is all a client is told of it.
+    by: Token,
+    /// Where the claimant stood when they claimed it, which is where the cairn
+    /// stands for good.
+    at: Vec2,
+    /// Empty for an island nobody has christened yet.
+    name: String,
 }
 
 /// One boat, as the session holds it: its file record's fields plus the
@@ -451,6 +625,22 @@ impl Server {
                                     // the door — see the welcome.
                                     occupant: None,
                                     virgin: false,
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+                claims: Mutex::new(
+                    record
+                        .claims
+                        .into_iter()
+                        .map(|claim| {
+                            (
+                                claim.island,
+                                Claim {
+                                    by: claim.by,
+                                    at: claim.at,
+                                    name: claim.name,
                                 },
                             )
                         })
@@ -916,23 +1106,42 @@ impl Shared {
     /// where they are, not where they last left.
     ///
     /// The locks are taken one at a time, never nested, like every other
-    /// path through them.
+    /// path through them — and the surveys are copied out after the roster
+    /// has been let go, the roster's hold being nothing but the pointers.
+    /// A save that copied thousands of chunks per player under it would be a
+    /// save that stopped everyone else's `Move` for the length of the file.
     fn record(&self) -> keeper::WorldRecord {
-        let here: Vec<(Token, keeper::PlayerRecord)> = {
+        let present: Vec<(Token, Vec2, Option<BoatId>, Surveyed)> = {
             let players = self.players.lock().expect("no poisoned lock");
             players
                 .values()
                 .map(|player| {
                     (
                         player.token,
-                        keeper::PlayerRecord {
-                            position: player.position,
-                            aboard: player.aboard,
-                        },
+                        player.position,
+                        player.aboard,
+                        player.surveyed.clone(),
                     )
                 })
                 .collect()
         };
+        let here: Vec<(Token, keeper::PlayerRecord)> = present
+            .into_iter()
+            .map(|(token, position, aboard, surveyed)| {
+                (
+                    token,
+                    keeper::PlayerRecord {
+                        position,
+                        aboard,
+                        surveyed: surveyed
+                            .lock()
+                            .expect("no poisoned lock")
+                            .charted()
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
         let mut players = self.remembered.lock().expect("no poisoned lock").clone();
         players.extend(here);
         let boats = {
@@ -947,6 +1156,26 @@ impl Shared {
                 })
                 .collect()
         };
+        let claims = {
+            let claims = self.claims.lock().expect("no poisoned lock");
+            claims
+                .iter()
+                // Nothing the file could not be read back saying, on the terms
+                // the beasts are held to — see `beasts::Flock::records`, and
+                // [`island_in_the_world`] for what it costs to get this wrong.
+                // Nothing granted since the fix can fail this; it is the
+                // guarantee rather than the fix, and it is the guarantee that
+                // matters, because a claim the reader refuses takes the whole
+                // world with it.
+                .filter(|(island, claim)| island_in_the_world(**island) && reachable(claim.at))
+                .map(|(island, claim)| keeper::ClaimRecord {
+                    island: *island,
+                    by: claim.by,
+                    at: claim.at,
+                    name: claim.name.clone(),
+                })
+                .collect()
+        };
         let beasts = self.beasts.lock().expect("no poisoned lock").clone();
         keeper::WorldRecord {
             id: self.world_id,
@@ -956,6 +1185,7 @@ impl Shared {
             age: self.age(),
             players,
             boats,
+            claims,
             beasts,
         }
     }
@@ -1091,7 +1321,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         let remembered = shared.remembered.lock().expect("no poisoned lock");
         match presented {
             Some(token) => match remembered.get(&token) {
-                Some(&record) => (token, Some(record)),
+                Some(record) => (token, Some(record.clone())),
                 None => (Token(keeper::mint()), None),
             },
             None => (Token(keeper::mint()), None),
@@ -1115,10 +1345,28 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     });
 
     let mut player = Player {
-        position: returning_to.map_or_else(|| shared.spawn_for(id), |record| record.position),
+        position: returning_to
+            .as_ref()
+            .map_or_else(|| shared.spawn_for(id), |record| record.position),
         token,
         aboard: None,
         waiting_since: None,
+        // Where this player has already been, taken back up: the survey is
+        // the world's memory of them and picks up where it left off.
+        //
+        // The chunks come back blank, the file keeping only where somebody
+        // went — see [`tell_the_survey_so_far`], which works the ink out again
+        // and fills it in here as it goes. So a returner's coastlines arrive
+        // over the first seconds of their visit rather than at the door, which
+        // is the same window in which their client has no chart drawn either:
+        // an island claimed in it is refused, and claimable a moment later.
+        surveyed: Arc::new(Mutex::new({
+            let mut survey = Survey::default();
+            for chunk in returning_to.iter().flat_map(|record| &record.surveyed) {
+                survey.record(*chunk, Soundings::default());
+            }
+            survey
+        })),
         outbox,
         line: stream,
     };
@@ -1168,6 +1416,13 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         if players.values().any(|other| other.token == player.token) {
             player.token = Token(keeper::mint());
             player.position = shared.spawn_for(id);
+            // Including what the papers had been anywhere: a stranger has
+            // seen nothing, and the survey belongs to whoever is still
+            // holding those papers rather than to both of them. Replaced
+            // rather than emptied, so that nothing locks a survey with the
+            // roster in hand — see [`Surveyed`]. Nobody else holds this one
+            // yet anyway, the player not being on the roster until below.
+            player.surveyed = Arc::new(Mutex::new(Survey::default()));
             returning = None;
         }
 
@@ -1219,7 +1474,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 );
                 (boat, at)
             };
-            player.aboard = match returning {
+            player.aboard = match &returning {
                 None => {
                     let (boat, at) = fresh_hull(&mut boats, player.position);
                     player.position = at;
@@ -1343,6 +1598,40 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     }
     (shared.report)(&format!("{id} joined"));
 
+    // The chart, once the world itself has been handed over: first everything
+    // this player had surveyed before — nothing at all, for a newcomer — and
+    // then whatever is within sight of where they have been put down, which
+    // for a returner is usually nothing new either. Outside the roster's hold,
+    // both of them, because both mean asking the world for ground.
+    let mut wake = {
+        let players = shared.players.lock().expect("no poisoned lock");
+        Wake::opening(
+            players
+                .get(&id)
+                .map_or(Vec2::ZERO, |player| player.position),
+        )
+    };
+    tell_the_survey_so_far(&shared, id);
+    // A way that goes nowhere, which is what standing where you were put
+    // down is: what it earns is the ground within sight of that spot.
+    let put_down = wake.at;
+    survey_the_way(&shared, id, &mut wake, put_down);
+    // And the cairns standing where they have been put down — the world's
+    // other players' doing, told as any other thing in the world is. Outside
+    // the roster's hold, the claims being a leaf lock nothing may reach for
+    // with the roster in hand.
+    tell_the_cairns_about(&shared, id, put_down);
+
+    // When this player last had a cairn raised, and when they last had one
+    // rewritten — see [`CAIRN_PACE`]. A connection's own locals, like the
+    // [`Wake`]: they are about the rate this thread is being asked to work at,
+    // and nothing shared has business with them. Two clocks rather than one,
+    // because the two rules about what pays are not the same rule and each
+    // reads where it is applied. Nothing yet, so the first ask of a session is
+    // answered at once.
+    let mut asked_to_claim: Option<Instant> = None;
+    let mut asked_to_name: Option<Instant> = None;
+
     // Relay and take orders for ground until the line drops. Anything else
     // ends the session too: after a framing error nothing later on the stream
     // can be trusted, a second hello is a client that has lost its place, and
@@ -1351,51 +1640,70 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     loop {
         match ToServer::read(&mut reader) {
             Ok(ToServer::Move { position }) if reachable(position) => {
-                let mut players = shared.players.lock().expect("no poisoned lock");
-                // Quietly ignored from a player at a helm, on Helm's own
-                // terms: a `Move` can honestly cross a boarding grant on
-                // the wire, and believing it would walk the player away
-                // from a boat everyone else sees them steering.
-                let afoot = players
-                    .get_mut(&id)
-                    .filter(|player| player.aboard.is_none());
-                if let Some(player) = afoot {
-                    player.position = position;
-                    broadcast(&players, id, ToClient::Moved { id, position });
+                let walked = {
+                    let mut players = shared.players.lock().expect("no poisoned lock");
+                    // Quietly ignored from a player at a helm, on Helm's own
+                    // terms: a `Move` can honestly cross a boarding grant on
+                    // the wire, and believing it would walk the player away
+                    // from a boat everyone else sees them steering.
+                    let afoot = players
+                        .get_mut(&id)
+                        .filter(|player| player.aboard.is_none());
+                    let walked = afoot.is_some();
+                    if let Some(player) = afoot {
+                        player.position = position;
+                        broadcast(&players, id, ToClient::Moved { id, position });
+                    }
+                    walked
+                };
+                // Outside the hold, the survey meaning ground to work out —
+                // and only for a move that was believed, or a report the
+                // session ignored would still put ink on somebody's chart.
+                if walked {
+                    survey_the_way(&shared, id, &mut wake, position);
                 }
             }
             Ok(ToServer::Helm { position, heading })
                 if reachable(position) && heading.is_finite() =>
             {
-                let mut players = shared.players.lock().expect("no poisoned lock");
-                // The rider goes with the vehicle: one report moves both.
-                // Quietly ignored from a player occupying nothing — see the
-                // wire's own doc for how that happens honestly.
-                let steering = players
-                    .get_mut(&id)
-                    .and_then(|player| player.aboard.inspect(|_| player.position = position));
-                if let Some(boat) = steering {
-                    let kind = {
-                        let mut boats = shared.boats.lock().expect("no poisoned lock");
-                        let state = boats.get_mut(&boat).expect("a boat once boarded exists");
-                        state.position = position;
-                        state.heading = heading;
-                        // Sailed, so no longer the spare hull the spawn
-                        // hands to arrivals — see [`BoatState::virgin`].
-                        state.virgin = false;
-                        state.kind
-                    };
-                    broadcast(
-                        &players,
-                        id,
-                        ToClient::Boat {
-                            id: boat,
-                            kind,
-                            position,
-                            heading,
-                            occupant: Some(id),
-                        },
-                    );
+                let sailed = {
+                    let mut players = shared.players.lock().expect("no poisoned lock");
+                    // The rider goes with the vehicle: one report moves both.
+                    // Quietly ignored from a player occupying nothing — see the
+                    // wire's own doc for how that happens honestly.
+                    let steering = players
+                        .get_mut(&id)
+                        .and_then(|player| player.aboard.inspect(|_| player.position = position));
+                    if let Some(boat) = steering {
+                        let kind = {
+                            let mut boats = shared.boats.lock().expect("no poisoned lock");
+                            let state = boats.get_mut(&boat).expect("a boat once boarded exists");
+                            state.position = position;
+                            state.heading = heading;
+                            // Sailed, so no longer the spare hull the spawn
+                            // hands to arrivals — see [`BoatState::virgin`].
+                            state.virgin = false;
+                            state.kind
+                        };
+                        broadcast(
+                            &players,
+                            id,
+                            ToClient::Boat {
+                                id: boat,
+                                kind,
+                                position,
+                                heading,
+                                occupant: Some(id),
+                            },
+                        );
+                    }
+                    steering.is_some()
+                };
+                // The coast a voyage runs past, on the terms a walk's is —
+                // and this is the report the way between two of them exists
+                // for, a hull under sail covering ground a walker cannot.
+                if sailed {
+                    survey_the_way(&shared, id, &mut wake, position);
                 }
             }
             Ok(ToServer::Board { boat }) => {
@@ -1435,6 +1743,9 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                         granted,
                     )
                 };
+                // Where a granted boarding has put them, kept for the survey
+                // below while the roster is still in hand.
+                let stepped = granted.then_some(player.position);
                 // A grant is news for everyone, the asker included — the
                 // telling is what seats them. A refusal changed nothing and
                 // is news only to the one who asked: answered to them alone,
@@ -1445,12 +1756,21 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 } else if let Some(player) = players.get(&id) {
                     post(player, answer);
                 }
+                drop(players);
+                // A grant moves the player onto the hull — a stride, never
+                // more than [`BOARD_GRANT`] — and a stride can still bring
+                // ground into sight.
+                if let Some(aboard) = stepped {
+                    survey_the_way(&shared, id, &mut wake, aboard);
+                }
             }
             Ok(ToServer::Disembark { position }) if reachable(position) => {
+                let mut stepped = false;
                 let mut players = shared.players.lock().expect("no poisoned lock");
                 if let Some(player) = players.get_mut(&id) {
                     // Ignored when not aboard, on Helm's terms.
                     if let Some(boat) = player.aboard.take() {
+                        stepped = true;
                         player.position = position;
                         let told = {
                             let mut boats = shared.boats.lock().expect("no poisoned lock");
@@ -1471,6 +1791,48 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                         broadcast_all(&players, told);
                         broadcast(&players, id, ToClient::Moved { id, position });
                     }
+                }
+                drop(players);
+                // A step ashore is a step, and the shore is exactly the place
+                // a step of it can be worth surveying.
+                if stepped {
+                    survey_the_way(&shared, id, &mut wake, position);
+                }
+            }
+            Ok(ToServer::Claim { island }) => {
+                // Paced rather than answered as fast as it is asked — see
+                // [`CAIRN_PACE`] — by waiting out what is left of it rather
+                // than by dropping the ask. A client that asks too soon is
+                // answered late; it is never answered with silence, which
+                // would leave an honest one unable to tell a refusal from a
+                // message that went nowhere. The waiting is done on this
+                // connection's own thread, so the only session it slows is
+                // the one asking.
+                //
+                // Only an ask that actually walked the coastlines pays the
+                // pace, which is why the clock is set from what came back
+                // rather than from having asked. What is being rationed is
+                // that walk; an ask the session answered off the roster or the
+                // claims alone — from somebody at a helm, or after an island
+                // somebody already holds — cost nothing, and charging it would
+                // mean a player who asked from the deck and then stepped
+                // ashore waited for no reason.
+                wait_out(asked_to_claim, CAIRN_PACE);
+                if settle_a_claim(&shared, id, island) {
+                    asked_to_claim = Some(Instant::now());
+                }
+            }
+            Ok(ToServer::Name { island, name }) => {
+                // Paced on the claim's terms and for the same reason, one word
+                // of it being as cheap to say as the other — see
+                // [`CAIRN_PACE`], which is where the two costs are written up.
+                // What pays is a christening that was actually granted, that
+                // being the one that goes to everybody near the cairn; a
+                // refusal reaches its asker and nobody else, and is answered
+                // as promptly as the last grant allows.
+                wait_out(asked_to_name, CAIRN_PACE);
+                if christen(&shared, id, island, &name) {
+                    asked_to_name = Some(Instant::now());
                 }
             }
             Ok(ToServer::WantDawn) => {
@@ -1526,18 +1888,41 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // loop ever moved it, and the read loop is over. And the two locks are
     // taken one after the other, never together, like every other path
     // through them.
-    let leaving = {
+    let last_seen = {
         let players = shared.players.lock().expect("no poisoned lock");
-        players
-            .get(&id)
-            .map(|player| (player.token, player.position, player.aboard))
+        players.get(&id).map(|player| {
+            (
+                player.token,
+                player.position,
+                player.aboard,
+                player.surveyed.clone(),
+            )
+        })
     };
-    if let Some((token, position, aboard)) = leaving {
+    // The survey copied out with the roster let go, as the saves do it: a
+    // departure that gathered thousands of chunks under that lock would be
+    // one player leaving and everybody else's report waiting on it. See
+    // [`Surveyed`].
+    let leaving = last_seen.map(|(token, position, aboard, surveyed)| {
+        (
+            token,
+            keeper::PlayerRecord {
+                position,
+                aboard,
+                surveyed: surveyed
+                    .lock()
+                    .expect("no poisoned lock")
+                    .charted()
+                    .collect(),
+            },
+        )
+    });
+    if let Some((token, record)) = &leaving {
         shared
             .remembered
             .lock()
             .expect("no poisoned lock")
-            .insert(token, keeper::PlayerRecord { position, aboard });
+            .insert(*token, record.clone());
     }
     {
         let mut players = shared.players.lock().expect("no poisoned lock");
@@ -1548,7 +1933,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         // return is a memory rather than a hold. Told under the same hold
         // as the departure, so nobody hears of a free boat before its
         // keeper has left.
-        if let Some((_, _, Some(boat))) = leaving {
+        if let Some(boat) = leaving.and_then(|(_, record)| record.aboard) {
             let told = {
                 let mut boats = shared.boats.lock().expect("no poisoned lock");
                 boats.get_mut(&boat).map(|state| {
@@ -1570,6 +1955,555 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     (shared.report)(&format!("{id} left"));
 }
 
+/// Settles a claim: grants it if the world's own record says this player has
+/// earned the island, and tells whoever can see the answer either way.
+///
+/// The three things a grant wants are all facts the server holds. The claimant
+/// must be afoot, because a cairn is built by somebody standing on the ground
+/// and not by somebody sailing past. The server's survey *for that player*
+/// must answer [`Survey::island_under`] with the island they named, which is
+/// both halves of the rule in one question — an unclosed coast rings nothing,
+/// and a point outside a ring is somewhere else. And nobody may hold it
+/// already, first asker taking it.
+///
+/// A refusal is posted to the asker alone and never broadcast: the world is
+/// otherwise exactly as they last heard it, and a refusal every other player's
+/// outbox carried would be a client able to pester the whole roster. Where the
+/// refusal is that somebody got there first, what goes back is that cairn —
+/// the same idiom as a refused boarding, where the boat's own state is the
+/// whole of the answer — provided the asker is standing near enough to be
+/// looking at it, which is [`tell_the_asker`]'s business. Where there is no
+/// state to send, or nobody near enough to be sent it, the answer is silence.
+///
+/// The claims are asked *before* the coastlines are walked, and that order is
+/// the whole of what stops a pestering client. An island somebody already holds
+/// is settled by the claims alone, and asking after one is exactly what a
+/// hostile client would repeat: the walk is what the pace exists to ration, so
+/// an ask that cannot possibly need it must not buy one. It also keeps the
+/// survey's own lock — which the saves and the backfill queue behind — held for
+/// the shortest time the question allows.
+///
+/// The locks are taken one at a time and in this order for the reason written
+/// on [`Shared::claims`]: the roster, let go; the claims, let go; the survey,
+/// let go; the claims again, let go; and only then the roster, to tell people.
+/// The claims being asked twice is not a race: the second hold is the one that
+/// decides, so two players walking the same shore at once still leave one
+/// cairn, whichever of them reaches the insertion first.
+///
+/// Says whether the survey was walked, which is the expensive half and the
+/// only half worth pacing — see the read loop, which is where the pacing is.
+fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
+    let Some((token, at, afoot, surveyed)) = ({
+        let players = shared.players.lock().expect("no poisoned lock");
+        players.get(&id).map(|player| {
+            (
+                player.token,
+                player.position,
+                player.aboard.is_none(),
+                player.surveyed.clone(),
+            )
+        })
+    }) else {
+        return false;
+    };
+
+    // Somebody's already — theirs or another's, and either way the cairn that
+    // stands there is the answer and no coastline needs walking to find it.
+    let held = shared
+        .claims
+        .lock()
+        .expect("no poisoned lock")
+        .get(&island)
+        .cloned();
+    if let Some(claim) = held {
+        let players = shared.players.lock().expect("no poisoned lock");
+        tell_the_asker(&players, id, island, &claim);
+        return false;
+    }
+    // Nor for somebody who could not be building a cairn wherever they are:
+    // one is built by a player standing on the ground, not sailing past.
+    if !afoot {
+        return false;
+    }
+
+    let stands_on = surveyed
+        .lock()
+        .expect("no poisoned lock")
+        .island_under(at)
+        .is_some_and(|found| found.id == island);
+
+    let (told, granted) = {
+        let mut claims = shared.claims.lock().expect("no poisoned lock");
+        match claims.get(&island) {
+            // Claimed while this ask was walking the shore, which is the only
+            // way it gets here: the answer is that cairn, as it would have
+            // been a moment earlier.
+            Some(held) => (Some(held.clone()), false),
+            // Earned, and the identity is one the world's own file can carry
+            // back — see [`island_in_the_world`]. A ring closed out at the
+            // very brink of the world is refused rather than granted and lost,
+            // a claim the reader cannot read being a world that will not open.
+            None if stands_on && island_in_the_world(island) => {
+                let raised = Claim {
+                    by: token,
+                    at,
+                    name: String::new(),
+                };
+                claims.insert(island, raised.clone());
+                (Some(raised), true)
+            }
+            // Nothing there, and nothing earned: an island this player has
+            // not been round, or is not standing on.
+            None => (None, false),
+        }
+    };
+
+    if let Some(claim) = told {
+        let players = shared.players.lock().expect("no poisoned lock");
+        if granted {
+            (shared.report)(&format!("{id} claimed an island"));
+            tell_the_cairn(&players, island, &claim, id);
+        } else {
+            tell_the_asker(&players, id, island, &claim);
+        }
+    }
+    // The shore was walked: everything that gets this far is an afoot asker
+    // after an island nobody held.
+    true
+}
+
+/// Christens a claimed island, if the asker is the one holding the claim.
+///
+/// A name is the world's now rather than one client's notebook: it rides with
+/// the cairn, so everybody who passes reads the same word. Which is why it is
+/// earned the way the island was — only the claimant may write it, and a name
+/// the wire will not carry (see [`protocol::island_name`]) is a refusal rather
+/// than an erasure, leaving the cairn saying whatever it said before.
+///
+/// An island nobody has claimed cannot be named at all, and there is no state
+/// to answer with, so that ask is met with silence.
+///
+/// Says whether the christening was granted, which is the half that reaches
+/// anybody but the asker and so the half worth pacing — see the read loop.
+fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) -> bool {
+    let Some(token) = ({
+        let players = shared.players.lock().expect("no poisoned lock");
+        players.get(&id).map(|player| player.token)
+    }) else {
+        return false;
+    };
+
+    let (told, granted) = {
+        let mut claims = shared.claims.lock().expect("no poisoned lock");
+        let Some(claim) = claims.get_mut(&island) else {
+            return false;
+        };
+        match protocol::island_name(name) {
+            // The name it already had is not news, so nobody nearby is told of
+            // it: this is a client's word, and a client repeating itself should
+            // not read as the cairn changing. It suppresses a repetition and
+            // nothing more — a client alternating two good names passes it
+            // every time — so what actually holds the rate down is
+            // [`CAIRN_PACE`], applied where the ask is read.
+            Some(written) if claim.by == token && written != claim.name => {
+                claim.name = written;
+                (claim.clone(), true)
+            }
+            // Somebody else's island, or nothing anybody could call a name:
+            // the cairn goes back to the asker exactly as it stands.
+            _ => (claim.clone(), false),
+        }
+    };
+
+    let players = shared.players.lock().expect("no poisoned lock");
+    if granted {
+        tell_the_cairn(&players, island, &told, id);
+    } else {
+        tell_the_asker(&players, id, island, &told);
+    }
+    granted
+}
+
+/// Tells a joining player the cairns standing near where they have been put
+/// down — the same proximity the raising of one is told by.
+fn tell_the_cairns_about(shared: &Shared, id: PlayerId, at: Vec2) {
+    let near: Vec<(IVec2, Claim)> = {
+        let claims = shared.claims.lock().expect("no poisoned lock");
+        claims
+            .iter()
+            .filter(|(_, claim)| claim.at.distance(at) <= CAIRN_SIGHT)
+            .map(|(island, claim)| (*island, claim.clone()))
+            .collect()
+    };
+    if near.is_empty() {
+        return;
+    }
+    let players = shared.players.lock().expect("no poisoned lock");
+    let Some(player) = players.get(&id) else {
+        return;
+    };
+    for (island, claim) in near {
+        post(player, cairn_told_to(player, island, &claim));
+    }
+}
+
+/// Answers one asker with a cairn, if they are near enough to be looking at
+/// it — what a refusal that has state to show comes down to.
+///
+/// The gate is [`CAIRN_SIGHT`]'s own rule kept honestly. A refusal carrying the
+/// cairn is how a picture corrects itself for somebody standing there and
+/// finding it already taken; ungated it would be a client with an island's
+/// identity in hand reading off who holds it, what they called it and where
+/// their cairn stands, from anywhere in the world. Sailing round a coast is
+/// what earns an identity, so the leak is small — and who holds what is
+/// something a player is meant to find out by going there.
+fn tell_the_asker(
+    players: &HashMap<PlayerId, Player>,
+    asker: PlayerId,
+    island: IVec2,
+    claim: &Claim,
+) {
+    if let Some(player) = players.get(&asker) {
+        if player.position.distance(claim.at) <= CAIRN_SIGHT {
+            post(player, cairn_told_to(player, island, claim));
+        }
+    }
+}
+
+/// Tells everyone near enough to see a cairn about it, and the `asker`
+/// whether they are near it or not — a player who names an island from the
+/// other side of the world still hears what became of their asking.
+fn tell_the_cairn(
+    players: &HashMap<PlayerId, Player>,
+    island: IVec2,
+    claim: &Claim,
+    asker: PlayerId,
+) {
+    for (id, player) in players {
+        if player.position.distance(claim.at) <= CAIRN_SIGHT || *id == asker {
+            post(player, cairn_told_to(player, island, claim));
+        }
+    }
+}
+
+/// One cairn as one player hears it.
+///
+/// The message is built per hearer because `yours` is a fact about the hearer:
+/// what a client needs to know is which cairns are its own player's doing, and
+/// what it must never be sent is the [`Token`] that actually settles it —
+/// tokens are credentials and go nowhere but to the client holding them.
+fn cairn_told_to(player: &Player, island: IVec2, claim: &Claim) -> ToClient {
+    ToClient::Cairn {
+        island,
+        at: claim.at,
+        name: claim.name.clone(),
+        yours: player.token == claim.by,
+    }
+}
+
+/// One chunk of the world, surveyed exactly as a client would survey it.
+///
+/// Through [`Archipelago::chunk_payload`] and back out of it — quantised
+/// heights and all — rather than off the generator's own `f32`s, and that is
+/// the whole point of this function existing. A client surveys what it was
+/// *sent*, and a waterline traced across heights the wire has rounded is not
+/// quite the waterline traced across the heights before it: a corner a
+/// centimetre either side of the sea puts the crossing somewhere else, and
+/// two ends that disagree about a coastline disagree about whether it closes.
+/// So the server asks the same question of the same numbers.
+///
+/// Open water carries no ground, and comes back surveyed and blank — which is
+/// exactly what a client makes of an ocean answer, and is worth recording:
+/// water somebody has crossed is not water nobody has.
+fn survey_chunk(world: &Archipelago, chunk: IVec2) -> Soundings {
+    match world.chunk_payload(chunk) {
+        None => Soundings::default(),
+        Some(payload) => {
+            let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
+            protocol::survey::survey(&heights)
+        }
+    }
+}
+
+/// Cuts surveyed chunks into the messages they travel in: filled to
+/// [`SURVEY_BATCH_BYTES`], and never splitting one chunk across two — which
+/// is what lets a frame's ceiling be worked out at all. See
+/// [`ToClient::Surveyed`].
+///
+/// The one place the wire's budget is spent, on purpose. Everything with
+/// survey to hand over comes through here, so what a message costs is one
+/// arithmetic rather than a rule and somebody's recollection of it.
+fn survey_batches(found: Vec<(IVec2, Soundings)>) -> Vec<Vec<(IVec2, Soundings)>> {
+    let mut batches: Vec<Vec<(IVec2, Soundings)>> = Vec::new();
+    let mut batch: Vec<(IVec2, Soundings)> = Vec::new();
+    let mut spent = 0;
+    for (chunk, ink) in found {
+        let costs = protocol::surveyed_bytes(&ink);
+        // A chunk whose own ink overruns the whole budget still travels
+        // whole, alone in a message of its own — which is the case the
+        // frame's ceiling is worked out from, rather than this one.
+        if spent + costs > SURVEY_BATCH_BYTES && !batch.is_empty() {
+            batches.push(std::mem::take(&mut batch));
+            spent = 0;
+        }
+        spent += costs;
+        batch.push((chunk, ink));
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
+
+/// Tells one player what has been surveyed for them, a message at a time.
+fn post_the_survey(
+    players: &HashMap<PlayerId, Player>,
+    id: PlayerId,
+    found: Vec<(IVec2, Soundings)>,
+) {
+    let Some(player) = players.get(&id) else {
+        return;
+    };
+    for batch in survey_batches(found) {
+        post(player, ToClient::Surveyed { found: batch });
+    }
+}
+
+/// What the survey knows of one player between their reports: where it last
+/// got to, and how much way it will follow for them now.
+///
+/// A connection thread's own local, not a field on the roster. A player's
+/// reports are read by exactly one thread, and this is about the rate that
+/// thread is being asked to work at — nothing shared has any business with
+/// it, and on the roster it would only be another thing taken under that
+/// lock.
+struct Wake {
+    /// Where the survey last got to. Not quite where the player is, in the
+    /// one case that matters: a report too far ahead to be believed is
+    /// followed as far as the allowance carries it and no further, and this
+    /// is where that left off. For anyone actually sailing the two are the
+    /// same point, every time.
+    at: Vec2,
+    /// When the allowance was last worked out.
+    since: Instant,
+    /// Metres of way in hand: filling at [`PLAUSIBLE_SPEED`], never past
+    /// [`SURVEY_SWEEP`].
+    allowance: f32,
+}
+
+impl Wake {
+    /// A wake opened where a player has been put down, with a full
+    /// allowance. Arriving is not a voyage anybody has to earn: the ground
+    /// around where the world sets somebody down is theirs on the spot, and
+    /// there is no earlier report for the pace to be measured from anyway.
+    fn opening(at: Vec2) -> Self {
+        Self {
+            at,
+            since: Instant::now(),
+            allowance: SURVEY_SWEEP,
+        }
+    }
+
+    /// Takes a report and says what way the survey follows for it: from where
+    /// it last got to, out to as far along as the allowance reaches.
+    ///
+    /// A report inside the allowance is believed whole, which is every report
+    /// any real hull ever makes — a boat at ten metres a second, reporting
+    /// ten times a second, spends a metre of an allowance filling twenty-five
+    /// times as fast. One beyond it is neither called a lie nor thrown away:
+    /// the survey simply follows at the speed it believes in, and the rest of
+    /// the way is there to be had once the allowance has filled again. So a
+    /// client hopping about the world orders ground worked out at the pace of
+    /// somebody sailing, whatever pace it sends at.
+    fn follows(&mut self, now: Vec2) -> (Vec2, Vec2) {
+        let filled = self.since.elapsed().as_secs_f32() * PLAUSIBLE_SPEED;
+        self.since = Instant::now();
+        self.allowance = (self.allowance + filled).min(SURVEY_SWEEP);
+
+        let (from, run) = (self.at, self.at.distance(now));
+        let reached = if run <= self.allowance {
+            now
+        } else {
+            from + (now - from) * (self.allowance / run)
+        };
+        // Charged the whole run and not the part of it that was followed,
+        // and floored at nothing: a jump costs everything in hand, or the far
+        // end of one could be bought over and over for the price of the near
+        // end.
+        self.allowance = (self.allowance - run).max(0.0);
+        self.at = reached;
+        (from, reached)
+    }
+}
+
+/// The corners of the box of chunks the sight test has to be asked about for
+/// a way from `from` to `to` — what keeps that test a bounded number of
+/// questions rather than one about the whole world.
+///
+/// It has to *contain* everything the test accepts, and containing it is not
+/// the same as reaching the same distance. A chunk is measured by its square,
+/// so the box starts a chunk further out than the point it is worked from:
+/// where the reach lands exactly on a boundary, the chunk before it is still
+/// in sight by its own far corner. The high side wants no such slack, a
+/// chunk's own corner being the near one there. A box that only nearly
+/// contains the rule loses a chunk at an edge — silently, and only sometimes,
+/// which is the worst way for a survey to have a hole in it.
+fn scanned_for_sight(from: Vec2, to: Vec2) -> (IVec2, IVec2) {
+    (
+        chunk_at(from.min(to) - SIGHT_RADIUS) - IVec2::ONE,
+        chunk_at(from.max(to) + SIGHT_RADIUS),
+    )
+}
+
+/// Surveys whatever has come within sight on the way this report makes, adds
+/// it to this player's survey and tells them what was found there.
+///
+/// The way rather than its end, so that a hull between two position reports
+/// cannot slip past a coast unrecorded — [`protocol::survey::in_sight_along`]
+/// is the rule, and [`Wake`] is how much of a report is believed.
+///
+/// The ground is worked out with no lock held, because working it out may
+/// mean generating an island — tens to hundreds of milliseconds, on this
+/// connection's own thread and outside the worker pool. For a client that
+/// draws the world it never comes to that: a chunk within [`SIGHT_RADIUS`] is
+/// one the client streamed the ground of long ago, so the island is in the
+/// world's cache and this is arithmetic over a grid. That is a fact about a
+/// cooperative client, though, and not a bound — a client that asks for no
+/// ground at all and only reports positions would be ordering islands grown
+/// from nothing. What bounds it is the [`Wake`]'s pace, which is about the
+/// world rather than about how fast a socket can be fed.
+///
+/// The locks are taken around all that rather than across it, and the
+/// survey's own is taken with the roster's let go — see [`Surveyed`].
+fn survey_the_way(shared: &Shared, id: PlayerId, wake: &mut Wake, now: Vec2) {
+    let (from, to) = wake.follows(now);
+    let (least, most) = scanned_for_sight(from, to);
+
+    let surveyed = {
+        let players = shared.players.lock().expect("no poisoned lock");
+        let Some(player) = players.get(&id) else {
+            return;
+        };
+        player.surveyed.clone()
+    };
+    let fresh: Vec<IVec2> = {
+        let known = surveyed.lock().expect("no poisoned lock");
+        (least.y..=most.y)
+            .flat_map(|z| (least.x..=most.x).map(move |x| IVec2::new(x, z)))
+            .filter(|chunk| {
+                // Held to the same reach the ground is, and that is not
+                // tidiness: the world's own file refuses a surveyed chunk
+                // that fails this, so a survey allowed to hold one would be
+                // a world that saved and then could not be opened again. A
+                // legal report from just inside the edge has chunks in sight
+                // whose corners are past it, which is how that happens
+                // honestly.
+                in_the_world(*chunk) && !known.surveyed(*chunk) && in_sight_along(*chunk, from, to)
+            })
+            .collect()
+    };
+    if fresh.is_empty() {
+        return;
+    }
+
+    let found: Vec<(IVec2, Soundings)> = fresh
+        .into_iter()
+        .map(|chunk| (chunk, survey_chunk(&shared.world, chunk)))
+        .collect();
+
+    {
+        // Kept as well as sent: what closes a coastline is the world's own
+        // answer, and a claim is settled off it — see [`Surveyed`].
+        let mut surveyed = surveyed.lock().expect("no poisoned lock");
+        for (chunk, ink) in &found {
+            surveyed.record(*chunk, ink.clone());
+        }
+    }
+    let players = shared.players.lock().expect("no poisoned lock");
+    post_the_survey(&players, id, found);
+}
+
+/// Tells a returning player back the survey the world remembers them having
+/// taken, worked out afresh from the ground.
+///
+/// On a thread of its own, and that is not tidiness. The chunks are wherever
+/// this player has ever been, which is nowhere near where they are standing
+/// now, so the islands under them are not in the world's cache and every one
+/// has to be grown again — seconds of work for a well-sailed world. Done on
+/// the connection's own thread it would be seconds in which that client's
+/// requests for the ground under its feet went unread, at exactly the moment
+/// it has nothing to draw. So the ink arrives a batch at a time while the
+/// world opens around them, which is also how it reads: the chart fills in.
+///
+/// The one number here worth revisiting first is how much is re-derived. An
+/// hour's sailing is on the order of a thousand chunks and a few hundred
+/// kilobytes on the wire, which at this scale is fine; a world somebody has
+/// lived in for a season would want the ink kept rather than re-earned.
+fn tell_the_survey_so_far(shared: &Arc<Shared>, id: PlayerId) {
+    let surveyed = {
+        let players = shared.players.lock().expect("no poisoned lock");
+        let Some(player) = players.get(&id) else {
+            return;
+        };
+        player.surveyed.clone()
+    };
+    let known: Vec<IVec2> = {
+        let mut known: Vec<IVec2> = surveyed
+            .lock()
+            .expect("no poisoned lock")
+            .charted()
+            .collect();
+        // Sorted so that two runs of one world hand the same chart back in
+        // the same order — a hash set's order is nobody's business.
+        known.sort_by_key(|chunk| (chunk.x, chunk.y));
+        known
+    };
+    if known.is_empty() {
+        return;
+    }
+
+    let shared = shared.clone();
+    thread::spawn(move || {
+        for slab in known.chunks(SURVEY_SLAB) {
+            // Two ways there is nobody left to tell, and both have to end
+            // this loop rather than only slow it: a world that has ended, and
+            // a player who has hung up. Neither is noticed by posting — that
+            // quietly does nothing — while the growing of islands carries on
+            // regardless, so a client reconnecting in a loop would stack a
+            // thread of these per attempt, each holding the world open and
+            // each filling its cache with the coast of everywhere that
+            // player had ever been.
+            if shared.stopping.load(Ordering::Relaxed) {
+                return;
+            }
+            if !shared
+                .players
+                .lock()
+                .expect("no poisoned lock")
+                .contains_key(&id)
+            {
+                return;
+            }
+            let found: Vec<(IVec2, Soundings)> = slab
+                .iter()
+                .map(|&chunk| (chunk, survey_chunk(&shared.world, chunk)))
+                .collect();
+            {
+                // Filled in behind the blank the door left — see the survey
+                // this player was welcomed with. Until a slab lands here the
+                // world knows this player has been to those chunks but not
+                // what is on them, which is what a claim is settled by.
+                let mut surveyed = surveyed.lock().expect("no poisoned lock");
+                for (chunk, ink) in &found {
+                    surveyed.record(*chunk, ink.clone());
+                }
+            }
+            let players = shared.players.lock().expect("no poisoned lock");
+            post_the_survey(&players, id, found);
+        }
+    });
+}
+
 /// The yaw that points a hull standing at `at` toward `toward` — the
 /// client's own drawing convention, forward being -Z turned by the yaw
 /// about the vertical. Zero when the two coincide, which names no direction
@@ -1580,6 +2514,21 @@ fn aimed(at: Vec2, toward: Vec2) -> f32 {
         return 0.0;
     }
     f32::atan2(-along.x, -along.y)
+}
+
+/// Waits out whatever is left of `pace` since something last paid it.
+///
+/// How the paced asks are rationed — see [`CAIRN_PACE`]. A rate is held down
+/// here by making the asker wait rather than by throwing the ask away: a
+/// dropped ask is indistinguishable, from the far end of a socket, from one
+/// that was refused or one that was lost, and a client cannot be expected to
+/// tell those apart. Slowing the connection that asked is honest about what is
+/// happening and costs nobody else anything, this being that connection's own
+/// thread and no lock held while it sleeps.
+fn wait_out(since: Option<Instant>, pace: Duration) {
+    if let Some(left) = since.and_then(|paid| pace.checked_sub(paid.elapsed())) {
+        thread::sleep(left);
+    }
 }
 
 /// Whether a reported position is one a player could actually be standing at:
@@ -1597,8 +2546,22 @@ pub(crate) fn reachable(position: Vec2) -> bool {
 /// kilometres past where the world resolves is broken or hostile, and
 /// answering would put a worker to work generating an island out of
 /// coordinates that no longer have a metre between them.
-fn in_the_world(chunk: IVec2) -> bool {
+pub(crate) fn in_the_world(chunk: IVec2) -> bool {
     reachable(chunk.as_vec2() * protocol::ground::CHUNK_METRES)
+}
+
+/// Whether an island's identity is one the world can keep: the [`in_the_world`]
+/// test, asked of the chunk the identity's lattice point falls in — see
+/// [`protocol::survey::chunk_of`].
+///
+/// Both ends of the world file ask exactly this, and that is the point of it
+/// being one function. Nothing that fails it is granted or written down (see
+/// [`settle_a_claim`] and [`Shared::record`]), and nothing that fails it is
+/// read back (see `keeper::parse`) — because a claim the reader refuses is not
+/// a claim lost but a *world* lost: the file will not parse, the opening falls
+/// back to the copy beside it, and the next save takes that too.
+pub(crate) fn island_in_the_world(island: IVec2) -> bool {
+    in_the_world(protocol::survey::chunk_of(island))
 }
 
 /// Puts a message in a player's outbox, or hangs up on them.
@@ -1633,5 +2596,153 @@ fn broadcast(players: &HashMap<PlayerId, Player>, from: PlayerId, message: ToCli
             // is being cloned here is still a position and an id.
             post(player, message.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::survey::{Coast, Mark};
+
+    /// One chunk's ink of a chosen size: a coast of `marks` points, which is
+    /// what a torn shore actually costs on the wire.
+    fn ink(marks: usize) -> Soundings {
+        Soundings {
+            coast: vec![Coast::new(vec![Mark::unpack([1, 2]); marks], false)],
+            shoal: Vec::new(),
+        }
+    }
+
+    /// Whether a batch is one the wire will actually carry — the ceiling
+    /// being protocol's own, and a message that outgrew it failing to write
+    /// rather than arriving as garbage.
+    fn goes(batch: &[(IVec2, Soundings)]) -> bool {
+        (ToClient::Surveyed {
+            found: batch.to_vec(),
+        })
+        .write(&mut Vec::new())
+        .is_ok()
+    }
+
+    #[test]
+    fn a_survey_too_big_for_one_message_is_cut_into_several() {
+        // The budget doing its job. A voyage's worth of ink is more than one
+        // frame holds, so it has to come apart somewhere, and every piece
+        // has to be a piece the wire will carry.
+        let found: Vec<(IVec2, Soundings)> =
+            (0..32).map(|x| (IVec2::new(x, 0), ink(500))).collect();
+        let batches = survey_batches(found.clone());
+        assert!(
+            batches.len() > 1,
+            "{} chunks and {} bytes went in one message",
+            found.len(),
+            found
+                .iter()
+                .map(|(_, ink)| protocol::surveyed_bytes(ink))
+                .sum::<usize>()
+        );
+        for batch in &batches {
+            assert!(goes(batch), "a batch of {} would not send", batch.len());
+        }
+
+        // And nothing was lost or reordered on the way through: the batches
+        // read end to end are the chunks that went in.
+        let back: Vec<IVec2> = batches.iter().flatten().map(|(chunk, _)| *chunk).collect();
+        assert_eq!(
+            back,
+            found.iter().map(|(chunk, _)| *chunk).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_chunk_too_torn_for_the_budget_still_travels_whole() {
+        // The case the frame's ceiling is worked out from: a coast crossing
+        // every facet of one chunk costs more than a whole batch, and it
+        // must go alone rather than be cut in half — half a chunk's ink is
+        // not soundings anybody can read.
+        let alone = ink(6_000);
+        assert!(protocol::surveyed_bytes(&alone) > SURVEY_BATCH_BYTES);
+        let batches = survey_batches(vec![
+            (IVec2::ZERO, ink(4)),
+            (IVec2::new(1, 0), alone),
+            (IVec2::new(2, 0), ink(4)),
+        ]);
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [1, 1, 1]);
+        for batch in &batches {
+            assert!(goes(batch));
+        }
+    }
+
+    #[test]
+    fn the_box_holds_everything_the_sight_test_accepts() {
+        // The scan is a box and the rule is a distance, and the box has to
+        // hold the rule whole. The case worth naming is the second way here:
+        // the reach landing exactly on a chunk boundary, where the chunk
+        // before it is still in sight by its far corner and a box measured
+        // to the same distance leaves it out.
+        let ways = [
+            (Vec2::ZERO, Vec2::ZERO),
+            (Vec2::new(SIGHT_RADIUS, 64.0), Vec2::new(SIGHT_RADIUS, 64.0)),
+            (
+                Vec2::new(SIGHT_RADIUS, 64.0),
+                Vec2::new(SIGHT_RADIUS + 3.0 * protocol::ground::CHUNK_METRES, 64.0),
+            ),
+            (Vec2::new(-77.0, 412.0), Vec2::new(913.0, -1_200.0)),
+        ];
+        for (from, to) in ways {
+            let (least, most) = scanned_for_sight(from, to);
+            for z in least.y - 4..=most.y + 4 {
+                for x in least.x - 4..=most.x + 4 {
+                    let chunk = IVec2::new(x, z);
+                    assert!(
+                        !in_sight_along(chunk, from, to)
+                            || (chunk.cmpge(least).all() && chunk.cmple(most).all()),
+                        "{chunk} is in sight of the way from {from} to {to}, \
+                         and outside the box {least}..{most} that is scanned for it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_report_a_hull_could_have_made_is_followed_whole() {
+        // Everything a boat actually does: a wake opens where the world put
+        // somebody down, and the way to their next report is followed end to
+        // end, allowance or no allowance.
+        let mut wake = Wake::opening(Vec2::ZERO);
+        let along = Vec2::new(120.0, 0.0);
+        assert_eq!(wake.follows(along), (Vec2::ZERO, along));
+        let further = along + Vec2::new(0.0, 90.0);
+        assert_eq!(wake.follows(further), (along, further));
+
+        // And standing still costs nothing, so a player who stops does not
+        // spend their way towards being disbelieved.
+        assert_eq!(wake.follows(further), (further, further));
+    }
+
+    #[test]
+    fn a_jump_no_hull_could_make_is_followed_only_so_far() {
+        // Two kilometres in the time between two reports is not a voyage,
+        // and inking the whole of it would be a hundred chunks of ground
+        // ordered for twelve bytes. It is followed as far as anybody could
+        // have got, and the rest waits.
+        let mut wake = Wake::opening(Vec2::ZERO);
+        let far = Vec2::new(100_000.0, 0.0);
+        let (from, reached) = wake.follows(far);
+        assert_eq!(from, Vec2::ZERO);
+        assert!(
+            (reached.x - SURVEY_SWEEP).abs() < 1.0,
+            "the survey followed a jump to {reached}"
+        );
+
+        // And the next one straight after it goes nowhere at all: the jump
+        // cost everything that was in hand, so what a client can order is
+        // paced by the clock rather than by how fast it can write.
+        let (_, again) = wake.follows(far + Vec2::new(100_000.0, 0.0));
+        assert!(
+            again.distance(reached) < SURVEY_SWEEP / 4.0,
+            "a second jump ran on to {again} from {reached}"
+        );
     }
 }

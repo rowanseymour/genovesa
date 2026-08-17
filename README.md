@@ -161,7 +161,16 @@ that world, and taken up again on returning. What it is never written into is
 the server — having seen a stretch of coast is a fact about one player's
 client, and stays one.
 
-Islands have no names yet, so nothing on the sheet is lettered but its scale.
+An island whose shore has been run right around can be named: click it on the
+sheet and the keyboard becomes the pen, because a chart is written on rather
+than filled in. The name is the sheet's own for now — nobody else's chart shows
+it — and what would make it public is claiming the island, which is the
+server's to grant. That is why what a *survey* is — how ground becomes a
+coastline, when a coastline closes, and what makes one an island — lives in
+[`crates/protocol/src/survey.rs`](crates/protocol/src/survey.rs) rather than in
+the client: a claim can only be settled by a server that works the coast out
+the same way, from the same chunks, without taking the claimant's word for any
+of it.
 
 ## Playing together
 
