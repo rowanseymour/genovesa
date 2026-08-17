@@ -93,6 +93,21 @@ pub fn token_for(world: WorldId) -> Option<Token> {
     Some(Token(u64::from_str_radix(token, 16).ok()?))
 }
 
+/// Throws this machine's book for `world` away, for a world being discarded:
+/// the token is the player's name in a place, and a place that no longer
+/// exists has nobody to be named to. Quiet about a book that was never
+/// written — a world sailed on another machine and only listed here has none.
+pub fn forget(world: WorldId) {
+    let Some(path) = place_for(world) else {
+        return;
+    };
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => warn!("the logbook for a discarded world could not be thrown away: {error}"),
+    }
+}
+
 /// Where `world`'s logbook lives on this machine.
 fn place_for(world: WorldId) -> Option<PathBuf> {
     Some(
@@ -281,6 +296,26 @@ mod tests {
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");
         }
+    }
+
+    #[test]
+    fn a_forgotten_world_leaves_no_papers() {
+        // What a discarded world costs on this side: the token is the player's
+        // name in a place, and the place is gone.
+        crate::testing::quarantine_data_dir();
+        let world = WorldId(0x0BAD_0F00_D000_0001);
+        let book = Logbook {
+            path: place_for(world),
+            token: Token(7),
+        };
+        write_down(&book);
+        let path = place_for(world).expect("a place to keep it");
+        assert!(path.exists(), "the book was never written");
+
+        forget(world);
+        assert!(!path.exists(), "the book outlived the world");
+        // And a world nobody kept a book for is forgotten quietly.
+        forget(WorldId(0x0BAD_0F00_D000_0002));
     }
 
     #[test]

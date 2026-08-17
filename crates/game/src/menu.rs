@@ -141,9 +141,14 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(Helm::Controls), spawn_paused_settings)
             // Cleared before the screen is built, so that a screen only ever
             // shows what this visit to it has had to say.
+            //
+            // The set-sail screen is not built here, unlike the two below it:
+            // entering it only reads the worlds directory, and `show_set_sail`
+            // builds the screen out of what was read — and again every time it
+            // changes, which is how a row becomes a question.
             .add_systems(
                 OnEnter(AppState::SetSail),
-                (clear_status, spawn_set_sail).chain(),
+                (clear_status, read_the_harbour).chain(),
             )
             .add_systems(
                 OnEnter(AppState::NewWorld),
@@ -172,7 +177,12 @@ impl Plugin for MenuPlugin {
                     highlight_buttons,
                     settle_dialing.run_if(resource_exists::<Dialing>),
                     main_menu_actions.run_if(in_state(AppState::MainMenu)),
-                    (set_sail_actions, refresh_set_sail).run_if(in_state(AppState::SetSail)),
+                    // Chained so that a press and the screen it changes land
+                    // in the same frame: a row asked about must not be a row
+                    // that spends a frame looking as though nothing happened.
+                    (set_sail_actions, show_set_sail)
+                        .chain()
+                        .run_if(in_state(AppState::SetSail)),
                     (dialog_actions, open_world, refresh_dialog)
                         .run_if(in_state(AppState::NewWorld)),
                     // `type_seed` carries no run condition of its own, for
@@ -274,10 +284,28 @@ struct Status(String);
 /// directory each time the screen opens, and whether the one chosen will be
 /// shared. The rows hold indexes into this list — see
 /// [`MenuButton::OpenKept`].
+///
+/// The screen is built from this and nothing else, and built again whenever it
+/// changes — see [`show_set_sail`] — which is what lets a row stop being a
+/// world and become a question.
 #[derive(Resource, Default)]
 struct Harbour {
     worlds: Vec<server::KeptWorld>,
     share: bool,
+    /// The row that has been asked about, if any: its Discard has been pressed
+    /// and the row is now the question, waiting to be answered. One at a time,
+    /// because "yes" has to mean one world.
+    asked: Option<usize>,
+}
+
+impl Harbour {
+    /// Whether this machine is keeping as many worlds as it will — which is
+    /// what closes the way to a new one. `>=` rather than `==`: a directory
+    /// somebody has copied worlds into can hold more than the cap, and it is
+    /// full then too.
+    fn is_full(&self) -> bool {
+        self.worlds.len() >= MOST_KEPT_WORLDS
+    }
 }
 
 /// The action whose new key the controls screen is waiting for, if any. Only
@@ -287,9 +315,10 @@ struct Rebinding(Option<Action>);
 
 #[derive(Component, Clone, Copy, PartialEq)]
 enum MenuButton {
-    /// Opens the kept-worlds screen. Only offered once there is a world to
-    /// return to.
+    /// Opens the kept-worlds screen, which is the only way to a world of one's
+    /// own — see [`spawn_main_menu`].
     SetSail,
+    /// Opens the new-world dialog, from the set-sail screen.
     NewWorld,
     JoinWorld,
     Settings,
@@ -300,6 +329,14 @@ enum MenuButton {
     Start,
     /// Reopens the kept world at this row of the [`Harbour`].
     OpenKept(usize),
+    /// Asks about this row: whether the world on it is to be thrown away. The
+    /// row becomes the question rather than growing a second one beside it.
+    AskDiscard(usize),
+    /// Answers it: this world goes, for good.
+    Discard(usize),
+    /// And answers it the other way. Leaving the screen answers it too — a
+    /// question walked away from is not a yes.
+    KeepIt,
     /// Turns sharing the kept world about to be reopened on and off.
     ToggleKeptShare,
     /// Dials the address on the join screen.
@@ -323,11 +360,6 @@ struct SeedText;
 #[derive(Component)]
 struct ShareText;
 
-/// The set-sail screen's own sharing label — a component of its own so the
-/// two screens' refreshes cannot write each other's switches.
-#[derive(Component)]
-struct KeptShareText;
-
 /// Marks the address readout on the join screen.
 #[derive(Component)]
 struct AddressText;
@@ -345,14 +377,14 @@ struct KeyText(Action);
 // Main menu
 // ---------------------------------------------------------------------------
 
+/// The front screen.
+///
+/// One way to a world of one's own, not two: "Set Sail" and "New World" both
+/// read as *start playing*, and a player made to tell them apart before they
+/// have seen either is being asked about the machinery. So setting sail is the
+/// whole of it — the worlds this machine keeps and the way to a fresh one are
+/// one screen, because they answer one question.
 fn spawn_main_menu(mut commands: Commands) {
-    // Whether there is anywhere to set sail *to*: a machine with no kept
-    // worlds gets the menu it always had, and the button appears the first
-    // time there is a world to return to. Asked of the directory on each
-    // opening of this screen, which is exactly as often as the answer can
-    // have changed.
-    let kept_any = net::worlds_dir().is_some_and(|dir| !server::kept_worlds(&dir).is_empty());
-
     // The whole menu goes inside the cartouche, which is where an engraved
     // chart carries its title and everything said about it.
     let ink = ON_PAPER;
@@ -370,10 +402,7 @@ fn spawn_main_menu(mut commands: Commands) {
                     spawn_title(panel, &ink);
                     spawn_subtitle(panel, &ink);
 
-                    if kept_any {
-                        spawn_button(panel, &ink, MenuButton::SetSail, "Set Sail", 240.0);
-                    }
-                    spawn_button(panel, &ink, MenuButton::NewWorld, "New World", 240.0);
+                    spawn_button(panel, &ink, MenuButton::SetSail, "Set Sail", 240.0);
                     spawn_button(panel, &ink, MenuButton::JoinWorld, "Join World", 240.0);
                     spawn_button(panel, &ink, MenuButton::Settings, "Controls", 240.0);
                     spawn_button(panel, &ink, MenuButton::Exit, "Exit", 240.0);
@@ -479,7 +508,6 @@ fn main_menu_actions(
         }
         match button {
             MenuButton::SetSail => next.set(AppState::SetSail),
-            MenuButton::NewWorld => next.set(AppState::NewWorld),
             MenuButton::JoinWorld => next.set(AppState::JoinWorld),
             MenuButton::Settings => next.set(AppState::Settings),
             MenuButton::Exit => {
@@ -494,23 +522,88 @@ fn main_menu_actions(
 // Set sail: the kept worlds
 // ---------------------------------------------------------------------------
 
-/// Rows the screen offers before it starts summarising. Eight is more worlds
-/// than most machines will ever keep; the summary line below the rows is
-/// what says the rest are not lost, only older.
-const MOST_KEPT_ROWS: usize = 8;
+/// How many worlds this machine will keep at once.
+///
+/// A real limit rather than a limit on the rows: the screen used to offer the
+/// newest eight and summarise the rest as older, which meant a world that
+/// could be neither returned to nor thrown away — a dead end is worse than a
+/// limit. So every kept world is on the screen, and with five of them the way
+/// to a sixth is closed until one is discarded, which is one press away on the
+/// same screen.
+///
+/// Five because a world is a place to live in rather than a slot to fill, and
+/// somebody keeping more than five is really keeping a list they no longer
+/// read. The cap is this screen's, not the server's: a dedicated host may keep
+/// a directory of as many worlds as it likes, and a directory that already
+/// holds more than five is shown whole here rather than truncated.
+const MOST_KEPT_WORLDS: usize = 5;
 
-fn spawn_set_sail(mut commands: Commands, mut harbour: ResMut<Harbour>) {
-    // Read fresh on every visit to the screen: worlds are files, and files
-    // can have been copied in, deleted, or sailed from another install since
-    // the last look.
+/// A kept world's row: the world's own button, the press beside it, and the
+/// gap between them.
+const KEPT_WIDTH: f32 = 340.0;
+const DISCARD_WIDTH: f32 = 118.0;
+const ANSWER_GAP: f32 = 6.0;
+
+/// Each of the two answers that replace the Discard button when a row is asked
+/// about. Half of what they stand in for, less the gap and the pixel a border
+/// takes on either side of each of them, so the pair ends exactly where the one
+/// button ended.
+const ANSWER_WIDTH: f32 = (DISCARD_WIDTH - ANSWER_GAP - 2.0) / 2.0;
+
+/// How wide a row is, whichever face it is wearing.
+///
+/// Set on the row rather than left to the sum of what is in it, so that a row
+/// becoming a question cannot make the panel a different width — and so that
+/// the two answers land where the button they replaced was, whatever the
+/// arithmetic of borders comes to. Two pixels over the widths inside it, one
+/// for each button's border.
+const KEPT_ROW_WIDTH: f32 = KEPT_WIDTH + ANSWER_GAP + DISCARD_WIDTH + 4.0;
+
+/// Marks the set-sail screen, so it can be taken down and built again — which
+/// is how a row becomes a question. See [`show_set_sail`].
+#[derive(Component)]
+struct SetSailScreen;
+
+/// Reads the harbour off the worlds directory.
+///
+/// Fresh on every visit to the screen: worlds are files, and files can have
+/// been copied in, deleted, or sailed from another install since the last
+/// look. Any question left standing from last time goes with it — see
+/// [`MenuButton::KeepIt`].
+fn read_the_harbour(mut harbour: ResMut<Harbour>) {
     harbour.worlds = net::worlds_dir()
         .map(|dir| kept_worlds(&dir))
         .unwrap_or_default();
+    harbour.asked = None;
+}
+
+/// Builds the set-sail screen, and builds it again whenever the harbour
+/// changes.
+///
+/// A row asked about is not the same row with a different label on it: the
+/// world's own button is gone, replaced by the question and the two answers,
+/// so that the one press that opens a world cannot be the one press that was
+/// aimed at throwing it away. Rebuilding the list is the honest way to say
+/// that, and the list is a handful of buttons — it costs a frame's worth of
+/// spawning, on a screen where nothing is moving.
+fn show_set_sail(
+    mut commands: Commands,
+    harbour: Res<Harbour>,
+    status: Res<Status>,
+    standing: Query<Entity, With<SetSailScreen>>,
+) {
+    if !harbour.is_changed() && !standing.is_empty() {
+        return;
+    }
+    for screen in &standing {
+        commands.entity(screen).despawn();
+    }
 
     let ink = ON_PAPER;
     commands
         .spawn((
             Name::new("Set sail dialog"),
+            SetSailScreen,
             DespawnOnExit(AppState::SetSail),
             screen(&ink),
         ))
@@ -520,26 +613,29 @@ fn spawn_set_sail(mut commands: Commands, mut harbour: ResMut<Harbour>) {
                 .with_children(|panel| {
                     cartouche_rule(panel, &ink);
                     heading(panel, &ink, "Set Sail", 20.0);
-                    label(panel, &ink, "return to a world this machine keeps");
-
-                    for (row, world) in harbour.worlds.iter().take(MOST_KEPT_ROWS).enumerate() {
-                        spawn_button(
-                            panel,
-                            &ink,
-                            MenuButton::OpenKept(row),
-                            &world_label(world),
-                            360.0,
-                        );
+                    if harbour.worlds.is_empty() {
+                        label(panel, &ink, "no world sailed from here yet");
+                    } else {
+                        label(panel, &ink, "return to a world this machine keeps");
                     }
-                    if harbour.worlds.len() > MOST_KEPT_ROWS {
-                        label(
-                            panel,
-                            &ink,
-                            &format!(
-                                "and {} more, sailed longer ago",
-                                harbour.worlds.len() - MOST_KEPT_ROWS
-                            ),
-                        );
+
+                    // Every one of them, however many there are: a world on
+                    // this machine that the screen does not offer is a world
+                    // nobody can reach — see [`MOST_KEPT_WORLDS`].
+                    for (row, world) in harbour.worlds.iter().enumerate() {
+                        if harbour.asked == Some(row) {
+                            spawn_question(panel, &ink, row);
+                        } else {
+                            spawn_kept_row(panel, &ink, row, world);
+                        }
+                    }
+                    // Said as a state rather than as a count: a directory
+                    // somebody has copied a sixth world into is full too, and
+                    // a line naming five while six are listed would be a line
+                    // arguing with the rows above it. What to do about it is
+                    // the answer to the press — see [`set_sail_actions`].
+                    if harbour.is_full() {
+                        label(panel, &ink, "no room for another world");
                     }
 
                     // The same switch the new-world dialog carries, meaning
@@ -551,13 +647,13 @@ fn spawn_set_sail(mut commands: Commands, mut harbour: ResMut<Harbour>) {
                             ..default()
                         })
                         .with_children(|row| {
-                            row.spawn(button(&ink, MenuButton::ToggleKeptShare, 160.0))
-                                .with_children(|button| {
-                                    button.spawn((
-                                        KeptShareText,
-                                        button_label(&ink, share_label(harbour.share)),
-                                    ));
-                                });
+                            spawn_button(
+                                row,
+                                &ink,
+                                MenuButton::ToggleKeptShare,
+                                share_label(harbour.share),
+                                160.0,
+                            );
                         });
                     label(
                         panel,
@@ -565,10 +661,77 @@ fn spawn_set_sail(mut commands: Commands, mut harbour: ResMut<Harbour>) {
                         &format!("sharing hosts the world on port {DEFAULT_PORT}"),
                     );
 
-                    status_line(panel, &ink);
-                    spawn_button(panel, &ink, MenuButton::Back, "Back", 130.0);
+                    status_line(panel, &ink, &status.0);
+                    panel
+                        .spawn(Node {
+                            column_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(8.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_button(row, &ink, MenuButton::Back, "Back", 130.0);
+                            spawn_button(row, &ink, MenuButton::NewWorld, "New World", 160.0);
+                        });
                 });
         });
+}
+
+/// One kept world: the press that returns to it, and beside it the press that
+/// asks about throwing it away.
+fn spawn_kept_row(parent: &mut ChildSpawnerCommands, ink: &Palette, row: usize, world: &KeptWorld) {
+    parent.spawn(kept_row()).with_children(|line| {
+        spawn_button(
+            line,
+            ink,
+            MenuButton::OpenKept(row),
+            &world_label(world),
+            KEPT_WIDTH,
+        );
+        spawn_button(
+            line,
+            ink,
+            MenuButton::AskDiscard(row),
+            "Discard",
+            DISCARD_WIDTH,
+        );
+    });
+}
+
+/// And the same row once it has been asked about. The question stands where
+/// the world's name stood, which is what says *this* world: there is nothing
+/// else on the row to mean.
+fn spawn_question(parent: &mut ChildSpawnerCommands, ink: &Palette, row: usize) {
+    parent.spawn(kept_row()).with_children(|line| {
+        line.spawn((
+            Text::new("Discard this world for good?"),
+            TextFont {
+                font_size: FontSize::Px(17.0),
+                ..default()
+            },
+            TextColor(ink.text),
+        ));
+        line.spawn(Node {
+            column_gap: Val::Px(ANSWER_GAP),
+            ..default()
+        })
+        .with_children(|answers| {
+            spawn_button(answers, ink, MenuButton::Discard(row), "Yes", ANSWER_WIDTH);
+            spawn_button(answers, ink, MenuButton::KeepIt, "No", ANSWER_WIDTH);
+        });
+    });
+}
+
+/// The line a kept world is laid out along, whichever of its two faces it is
+/// wearing: what it opens with on the left, what it is answered with on the
+/// right, and the row's own width holding the two apart.
+fn kept_row() -> Node {
+    Node {
+        width: Val::Px(KEPT_ROW_WIDTH),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::SpaceBetween,
+        column_gap: Val::Px(ANSWER_GAP),
+        ..default()
+    }
 }
 
 /// What a kept world's row reads. The place's own story where it has one —
@@ -616,7 +779,17 @@ fn set_sail_actions(
         }
         match button {
             MenuButton::Back => next.set(AppState::MainMenu),
+            // The one door the cap closes, and the only place it is enforced:
+            // a world is started from the dialog behind this press, and this
+            // is the press that opens it.
+            MenuButton::NewWorld if harbour.is_full() => {
+                status.0 = "discard a world to make room for another".to_string();
+            }
+            MenuButton::NewWorld => next.set(AppState::NewWorld),
             MenuButton::ToggleKeptShare => harbour.share = !harbour.share,
+            MenuButton::AskDiscard(row) => harbour.asked = Some(*row),
+            MenuButton::KeepIt => harbour.asked = None,
+            MenuButton::Discard(row) => discard_kept(&mut harbour, *row, &mut status),
             // Already ringing: asking for a second world would only fail on
             // the lock the first one is taking.
             MenuButton::OpenKept(_) if dialing.is_some() => {}
@@ -639,13 +812,32 @@ fn set_sail_actions(
     }
 }
 
-/// Keeps the sharing switch's label in step with the setting behind it.
-fn refresh_set_sail(harbour: Res<Harbour>, mut share_text: Query<&mut Text, With<KeptShareText>>) {
-    if !harbour.is_changed() {
+/// Throws a kept world away, having been asked twice.
+///
+/// Both halves of what this machine holds of the place go: the world's own
+/// file, which is its history, and this machine's logbook for it, which is the
+/// player's name in it. Leaving the book would leave papers for somewhere that
+/// no longer exists.
+///
+/// A world being hosted refuses — see [`server::discard`] — and that refusal is
+/// worth reporting rather than swallowing: it is the one case where a player
+/// presses yes and nothing happens.
+fn discard_kept(harbour: &mut Harbour, row: usize, status: &mut Status) {
+    harbour.asked = None;
+    let Some((path, id)) = harbour
+        .worlds
+        .get(row)
+        .map(|world| (world.path.clone(), world.id))
+    else {
         return;
-    }
-    for mut text in &mut share_text {
-        text.0 = share_label(harbour.share).to_string();
+    };
+
+    match server::discard(&path) {
+        Ok(()) => {
+            crate::logbook::forget(id);
+            harbour.worlds.remove(row);
+        }
+        Err(problem) => status.0 = format!("the world could not be discarded: {problem}"),
     }
 }
 
@@ -653,7 +845,11 @@ fn refresh_set_sail(harbour: Res<Harbour>, mut share_text: Query<&mut Text, With
 // New world dialog
 // ---------------------------------------------------------------------------
 
-fn spawn_new_world_dialog(mut commands: Commands, settings: Res<NewWorldSettings>) {
+fn spawn_new_world_dialog(
+    mut commands: Commands,
+    settings: Res<NewWorldSettings>,
+    status: Res<Status>,
+) {
     let ink = ON_PAPER;
     commands
         .spawn((
@@ -714,7 +910,7 @@ fn spawn_new_world_dialog(mut commands: Commands, settings: Res<NewWorldSettings
                         &format!("sharing hosts the world on port {DEFAULT_PORT}"),
                     );
 
-                    status_line(panel, &ink);
+                    status_line(panel, &ink, &status.0);
                     panel
                         .spawn(Node {
                             column_gap: Val::Px(8.0),
@@ -754,7 +950,9 @@ fn dialog_actions(
         match button {
             MenuButton::RandomSeed => settings.seed = random_seed().to_string(),
             MenuButton::ToggleShare => settings.share = !settings.share,
-            MenuButton::Back => next.set(AppState::MainMenu),
+            // One step back is the screen this one opens from, which is where
+            // the worlds are — not the front of the game.
+            MenuButton::Back => next.set(AppState::SetSail),
             _ => {}
         }
     }
@@ -878,7 +1076,7 @@ fn refresh_dialog(
 // Join screen
 // ---------------------------------------------------------------------------
 
-fn spawn_join_dialog(mut commands: Commands, settings: Res<JoinSettings>) {
+fn spawn_join_dialog(mut commands: Commands, settings: Res<JoinSettings>, status: Res<Status>) {
     let ink = ON_PAPER;
     commands
         .spawn((
@@ -910,7 +1108,7 @@ fn spawn_join_dialog(mut commands: Commands, settings: Res<JoinSettings>) {
                         &format!("a bare name joins on port {DEFAULT_PORT}"),
                     );
 
-                    status_line(panel, &ink);
+                    status_line(panel, &ink, &status.0);
                     panel
                         .spawn(Node {
                             column_gap: Val::Px(8.0),
@@ -1543,14 +1741,15 @@ fn heading(parent: &mut ChildSpawnerCommands, ink: &Palette, text: &str, below: 
     ));
 }
 
-/// The line a dialog reports a dial on. Spawned empty and left that way until
-/// there is something to say, but spawned all the same: a line that appeared
-/// only when it had text would push the buttons under it down the moment the
-/// player pressed one.
-fn status_line(parent: &mut ChildSpawnerCommands, ink: &Palette) {
+/// The line a dialog reports a dial on. Spawned even when there is nothing to
+/// say — a line that appeared only when it had text would push the buttons
+/// under it down the moment the player pressed one — and spawned with whatever
+/// there is to say, since the set-sail screen can be built again mid-dial and
+/// must not come back having forgotten it.
+fn status_line(parent: &mut ChildSpawnerCommands, ink: &Palette, saying: &str) {
     parent.spawn((
         StatusText,
-        Text::new(""),
+        Text::new(saying.to_string()),
         TextFont {
             font_size: FontSize::Px(15.0),
             ..default()
@@ -1803,8 +2002,8 @@ mod tests {
             .count()
     }
 
-    /// Everything the pause menu currently says, run together.
-    fn pause_text(app: &mut App) -> String {
+    /// Everything the screen currently says, run together.
+    fn screen_text(app: &mut App) -> String {
         app.world_mut()
             .query::<&Text>()
             .iter(app.world())
@@ -1814,8 +2013,18 @@ mod tests {
     }
 
     #[test]
-    fn new_world_opens_the_setup_dialog() {
+    fn setting_sail_opens_the_worlds() {
         let mut app = test_app(AppState::MainMenu);
+        click(&mut app, MenuButton::SetSail);
+        assert_eq!(state(&app), AppState::SetSail);
+    }
+
+    #[test]
+    fn new_world_opens_the_setup_dialog() {
+        // From the worlds screen, which is where the choice between returning
+        // to one and starting one is made. An empty harbour, so this is about
+        // the press and not about the cap.
+        let mut app = harbour_of(Vec::new());
         click(&mut app, MenuButton::NewWorld);
         assert_eq!(state(&app), AppState::NewWorld);
     }
@@ -1829,11 +2038,176 @@ mod tests {
         assert!(!exits.is_empty(), "no AppExit was sent");
     }
 
+    /// One step back, not all the way out: the dialog is opened from the
+    /// worlds screen, so that is where Back belongs.
     #[test]
-    fn back_returns_to_the_main_menu() {
+    fn back_out_of_the_new_world_dialog_returns_to_the_worlds() {
         let mut app = test_app(AppState::NewWorld);
         click(&mut app, MenuButton::Back);
+        assert_eq!(state(&app), AppState::SetSail);
+    }
+
+    #[test]
+    fn back_out_of_the_worlds_returns_to_the_main_menu() {
+        let mut app = test_app(AppState::SetSail);
+        click(&mut app, MenuButton::Back);
         assert_eq!(state(&app), AppState::MainMenu);
+    }
+
+    /// A world for the screen to offer, with a real file behind it so that
+    /// discarding one has something to delete. Not a world anything could be
+    /// sailed in — what a discard needs is a name to take the lock on and
+    /// files to remove, and it never reads a byte of what is in them.
+    fn a_kept_world(id: u64) -> KeptWorld {
+        let dir = net::worlds_dir().expect("the quarantined data dir");
+        std::fs::create_dir_all(&dir).expect("the worlds directory");
+        let world = KeptWorld {
+            path: dir.join(format!("{}.world", protocol::WorldId(id))),
+            id: protocol::WorldId(id),
+            name: format!("Test Water {id:x}"),
+            age: 0.0,
+            kept: SystemTime::now(),
+        };
+        std::fs::write(&world.path, "a world, as far as this test is concerned").expect("write");
+        world
+    }
+
+    /// The worlds screen offering exactly the worlds a test names, rather than
+    /// whatever this machine happens to keep. Set after entering the screen,
+    /// which is what reads the directory — and a changed harbour is what
+    /// builds the screen again, so the list on screen is this one.
+    fn harbour_of(worlds: Vec<KeptWorld>) -> App {
+        let mut app = test_app(AppState::SetSail);
+        app.world_mut().resource_mut::<Harbour>().worlds = worlds;
+        app.update();
+        app
+    }
+
+    fn asked(app: &App) -> Option<usize> {
+        app.world().resource::<Harbour>().asked
+    }
+
+    #[test]
+    fn a_kept_world_is_offered_with_a_way_to_throw_it_away() {
+        let mut app = harbour_of(vec![a_kept_world(0x51)]);
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("Test Water 51"),
+            "the world is not offered: {text}"
+        );
+        assert!(text.contains("Discard"), "no way to throw it away: {text}");
+    }
+
+    #[test]
+    fn discarding_asks_first_and_takes_no_for_an_answer() {
+        let world = a_kept_world(0x52);
+        let path = world.path.clone();
+        let mut app = harbour_of(vec![world]);
+
+        click(&mut app, MenuButton::AskDiscard(0));
+        assert_eq!(asked(&app), Some(0));
+        assert!(
+            screen_text(&mut app).contains("for good?"),
+            "the row asked nothing"
+        );
+        assert!(path.exists(), "the world went before anybody said yes");
+
+        click(&mut app, MenuButton::KeepIt);
+        assert_eq!(asked(&app), None);
+        assert!(path.exists(), "the world went on a no");
+        assert_eq!(app.world().resource::<Harbour>().worlds.len(), 1);
+        assert!(
+            !screen_text(&mut app).contains("for good?"),
+            "the question is still standing"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn yes_throws_the_world_away() {
+        let world = a_kept_world(0x53);
+        let path = world.path.clone();
+        let mut app = harbour_of(vec![world]);
+
+        click(&mut app, MenuButton::AskDiscard(0));
+        click(&mut app, MenuButton::Discard(0));
+
+        assert!(!path.exists(), "the world's file outlived the discard");
+        assert!(
+            app.world().resource::<Harbour>().worlds.is_empty(),
+            "the row outlived the world"
+        );
+        assert_eq!(asked(&app), None);
+    }
+
+    /// Leaving the screen answers the question the safe way — and coming back
+    /// must not find it still standing over a world that was never chosen.
+    #[test]
+    fn a_question_walked_away_from_is_not_a_yes() {
+        let world = a_kept_world(0x54);
+        let path = world.path.clone();
+        let mut app = harbour_of(vec![world]);
+
+        click(&mut app, MenuButton::AskDiscard(0));
+        click(&mut app, MenuButton::Back);
+        assert_eq!(state(&app), AppState::MainMenu);
+
+        go_to(&mut app, AppState::SetSail);
+        assert_eq!(asked(&app), None, "the screen came back still asking");
+        assert!(path.exists(), "the world went while nobody was looking");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_empty_harbour_says_so() {
+        let mut app = harbour_of(Vec::new());
+        assert!(screen_text(&mut app).contains("no world sailed from here yet"));
+    }
+
+    /// The cap is a closed door, not a hidden row: a full machine says so and
+    /// refuses the press, and every world it is keeping is still on the screen
+    /// to be returned to or thrown away.
+    #[test]
+    fn a_full_harbour_refuses_another_world() {
+        let worlds: Vec<KeptWorld> = (0..MOST_KEPT_WORLDS)
+            .map(|n| a_kept_world(0x60 + n as u64))
+            .collect();
+        let paths: Vec<_> = worlds.iter().map(|world| world.path.clone()).collect();
+        let mut app = harbour_of(worlds);
+
+        click(&mut app, MenuButton::NewWorld);
+        assert_eq!(
+            state(&app),
+            AppState::SetSail,
+            "the cap let a sixth world by"
+        );
+        assert!(
+            app.world().resource::<Status>().0.contains("discard"),
+            "the press was refused without saying why: {:?}",
+            app.world().resource::<Status>().0
+        );
+
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("no room for another world"),
+            "the screen does not say it is full: {text}"
+        );
+        for (n, _) in paths.iter().enumerate() {
+            assert!(
+                text.contains(&format!("Test Water {:x}", 0x60 + n)),
+                "world {n} of a full harbour is not on the screen"
+            );
+        }
+
+        // And room made is a way through: the same press, one discard later.
+        click(&mut app, MenuButton::AskDiscard(0));
+        click(&mut app, MenuButton::Discard(0));
+        click(&mut app, MenuButton::NewWorld);
+        assert_eq!(state(&app), AppState::NewWorld);
+
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]
@@ -2409,7 +2783,7 @@ mod tests {
         app.insert_resource(Hosting(fake_host("0.0.0.0:0")));
         press_key(&mut app, KeyCode::Escape);
         app.update();
-        assert!(pause_text(&mut app).contains("leaving closes it on them"));
+        assert!(screen_text(&mut app).contains("leaving closes it on them"));
     }
 
     /// But a world of one's own is served too — over the loopback — so the
@@ -2421,7 +2795,7 @@ mod tests {
         app.insert_resource(Hosting(fake_host("127.0.0.1:0")));
         press_key(&mut app, KeyCode::Escape);
         app.update();
-        assert!(!pause_text(&mut app).contains("leaving closes it on them"));
+        assert!(!screen_text(&mut app).contains("leaving closes it on them"));
     }
 
     #[test]

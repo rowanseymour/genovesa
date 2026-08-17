@@ -39,7 +39,7 @@ use protocol::{
 };
 use world::archipelago::Archipelago;
 
-pub use keeper::{data_dir, kept_worlds, KeptWorld};
+pub use keeper::{data_dir, discard, kept_worlds, KeptWorld};
 pub use world::archipelago::{random_seed, WorldConfig, MAX_SEED};
 
 /// How long a fresh connection has to say hello. Generous for a slow link,
