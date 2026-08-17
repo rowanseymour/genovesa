@@ -723,6 +723,19 @@ mod tests {
     /// lie at anchor. No terrain and no renderer: what these tests are about
     /// is a clock, a direction and a colour, none of which needs a GPU.
     fn sky_app() -> App {
+        let mut app = sky_app_ashore_of_entry();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InWorld);
+        app.update();
+        app
+    }
+
+    /// The same app, stopped short of entering the world — for the one test
+    /// that joins a real session first, the way a real run does: whether a
+    /// boat is launched or told depends on the session being in place
+    /// before the threshold is crossed.
+    fn sky_app_ashore_of_entry() -> App {
         let mut app = App::new();
         app.add_plugins((
             TaskPoolPlugin::default(),
@@ -742,10 +755,6 @@ mod tests {
         // What the clouds' mask is put into, the sky bringing them with it.
         .init_asset::<Image>()
         .init_resource::<Assets<StandardMaterial>>();
-        app.update();
-        app.world_mut()
-            .resource_mut::<NextState<AppState>>()
-            .set(AppState::InWorld);
         app.update();
         app
     }
@@ -1028,10 +1037,17 @@ mod tests {
         crate::testing::quarantine_data_dir();
         let session = Session::open(WorldConfig { seed: 5 }, Reach::Alone, 0.19, false)
             .expect("a world to lie at anchor in");
-        let mut app = sky_app();
+        // The session in hand *before* the threshold, as a real join has it:
+        // the boat lain at anchor is the one the server tells of, not one
+        // the offline entry would have launched beside it.
+        let mut app = sky_app_ashore_of_entry();
         app.add_plugins(crate::net::NetPlugin);
         app.insert_resource(Online::new(session.connection));
         let _hosting = session.hosting;
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InWorld);
+        app.update();
 
         run_until(&mut app, "the world has said what time it is", |app| {
             app.world().resource::<Sky>().told.is_some()

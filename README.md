@@ -204,13 +204,23 @@ on; `--time` opens a new world at any hour instead — or winds a kept one
 forward to it — on either binary.
 
 Everyone enters a world for the first time in the same place — afloat just
-off the coast of the same island — and other players appear as coloured
-markers. The server
-also owns the sea's creatures worth agreeing on: sharks patrol the shallows
-with their fins cutting the surface, dolphin pods and the odd whale cross
-the deeper water, and every client is told about the same animal in the
-same place — so "look, a whale!" works. Only the birds stay each client's
-own invention. The wire is defined
+off the coast of the same island, at the helm of a boat the world provides —
+and other players appear in their actual boats, or as coloured markers when
+they are ashore on their own feet.
+
+Boats are the world's, not the players': the server tracks every hull, and a
+boat is used rather than owned. Step ashore and yours lies at anchor exactly
+where you left it — visible to everyone, including while you are away — and
+an empty helm belongs to whoever reaches it first, your own included. Leave
+a world at a helm and you return to it, provided nobody has sailed it off in
+the meantime; harbours slowly collect the boats of players who never came
+back, which is the world remembering having been lived in.
+
+The server also owns the sea's creatures worth agreeing on: sharks patrol
+the shallows with their fins cutting the surface, dolphin pods and the odd
+whale cross the deeper water, and every client is told about the same animal
+in the same place — so "look, a whale!" works. Only the birds stay each
+client's own invention. The wire is defined
 once, in the [`protocol`](crates/protocol/src/lib.rs) crate, which is
 the whole of what a client has to understand: the words of a session, the grid
 a chunk of ground is drawn on, and the small palette it is painted from.

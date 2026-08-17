@@ -34,7 +34,9 @@ use std::time::Duration;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use protocol::{PlayerId, ToClient, ToServer, Token, WorldId, DEFAULT_PORT, PROTOCOL_VERSION};
+use protocol::{
+    BoatId, PlayerId, ToClient, ToServer, Token, WorldId, DEFAULT_PORT, PROTOCOL_VERSION,
+};
 use server::{Host, Server, WorldConfig};
 
 use crate::player::PlayerPlace;
@@ -94,11 +96,10 @@ pub struct Connection {
     /// The token this player now holds the world by, for the logbook to
     /// keep and the next visit to present.
     pub token: Token,
-    /// Whether the server recognised the papers presented — a resumed visit,
-    /// with the spawn being where the world last saw this player, rather
-    /// than an arrival. What decides whether the logbook's berth is to be
-    /// believed.
-    pub resumed: bool,
+    /// The boat whose helm this player enters at, if any — `None` is a
+    /// player entering on their own feet. The hull itself arrives as a
+    /// telling; this is only how entry knows not to spawn a walker.
+    pub aboard: Option<BoatId>,
 }
 
 impl Connection {
@@ -150,6 +151,7 @@ impl Connection {
                 spawn,
                 facing,
                 token,
+                aboard,
             }) => {
                 let _ = stream.set_read_timeout(None);
                 let _ = stream.set_write_timeout(Some(REPORT_TIMEOUT));
@@ -176,9 +178,7 @@ impl Connection {
                     facing,
                     world,
                     token,
-                    // The welcome echoing the presented token is the whole
-                    // of how "welcome back" is said.
-                    resumed: presented == Some(token),
+                    aboard,
                 })
             }
             Ok(other) => Err(format!("`{addr}` is talking nonsense: {other:?}")),
@@ -224,6 +224,20 @@ impl Connection {
     /// [`Connection::want_dawn`].
     pub fn command(&self, line: String) {
         self.say(ToServer::Command { line });
+    }
+
+    /// Asks for a boat's helm — [`crate::player`] owns the key and judges
+    /// the reach; the answer comes back as a [`protocol::ToClient::Boat`]
+    /// telling, believed when it lands rather than assumed when it is sent.
+    /// Public on the terms of [`Connection::want_dawn`].
+    pub fn board(&self, boat: protocol::BoatId) {
+        self.say(ToServer::Board { boat });
+    }
+
+    /// Steps off the helm we hold, landing at `position` — the spot whose
+    /// footing [`crate::player`] already judged. Public on the same terms.
+    pub fn disembark(&self, position: Vec2) {
+        self.say(ToServer::Disembark { position });
     }
 
     fn say(&self, message: ToServer) {
@@ -553,14 +567,32 @@ impl Plugin for NetPlugin {
             .init_resource::<sea::SeaConditions>()
             .init_resource::<crate::sky::Sky>()
             .init_resource::<crate::beasts::Beasts>()
+            .init_resource::<crate::boat::Fleet>()
             .init_resource::<crate::console::Console>()
             .add_systems(
+                OnEnter(AppState::InWorld),
+                enter_afoot.run_if(resource_exists::<Online>),
+            )
+            .add_systems(
                 Update,
-                (receive, ask_for_ground, report_position, place_markers)
+                (
+                    receive,
+                    ask_for_ground,
+                    report_position,
+                    place_markers,
+                    shade_markers,
+                )
                     .chain()
                     .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Online>)),
             )
-            .add_systems(OnExit(AppState::InWorld), disconnect);
+            .add_systems(
+                OnExit(AppState::InWorld),
+                // The fleet forgotten here as well as by the boat plugin —
+                // scuttling twice is writing a default twice, and an app
+                // with only one of the two plugins (the lean net tests')
+                // must still not carry one world's hulls into the next.
+                (disconnect, crate::boat::scuttle),
+            );
     }
 }
 
@@ -598,17 +630,21 @@ struct Told<'w> {
     sky: ResMut<'w, crate::sky::Sky>,
     beasts: ResMut<'w, crate::beasts::Beasts>,
     console: ResMut<'w, crate::console::Console>,
+    fleet: ResMut<'w, crate::boat::Fleet>,
 }
 
 /// Applies what the server said since last frame: players joining, moving
-/// and leaving, as markers coming, easing and going.
+/// and leaving, as markers coming, easing and going — and the boats, whose
+/// assets travel in the [`crate::boat::HullKit`] the markers' own meshes
+/// and materials now come through too, one system not being allowed two
+/// hands on one store.
 fn receive(
     mut commands: Commands,
     mut online: ResMut<Online>,
     mut ground: Option<ResMut<Ground>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut kit: crate::boat::HullKit,
     mut told: Told,
+    walkers: Query<Entity, (With<crate::player::Player>, Without<ChildOf>)>,
     mut lost: Local<bool>,
 ) {
     let (messages, connected) = online.connection.drain();
@@ -630,8 +666,12 @@ fn receive(
                             target: position,
                         },
                         DespawnOnExit(AppState::InWorld),
-                        Mesh3d(meshes.add(Capsule3d::new(MARKER_RADIUS, MARKER_LENGTH))),
-                        MeshMaterial3d(materials.add(matte(marker_color(id)))),
+                        Mesh3d(kit.meshes.add(Capsule3d::new(MARKER_RADIUS, MARKER_LENGTH))),
+                        MeshMaterial3d(kit.materials.add(matte(marker_color(id)))),
+                        // Spelled out rather than left to the mesh's required
+                        // components, because [`shade_markers`] writes it —
+                        // a helmsman's capsule goes dark under their hull.
+                        Visibility::default(),
                         // On the ground plane for now — `place_markers` owns
                         // the height from the next frame on.
                         Transform::from_xyz(position.x, 0.0, position.y),
@@ -720,6 +760,29 @@ fn receive(
             // [`crate::console`], which owns what completion means and
             // still sends every line verbatim.
             ToClient::Vocabulary { verbs } => told.console.teach(verbs),
+            ToClient::Boat {
+                id,
+                position,
+                heading,
+                occupant,
+                ..
+            } => {
+                // Believed within the sky's reason: a hull is eased towards
+                // and drawn every frame, and one telling of a non-finite
+                // pose would moor it at NaN for good.
+                if position.is_finite() && heading.is_finite() {
+                    told.fleet.told(
+                        &mut commands,
+                        &mut kit,
+                        &walkers,
+                        online.connection.id,
+                        id,
+                        position,
+                        heading,
+                        occupant,
+                    );
+                }
+            }
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } | ToClient::World { .. } => {}
@@ -747,21 +810,82 @@ fn ask_for_ground(online: Res<Online>, ground: Option<ResMut<Ground>>) {
 fn report_position(
     time: Res<Time>,
     online: Res<Online>,
+    fleet: Res<crate::boat::Fleet>,
     player: PlayerPlace,
-    mut last: Local<Option<(f32, Vec2)>>,
+    mut last: Local<Option<(f32, Vec2, f32)>>,
 ) {
-    let Some(position) = player.on_the_map() else {
+    let (Some(position), Some(heading)) = (player.on_the_map(), player.heading()) else {
         return;
     };
+    // The carrier's bearing as the wire's yaw — how the hull is pointed,
+    // which the other clients draw and a capsule marker never needed.
+    let yaw = f32::atan2(-heading.x, -heading.y);
     let now = time.elapsed_secs();
 
-    if let Some((reported_at, reported)) = *last {
-        if now - reported_at < REPORT_INTERVAL || reported.distance(position) < REPORT_THRESHOLD {
+    if let Some((reported_at, reported, reported_yaw)) = *last {
+        // A hull turning in place is moving news even though it goes
+        // nowhere: the heading is drawn, so it reports on the same terms as
+        // the position.
+        let turned = (yaw - reported_yaw).abs() > 0.02;
+        if now - reported_at < REPORT_INTERVAL
+            || (reported.distance(position) < REPORT_THRESHOLD && !turned)
+        {
             return;
         }
     }
-    online.connection.report(position);
-    *last = Some((now, position));
+    // At a helm the report is the boat's — the server carries the rider
+    // with the vehicle — and afoot it is the walker's own.
+    match fleet.helmed {
+        Some(_) => online.connection.say(ToServer::Helm {
+            position,
+            heading: yaw,
+        }),
+        None => online.connection.report(position),
+    }
+    *last = Some((now, position, yaw));
+}
+
+/// Enters the world on foot, for the player the welcome seated at no helm:
+/// their boat lies wherever they left it, one telling among the rest, and
+/// what entry owes them is a walker standing where the server said they
+/// stand. The height starts at sea level and [`crate::player`] settles it
+/// onto the ground once the ground has streamed in.
+fn enter_afoot(
+    mut commands: Commands,
+    online: Res<Online>,
+    view: Option<Res<crate::camera::View>>,
+) {
+    if online.connection.aboard.is_some() {
+        return;
+    }
+    // The view only aims the walker — a headless test with no camera at all
+    // gets one facing north, which nothing there looks at.
+    let yaw = view.map_or(0.0, |view| view.yaw);
+    let at = online.connection.spawn;
+    commands.spawn((
+        Name::new("Player"),
+        crate::player::Player,
+        crate::player::Unsettled,
+        DespawnOnExit(AppState::InWorld),
+        Transform::from_xyz(at.x, 0.0, at.y).with_rotation(Quat::from_rotation_y(yaw)),
+        Visibility::default(),
+    ));
+}
+
+/// Hides the capsule of anyone at a helm: their boat is their marker, told
+/// and drawn in full, and a capsule riding its deck would be clutter over
+/// the one thing on screen that already says who is where.
+fn shade_markers(
+    fleet: Res<crate::boat::Fleet>,
+    mut markers: Query<(&RemotePlayer, &mut Visibility)>,
+) {
+    for (player, mut visibility) in &mut markers {
+        *visibility = if fleet.crewed(player.id) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+    }
 }
 
 /// Walks each marker towards where the server last put its player, and
@@ -830,6 +954,9 @@ pub(crate) fn fake_server(spawn: Vec2, facing: Vec2) -> (String, Receiver<TcpStr
             spawn,
             facing,
             token: Token(7),
+            // Afoot, so a test app entering this world spawns a walker and
+            // owes the fake server no boat tellings.
+            aboard: None,
         })
         .write(&mut &stream)
         .expect("welcome");
@@ -854,12 +981,22 @@ mod tests {
     /// terrain — markers then keep their height, which these tests ignore.
     fn test_app(connection: Connection) -> App {
         let mut app = App::new();
-        app.add_plugins((TimePlugin, StatesPlugin, NetPlugin))
-            .init_state::<AppState>()
-            .add_sub_state::<Helm>()
-            .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .insert_resource(Online::new(connection));
+        app.add_plugins((
+            // The asset machinery because `receive` carries a HullKit now —
+            // a telling can spawn a hull, and a hull is meshes.
+            bevy::app::TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+            TimePlugin,
+            StatesPlugin,
+            NetPlugin,
+        ))
+        .init_state::<AppState>()
+        .add_sub_state::<Helm>()
+        // Registered with the asset server, not merely inserted: a boat
+        // telling loads its hull's meshes through it.
+        .init_asset::<Mesh>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .insert_resource(Online::new(connection));
         app.update();
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
@@ -1053,6 +1190,63 @@ mod tests {
     }
 
     #[test]
+    fn a_boat_telling_raises_a_hull_and_hides_its_helmsman() {
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+
+        // Somebody else is here, at a helm: their hull is raised from the
+        // telling, and their capsule goes dark — the boat is their marker.
+        (ToClient::Joined {
+            id: PlayerId(9),
+            position: Vec2::new(4.0, 5.0),
+        })
+        .write(&mut &server)
+        .expect("joined");
+        (ToClient::Boat {
+            id: BoatId(3),
+            kind: protocol::BoatKind::Sloop,
+            position: Vec2::new(4.0, 5.0),
+            heading: 0.5,
+            occupant: Some(PlayerId(9)),
+        })
+        .write(&mut &server)
+        .expect("boat");
+        run_until(&mut app, "the hull is raised", |app| {
+            app.world_mut()
+                .query::<&crate::boat::HullId>()
+                .iter(app.world())
+                .count()
+                == 1
+        });
+        run_until(&mut app, "the helmsman's capsule goes dark", |app| {
+            app.world_mut()
+                .query::<(&RemotePlayer, &Visibility)>()
+                .single(app.world())
+                .is_ok_and(|(_, visibility)| *visibility == Visibility::Hidden)
+        });
+
+        // They step ashore: the helm is told free, and the capsule stands
+        // again — a walker is a capsule, having no hull to be.
+        (ToClient::Boat {
+            id: BoatId(3),
+            kind: protocol::BoatKind::Sloop,
+            position: Vec2::new(4.0, 5.0),
+            heading: 0.5,
+            occupant: None,
+        })
+        .write(&mut &server)
+        .expect("boat freed");
+        run_until(&mut app, "the walker's capsule stands again", |app| {
+            app.world_mut()
+                .query::<(&RemotePlayer, &Visibility)>()
+                .single(app.world())
+                .is_ok_and(|(_, visibility)| *visibility == Visibility::Inherited)
+        });
+    }
+
+    #[test]
     fn other_players_come_move_and_go_as_markers() {
         let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
         let connection = Connection::join(&addr).expect("join");
@@ -1152,8 +1346,16 @@ mod tests {
         server
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set timeout");
+        // Read past the walker's own position reports — entry stands a
+        // player up now, and a player reports — to the line itself.
+        let line = loop {
+            match ToServer::read(&mut &server).expect("the command should arrive") {
+                ToServer::Move { .. } | ToServer::Helm { .. } => continue,
+                message => break message,
+            }
+        };
         assert_eq!(
-            ToServer::read(&mut &server).expect("the command should arrive"),
+            line,
             ToServer::Command {
                 line: "spawn shark".to_string()
             }

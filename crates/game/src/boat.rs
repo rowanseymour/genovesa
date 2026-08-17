@@ -26,11 +26,13 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::math::Vec3Swizzles;
 use bevy::mesh::PrimitiveTopology;
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+
+use protocol::{BoatId, PlayerId};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
-use crate::logbook::{Berth, Logbook};
 use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
@@ -531,6 +533,177 @@ struct Pennant {
 #[derive(Component)]
 struct Sail;
 
+/// The name a hull answers to on the wire — see [`protocol::BoatId`]. Only
+/// the hulls a server told us about carry one: a world with no server behind
+/// it (the headless tests') launches a nameless boat, and the absence is how
+/// [`crate::player::embark_or_land`] tells the two apart.
+#[derive(Component, Clone, Copy)]
+pub struct HullId(pub BoatId);
+
+/// Any hull at all — ours under sail, another's under way, anyone's at
+/// anchor. What the boarding key sweeps for, the components that say *whose*
+/// a hull is coming and going with the helm.
+#[derive(Component)]
+pub struct Vessel;
+
+/// Where the server last put a hull nobody here is steering, and how it was
+/// pointed — eased towards, like a marker; [`moor`] is what does the easing
+/// and keeps the hull riding the swell meanwhile. Present on every hull but
+/// the one this player has the helm of, whose transform belongs to the
+/// sailing systems.
+#[derive(Component, Clone, Copy)]
+struct ToldHull {
+    position: Vec2,
+    heading: f32,
+}
+
+/// The boats of the world, as this client was told them: the wire's ids to
+/// this side's entities, who is at each helm, and — the fact everything
+/// else hangs off — which hull is *ours*.
+///
+/// Cleared on leaving the world; the entities clear themselves, being
+/// `DespawnOnExit`.
+#[derive(Resource, Default)]
+pub struct Fleet {
+    hulls: HashMap<BoatId, Entity>,
+    crews: HashMap<BoatId, PlayerId>,
+    /// The boat this player holds the helm of, by the server's telling.
+    /// What decides which hull the sailing systems steer, and whether the
+    /// session reports [`protocol::ToServer::Helm`] or `Move`.
+    pub helmed: Option<BoatId>,
+}
+
+impl Fleet {
+    /// Whether a player is at some boat's helm — whose marker is then the
+    /// boat itself, the capsule adding nothing but clutter over the deck.
+    pub fn crewed(&self, player: PlayerId) -> bool {
+        self.crews.values().any(|aboard| *aboard == player)
+    }
+
+    /// Whether anyone holds this boat's helm, as of the last telling — what
+    /// keeps the boarding key from asking after a helm that is visibly
+    /// somebody's. The server rules either way; this only spares the wire
+    /// an ask whose answer is already on screen.
+    pub fn manned(&self, boat: BoatId) -> bool {
+        self.crews.contains_key(&boat)
+    }
+
+    /// Gives our hull back to its moorings — what stepping ashore does. The
+    /// sailing systems come off, the hull holds station where it lies until
+    /// a telling moves it, and the fleet stops calling any helm ours.
+    pub fn hand_back(&mut self, commands: &mut Commands, hull: Entity, pose: &Transform) {
+        if let Some(boat) = self.helmed.take() {
+            self.crews.remove(&boat);
+        }
+        let forward = pose.forward();
+        commands.entity(hull).remove::<Boat>().insert(ToldHull {
+            position: pose.translation.xz(),
+            heading: f32::atan2(-forward.x, -forward.z),
+        });
+    }
+
+    /// A word about a boat: the first spawns its hull, every later one
+    /// re-moors it or changes whose hands are on the helm. Called by the
+    /// session's [`crate::net::receive`], which is where everything a server
+    /// says lands.
+    ///
+    /// The one word that changes this client's own life is `occupant`
+    /// becoming — or no longer being — *us*: boarding is asked of the server
+    /// and only believed when the telling comes back, so this is where our
+    /// hull gains the sailing systems and the player steps onto its deck.
+    #[allow(clippy::too_many_arguments)]
+    pub fn told(
+        &mut self,
+        commands: &mut Commands,
+        kit: &mut HullKit,
+        walkers: &Query<Entity, (With<Player>, Without<ChildOf>)>,
+        me: PlayerId,
+        id: BoatId,
+        position: Vec2,
+        heading: f32,
+        occupant: Option<PlayerId>,
+    ) {
+        let hull = *self.hulls.entry(id).or_insert_with(|| {
+            spawn_hull(
+                commands,
+                kit,
+                Transform::from_xyz(position.x, 0.0, position.y)
+                    .with_rotation(Quat::from_rotation_y(heading)),
+                Some(id),
+            )
+        });
+        match occupant {
+            Some(player) => self.crews.insert(id, player),
+            None => self.crews.remove(&id),
+        };
+
+        if occupant == Some(me) {
+            if self.helmed != Some(id) {
+                // Ours, as of this telling: the helm the server granted —
+                // at entry, or a boarding confirmed. The hull comes off its
+                // moorings and under the sailing systems, snapped to where
+                // the server says it lies, and the player steps aboard —
+                // from wherever they were walking, or out of nowhere at
+                // all, entry aboard being a player who begins on a deck.
+                self.helmed = Some(id);
+                commands.entity(hull).remove::<ToldHull>().insert((
+                    Boat::ship(),
+                    Transform::from_xyz(position.x, 0.0, position.y)
+                        .with_rotation(Quat::from_rotation_y(heading)),
+                ));
+                let helm = Transform::from_translation(SHIP.helm());
+                if let Some(walker) = walkers.iter().next() {
+                    commands
+                        .entity(walker)
+                        .remove::<DespawnOnExit<AppState>>()
+                        .remove::<crate::player::Unsettled>()
+                        .insert((ChildOf(hull), helm));
+                } else {
+                    commands.entity(hull).with_child((
+                        Name::new("Player"),
+                        Player,
+                        helm,
+                        Visibility::default(),
+                    ));
+                }
+            }
+            // Later tellings about our own boat are our own reports echoed
+            // — the Board grant broadcast reaches the asker too — and this
+            // machine's simulation is the authority on its own hull.
+            return;
+        }
+
+        // Somebody else's, or nobody's: moored to wherever the server said,
+        // which [`moor`] eases it towards. If it was ours, our disembark
+        // already gave it back — see [`crate::player::embark_or_land`].
+        commands.entity(hull).insert(ToldHull { position, heading });
+    }
+}
+
+/// What spawning a hull needs in hand — bundled because the telling arrives
+/// inside [`crate::net::receive`], which is already juggling the markers'
+/// own assets.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct HullKit<'w, 's> {
+    pub(crate) meshes: ResMut<'w, Assets<Mesh>>,
+    pub(crate) materials: ResMut<'w, Assets<StandardMaterial>>,
+    pub(crate) assets: Res<'w, AssetServer>,
+    /// The procedural pieces every hull shares, made once per system that
+    /// spawns hulls and cloned per boat: a harbour of thirty hulls is one
+    /// pennant mesh, not thirty.
+    fittings: Local<'s, Option<Fittings>>,
+}
+
+/// The handles [`spawn_hull`] deals from — see [`HullKit::fittings`].
+#[derive(Clone)]
+struct Fittings {
+    painted: Handle<StandardMaterial>,
+    pennant_material: Handle<StandardMaterial>,
+    sail_material: Handle<StandardMaterial>,
+    pennant_mesh: Handle<Mesh>,
+    sail_mesh: Handle<Mesh>,
+}
+
 pub struct BoatPlugin;
 
 impl Plugin for BoatPlugin {
@@ -541,7 +714,17 @@ impl Plugin for BoatPlugin {
         // plugin: resources are global and initialising one twice is free,
         // and the boat's own tests run without any terrain at all.
         app.init_resource::<sea::SeaConditions>()
-            .add_systems(OnEnter(AppState::InWorld), launch)
+            .init_resource::<Fleet>()
+            // Cleared with the world it described: the next world's hulls
+            // are new tellings, and a fleet carried over would pin their
+            // ids to entities that no longer exist.
+            .add_systems(OnExit(AppState::InWorld), scuttle)
+            // Only for a world with no server behind it — see [`launch`].
+            // A served world's boats arrive as tellings instead.
+            .add_systems(
+                OnEnter(AppState::InWorld),
+                launch.run_if(not(resource_exists::<crate::net::Online>)),
+            )
             .add_systems(
                 Update,
                 // Only the steering stops when the game is paused. Floating is
@@ -559,6 +742,9 @@ impl Plugin for BoatPlugin {
                     float,
                     fly_the_pennant,
                     trim_the_sails,
+                    // The hulls nobody here is steering, ridden after the
+                    // one that is: same water, same frame.
+                    moor,
                 )
                     .chain()
                     .run_if(in_state(AppState::InWorld)),
@@ -566,91 +752,108 @@ impl Plugin for BoatPlugin {
     }
 }
 
-/// Puts the ship in the world at the point the world is entered, pointing the
-/// way the opening view looks — with the player aboard, entering a world
-/// being something done afloat.
+/// Forgets the fleet with the world it belonged to.
+pub(crate) fn scuttle(mut fleet: ResMut<Fleet>) {
+    *fleet = Fleet::default();
+}
+
+/// Puts a nameless ship in the world at the point it is entered, pointing
+/// the way the opening view looks — with the player aboard.
 ///
-/// The view names where the player enters the world, so the boat goes there
-/// rather than anywhere of its own choosing. Entry is the world's spawn
-/// point — open water the layout keeps just off the first island's coast —
-/// so the boat starts afloat with land dead ahead; a `--focus` can still put
-/// it down inland, aground until the movement keys drive it back to the sea.
-/// The meshes hang off the boat as children rather than on it: the hull and
-/// the spar stay two meshes not for their colours — both carry their own now —
-/// but because the game measures them separately, the keel probed along one
-/// and the pennant tied to the other. Their geometry is already in the boat's
-/// own frame — the modeller places the mast on the deck, not the game — so the
-/// children sit at the identity and the only transform anything writes is the
-/// boat's own. The player is one more child: aboard *is* being in the
-/// hierarchy — see [`crate::player`] — so they stand wherever the hull carries
-/// them and go down with the ship when the world is left.
+/// The *offline* entry, and only that: a served world's hulls arrive as
+/// [`protocol::ToClient::Boat`] tellings and go through [`Fleet::told`],
+/// which is also what puts the player on the deck of their own. What is
+/// left for this is a world with no server behind it at all — the headless
+/// tests', which sail and land and board without a session — and it keeps
+/// the old ceremony whole: boat under the view, player at the helm.
+fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
+    let boat = spawn_hull(
+        &mut commands,
+        &mut kit,
+        // A rotation of `yaw` about the vertical takes -Z to the camera's
+        // own forward, so the boat starts pointing away from the viewer.
+        Transform::from_xyz(view.focus.x, 0.0, view.focus.z)
+            .with_rotation(Quat::from_rotation_y(view.yaw)),
+        None,
+    );
+    commands.entity(boat).insert(Boat::ship()).with_child((
+        Name::new("Player"),
+        Player,
+        Transform::from_translation(SHIP.helm()),
+        Visibility::default(),
+    ));
+
+    // Said out loud for the same reason a run without a seed says which world
+    // it picked: a placeholder nobody can find is indistinguishable from one
+    // that never spawned, and `--focus` takes exactly these two numbers.
+    info!("boat launched at {}, {}", view.focus.x, view.focus.z);
+}
+
+/// One hull, meshes and all, at a pose — everything a boat is *before*
+/// anyone is aboard: no [`Boat`], because the sailing systems belong to
+/// whoever holds the helm, and no [`ToldHull`], because who moves it is the
+/// caller's decision. `named` is its wire id, for the hulls a server told
+/// us about.
 ///
-/// A world this machine remembers can override the ceremony — see
-/// [`Berth`]: a resumed visit puts the hull back on its own heading, and one
-/// left from ashore puts the boat at its anchorage and the player on their
-/// own feet where the server said they stand, exactly as
-/// [`crate::player::embark_or_land`] would have left them.
-fn launch(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    assets: Res<AssetServer>,
-    view: Res<View>,
-    logbook: Option<Res<Logbook>>,
-) {
-    let berth = logbook.as_ref().and_then(|logbook| logbook.berth);
-    let entered = view.focus.xz();
-    let (boat_at, boat_yaw) = match berth {
-        None => (entered, view.yaw),
-        Some(Berth::Aboard { heading }) => (entered, heading),
-        Some(Berth::Ashore { boat, heading, .. }) => (boat, heading),
-    };
+/// The meshes hang off the hull as children rather than on it: hull and
+/// spar stay two meshes not for their colours — both carry their own — but
+/// because the game measures them separately, the keel probed along one and
+/// the pennant tied to the other. Their geometry is already in the boat's
+/// own frame, so the children sit at the identity and the only transform
+/// anything writes is the boat's own.
+fn spawn_hull(
+    commands: &mut Commands,
+    kit: &mut HullKit,
+    pose: Transform,
+    named: Option<BoatId>,
+) -> Entity {
     // The model carries its own colours on its facets — see the master's
     // NOTES — so the timber is drawn with one white matte that does nothing
     // but let them through, the same way every painted model here is. The
     // file's PBR materials are still ignored: lit the way the file asked for,
     // the hull would be the one surface in the world with a highlight on it.
-    let painted = materials.add(matte(Color::WHITE));
-    // Cloth is the one thing aboard with no inside, so it is the one material
-    // here that is drawn from both faces. Left single-sided the pennant would
-    // wink out every time the wind put its back to the camera, which happens
-    // several times a minute at a flutter.
-    let pennant_material = materials.add(StandardMaterial {
-        double_sided: true,
-        cull_mode: None,
-        ..matte(PENNANT_COLOR)
-    });
-    // Cloth again, so drawn from both faces for the pennant's reason.
-    let sail_material = materials.add(StandardMaterial {
-        double_sided: true,
-        cull_mode: None,
-        ..matte(SAIL_COLOR)
-    });
+    // The cloth materials are drawn from both faces — left single-sided the
+    // pennant would wink out every time the wind put its back to the camera.
+    let fittings = kit
+        .fittings
+        .get_or_insert_with(|| Fittings {
+            painted: kit.materials.add(matte(Color::WHITE)),
+            pennant_material: kit.materials.add(StandardMaterial {
+                double_sided: true,
+                cull_mode: None,
+                ..matte(PENNANT_COLOR)
+            }),
+            sail_material: kit.materials.add(StandardMaterial {
+                double_sided: true,
+                cull_mode: None,
+                ..matte(SAIL_COLOR)
+            }),
+            pennant_mesh: kit.meshes.add(pennant_mesh()),
+            sail_mesh: kit.meshes.add(sail_mesh()),
+        })
+        .clone();
 
-    let boat = commands
+    let hull = commands
         .spawn((
             Name::new("Boat"),
-            Boat::ship(),
+            Vessel,
             DespawnOnExit(AppState::InWorld),
-            // A rotation of `yaw` about the vertical takes -Z to the camera's own
-            // forward, so the boat starts pointing away from the viewer.
-            Transform::from_xyz(boat_at.x, 0.0, boat_at.y)
-                .with_rotation(Quat::from_rotation_y(boat_yaw)),
-            // Carried by the parent because the children inherit it: without one
-            // here there is nothing for their own visibility to be computed
-            // against, and a boat whose meshes are on entities of their own would
-            // never be drawn.
+            pose,
+            // Carried by the parent because the children inherit it: without
+            // one here there is nothing for their own visibility to be
+            // computed against, and a boat whose meshes are on entities of
+            // their own would never be drawn.
             Visibility::default(),
             children![
                 (
                     Name::new("Hull"),
-                    Mesh3d(assets.load(model_mesh(MODEL, HULL_MESH))),
-                    MeshMaterial3d(painted.clone()),
+                    Mesh3d(kit.assets.load(model_mesh(MODEL, HULL_MESH))),
+                    MeshMaterial3d(fittings.painted.clone()),
                 ),
                 (
                     Name::new("Spar"),
-                    Mesh3d(assets.load(model_mesh(MODEL, SPAR_MESH))),
-                    MeshMaterial3d(painted),
+                    Mesh3d(kit.assets.load(model_mesh(MODEL, SPAR_MESH))),
+                    MeshMaterial3d(fittings.painted),
                 ),
                 // Tied to the masthead and pointed by [`fly_the_pennant`]. The
                 // one piece of the boat that is not in the file: a flag is a
@@ -664,8 +867,8 @@ fn launch(
                         // anyway.
                         bearing: 0.0,
                     },
-                    Mesh3d(meshes.add(pennant_mesh())),
-                    MeshMaterial3d(pennant_material),
+                    Mesh3d(fittings.pennant_mesh),
+                    MeshMaterial3d(fittings.pennant_material),
                     Transform::from_xyz(0.0, SHIP.masthead, SHIP.masthead_station),
                 ),
                 // The sail, at the mast's foot so its rotation is a turn about
@@ -675,46 +878,51 @@ fn launch(
                 (
                     Name::new("Sail"),
                     Sail,
-                    Mesh3d(meshes.add(sail_mesh())),
-                    MeshMaterial3d(sail_material),
+                    Mesh3d(fittings.sail_mesh),
+                    MeshMaterial3d(fittings.sail_material),
                     Transform::from_xyz(0.0, 0.0, SHIP.masthead_station),
                     Visibility::Hidden,
                 ),
             ],
         ))
         .id();
-
-    // The figure itself is hung under the player by `figure::dress`, which
-    // is the player's own business rather than the boat's. Aboard, the
-    // player is a child of the hull, standing at its helm — aboard *is*
-    // being in the hierarchy. Ashore they stand on their own transform with
-    // a `DespawnOnExit` of their own, exactly as stepping off the gunwale
-    // leaves them.
-    match berth {
-        Some(Berth::Ashore { height, facing, .. }) => {
-            commands.spawn((
-                Name::new("Player"),
-                Player,
-                DespawnOnExit(AppState::InWorld),
-                Transform::from_xyz(entered.x, height, entered.y)
-                    .with_rotation(Quat::from_rotation_y(facing)),
-                Visibility::default(),
-            ));
-        }
-        _ => {
-            commands.entity(boat).with_child((
-                Name::new("Player"),
-                Player,
-                Transform::from_translation(SHIP.helm()),
-                Visibility::default(),
-            ));
-        }
+    if let Some(id) = named {
+        commands.entity(hull).insert(HullId(id));
     }
+    hull
+}
 
-    // Said out loud for the same reason a run without a seed says which world
-    // it picked: a placeholder nobody can find is indistinguishable from one
-    // that never spawned, and `--focus` takes exactly these two numbers.
-    info!("boat launched at {}, {}", boat_at.x, boat_at.y);
+/// Rides the moored hulls: eases each towards where the server last put it,
+/// turns it onto its told heading, and keeps it on the water meanwhile —
+/// level, the pitching and heeling being the sailing systems' and a boat at
+/// anchor or under somebody else's hand having no business doing either
+/// this side of the wire. The easing pace is the markers' own, tellings
+/// arriving on the same reporting beat.
+fn moor(
+    ground: Option<Res<Ground>>,
+    time: Res<Time>,
+    sea: Res<sea::SeaConditions>,
+    mut hulls: Query<(&ToldHull, &mut Transform), Without<Boat>>,
+) {
+    let elapsed = time.elapsed_secs_wrapped();
+    let t = eased(8.0, time.delta_secs());
+
+    for (told, mut transform) in &mut hulls {
+        let at = transform.translation.xz();
+        let eased_to = at.lerp(told.position, t);
+        transform.translation.x = eased_to.x;
+        transform.translation.z = eased_to.y;
+        if let Some(height) = ground
+            .as_ref()
+            .and_then(|g| g.height(eased_to.x, eased_to.y))
+        {
+            let water = sea.water_over(ground.as_deref(), eased_to, elapsed);
+            transform.translation.y = height.max(water);
+        }
+        transform.rotation = transform
+            .rotation
+            .slerp(Quat::from_rotation_y(told.heading), t);
+    }
 }
 
 /// The pennant, as a shape: a burgee tied at the origin, so that everything
@@ -887,14 +1095,24 @@ fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
 fn fly_the_pennant(
     time: Res<Time>,
     conditions: Res<sea::SeaConditions>,
-    boats: Query<(&Boat, &Transform), Without<Pennant>>,
+    boats: Query<(Option<&Boat>, &Transform), (With<Vessel>, Without<Pennant>)>,
     mut pennants: Query<(&mut Pennant, &ChildOf, &mut Transform)>,
 ) {
     for (mut pennant, of, mut transform) in &mut pennants {
         let Ok((boat, hull)) = boats.get(of.parent()) else {
             continue;
         };
-        let apparent = conditions.wind() - hull.forward().xz() * boat.way;
+        // Every flag in the world flies on the same wind. Our own hull adds
+        // the wind of its way; a told hull's way is not on the wire, so its
+        // flag reads the true wind alone — moored hulls have no way anyway,
+        // and a hull under somebody else's sail being a knot or two off in
+        // its flag is nothing a passing witness can measure.
+        let way = boat.map_or(0.0, |boat| boat.way);
+        let masthead = boat.map_or_else(
+            || Vec3::new(0.0, SHIP.masthead, SHIP.masthead_station),
+            |boat| Vec3::new(0.0, boat.hull.masthead, boat.hull.masthead_station),
+        );
+        let apparent = conditions.wind() - hull.forward().xz() * way;
         let (bearing, droop) = pennant_pose(apparent, pennant.bearing);
         pennant.bearing = bearing;
 
@@ -915,8 +1133,7 @@ fn fly_the_pennant(
         // rather than inside it. Steered by the bearing without the flutter:
         // the tie is a fixed point on a swinging flag, not a swinging one.
         let tie_off = Quat::from_rotation_y(bearing) * (Vec3::NEG_Z * PENNANT_TIE_OFF);
-        transform.translation = Vec3::new(0.0, boat.hull.masthead, boat.hull.masthead_station)
-            + hull.rotation.inverse() * tie_off;
+        transform.translation = masthead + hull.rotation.inverse() * tie_off;
     }
 }
 

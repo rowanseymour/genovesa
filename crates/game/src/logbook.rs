@@ -1,33 +1,25 @@
-//! The logbook: what this machine remembers of a world between visits.
+//! The logbook: what this machine still keeps of a world between visits —
+//! an interim home, and shrinking on purpose.
 //!
-//! The server keeps the world — its clock, its players' positions, one file
-//! per world wherever it is hosted. What it deliberately does not keep is
-//! this client's own memory of the place: the chart is a record of what *one
-//! player's client* has seen (see `chart`), the boat has never crossed the
-//! wire at all, and the token is the client's half of a secret. So each
-//! world a player sails gets a logbook on this machine, keyed by the
-//! [`WorldId`] the server names in its handshake — never by address, since a
-//! world moved to another host is meant to still be the same world.
+//! The design this serves is *world stop and restart*, not save-and-load:
+//! the server's world file is the world's continuity, and a client is meant
+//! to keep nothing a rejoin cannot answer. Two things remain here on their
+//! way to that. The **token** stays for good — it is the player's credential
+//! for a world, the client's half of a secret, and has to live with the
+//! client by definition. The **chart** stays only until claims land: the
+//! server will then track each player's survey for its own reasons (a claim
+//! has to be judged) and can serve the drawn coastline back on join, at
+//! which point this file is a token and nothing else. The berth this book
+//! once carried is already gone — boats are the server's entities now, told
+//! over the wire like the players and the beasts.
 //!
-//! A logbook holds three things: the token this player holds the world by,
-//! where they left off — aboard, or ashore with the boat lying at anchor —
-//! and the chart. The token is presented on the next visit (see
-//! [`crate::net::Connection`]), the server answers with where this player
-//! was, and the berth and the chart fill in the rest of the picture the wire
-//! does not carry.
-//!
-//! The berth is trusted only when the server recognised the papers. A world
-//! that greets us as a stranger — its file lost, its memory of us gone — is
-//! putting us on the spawn, and a boat restored to some far anchorage would
-//! be a boat the player can never reach. The chart survives either way: it
-//! is a record of coasts seen, the world id says they are this world's
-//! coasts, and being forgotten by the server does not unsee them.
-//!
-//! Like the server's world file, the format is plain versioned text, written
-//! whole beside the file and renamed over it, and a build refuses a file it
-//! only half-understands. Unlike the world file there is no lock and no
-//! backup: one game process per machine is the ordinary case, and the worst
-//! a lost logbook costs is a chart — the world itself is the server's.
+//! Books are keyed by the [`WorldId`] the server names in its handshake —
+//! never by address, since a world moved to another host is meant to still
+//! be the same world. Like the server's world file, the format is plain
+//! versioned text, written whole beside the file and renamed over it, and a
+//! build refuses a file it only half-understands — except the keys a past
+//! format-1 build wrote and this one has outgrown, which are read past
+//! rather than refused: an old book's chart is still a chart.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -38,10 +30,8 @@ use bevy::prelude::*;
 
 use protocol::{Token, WorldId};
 
-use crate::boat::Boat;
 use crate::chart::{Chart, Coast, Soundings};
 use crate::net::Session;
-use crate::player::Player;
 use crate::AppState;
 
 /// The format this build writes, named in the file's first line.
@@ -63,9 +53,6 @@ pub struct Logbook {
     path: Option<PathBuf>,
     /// The token this player holds the world by — presented next visit.
     token: Token,
-    /// Where the player left off. `None` when this visit started fresh —
-    /// nothing to restore, and the entry ceremony is the ordinary one.
-    pub berth: Option<Berth>,
     /// The chart as of the last write — the working copy is the [`Chart`]
     /// resource, read back in here each time the book is written.
     soundings: Vec<(IVec2, Soundings)>,
@@ -74,39 +61,6 @@ pub struct Logbook {
     /// lose.
     names: Vec<(IVec2, String)>,
 }
-
-/// Where a player left off, in the terms the wire does not carry: the server
-/// remembers where they *were*, and this says what that position meant —
-/// at the helm, or on their own feet with the boat lying somewhere else.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Berth {
-    /// At the helm, the hull heading this way (a yaw about the vertical,
-    /// the world's usual convention).
-    Aboard { heading: f32 },
-    /// On their own feet, standing `at` — which must agree with where the
-    /// server says they are, see [`BERTH_SLACK`] — with the boat at anchor
-    /// at `boat`. `height` and `facing` are the walker's own, kept because
-    /// the ground may not have streamed in yet when they are put back.
-    Ashore {
-        at: Vec2,
-        boat: Vec2,
-        heading: f32,
-        height: f32,
-        facing: f32,
-    },
-}
-
-/// How far the book's idea of where the player stood may differ from the
-/// server's before the berth is disbelieved, in metres.
-///
-/// The two records are written by different machines on different clocks, and
-/// a session that *crashed* can leave them telling different moments: the
-/// server's last save from before the player anchored and went ashore, the
-/// logbook's from after. Trusting the stale half would stand the player on
-/// open water with the boat at an anchorage they cannot reach. A clean close
-/// writes both within the same instant, so agreement is the ordinary case
-/// and the slack only has to cover rounding, not drift.
-const BERTH_SLACK: f32 = 8.0;
 
 impl Logbook {
     /// The chart this world's book holds, for the survey to continue from.
@@ -121,10 +75,7 @@ impl Logbook {
 ///
 /// The book on file is opened — or begun — under the world id the handshake
 /// named, and the token the welcome dealt replaces whatever was held: the
-/// server's answer is what next visit's papers must match. The berth
-/// survives only a *recognised* return that agrees with the server about
-/// where the player stands (see the module doc and [`BERTH_SLACK`]); the
-/// chart survives any.
+/// server's answer is what next visit's papers must match.
 pub fn for_session(session: &Session) -> Option<Logbook> {
     if session.hosting.is_some() && !session.kept {
         return None;
@@ -135,7 +86,6 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
         Read::Missing => Logbook {
             path: place_for(connection.world),
             token: connection.token,
-            berth: None,
             soundings: Vec::new(),
             names: Vec::new(),
         },
@@ -146,20 +96,11 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
         Read::Refused => Logbook {
             path: None,
             token: connection.token,
-            berth: None,
             soundings: Vec::new(),
             names: Vec::new(),
         },
     };
     book.token = connection.token;
-    if !connection.resumed {
-        book.berth = None;
-    }
-    if let Some(Berth::Ashore { at, .. }) = book.berth {
-        if at.distance(connection.spawn) > BERTH_SLACK {
-            book.berth = None;
-        }
-    }
     Some(book)
 }
 
@@ -198,10 +139,9 @@ fn read(world: WorldId) -> Read {
         return Read::Missing;
     };
     match parse(&text) {
-        Ok((token, berth, soundings, names)) => Read::Book(Logbook {
+        Ok((token, soundings, names)) => Read::Book(Logbook {
             path: Some(path),
             token,
-            berth,
             soundings,
             names,
         }),
@@ -221,9 +161,7 @@ impl Plugin for LogbookPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (note_berth, keep_the_log)
-                .chain()
-                .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Logbook>)),
+            keep_the_log.run_if(in_state(AppState::InWorld).and_then(resource_exists::<Logbook>)),
         )
         // Closed before the chart is stowed, or there would be nothing left
         // to write down. Conditioned like the systems above: a world nobody
@@ -236,39 +174,6 @@ impl Plugin for LogbookPlugin {
                 .before(crate::chart::stow_the_chart),
         );
     }
-}
-
-/// Keeps the book's berth current, every frame: reading it is two queries,
-/// and a berth mirrored continuously is one that is right whenever the book
-/// happens to be written — including at an exit racing the despawn of the
-/// very entities it describes.
-fn note_berth(
-    mut logbook: ResMut<Logbook>,
-    players: Query<(&Transform, Option<&ChildOf>), With<Player>>,
-    boats: Query<&Transform, With<Boat>>,
-) {
-    let (Ok((walker, aboard)), Ok(boat)) = (players.single(), boats.single()) else {
-        return;
-    };
-    logbook.berth = Some(match aboard {
-        Some(_) => Berth::Aboard {
-            heading: yaw_of(boat),
-        },
-        None => Berth::Ashore {
-            at: walker.translation.xz(),
-            boat: boat.translation.xz(),
-            heading: yaw_of(boat),
-            height: walker.translation.y,
-            facing: yaw_of(walker),
-        },
-    });
-}
-
-/// The yaw a transform was aimed with: the inverse of
-/// `Quat::from_rotation_y`, read off the forward it produces.
-fn yaw_of(transform: &Transform) -> f32 {
-    let forward = transform.forward();
-    f32::atan2(-forward.x, -forward.z)
 }
 
 /// Writes the book on a slow beat — insurance, not the record; see
@@ -321,25 +226,6 @@ fn compose(logbook: &Logbook) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "genovesa logbook {FORMAT}");
     let _ = writeln!(out, "token {:016x}", logbook.token.0);
-    match logbook.berth {
-        None => {}
-        Some(Berth::Aboard { heading }) => {
-            let _ = writeln!(out, "aboard {heading}");
-        }
-        Some(Berth::Ashore {
-            at,
-            boat,
-            heading,
-            height,
-            facing,
-        }) => {
-            let _ = writeln!(
-                out,
-                "ashore {} {} {} {} {heading} {height} {facing}",
-                at.x, at.y, boat.x, boat.y
-            );
-        }
-    }
     // Sorted, so that one chart is one file, byte for byte, whatever order
     // the survey's map hands its chunks out in. Every surveyed chunk gets a
     // `coast` line even when it found nothing — surveyed-and-empty is worth
@@ -381,12 +267,7 @@ fn put_runs(out: &mut String, runs: &[Coast]) {
     }
 }
 
-type Parsed = (
-    Token,
-    Option<Berth>,
-    Vec<(IVec2, Soundings)>,
-    Vec<(IVec2, String)>,
-);
+type Parsed = (Token, Vec<(IVec2, Soundings)>, Vec<(IVec2, String)>);
 
 fn parse(text: &str) -> Result<Parsed, String> {
     let mut lines = text.lines();
@@ -397,7 +278,6 @@ fn parse(text: &str) -> Result<Parsed, String> {
     }
 
     let mut token = None;
-    let mut berth = None;
     let mut soundings: std::collections::HashMap<(i32, i32), Soundings> = Default::default();
     let mut names = Vec::new();
     for line in lines {
@@ -414,24 +294,10 @@ fn parse(text: &str) -> Result<Parsed, String> {
                         .map_err(|_| format!("`{value}` is not a token"))?,
                 ))
             }
-            "aboard" => {
-                berth = Some(Berth::Aboard {
-                    heading: finite(value)?,
-                })
-            }
-            "ashore" => {
-                let fields: Vec<f32> = value.split(' ').map(finite).collect::<Result<_, _>>()?;
-                let [ax, ay, bx, by, heading, height, facing] = fields[..] else {
-                    return Err(format!("half a berth: `{line}`"));
-                };
-                berth = Some(Berth::Ashore {
-                    at: Vec2::new(ax, ay),
-                    boat: Vec2::new(bx, by),
-                    heading,
-                    height,
-                    facing,
-                });
-            }
+            // Keys an earlier format-1 build wrote and this one has outgrown
+            // — the berth moved to the server with the boats. Read past, not
+            // refused: an old book's chart is still a chart.
+            "aboard" | "ashore" => {}
             "coast" => {
                 let (chunk, runs) = runs_line(value)?;
                 soundings.entry((chunk.x, chunk.y)).or_default().coast = runs;
@@ -457,7 +323,6 @@ fn parse(text: &str) -> Result<Parsed, String> {
     }
     Ok((
         token.ok_or("no token")?,
-        berth,
         soundings
             .into_iter()
             .map(|((x, y), found)| (IVec2::new(x, y), found))
@@ -507,14 +372,6 @@ fn runs_line(value: &str) -> Result<(IVec2, Vec<Coast>), String> {
     Ok((chunk, runs))
 }
 
-fn finite(value: &str) -> Result<f32, String> {
-    value
-        .parse::<f32>()
-        .ok()
-        .filter(|parsed| parsed.is_finite())
-        .ok_or_else(|| format!("`{value}` is not a number"))
-}
-
 fn whole(value: &str) -> Result<i32, String> {
     value
         .parse::<i32>()
@@ -525,19 +382,11 @@ fn whole(value: &str) -> Result<i32, String> {
 mod tests {
     use super::*;
     use crate::chart::Mark;
-    use crate::testing::{enter_world, world_app_ashore_of_entry};
 
     fn a_book() -> Logbook {
         Logbook {
             path: None,
             token: Token(0x00C0_FFEE_0000_0007),
-            berth: Some(Berth::Ashore {
-                at: Vec2::new(118.0, -30.5),
-                boat: Vec2::new(120.5, -33.25),
-                heading: 1.25,
-                height: 2.5,
-                facing: -0.75,
-            }),
             soundings: vec![
                 (
                     IVec2::new(3, -2),
@@ -573,10 +422,8 @@ mod tests {
     #[test]
     fn a_logbook_survives_the_round_trip() {
         let book = a_book();
-        let (token, berth, soundings, names) =
-            parse(&compose(&book)).expect("parse what was composed");
+        let (token, soundings, names) = parse(&compose(&book)).expect("parse what was composed");
         assert_eq!(token, book.token);
-        assert_eq!(berth, book.berth);
         // Composing sorts the entries — one chart, one file — so they come
         // back in that order whatever order they were held in; sorting both
         // sides makes the comparison about content alone.
@@ -589,93 +436,15 @@ mod tests {
     }
 
     #[test]
-    fn a_book_with_no_berth_still_reads() {
-        let mut book = a_book();
-        book.berth = None;
-        let (_, berth, _, _) = parse(&compose(&book)).expect("parse");
-        assert_eq!(berth, None);
-
-        book.berth = Some(Berth::Aboard { heading: 2.5 });
-        let (_, berth, _, _) = parse(&compose(&book)).expect("parse");
-        assert_eq!(berth, book.berth);
-    }
-
-    /// A book with only a berth in it, for the entry tests.
-    fn moored(berth: Berth) -> Logbook {
-        Logbook {
-            path: None,
-            token: Token(1),
-            berth: Some(berth),
-            soundings: Vec::new(),
-            names: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_berth_ashore_puts_the_boat_at_anchor_and_the_player_on_their_feet() {
-        let mut app = world_app_ashore_of_entry();
-        // Where the server put the player down — their own walking position,
-        // for a visit that left off ashore.
-        app.world_mut().resource_mut::<crate::camera::View>().focus = Vec3::new(10.0, 0.0, 5.0);
-        app.world_mut().insert_resource(moored(Berth::Ashore {
-            at: Vec2::new(10.0, 5.0),
-            boat: Vec2::new(50.0, -20.0),
-            heading: 0.5,
-            height: 2.0,
-            facing: 1.0,
-        }));
-        enter_world(&mut app);
-
-        // The boat lies at its anchorage, not at the player.
-        let boat = *app
-            .world_mut()
-            .query_filtered::<&Transform, With<Boat>>()
-            .single(app.world())
-            .expect("a boat");
-        assert_eq!(boat.translation.x, 50.0);
-        assert_eq!(boat.translation.z, -20.0);
-
-        // And the player stands on their own feet where the server said,
-        // at the height the book remembered — not aboard.
-        let (walker, aboard) = app
-            .world_mut()
-            .query_filtered::<(&Transform, Option<&ChildOf>), With<Player>>()
-            .single(app.world())
-            .expect("a player");
-        assert!(aboard.is_none(), "the player was put back aboard");
-        assert_eq!(walker.translation, Vec3::new(10.0, 2.0, 5.0));
-    }
-
-    #[test]
-    fn a_berth_aboard_holds_the_hull_on_its_heading() {
-        let mut app = world_app_ashore_of_entry();
-        app.world_mut().resource_mut::<crate::camera::View>().focus = Vec3::new(10.0, 0.0, 5.0);
-        app.world_mut()
-            .insert_resource(moored(Berth::Aboard { heading: 1.25 }));
-        enter_world(&mut app);
-
-        // The boat is where the player is — the server's position — but on
-        // the heading it was left on, not the view's.
-        let boat = *app
-            .world_mut()
-            .query_filtered::<&Transform, With<Boat>>()
-            .single(app.world())
-            .expect("a boat");
-        assert_eq!(boat.translation.x, 10.0);
-        assert_eq!(boat.translation.z, 5.0);
-        assert!(
-            (yaw_of(&boat) - 1.25).abs() < 1e-5,
-            "the hull came back on yaw {} rather than its own",
-            yaw_of(&boat)
-        );
-
-        // And the player is aboard, exactly as an ordinary entry leaves them.
-        let (_, aboard) = app
-            .world_mut()
-            .query_filtered::<(&Transform, Option<&ChildOf>), With<Player>>()
-            .single(app.world())
-            .expect("a player");
-        assert!(aboard.is_some(), "the player was left standing on the sea");
+    fn an_old_books_berth_keys_are_read_past() {
+        // A format-1 book from before the berth moved to the server: its
+        // chart still counts, and the keys this build has outgrown are
+        // passed over rather than refused.
+        let (token, soundings, _names) =
+            parse("genovesa logbook 1\ntoken 2a\nashore 1 2 3 4 5 6 7\naboard 1.5\ncoast 0 0\n")
+                .expect("an old book still reads");
+        assert_eq!(token, Token(0x2A));
+        assert_eq!(soundings.len(), 1);
     }
 
     #[test]
@@ -699,10 +468,6 @@ mod tests {
             (
                 "genovesa logbook 1\ntoken 1\ncoast 0 0 c\u{20ac}1\n",
                 "marks that are not even ASCII",
-            ),
-            (
-                "genovesa logbook 1\ntoken 1\nashore 1 2 3\n",
-                "half a berth",
             ),
             (
                 "genovesa logbook 1\ntoken 1\nname 1 2\n",
