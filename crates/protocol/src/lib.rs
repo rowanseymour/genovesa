@@ -93,6 +93,42 @@ pub fn clock(phase: f32) -> String {
 /// powers of two run together.
 pub const DEFAULT_PORT: u16 = 24816;
 
+/// The longest an island's name may be, in bytes — see [`island_name`].
+///
+/// Bytes rather than characters because bytes are what the wire counts and
+/// what a frame is measured in, and the thing being bounded is what a hostile
+/// client can make a server hold and hand on. The number is the twenty-four
+/// characters a chart is drawn to allow, at the four bytes a character costs
+/// in the worst case UTF-8 has: a name of two dozen letters fits whatever
+/// alphabet it is written in.
+pub const NAME_BYTES: usize = 96;
+
+/// A name for an island as the wire will carry it, or `None` for something
+/// that is not a name at all.
+///
+/// The one place the rule lives, because both ends need it and neither may be
+/// the one that decides: a client offers it while a player types, and a server
+/// applies it again to whatever actually arrives — the client that sends a
+/// name is the one thing here nobody controls.
+///
+/// Refused rather than repaired, in every case. A name trimmed to fit is half
+/// of somebody's word standing on their island for good; a name with its
+/// control characters filtered out is a different name from the one that was
+/// typed; and an empty one is somebody asking for nothing, which is not the
+/// same as asking for the name to be taken away. So the answer is either the
+/// name or nothing, and a refusal leaves what was there before.
+///
+/// Control characters go because a name is a line of text in the end — the
+/// world's own file writes one per line, and a chart draws it in one — and
+/// because nothing typed at a keyboard has a newline in the middle of it.
+pub fn island_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    let carried = !name.is_empty()
+        && name.len() <= NAME_BYTES
+        && !name.chars().any(|letter| letter.is_control());
+    carried.then(|| name.to_string())
+}
+
 /// The longest frame a server will accept from a client. Everything a client
 /// says is a couple of dozen bytes — where it is, or which chunk it wants —
 /// except a console line, which is as long as whatever was typed and gets the
@@ -360,6 +396,33 @@ pub enum ToServer {
     /// own spot, chosen by the client that judged the footing. The boat
     /// stays where it lies, at anchor for anyone.
     Disembark { position: Vec2 },
+    /// Claims the island of this identity — see [`survey::Island::id`], which
+    /// is what a client names it by.
+    ///
+    /// Granted to a player who is standing on that island having sailed the
+    /// whole way round it, and to nobody else: the server asks
+    /// [`survey::Survey::island_under`] of *its own* survey for this player,
+    /// which answers both halves at once, and grants only if the island it
+    /// finds is the one named and nobody has claimed it already. The claim is
+    /// settled against the world's record of where this player has been, never
+    /// against the client's assertion of it.
+    ///
+    /// A grant raises a cairn where the claimant stands, and everybody near
+    /// enough to see it is told — see [`ToClient::Cairn`], which is the whole
+    /// of the answer: what the asker hears is either the cairn they have just
+    /// raised or the one that was already there. A claim refused for any other
+    /// reason is answered by silence, the world being exactly as the asker
+    /// last heard it.
+    Claim { island: IVec2 },
+    /// Christens a claimed island. Granted only to the holder of the claim,
+    /// and the name then rides with the cairn for everyone who passes it.
+    ///
+    /// There is no such thing as a private name any more: a name is something
+    /// the world carries, so it is earned the way the island was. A name that
+    /// is empty, all whitespace, over-long or not text at all is a refusal
+    /// rather than an erasure — see [`island_name`], which is the rule — and a
+    /// refusal leaves the cairn saying whatever it said before.
+    Name { island: IVec2, name: String },
     /// Ground, please — one chunk of it, named by its coordinate on the world
     /// grid of [`ground::CHUNK_METRES`] squares.
     ///
@@ -612,6 +675,35 @@ pub enum ToClient {
     Surveyed {
         found: Vec<(IVec2, survey::Soundings)>,
     },
+    /// A cairn: a heap of stones standing where somebody claimed an island,
+    /// which is how anybody else finds out it is spoken for.
+    ///
+    /// One message is both the introduction and every change after, as with
+    /// the beasts and the boats — a client keys cairns by the island they
+    /// stand for and redraws whatever a telling says. Sent to everyone near
+    /// enough when one is raised or renamed, to a joining player for the ones
+    /// near where they are put down, and to a claim this server refused
+    /// because the island was already somebody's, which is how an asker's
+    /// picture corrects itself.
+    ///
+    /// `at` is where the claimant stood, in metres, and the cairn stands there
+    /// for good: an island is claimed by a person in a place, not by a
+    /// calculation about its middle.
+    ///
+    /// `name` is what the island is called, and empty for one nobody has
+    /// christened yet — see [`ToServer::Name`].
+    ///
+    /// `yours` says whether this cairn is the hearer's own doing. It is a fact
+    /// about the hearer rather than about the cairn, so the same cairn goes
+    /// out with different answers to different players. What is *not* here is
+    /// the [`Token`] that actually holds the claim: a token is a credential,
+    /// and it goes to nobody but the client that holds it.
+    Cairn {
+        island: IVec2,
+        at: Vec2,
+        name: String,
+        yours: bool,
+    },
 }
 
 impl ToServer {
@@ -661,6 +753,15 @@ impl ToServer {
                 payload.push(8);
                 put_vec2(&mut payload, *position);
             }
+            Self::Claim { island } => {
+                payload.push(9);
+                put_ivec2(&mut payload, *island);
+            }
+            Self::Name { island, name } => {
+                payload.push(10);
+                put_ivec2(&mut payload, *island);
+                put_str(&mut payload, name);
+            }
         }
         write_frame(to, &payload, MAX_CLIENT_FRAME)
     }
@@ -699,6 +800,17 @@ impl ToServer {
             },
             8 => Self::Disembark {
                 position: payload.vec2()?,
+            },
+            9 => Self::Claim {
+                island: payload.ivec2()?,
+            },
+            10 => Self::Name {
+                island: payload.ivec2()?,
+                // Read as whatever text it is, and judged where it is acted
+                // on: what a name may say is the world's business — see
+                // [`island_name`] — where this layer's business is only that
+                // it arrived as text at all.
+                name: payload.str()?,
             },
             tag => return Err(corrupt(format!("unknown client message tag {tag}"))),
         };
@@ -810,6 +922,21 @@ impl ToClient {
                 for verb in verbs {
                     put_str(&mut payload, verb);
                 }
+            }
+            Self::Cairn {
+                island,
+                at,
+                name,
+                yours,
+            } => {
+                payload.push(15);
+                put_ivec2(&mut payload, *island);
+                put_vec2(&mut payload, *at);
+                payload.push(u8::from(*yours));
+                // Last, being the one field whose length is not the same for
+                // every cairn — so everything a reader needs in order to read
+                // it stands in front of it.
+                put_str(&mut payload, name);
             }
             Self::Surveyed { found } => {
                 payload.push(14);
@@ -940,6 +1067,12 @@ impl ToClient {
                 }
                 Self::Surveyed { found }
             }
+            15 => Self::Cairn {
+                island: payload.ivec2()?,
+                at: payload.vec2()?,
+                yours: payload.u8()? != 0,
+                name: payload.str()?,
+            },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
         payload.finish()?;
@@ -1236,6 +1369,20 @@ mod tests {
                 boat: BoatId(0x0102_0304_0506_0708),
             },
             ToServer::Disembark { position: at },
+            ToServer::Claim {
+                island: IVec2::new(-1_234, 5_678),
+            },
+            ToServer::Name {
+                island: IVec2::new(-1_234, 5_678),
+                name: "Windward Reach".to_string(),
+            },
+            // An island christened in an alphabet that costs more than a byte
+            // a letter, which is the case the wire's cap is counted in bytes
+            // for.
+            ToServer::Name {
+                island: IVec2::ZERO,
+                name: "Ilha do Príncipe".to_string(),
+            },
         ] {
             let bytes = bytes_of_client(&message);
             assert_eq!(ToServer::read(&mut bytes.as_slice()).unwrap(), message);
@@ -1336,6 +1483,19 @@ mod tests {
                 ],
             },
             ToClient::Surveyed { found: Vec::new() },
+            ToClient::Cairn {
+                island: IVec2::new(-1_234, 5_678),
+                at,
+                name: "Windward Reach".to_string(),
+                yours: true,
+            },
+            // And one nobody has christened, standing for somebody else.
+            ToClient::Cairn {
+                island: IVec2::new(7, -7),
+                at,
+                name: String::new(),
+                yours: false,
+            },
         ] {
             let bytes = bytes_of_server(&message);
             assert_eq!(ToClient::read(&mut bytes.as_slice()).unwrap(), message);
@@ -1449,6 +1609,31 @@ mod tests {
                 8, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // y = -2.0
+            ],
+        );
+        assert_eq!(
+            bytes_of_client(&ToServer::Claim {
+                island: IVec2::new(5, -3),
+            }),
+            [
+                9, 0, // length
+                9, // tag
+                5, 0, 0, 0, // x = 5
+                0xFD, 0xFF, 0xFF, 0xFF, // z = -3, two's complement LE
+            ],
+        );
+        assert_eq!(
+            bytes_of_client(&ToServer::Name {
+                island: IVec2::new(5, -3),
+                name: "hi".to_string(),
+            }),
+            [
+                13, 0,  // length
+                10, // tag
+                5, 0, 0, 0, // x = 5
+                0xFD, 0xFF, 0xFF, 0xFF, // z = -3
+                2, 0, // the name's own byte count, LE
+                0x68, 0x69, // "hi"
             ],
         );
 
@@ -1684,6 +1869,46 @@ mod tests {
                 2, 0, 0x79, 0x6F, // "yo"
             ],
         );
+        assert_eq!(
+            bytes_of_server(&ToClient::Cairn {
+                island: IVec2::new(5, -3),
+                at: Vec2::new(1.5, -2.0),
+                name: "hi".to_string(),
+                yours: true,
+            }),
+            [
+                22, 0,  // length
+                15, // tag
+                5, 0, 0, 0, // the island's x = 5
+                0xFD, 0xFF, 0xFF, 0xFF, // and z = -3
+                0, 0, 0xC0, 0x3F, // where it stands: x = 1.5
+                0, 0, 0, 0xC0, // z = -2.0
+                1,    // the hearer's own doing
+                2, 0, 0x68, 0x69, // "hi", counted then spelled
+            ],
+        );
+        // Somebody else's, and unchristened: the flag and an empty count, and
+        // nothing else moves.
+        let mine = bytes_of_server(&ToClient::Cairn {
+            island: IVec2::new(5, -3),
+            at: Vec2::new(1.5, -2.0),
+            name: "hi".to_string(),
+            yours: true,
+        });
+        let theirs = bytes_of_server(&ToClient::Cairn {
+            island: IVec2::new(5, -3),
+            at: Vec2::new(1.5, -2.0),
+            name: String::new(),
+            yours: false,
+        });
+        assert_eq!(
+            theirs[..2],
+            [20, 0],
+            "a nameless cairn is shorter by a name"
+        );
+        assert_eq!(theirs[2..19], mine[2..19], "whose it is moved the fields");
+        assert_eq!(theirs[19], 0, "somebody else's cairn is not flagged 0");
+        assert_eq!(theirs[20..], [0, 0], "an unchristened cairn says nothing");
 
         // A survey: two chunks, one with a single open run on its waterline
         // and one surveyed and blank. Written out whole, since between them
@@ -1845,6 +2070,37 @@ mod tests {
             ],
             "one palm, on the end of the ground it stands on"
         );
+    }
+
+    #[test]
+    fn a_name_is_either_carried_or_refused() {
+        // What a person types, with the whitespace they leaned on either side
+        // of it taken off — the name is the word, not the typing.
+        assert_eq!(
+            island_name("  Windward Reach "),
+            Some("Windward Reach".to_string())
+        );
+        // A name in an alphabet that costs more than a byte a letter fits,
+        // which is what counting to [`NAME_BYTES`] rather than to twenty-four
+        // is for.
+        assert_eq!(
+            island_name("Ilha do Príncipe").as_deref(),
+            Some("Ilha do Príncipe")
+        );
+
+        for (raw, what) in [
+            ("", "nothing at all"),
+            ("   ", "a name that is only the space bar"),
+            ("Windward\nReach", "a name with a line break in it"),
+            ("Windward\tReach", "a name with a tab in it"),
+        ] {
+            assert!(island_name(raw).is_none(), "the wire carried {what}");
+        }
+        // And one past the cap, which is refused whole rather than trimmed to
+        // fit: half of somebody's word would stand on their island for good.
+        let overlong = "a".repeat(NAME_BYTES + 1);
+        assert_eq!(island_name(&overlong), None);
+        assert!(island_name(&"a".repeat(NAME_BYTES)).is_some());
     }
 
     #[test]

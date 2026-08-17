@@ -7,8 +7,9 @@
 //! raised around whoever is present. What is left — what cannot be re-derived
 //! and so is the whole of what a world *is* beyond its seed — is short: which
 //! world this is, how old it is, what it is called, where it last saw each
-//! player it has dealt papers to, and which ground each of them has been near
-//! enough to survey. The seed is the geography; this file is the history.
+//! player it has dealt papers to, which ground each of them has been near
+//! enough to survey, and which islands have been claimed and by whom. The seed
+//! is the geography; this file is the history.
 //!
 //! A survey is the one part of it with any size to it — a voyage is thousands
 //! of chunks — and only the *coordinates* are written. What was found on them
@@ -84,6 +85,11 @@ pub(crate) struct WorldRecord {
     /// see [`protocol::BoatId`] — so unlike the beasts this is not a
     /// summary of a performance but the roster itself.
     pub boats: Vec<BoatRecord>,
+    /// Every island anybody has claimed — see [`ClaimRecord`]. Of everything
+    /// in this file it is the part that has to be kept most carefully: an
+    /// island claimed is a thing another player is barred from, and a world
+    /// that forgot one would hand somebody's place to the next comer.
+    pub claims: Vec<ClaimRecord>,
     /// The beasts alive when the world was last written — see
     /// [`BeastRecord`], and `beasts` for how the warden takes them back up.
     pub beasts: Vec<BeastRecord>,
@@ -118,6 +124,25 @@ pub(crate) struct BoatRecord {
     pub heading: f32,
 }
 
+/// One island claimed, as the file keeps it: which island, whose it is, where
+/// their cairn stands, and what they have christened it.
+///
+/// The island is named by the identity of its ring — see
+/// [`protocol::survey::Island::id`] — which is a point on the mark lattice and
+/// so a pair of whole numbers that mean the same thing in every session of
+/// this world. `by` is a [`Token`], the same one the player's own line is
+/// filed under: a claim belongs to whoever holds those papers, and outlives
+/// every visit.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ClaimRecord {
+    pub island: IVec2,
+    pub by: Token,
+    pub at: Vec2,
+    /// Empty for an island nobody has christened. Free text, which is why it
+    /// goes last on its line — see [`compose`].
+    pub name: String,
+}
+
 impl WorldRecord {
     /// A world that has just been made and has no history yet.
     pub(crate) fn fresh(seed: u32) -> Self {
@@ -129,6 +154,7 @@ impl WorldRecord {
             age: 0.0,
             players: HashMap::new(),
             boats: Vec::new(),
+            claims: Vec::new(),
             beasts: Vec::new(),
         }
     }
@@ -470,6 +496,28 @@ fn compose(record: &WorldRecord) -> String {
             boat.heading
         );
     }
+    // Sorted by the island claimed, which is the one field of a claim that
+    // cannot repeat: an island is claimed once or not at all.
+    let mut claims = record.claims.clone();
+    claims.sort_by_key(|claim| (claim.island.x, claim.island.y));
+    for claim in claims {
+        let _ = write!(
+            out,
+            "claim {} {} {:016x} {} {}",
+            claim.island.x, claim.island.y, claim.by.0, claim.at.x, claim.at.y
+        );
+        // The name last, and filtered on the way out as it is on the way in:
+        // it is the one field here somebody typed, and a line of this file has
+        // to stay a line. Nothing that reaches this should need the filter —
+        // the wire refuses a name with a control character in it — but the
+        // format's promise that it can be read back should not rest on
+        // somebody else's check.
+        let name = filtered(&claim.name);
+        if !name.is_empty() {
+            let _ = write!(out, " {name}");
+        }
+        let _ = writeln!(out);
+    }
     // Sorted likewise — by kind and then by where they stood, the bits
     // standing in for an order nobody reads but everybody can reproduce.
     let mut beasts = record.beasts.clone();
@@ -514,6 +562,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
     // this must not be the exception.
     let mut surveys: HashMap<Token, Vec<IVec2>> = HashMap::new();
     let mut boats = Vec::new();
+    let mut claims: Vec<ClaimRecord> = Vec::new();
     let mut beasts = Vec::new();
     for line in lines {
         if line.is_empty() {
@@ -640,6 +689,56 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     heading: finite(heading)?,
                 });
             }
+            // Five fields and then the rest of the line, which is the name:
+            // free text, so it may hold spaces and is split off last rather
+            // than counted among the others.
+            "claim" => {
+                let mut fields = value.splitn(6, ' ');
+                let (x, z, by, ax, az) = (
+                    fields.next().ok_or("a claim of no island")?,
+                    fields.next().ok_or("a claim of half an island")?,
+                    fields.next().ok_or("a claim in nobody's name")?,
+                    fields.next().ok_or("a cairn with no position")?,
+                    fields.next().ok_or("a cairn with half a position")?,
+                );
+                let island = IVec2::new(whole(x)?, whole(z)?);
+                // The reach everything else here is held to, in marks — an
+                // island is named by a point on the mark lattice, so this is
+                // the same test the positions get, read in the units the
+                // identity is written in.
+                if !crate::reachable(island.as_vec2() * protocol::survey::MARK_STEP) {
+                    return Err(format!("nobody ever sailed round {island}"));
+                }
+                let at = Vec2::new(finite(ax)?, finite(az)?);
+                if !crate::reachable(at) {
+                    return Err(format!("no cairn ever stood at {at}"));
+                }
+                // Held to the wire's own rule as well as the file's, so that
+                // what a hand-edited file can put on a cairn is what a player
+                // could have put there. A name that fails it is dropped and
+                // the claim kept: the island is somebody's either way, and a
+                // name can be written again.
+                let name = fields
+                    .next()
+                    .map(filtered)
+                    .as_deref()
+                    .and_then(protocol::island_name)
+                    .unwrap_or_default();
+                // Once each, on the terms the players are: an island claimed
+                // twice is a file that cannot say whose it is.
+                if claims
+                    .iter()
+                    .any(|held: &ClaimRecord| held.island == island)
+                {
+                    return Err(format!("one island claimed twice: `{line}`"));
+                }
+                claims.push(ClaimRecord {
+                    island,
+                    by: Token(hex(by)?),
+                    at,
+                    name,
+                });
+            }
             "beast" => {
                 let fields: Vec<&str> = value.split(' ').collect();
                 let ([kind, x, y, left], goal) = (
@@ -698,8 +797,24 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
         age,
         players,
         boats,
+        claims,
         beasts,
     })
+}
+
+/// A name as this file will carry it: control characters out, ends trimmed.
+///
+/// The wire's own rule ([`protocol::island_name`]) is the harder one and
+/// refuses such a name outright, which is right for a name somebody is
+/// offering. This is the format's rule, and it repairs rather than refuses
+/// because what it guards is only that a line stays a line — a world must not
+/// become unreadable over a stray byte in a name.
+fn filtered(name: &str) -> String {
+    name.chars()
+        .filter(|letter| !letter.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn hex(value: &str) -> Result<u64, String> {
@@ -779,6 +894,23 @@ mod tests {
                     heading: -2.25,
                 },
             ],
+            claims: vec![
+                // One christened and one not, and the names either side of
+                // the plainest word there is: spaces inside them, which is
+                // what putting the name last on the line is for.
+                ClaimRecord {
+                    island: IVec2::new(-40, 300),
+                    by: Token(7),
+                    at: Vec2::new(12.5, -340.25),
+                    name: "Ilha do Príncipe".to_string(),
+                },
+                ClaimRecord {
+                    island: IVec2::new(2, -1),
+                    by: Token(0xFFFF_0000_0000_0002),
+                    at: Vec2::new(-0.125, 9000.0),
+                    name: String::new(),
+                },
+            ],
             beasts: vec![
                 // One living where it stands, one still bound somewhere.
                 BeastRecord {
@@ -827,6 +959,15 @@ mod tests {
             boats
         };
         assert_eq!(boats_sorted(read.boats), boats_sorted(record.boats.clone()));
+        let claims_sorted = |mut claims: Vec<ClaimRecord>| {
+            claims.sort_by_key(|claim| (claim.island.x, claim.island.y));
+            claims
+        };
+        assert_eq!(
+            claims_sorted(read.claims),
+            claims_sorted(record.claims.clone()),
+            "a claim came back as somebody else's island"
+        );
         let sorted = |mut beasts: Vec<BeastRecord>| {
             beasts.sort_by_key(|beast| (word_of(beast.kind), beast.position.x.to_bits()));
             beasts
@@ -971,6 +1112,23 @@ mod tests {
                 "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
                  player 1 0 0\nplayer 1 8 8\n",
                 "one player told twice",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 3\n",
+                "a cairn with half a position",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 1e30 0\n",
+                "a cairn past where the world resolves",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 99999999 0 7 0 0\n",
+                "an island past where the world resolves",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                 claim 1 2 7 0 0 Here\nclaim 1 2 9 4 4 There\n",
+                "one island claimed twice",
             ),
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");

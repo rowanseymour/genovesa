@@ -21,7 +21,7 @@ pub mod cli;
 mod console;
 mod keeper;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{chunk_at, dequantize};
-use protocol::survey::{in_sight_along, Soundings, SIGHT_RADIUS};
+use protocol::survey::{in_sight_along, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
     SURVEY_BATCH_BYTES,
@@ -192,7 +192,11 @@ pub const SURVEY_SWEEP: f32 = 2_048.0;
 /// kilometres, and every metre of headroom is a lag spike, a stall on some
 /// far machine, or a legitimate catch-up that this must never clip. A voyage
 /// that touched it would be a voyage nobody sailed.
-const PLAUSIBLE_SPEED: f32 = 256.0;
+///
+/// Public so that a test which has to sail a real coast can wait for its
+/// allowance at the rate the survey actually fills it, rather than sleeping on
+/// a guess that would rot the moment this number moved.
+pub const PLAUSIBLE_SPEED: f32 = 256.0;
 
 /// How many chunks of a returning player's survey are worked out between one
 /// look at whether there is still anybody to tell — see
@@ -206,6 +210,31 @@ const PLAUSIBLE_SPEED: f32 = 256.0;
 /// between them; sixty-four is milliseconds of that in the ordinary case and
 /// under a second in the worst.
 const SURVEY_SLAB: usize = 64;
+
+/// How near a cairn a player has to be to be told about it, in metres.
+///
+/// A cairn is a thing standing in the world rather than an announcement, so it
+/// is told to whoever could be looking at it: everybody nearby when one is
+/// raised or renamed, and everybody put down beside one when they join. Wide
+/// enough that a client has it before it has drawn the ground it stands on —
+/// a client streams something like a kilometre around its camera — and narrow
+/// enough that who holds what is something a player finds out by going there.
+///
+/// What this is deliberately not is a rule about *knowing*. A player who sails
+/// up to a claimed island mid-session hears nothing until they ask, and what
+/// answers them is the refusal, which carries the cairn that is already there.
+/// A chart that remembers the coasts it has passed — sighting, as against
+/// visiting — is a slice of its own.
+const CAIRN_SIGHT: f32 = 1_536.0;
+
+/// How often one player's claim is settled, at most.
+///
+/// Settling one means walking every coastline that player has surveyed. That
+/// is arithmetic rather than generation — the soundings are already in hand,
+/// see [`Surveyed`] — but it grows with the voyage, and a client can ask as
+/// fast as it can write. A cairn is built by hand, so a quarter of a second
+/// between asks is nothing to a player and everything to a pestering client.
+const CLAIM_PACE: Duration = Duration::from_millis(250);
 
 /// How far from the origin a reported position may be, in metres. The world
 /// crate measures where `f32` ground stops being exactly the ground at about
@@ -278,7 +307,15 @@ type Report = Box<dyn Fn(&str) + Send + Sync>;
 /// takes the roster, clones the handle, lets the roster go, and only then
 /// locks this. No thread ever holds both, so there is no order for the two to
 /// disagree about.
-type Surveyed = Arc<Mutex<HashSet<IVec2>>>;
+///
+/// The ink is kept and not only the coordinates, which costs a few megabytes
+/// for a player who has called at a thousand islands and buys the one thing a
+/// bare list of chunks cannot answer: whether a coastline closes. A claim is
+/// settled by asking exactly that — see [`settle_a_claim`] — and asking it of
+/// a list would mean working every chunk of a whole voyage's ground out again,
+/// per ask, on the connection's own thread. The soundings are already in hand
+/// where they are recorded, so keeping them is free.
+type Surveyed = Arc<Mutex<Survey>>;
 
 /// A hosted world, listening for players.
 pub struct Server {
@@ -353,6 +390,17 @@ pub(crate) struct Shared {
     /// business (the saves) take it alone. That one-way rule is why the
     /// pair cannot deadlock.
     pub(crate) boats: Mutex<HashMap<BoatId, BoatState>>,
+    /// Every island anybody has claimed, by the identity of the ring that is
+    /// it — see [`protocol::survey::Island::id`]. What a cairn stands for, and
+    /// the whole of who may name what.
+    ///
+    /// Lock order: a leaf, like a player's survey, and held alone. Everything
+    /// a grant needs from the roster — where the asker is, whether they are
+    /// afoot — is read and let go before this is taken, and everything anybody
+    /// is told is posted after it has been let go again. So the one nesting
+    /// this session allows, the roster over the boats, has nothing to say
+    /// about this lock and cannot be got into an argument with it.
+    claims: Mutex<HashMap<IVec2, Claim>>,
     /// The file this world survives in, if it is being kept: `None` is an
     /// ephemeral world — a test's, or a dedicated server nobody asked to
     /// remember — which lives exactly as long as its process.
@@ -447,6 +495,27 @@ impl Player {
         self.waiting_since
             .is_some_and(|asked| now.duration_since(asked) < WAIT_LAPSE)
     }
+}
+
+/// One island claimed, as the session holds it: whose it is, where their cairn
+/// stands, and what they have christened it.
+///
+/// An island is claimed by a player who has sailed the whole way round it and
+/// then stood on it — see [`settle_a_claim`], which is where that is judged
+/// against the world's own survey of them rather than against anything a
+/// client says.
+#[derive(Clone)]
+struct Claim {
+    /// The token it belongs to, and never the player id: a claim outlives the
+    /// visit that made it, where an id is good for one session. It is also a
+    /// credential, so it never leaves this process — see
+    /// [`ToClient::Cairn`]'s `yours`, which is all a client is told of it.
+    by: Token,
+    /// Where the claimant stood when they claimed it, which is where the cairn
+    /// stands for good.
+    at: Vec2,
+    /// Empty for an island nobody has christened yet.
+    name: String,
 }
 
 /// One boat, as the session holds it: its file record's fields plus the
@@ -546,6 +615,22 @@ impl Server {
                                     // the door — see the welcome.
                                     occupant: None,
                                     virgin: false,
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+                claims: Mutex::new(
+                    record
+                        .claims
+                        .into_iter()
+                        .map(|claim| {
+                            (
+                                claim.island,
+                                Claim {
+                                    by: claim.by,
+                                    at: claim.at,
+                                    name: claim.name,
                                 },
                             )
                         })
@@ -1041,8 +1126,7 @@ impl Shared {
                         surveyed: surveyed
                             .lock()
                             .expect("no poisoned lock")
-                            .iter()
-                            .copied()
+                            .charted()
                             .collect(),
                     },
                 )
@@ -1062,6 +1146,18 @@ impl Shared {
                 })
                 .collect()
         };
+        let claims = {
+            let claims = self.claims.lock().expect("no poisoned lock");
+            claims
+                .iter()
+                .map(|(island, claim)| keeper::ClaimRecord {
+                    island: *island,
+                    by: claim.by,
+                    at: claim.at,
+                    name: claim.name.clone(),
+                })
+                .collect()
+        };
         let beasts = self.beasts.lock().expect("no poisoned lock").clone();
         keeper::WorldRecord {
             id: self.world_id,
@@ -1071,6 +1167,7 @@ impl Shared {
             age: self.age(),
             players,
             boats,
+            claims,
             beasts,
         }
     }
@@ -1238,11 +1335,20 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         waiting_since: None,
         // Where this player has already been, taken back up: the survey is
         // the world's memory of them and picks up where it left off.
-        surveyed: Arc::new(Mutex::new(
-            returning_to.as_ref().map_or_else(HashSet::new, |record| {
-                record.surveyed.iter().copied().collect()
-            }),
-        )),
+        //
+        // The chunks come back blank, the file keeping only where somebody
+        // went — see [`tell_the_survey_so_far`], which works the ink out again
+        // and fills it in here as it goes. So a returner's coastlines arrive
+        // over the first seconds of their visit rather than at the door, which
+        // is the same window in which their client has no chart drawn either:
+        // an island claimed in it is refused, and claimable a moment later.
+        surveyed: Arc::new(Mutex::new({
+            let mut survey = Survey::default();
+            for chunk in returning_to.iter().flat_map(|record| &record.surveyed) {
+                survey.record(*chunk, Soundings::default());
+            }
+            survey
+        })),
         outbox,
         line: stream,
     };
@@ -1298,7 +1404,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             // rather than emptied, so that nothing locks a survey with the
             // roster in hand — see [`Surveyed`]. Nobody else holds this one
             // yet anyway, the player not being on the roster until below.
-            player.surveyed = Arc::new(Mutex::new(HashSet::new()));
+            player.surveyed = Arc::new(Mutex::new(Survey::default()));
             returning = None;
         }
 
@@ -1492,6 +1598,17 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // down is: what it earns is the ground within sight of that spot.
     let put_down = wake.at;
     survey_the_way(&shared, id, &mut wake, put_down);
+    // And the cairns standing where they have been put down — the world's
+    // other players' doing, told as any other thing in the world is. Outside
+    // the roster's hold, the claims being a leaf lock nothing may reach for
+    // with the roster in hand.
+    tell_the_cairns_about(&shared, id, put_down);
+
+    // When this player's last claim was settled — see [`CLAIM_PACE`]. A
+    // connection's own local, like the [`Wake`]: it is about the rate this
+    // thread is being asked to work at, and nothing shared has business with
+    // it. Nothing yet, so the first ask of a session is answered at once.
+    let mut asked_to_claim: Option<Instant> = None;
 
     // Relay and take orders for ground until the line drops. Anything else
     // ends the session too: after a framing error nothing later on the stream
@@ -1660,6 +1777,26 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     survey_the_way(&shared, id, &mut wake, position);
                 }
             }
+            Ok(ToServer::Claim { island }) => {
+                // Paced rather than answered as fast as it is asked — see
+                // [`CLAIM_PACE`] — and an ask inside the pace is dropped on
+                // the floor, there being nothing to say about one that was
+                // never looked at.
+                //
+                // Only an ask that actually walked the coastlines pays the
+                // pace, which is why the clock is set from what came back
+                // rather than from having asked. What is being rationed is
+                // that walk; an ask the session answered off the roster alone
+                // — from somebody at a helm, say — cost nothing, and charging
+                // it would mean a player who asked from the deck and then
+                // stepped ashore went unanswered for a beat.
+                if asked_to_claim.is_none_or(|since| since.elapsed() >= CLAIM_PACE)
+                    && settle_a_claim(&shared, id, island)
+                {
+                    asked_to_claim = Some(Instant::now());
+                }
+            }
+            Ok(ToServer::Name { island, name }) => christen(&shared, id, island, &name),
             Ok(ToServer::WantDawn) => {
                 // Noted rather than acted on: whether the night actually
                 // runs depends on what everyone else wants — see
@@ -1737,8 +1874,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 surveyed: surveyed
                     .lock()
                     .expect("no poisoned lock")
-                    .iter()
-                    .copied()
+                    .charted()
                     .collect(),
             },
         )
@@ -1779,6 +1915,192 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         }
     }
     (shared.report)(&format!("{id} left"));
+}
+
+/// Settles a claim: grants it if the world's own record says this player has
+/// earned the island, and tells whoever can see the answer either way.
+///
+/// The three things a grant wants are all facts the server holds. The claimant
+/// must be afoot, because a cairn is built by somebody standing on the ground
+/// and not by somebody sailing past. The server's survey *for that player*
+/// must answer [`Survey::island_under`] with the island they named, which is
+/// both halves of the rule in one question — an unclosed coast rings nothing,
+/// and a point outside a ring is somewhere else. And nobody may hold it
+/// already, first asker taking it.
+///
+/// A refusal is posted to the asker alone and never broadcast: the world is
+/// otherwise exactly as they last heard it, and a refusal every other player's
+/// outbox carried would be a client able to pester the whole roster. Where the
+/// refusal is that somebody got there first, what goes back is that cairn,
+/// which is how a picture corrects itself — the same idiom as a refused
+/// boarding, where the boat's own state is the whole of the answer. Where it
+/// is anything else there is no state to send, and the answer is silence.
+///
+/// The locks are taken one at a time and in this order for the reason written
+/// on [`Shared::claims`]: the roster, let go; the survey, let go; the claims,
+/// let go; and only then the roster again, to tell people.
+///
+/// Says whether the survey was walked, which is the expensive half and the
+/// only half worth pacing — see the read loop, which is where the pacing is.
+fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
+    let Some((token, at, afoot, surveyed)) = ({
+        let players = shared.players.lock().expect("no poisoned lock");
+        players.get(&id).map(|player| {
+            (
+                player.token,
+                player.position,
+                player.aboard.is_none(),
+                player.surveyed.clone(),
+            )
+        })
+    }) else {
+        return false;
+    };
+
+    // The survey is only asked of somebody who could be building a cairn,
+    // which saves walking a voyage's coastlines for a helmsman's ask.
+    let stands_on = afoot
+        && surveyed
+            .lock()
+            .expect("no poisoned lock")
+            .island_under(at)
+            .is_some_and(|found| found.id == island);
+
+    let (told, granted) = {
+        let mut claims = shared.claims.lock().expect("no poisoned lock");
+        match claims.get(&island) {
+            // Somebody's already — theirs or another's, and either way the
+            // cairn that stands there is the answer.
+            Some(held) => (Some(held.clone()), false),
+            None if stands_on => {
+                let raised = Claim {
+                    by: token,
+                    at,
+                    name: String::new(),
+                };
+                claims.insert(island, raised.clone());
+                (Some(raised), true)
+            }
+            // Nothing there, and nothing earned: an island this player has
+            // not been round, or is not standing on, or is not ashore at all.
+            None => (None, false),
+        }
+    };
+
+    let Some(claim) = told else {
+        return afoot;
+    };
+    let players = shared.players.lock().expect("no poisoned lock");
+    if granted {
+        (shared.report)(&format!("{id} claimed an island"));
+        tell_the_cairn(&players, island, &claim, id);
+    } else if let Some(player) = players.get(&id) {
+        post(player, cairn_told_to(player, island, &claim));
+    }
+    // Walked exactly when the asker was afoot — `stands_on` above is the only
+    // question the survey is asked, and it short-circuits on that.
+    afoot
+}
+
+/// Christens a claimed island, if the asker is the one holding the claim.
+///
+/// A name is the world's now rather than one client's notebook: it rides with
+/// the cairn, so everybody who passes reads the same word. Which is why it is
+/// earned the way the island was — only the claimant may write it, and a name
+/// the wire will not carry (see [`protocol::island_name`]) is a refusal rather
+/// than an erasure, leaving the cairn saying whatever it said before.
+///
+/// An island nobody has claimed cannot be named at all, and there is no state
+/// to answer with, so that ask is met with silence.
+fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) {
+    let Some(token) = ({
+        let players = shared.players.lock().expect("no poisoned lock");
+        players.get(&id).map(|player| player.token)
+    }) else {
+        return;
+    };
+
+    let (told, granted) = {
+        let mut claims = shared.claims.lock().expect("no poisoned lock");
+        let Some(claim) = claims.get_mut(&island) else {
+            return;
+        };
+        match protocol::island_name(name) {
+            // The name it already had is not news, and telling everybody
+            // nearby would be: a client is the one saying this, and one
+            // repeating itself must not be able to fill the outboxes of every
+            // player standing near the cairn. Answered to the asker alone,
+            // like any other ask that changed nothing.
+            Some(written) if claim.by == token && written != claim.name => {
+                claim.name = written;
+                (claim.clone(), true)
+            }
+            // Somebody else's island, or nothing anybody could call a name:
+            // the cairn goes back to the asker exactly as it stands.
+            _ => (claim.clone(), false),
+        }
+    };
+
+    let players = shared.players.lock().expect("no poisoned lock");
+    if granted {
+        tell_the_cairn(&players, island, &told, id);
+    } else if let Some(player) = players.get(&id) {
+        post(player, cairn_told_to(player, island, &told));
+    }
+}
+
+/// Tells a joining player the cairns standing near where they have been put
+/// down — the same proximity the raising of one is told by.
+fn tell_the_cairns_about(shared: &Shared, id: PlayerId, at: Vec2) {
+    let near: Vec<(IVec2, Claim)> = {
+        let claims = shared.claims.lock().expect("no poisoned lock");
+        claims
+            .iter()
+            .filter(|(_, claim)| claim.at.distance(at) <= CAIRN_SIGHT)
+            .map(|(island, claim)| (*island, claim.clone()))
+            .collect()
+    };
+    if near.is_empty() {
+        return;
+    }
+    let players = shared.players.lock().expect("no poisoned lock");
+    let Some(player) = players.get(&id) else {
+        return;
+    };
+    for (island, claim) in near {
+        post(player, cairn_told_to(player, island, &claim));
+    }
+}
+
+/// Tells everyone near enough to see a cairn about it, and the `asker`
+/// whether they are near it or not — a player who names an island from the
+/// other side of the world still hears what became of their asking.
+fn tell_the_cairn(
+    players: &HashMap<PlayerId, Player>,
+    island: IVec2,
+    claim: &Claim,
+    asker: PlayerId,
+) {
+    for (id, player) in players {
+        if player.position.distance(claim.at) <= CAIRN_SIGHT || *id == asker {
+            post(player, cairn_told_to(player, island, claim));
+        }
+    }
+}
+
+/// One cairn as one player hears it.
+///
+/// The message is built per hearer because `yours` is a fact about the hearer:
+/// what a client needs to know is which cairns are its own player's doing, and
+/// what it must never be sent is the [`Token`] that actually settles it —
+/// tokens are credentials and go nowhere but to the client holding them.
+fn cairn_told_to(player: &Player, island: IVec2, claim: &Claim) -> ToClient {
+    ToClient::Cairn {
+        island,
+        at: claim.at,
+        name: claim.name.clone(),
+        yours: player.token == claim.by,
+    }
 }
 
 /// One chunk of the world, surveyed exactly as a client would survey it.
@@ -1978,7 +2300,7 @@ fn survey_the_way(shared: &Shared, id: PlayerId, wake: &mut Wake, now: Vec2) {
                 // legal report from just inside the edge has chunks in sight
                 // whose corners are past it, which is how that happens
                 // honestly.
-                in_the_world(*chunk) && !known.contains(chunk) && in_sight_along(*chunk, from, to)
+                in_the_world(*chunk) && !known.surveyed(*chunk) && in_sight_along(*chunk, from, to)
             })
             .collect()
     };
@@ -1991,10 +2313,14 @@ fn survey_the_way(shared: &Shared, id: PlayerId, wake: &mut Wake, now: Vec2) {
         .map(|chunk| (chunk, survey_chunk(&shared.world, chunk)))
         .collect();
 
-    surveyed
-        .lock()
-        .expect("no poisoned lock")
-        .extend(found.iter().map(|(chunk, _)| *chunk));
+    {
+        // Kept as well as sent: what closes a coastline is the world's own
+        // answer, and a claim is settled off it — see [`Surveyed`].
+        let mut surveyed = surveyed.lock().expect("no poisoned lock");
+        for (chunk, ink) in &found {
+            surveyed.record(*chunk, ink.clone());
+        }
+    }
     let players = shared.players.lock().expect("no poisoned lock");
     post_the_survey(&players, id, found);
 }
@@ -2016,19 +2342,18 @@ fn survey_the_way(shared: &Shared, id: PlayerId, wake: &mut Wake, now: Vec2) {
 /// kilobytes on the wire, which at this scale is fine; a world somebody has
 /// lived in for a season would want the ink kept rather than re-earned.
 fn tell_the_survey_so_far(shared: &Arc<Shared>, id: PlayerId) {
-    let known: Vec<IVec2> = {
-        let surveyed = {
-            let players = shared.players.lock().expect("no poisoned lock");
-            let Some(player) = players.get(&id) else {
-                return;
-            };
-            player.surveyed.clone()
+    let surveyed = {
+        let players = shared.players.lock().expect("no poisoned lock");
+        let Some(player) = players.get(&id) else {
+            return;
         };
+        player.surveyed.clone()
+    };
+    let known: Vec<IVec2> = {
         let mut known: Vec<IVec2> = surveyed
             .lock()
             .expect("no poisoned lock")
-            .iter()
-            .copied()
+            .charted()
             .collect();
         // Sorted so that two runs of one world hand the same chart back in
         // the same order — a hash set's order is nobody's business.
@@ -2065,6 +2390,16 @@ fn tell_the_survey_so_far(shared: &Arc<Shared>, id: PlayerId) {
                 .iter()
                 .map(|&chunk| (chunk, survey_chunk(&shared.world, chunk)))
                 .collect();
+            {
+                // Filled in behind the blank the door left — see the survey
+                // this player was welcomed with. Until a slab lands here the
+                // world knows this player has been to those chunks but not
+                // what is on them, which is what a claim is settled by.
+                let mut surveyed = surveyed.lock().expect("no poisoned lock");
+                for (chunk, ink) in &found {
+                    surveyed.record(*chunk, ink.clone());
+                }
+            }
             let players = shared.players.lock().expect("no poisoned lock");
             post_the_survey(&players, id, found);
         }

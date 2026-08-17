@@ -519,6 +519,15 @@ impl Survey {
         self.soundings.get(&chunk)
     }
 
+    /// Every chunk the survey holds, in whatever order it holds them.
+    ///
+    /// The record of where somebody has been, stripped of what was found
+    /// there — which is exactly what a world's file writes down, the ink being
+    /// derivable from the seed and the going never being.
+    pub fn charted(&self) -> impl Iterator<Item = IVec2> + '_ {
+        self.soundings.keys().copied()
+    }
+
     /// Records what one chunk's ground turned out to hold.
     pub fn record(&mut self, chunk: IVec2, found: Soundings) {
         self.soundings.insert(chunk, found);
@@ -669,6 +678,43 @@ impl Survey {
         self.islands().into_iter().find(|island| island.id == id)
     }
 
+    /// The island a point stands on, if this survey has closed one around it.
+    ///
+    /// The whole of the claim test, in one question. Standing inside a ring
+    /// this survey has closed means both of the things a claim asks — that the
+    /// claimant has been all the way round this shore, and that they are on the
+    /// land it encloses — and neither can be had without the other, because an
+    /// unclosed coast rings nothing and a point outside it is somewhere else.
+    /// The server asks it of its own survey, which is what makes a claim
+    /// something granted rather than something announced.
+    ///
+    /// Where rings nest — an islet in a lagoon in an island — the answer is the
+    /// smallest that holds the point, which is the one somebody is actually
+    /// standing on.
+    ///
+    /// A point in a lagoon counts as on the island: the water in the middle of
+    /// a place is part of the place, and somebody who has run the whole outer
+    /// shore has earned it either way.
+    pub fn island_under(&self, at: Vec2) -> Option<Island> {
+        let mut under: Option<Island> = None;
+        self.coastlines(&mut |id, ring| {
+            let points: Vec<Vec2> = ring.collect();
+            let measured = measure(&mut points.iter().copied());
+            if !measured.is_island() || !rings(&points, at) {
+                return;
+            }
+            let island = Island {
+                id,
+                centre: measured.centre,
+                extent: measured.extent,
+            };
+            if under.is_none_or(|held| island.extent < held.extent) {
+                under = Some(island);
+            }
+        });
+        under
+    }
+
     /// Everything the survey holds, counted in a single walk of the coasts.
     ///
     /// One walk rather than a count and a list, because measuring a ring is
@@ -715,6 +761,39 @@ fn ring_id(marks: impl Iterator<Item = IVec2>) -> IVec2 {
     marks
         .min_by_key(|point| (point.x, point.y))
         .expect("a ring has points")
+}
+
+/// Whether a closed ring encloses a point.
+///
+/// A ray cast east from the point, counting the edges it crosses: odd is
+/// inside. Which way the ring was walked does not matter, so no assumption is
+/// made here about the land-on-the-left convention every other question leans
+/// on — a lagoon's ring encloses its water exactly as an island's encloses its
+/// land, and telling those two apart is [`Ring::is_island`]'s job, not this
+/// one's.
+///
+/// The joins are harmless: a run's end and the next run's identical start make
+/// a zero-length edge, which straddles nothing and so is never crossed.
+fn rings(points: &[Vec2], at: Vec2) -> bool {
+    let mut inside = false;
+    let Some(&last) = points.last() else {
+        return false;
+    };
+    let mut previous = last;
+    for &point in points {
+        // Only edges that straddle the ray's own latitude can cross it, and
+        // the halves are taken as half-open — one end counted, the other not —
+        // so a vertex sitting exactly on the ray is crossed once rather than
+        // twice or never.
+        if (point.y > at.y) != (previous.y > at.y) {
+            let along = (at.y - point.y) / (previous.y - point.y);
+            if at.x < point.x + along * (previous.x - point.x) {
+                inside = !inside;
+            }
+        }
+        previous = point;
+    }
+    inside
 }
 
 /// A closed ring, measured.
@@ -1583,5 +1662,59 @@ mod tests {
         kept.record(IVec2::new(4, 4), survey(&a_north_shore(50.0)));
         kept.record(IVec2::new(-3, 2), survey(&all(-8.0)));
         assert_eq!(kept.islands()[0].id, id);
+    }
+
+    /// One island, closed: a cone across two chunks, big enough to be worth a
+    /// name. Hands back the survey and the island in it.
+    fn a_closed_island() -> (Survey, Island) {
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut kept = Survey::default();
+        for chunk in [IVec2::ZERO, IVec2::new(1, 0)] {
+            kept.record(chunk, survey(&a_cone(chunk, middle, 60.0)));
+        }
+        let island = kept.islands()[0];
+        (kept, island)
+    }
+
+    #[test]
+    fn standing_on_an_island_is_standing_inside_its_ring() {
+        // The whole of the claim test: the middle of the cone is on it, and
+        // the open water well off its shore is not.
+        let (kept, island) = a_closed_island();
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+
+        assert_eq!(
+            kept.island_under(middle).map(|found| found.id),
+            Some(island.id),
+            "the middle of an island is not on it"
+        );
+        assert_eq!(
+            kept.island_under(middle + Vec2::new(400.0, 0.0)),
+            None,
+            "open water four hundred metres out is somebody's island"
+        );
+    }
+
+    #[test]
+    fn a_shore_nobody_has_been_round_holds_nobody_up() {
+        // Half a survey rings nothing, so there is nothing to stand on and
+        // nothing to claim — which is the rule the whole business rests on.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut half = Survey::default();
+        half.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+
+        assert_eq!(half.islands(), &[], "half a coast closed an island");
+        assert_eq!(half.island_under(middle), None);
+    }
+
+    #[test]
+    fn a_rock_awash_is_nobodys_island_to_stand_on() {
+        // Closed, and too small to be a place: standing on it earns nothing.
+        let middle = Vec2::splat(CHUNK_METRES / 2.0);
+        let mut kept = Survey::default();
+        kept.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 30.0)));
+
+        assert_eq!(counted(&kept), (1, 0, 0), "a skerry counted as an island");
+        assert_eq!(kept.island_under(middle), None);
     }
 }

@@ -807,6 +807,10 @@ fn receive(
                     );
                 }
             }
+            // Heard and not yet drawn: the cairn's model, the key that plants
+            // one and the mark it leaves on the chart are the client's half of
+            // claiming, and land with it.
+            ToClient::Cairn { .. } => {}
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } | ToClient::World { .. } => {}
