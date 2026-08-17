@@ -179,6 +179,23 @@ claimant's word for any of it.
 streams on the true wind, on the same arithmetic a masthead pennant does — so
 a player anchored offshore can read the weather off somebody else's claim.*
 
+Nobody is announced. What one player knows of another's claims is earned by
+being there, in three steps: sight the banner from offshore and the stones go
+on the chart unlettered — somebody is here, and that is all a daymark says at a
+mile. Land and walk up to the cairn and it says whose, and the name goes on the
+paper beside it. Sail the whole coast yourself and you have the island itself,
+drawn in the ordinary way and open to a claim of your own if nobody has taken
+it. Only the last of the three is the player's own seeing, and only the last
+earns a claim — a chart that let hearsay close a coastline would be a chart an
+island could be claimed off having been *told* about it. Each step is kept by
+the world, so a landing is worth making once.
+
+![Three ways of knowing, on one sheet](docs/chart-cairns.png)
+
+*The same chart carrying all three: an island surveyed and lettered, a cairn
+that has been visited and so has a name, and a cairn only ever seen from a
+distance, which keeps its owner's word to itself.*
+
 ## Playing together
 
 Every world is a served world. The server generates the ocean and hands it out

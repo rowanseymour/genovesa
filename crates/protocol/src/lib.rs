@@ -680,18 +680,25 @@ pub enum ToClient {
     ///
     /// One message is both the introduction and every change after, as with
     /// the beasts and the boats — a client keys cairns by the island they
-    /// stand for and redraws whatever a telling says. Sent to everyone near
-    /// enough when one is raised or renamed, to a joining player for the ones
-    /// near where they are put down, and to a claim this server refused
-    /// because the island was already somebody's, which is how an asker's
-    /// picture corrects itself.
+    /// stand for and redraws whatever a telling says. Sent when one comes
+    /// within sight of a player and again when they come near enough to read
+    /// it, to everyone near enough when one is raised or renamed, to a joining
+    /// player for every one they already knew of, and to a claim this server
+    /// refused because the island was already somebody's, which is how an
+    /// asker's picture corrects itself.
     ///
     /// `at` is where the claimant stood, in metres, and the cairn stands there
     /// for good: an island is claimed by a person in a place, not by a
     /// calculation about its middle.
     ///
     /// `name` is what the island is called, and empty for one nobody has
-    /// christened yet — see [`ToServer::Name`].
+    /// christened yet — see [`ToServer::Name`]. It is **also** empty for one
+    /// this hearer has not been near enough to read, and a client cannot tell
+    /// those apart. That is the point rather than a shortcoming: knowledge here
+    /// is gated on having been there, and being able to distinguish *there is a
+    /// word here you may not read* from *there is no word here* would be
+    /// knowing something about a place nobody has visited. Both are stones with
+    /// nothing legible on them, which is what standing off a coast shows you.
     ///
     /// `yours` says whether this cairn is the hearer's own doing. It is a fact
     /// about the hearer rather than about the cairn, so the same cairn goes

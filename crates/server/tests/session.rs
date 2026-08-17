@@ -253,6 +253,28 @@ impl Client {
         }
     }
 
+    /// The next word about a cairn whose name `wanted` is happy with, ignoring
+    /// the words before it.
+    ///
+    /// What a client hears about one cairn is a sequence and not an event: the
+    /// stones are told when they come into sight and told again when they are
+    /// walked up to and read. A test about the second would otherwise be a test
+    /// about how many of the first happened to have arrived first, which
+    /// depends on where the world put somebody down.
+    fn hear_a_cairn_saying(&self, wanted: impl Fn(&str) -> bool) -> (IVec2, Vec2, String, bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let told = self.hear_a_cairn();
+            if wanted(&told.2) {
+                return told;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ten seconds and no cairn ever said the wanted thing"
+            );
+        }
+    }
+
     /// Whether the session said nothing about any cairn — which is what a
     /// refusal with no state to show sounds like.
     ///
@@ -1826,6 +1848,23 @@ fn sail_around(
     charted
 }
 
+/// Sails one leg, at the speed the world believes in.
+///
+/// The sleep is what [`sail_around`]'s is: the survey follows a report only as
+/// far as its allowance reaches (see [`server::PLAUSIBLE_SPEED`]), so a leg
+/// taken faster than a hull could take it is a leg the world only half
+/// follows — and a test whose point is what was passed on the way would be
+/// asking about a way that was never gone down.
+fn sail_to(client: &Client, from: Vec2, to: Vec2) {
+    std::thread::sleep(Duration::from_secs_f32(
+        from.distance(to) / server::PLAUSIBLE_SPEED,
+    ));
+    client.say(ToServer::Helm {
+        position: to,
+        heading: 0.0,
+    });
+}
+
 /// A spot ashore, found by walking in from the water until the test's own copy
 /// of the world says there is ground underfoot — where a client would judge
 /// its own footing before stepping off a boat.
@@ -1984,25 +2023,229 @@ fn only_the_claimant_may_name_the_island() {
     alice.say(ToServer::Claim { island });
     let _ = alice.hear_a_cairn();
 
-    // A stranger's christening is refused, and what comes back is the cairn
-    // exactly as it stands — unnamed, and not his.
-    let (bob, _id, _spawn, _facing) = Client::join(addr);
-    bob.say(ToServer::Name {
-        island,
-        name: "Bob's Rock".to_string(),
-    });
-    let (told, _at, name, yours) = bob.hear_a_cairn();
-    assert_eq!(told, island);
-    assert_eq!(name, "", "a stranger wrote on somebody else's island");
-    assert!(!yours);
-
-    // The claimant's is granted, and rides with the cairn.
+    // The claimant's christening is granted, and rides with the cairn.
     alice.say(ToServer::Name {
         island,
         name: "Ilha Verde".to_string(),
     });
     let (told, _at, name, yours) = alice.hear_a_cairn();
     assert_eq!((told, name.as_str(), yours), (island, "Ilha Verde", true));
+
+    // A stranger's is refused, and what comes back is the cairn exactly as it
+    // stands. Bob is walked right up to it first, so that what he hears is
+    // Alice's word and not an empty name he would have been handed anyway —
+    // the refusal has to be shown *not writing*, and a hearer too far off to
+    // read the stones could not tell the difference. See
+    // [`a_passing_hull_reads_the_stones_and_a_landing_reads_the_word`].
+    let (bob, _id, _spawn, _facing) = Client::join(addr);
+    bob.say(ToServer::Disembark { position: ashore });
+    bob.say(ToServer::Name {
+        island,
+        name: "Bob's Rock".to_string(),
+    });
+    let (told, _at, name, yours) = bob.hear_a_cairn_saying(|name| !name.is_empty());
+    assert_eq!(told, island);
+    assert_eq!(name, "Ilha Verde", "a stranger wrote on somebody's island");
+    assert!(!yours);
+}
+
+#[test]
+fn a_passing_hull_reads_the_stones_and_a_landing_reads_the_word() {
+    // Presence-gated knowledge, in one voyage. A cairn is a daymark on a
+    // twenty-metre staff and says *somebody is here* from a mile off; the
+    // name is lettering, and lettering is read by walking up to it.
+    let addr = host(CLAIMABLE);
+    let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
+    alice.say(ToServer::Disembark { position: ashore });
+    alice.say(ToServer::Claim { island });
+    let _ = alice.hear_a_cairn();
+    alice.say(ToServer::Name {
+        island,
+        name: "Ilha Verde".to_string(),
+    });
+    assert_eq!(alice.hear_a_cairn().2, "Ilha Verde");
+
+    // Bob stands off it — inside the reach a staff and banner carry, well
+    // outside the reach a word does. Seaward of the cairn rather than at some
+    // bearing of its own, so that the way he sails to get there runs away from
+    // the stones and cannot brush past them.
+    let world = behind_the_curtain(CLAIMABLE);
+    let (centre, _across, _ashore) = an_island_to_sail_round(&world, ashore);
+    let seaward = (ashore - centre).normalize_or(Vec2::X);
+    let standing_off = ashore + seaward * ((server::CAIRN_SIGHT + server::CAIRN_VISIT) / 2.0);
+    let (bob, _id, spawn, _facing) = Client::join(addr);
+    sail_to(&bob, spawn, standing_off);
+
+    let (told, at, name, yours) = bob.hear_a_cairn();
+    assert_eq!(told, island, "a cairn for some other island");
+    assert_eq!(at, ashore, "the stones are not where they were built");
+    assert!(
+        !yours,
+        "somebody else's cairn was told as this player's own"
+    );
+    assert_eq!(
+        name, "",
+        "an island's name was read from a hull standing off it"
+    );
+
+    // And then he lands on it, and the stones say who was here.
+    bob.say(ToServer::Disembark { position: ashore });
+    let (told, _at, name, yours) = bob.hear_a_cairn_saying(|name| !name.is_empty());
+    assert_eq!(told, island, "a name for some other island");
+    assert_eq!(name, "Ilha Verde", "a cairn walked up to said nothing");
+    assert!(!yours, "reading a cairn handed the island over");
+}
+
+#[test]
+fn a_claimant_walking_round_their_own_cairn_is_not_told_about_it_again() {
+    // Cairns come into sight as a player sails, and a player told about one
+    // every time they report where they are would be a player whose own
+    // outbox filled up standing next to their own island. What stops it is
+    // that the telling only goes out when something has been *learnt* — and a
+    // claimant has nothing left to learn about their own stones, wherever they
+    // stand.
+    let addr = host(CLAIMABLE);
+    let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
+    alice.say(ToServer::Disembark { position: ashore });
+    alice.say(ToServer::Claim { island });
+    let (told, _at, _name, yours) = alice.hear_a_cairn();
+    assert_eq!((told, yours), (island, true));
+
+    // A few paces about it, at every remove that could earn anybody anything:
+    // right beside it, a stone's throw off, and out where only the banner
+    // would show.
+    for step in [1.0, server::CAIRN_VISIT / 2.0, server::CAIRN_SIGHT / 2.0] {
+        alice.say(ToServer::Move {
+            position: ashore + Vec2::new(step, 0.0),
+        });
+    }
+    assert!(
+        alice.nothing_was_said_about_a_cairn(),
+        "a claimant was told about their own cairn for walking past it"
+    );
+}
+
+#[test]
+fn what_a_landing_taught_is_still_known_when_the_world_opens_again() {
+    // The knowing is the world's and lasts as long as the world does. A player
+    // who has been up to somebody else's cairn does not have to go back and
+    // look at it again after a night ashore — that is the whole difference
+    // between a chart and a view out of a window.
+    let path = scratch("knowing").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: CLAIMABLE })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
+    alice.say(ToServer::Disembark { position: ashore });
+    alice.say(ToServer::Claim { island });
+    let _ = alice.hear_a_cairn();
+    alice.say(ToServer::Name {
+        island,
+        name: "Ilha Verde".to_string(),
+    });
+    assert_eq!(alice.hear_a_cairn().2, "Ilha Verde");
+
+    // Bob lands, reads it, and walks back off down the shore before the world
+    // shuts — far enough that where he is put back down could earn him the
+    // stones and could never earn him the word on them. So a name at the door
+    // is a name he remembered.
+    let (bob, _id, _spawn, _facing, papers) = Client::join_presenting(addr, None);
+    bob.say(ToServer::Disembark { position: ashore });
+    assert_eq!(
+        bob.hear_a_cairn_saying(|name| !name.is_empty()).2,
+        "Ilha Verde"
+    );
+    let world = behind_the_curtain(CLAIMABLE);
+    let (centre, _across, _ashore) = an_island_to_sail_round(&world, ashore);
+    let seaward = (ashore - centre).normalize_or(Vec2::X);
+    let along_the_shore = ashore + seaward * ((server::CAIRN_SIGHT + server::CAIRN_VISIT) / 2.0);
+    bob.say(ToServer::Move {
+        position: along_the_shore,
+    });
+    // Waited out before the world is shut, because a client that says a thing
+    // and hangs up has not necessarily been heard say it, and where he was
+    // standing is the whole of what this test rests on. One connection's words
+    // are read in the order it says them, so an answer to a line typed after
+    // the step is proof the step was taken.
+    bob.say(ToServer::Command {
+        line: "help".to_string(),
+    });
+    let _ = bob.hear_reply();
+    drop(alice);
+    drop(bob);
+    drop(host);
+
+    let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
+    let addr = again.local_addr().expect("addr");
+    let _host = again.spawn().expect("spawn");
+
+    let (bob, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(papers));
+    assert_eq!(dealt, papers, "kept papers were re-dealt");
+    assert!(
+        spawn.distance(ashore) > server::CAIRN_VISIT,
+        "the returner was put back within reading distance of the cairn, \
+         so a name at the door proves nothing about what they remembered"
+    );
+    let (told, at, name, yours) = bob.hear_a_cairn();
+    assert_eq!(told, island, "some other island was remembered");
+    assert_eq!(at, ashore, "the cairn moved while the world was shut");
+    assert_eq!(name, "Ilha Verde", "a visited cairn came back unread");
+    assert!(!yours, "a visit turned into a claim overnight");
+}
+
+#[test]
+fn a_word_carved_after_a_visit_does_not_chase_the_chart_that_left() {
+    // What a chart holds is what was there when it was drawn. Somebody who
+    // read a cairn and sailed on keeps the word that was on the stones then —
+    // a rename reaches whoever is standing by to see it happen and nobody
+    // else, and the way to find out what an island is called now is the way it
+    // was the first time.
+    let addr = host(CLAIMABLE);
+    let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
+    alice.say(ToServer::Disembark { position: ashore });
+    alice.say(ToServer::Claim { island });
+    let _ = alice.hear_a_cairn();
+    alice.say(ToServer::Name {
+        island,
+        name: "Ilha Verde".to_string(),
+    });
+    assert_eq!(alice.hear_a_cairn().2, "Ilha Verde");
+
+    let (bob, _id, _spawn, _facing) = Client::join(addr);
+    bob.say(ToServer::Disembark { position: ashore });
+    assert_eq!(
+        bob.hear_a_cairn_saying(|name| !name.is_empty()).2,
+        "Ilha Verde"
+    );
+
+    // Bob puts the island hull down behind him, and Alice carves it again. The
+    // way there is nobody's business here — only where he ends up is, that
+    // being what the telling is decided by — so this goes at the speed a test
+    // goes at rather than at a hull's.
+    bob.say(ToServer::Move {
+        position: ashore + Vec2::splat(server::CAIRN_SIGHT),
+    });
+    // And waited out before Alice carves, the two of them being two
+    // connections with no order between them: a rename that overtook the step
+    // would be told to somebody still standing there, which is a different test
+    // passing under this one's name.
+    bob.say(ToServer::Command {
+        line: "help".to_string(),
+    });
+    let _ = bob.hear_reply();
+    alice.say(ToServer::Name {
+        island,
+        name: "Ilha Roxa".to_string(),
+    });
+    assert_eq!(alice.hear_a_cairn().2, "Ilha Roxa");
+    assert!(
+        bob.nothing_was_said_about_a_cairn(),
+        "a cairn recarved on the far side of the world followed the chart that left it"
+    );
 }
 
 #[test]
