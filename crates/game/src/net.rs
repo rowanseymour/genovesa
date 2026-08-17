@@ -628,10 +628,10 @@ fn marker_color(id: PlayerId) -> Color {
 }
 
 /// Where a server's word lands when it is not an entity: the wind the sea is
-/// drawn under, the hour the world is lit at, the beasts in its water, and
-/// the console a reply is printed on. Resources belonging to four other
-/// modules, taken together because [`receive`] is the one place any of them
-/// is written and none is this module's to interpret.
+/// drawn under, the hour the world is lit at, the beasts in its water, the
+/// coast on the chart and the console a reply is printed on. Resources
+/// belonging to other modules, taken together because [`receive`] is the one
+/// place any of them is written and none is this module's to interpret.
 #[derive(SystemParam)]
 struct Told<'w> {
     forecast: ResMut<'w, sea::Forecast>,
@@ -639,6 +639,9 @@ struct Told<'w> {
     beasts: ResMut<'w, crate::beasts::Beasts>,
     console: ResMut<'w, crate::console::Console>,
     fleet: ResMut<'w, crate::boat::Fleet>,
+    /// Optional where the rest are not: the sheet exists only inside a world,
+    /// and the lean tests of this module run without one.
+    chart: Option<ResMut<'w, crate::chart::Chart>>,
 }
 
 /// Applies what the server said since last frame: players joining, moving
@@ -715,6 +718,19 @@ fn receive(
                 // is nothing left for it to be part of.
                 if let Some(ground) = ground.as_mut() {
                     ground.deliver(chunk, sent);
+                }
+            }
+            ToClient::Surveyed { found } => {
+                // Only while a world is open, on the ground's own terms: ink
+                // arriving after the sheet has been rolled up is about a
+                // world that no longer exists here. Nothing is checked — a
+                // mark is two bytes and cannot be non-finite, and what a
+                // coast *means* is the wire's own arithmetic rather than
+                // something a client re-derives and could disagree about.
+                if let Some(chart) = told.chart.as_mut() {
+                    for (chunk, soundings) in found {
+                        chart.record(chunk, soundings);
+                    }
                 }
             }
             ToClient::Weather { wind } => {
@@ -1320,6 +1336,47 @@ mod tests {
             ashore,
             "the capsule is gliding in from where they boarded"
         );
+    }
+
+    #[test]
+    fn a_telling_of_the_survey_reaches_the_chart() {
+        // The client has no survey of its own: coast reaches the sheet by
+        // being told, and this is the whole of that path.
+        use protocol::survey::{Coast, Mark, Soundings};
+
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+        app.insert_resource(crate::chart::Chart::default());
+
+        let shore = IVec2::new(3, -2);
+        (ToClient::Surveyed {
+            found: vec![
+                (
+                    shore,
+                    Soundings {
+                        coast: vec![Coast::new(
+                            vec![Mark::unpack([0, 17]), Mark::unpack([255, 254])],
+                            false,
+                        )],
+                        shoal: Vec::new(),
+                    },
+                ),
+                // And open water, which is surveyed and blank.
+                (IVec2::new(4, -2), Soundings::default()),
+            ],
+        })
+        .write(&mut &server)
+        .expect("surveyed");
+
+        run_until(&mut app, "the ink lands on the sheet", |app| {
+            app.world().resource::<crate::chart::Chart>().surveys() == 2
+        });
+        assert!(app
+            .world()
+            .resource::<crate::chart::Chart>()
+            .surveyed(shore));
     }
 
     #[test]

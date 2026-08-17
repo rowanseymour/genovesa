@@ -100,17 +100,59 @@ pub const DEFAULT_PORT: u16 = 24816;
 /// reads as corruption instead of as a request to buffer megabytes.
 const MAX_CLIENT_FRAME: u16 = 512;
 
-/// The longest frame a client will accept from a server, which is exactly one
-/// chunk of ground and not a byte more: its tag, its coordinates, the flag
-/// that says what kind of answer this is, the count of plants growing on it,
-/// and the payload — the largest kind, which is ground with standing water on
-/// it and a full complement of plants.
+/// How many bytes of survey one [`ToClient::Surveyed`] carries.
+///
+/// A batch rather than a chunk at a time, because a returning player is told
+/// back a whole voyage's worth of it at the door and a message each would be
+/// thousands of messages — deeper than any outbox is, and the server's answer
+/// to a client that far behind is to hang up on it.
+///
+/// A budget in bytes rather than a count of chunks, because chunks are not
+/// alike: most of a voyage is open water, which is twelve bytes of "surveyed,
+/// and nothing on it", while a chunk of broken coast is many times that.
+/// Eight kilobytes is several hundred chunks of the common kind, so an hour's
+/// sailing crosses in a handful of messages, and one island's coast in one.
+pub const SURVEY_BATCH_BYTES: usize = 8 * 1024;
+
+/// How many bytes one chunk's entry in a [`ToClient::Surveyed`] takes: where
+/// it is, and what was found there.
+///
+/// Public because a server fills a batch to [`SURVEY_BATCH_BYTES`] by it, and
+/// the budget being filled and the bytes that actually go had better be one
+/// arithmetic.
+pub fn surveyed_bytes(found: &survey::Soundings) -> usize {
+    8 + found.bytes()
+}
+
+/// The longest frame a client will accept from a server: the larger of the
+/// two answers big enough to be worth measuring, one ceiling having to cover
+/// the whole direction.
+///
+/// One is a chunk of ground, and it is exactly that and not a byte more: its
+/// tag, its coordinates, the flag that says what kind of answer this is, the
+/// count of plants growing on it, and the payload — the largest kind, which
+/// is ground with standing water on it and a full complement of plants.
+///
+/// The other is a batch of survey, filled to [`SURVEY_BATCH_BYTES`] — except
+/// that one chunk's soundings are never split across two messages, so a chunk
+/// more torn than the whole budget still has to travel whole. That is what
+/// [`survey::SOUNDINGS_BYTES`] is for, and it is the term that wins: the
+/// ceiling stands where a coast crossing every facet of a chunk would put it,
+/// rather than where a real coast happens to.
 ///
 /// Derived rather than picked, so that a message which outgrew it fails to
 /// send here instead of arriving as garbage — and so that "how much can one
 /// answer cost" has one answer, written down.
-const MAX_SERVER_FRAME: u16 =
-    (1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS)) as u16;
+const MAX_SERVER_FRAME: u16 = {
+    let ground = 1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS);
+    let batch = if SURVEY_BATCH_BYTES > 8 + survey::SOUNDINGS_BYTES {
+        SURVEY_BATCH_BYTES
+    } else {
+        8 + survey::SOUNDINGS_BYTES
+    };
+    let surveyed = 1 + 2 + batch;
+    (if ground > surveyed { ground } else { surveyed }) as u16
+};
 
 /// A player, as the server counts them: dealt out in joining order, never
 /// reused within a session, meaningless across sessions.
@@ -544,6 +586,32 @@ pub enum ToClient {
     Vocabulary {
         verbs: Vec<String>,
     },
+    /// Coast this player has surveyed: a batch of chunks, each with what one
+    /// walk of its ground found — see [`survey`], which is what a survey *is*
+    /// and is shared by both ends for the reason written there.
+    ///
+    /// The survey belongs to the world, not to the client. The server holds
+    /// which chunks each player has been near enough to look at, works out
+    /// what is on them, and says so: on joining, everything they had surveyed
+    /// before, and after that a batch whenever sailing brings more within
+    /// [`survey::SIGHT_RADIUS`]. A client records what it is told and draws
+    /// it, and has no rule of its own about what counts as seen — which is
+    /// what lets a claim be the server's to grant off the same coastline the
+    /// player is looking at.
+    ///
+    /// An entry with no runs in it is not nothing: it is a chunk surveyed and
+    /// found blank, which is most of an ocean and is worth saying, being the
+    /// difference between water somebody has crossed and water nobody has.
+    ///
+    /// A batch because a voyage's worth arrives at once — see
+    /// [`SURVEY_BATCH_BYTES`] for how much of it goes in a message and why it
+    /// is measured in bytes. On the wire: a u16 count of chunks, then each as
+    /// its coordinates and its soundings, the runs of the waterline and then
+    /// of the shoal line, each run a flag saying whether it closes, a u16
+    /// count of marks, and the marks as the two bytes they are.
+    Surveyed {
+        found: Vec<(IVec2, survey::Soundings)>,
+    },
 }
 
 impl ToServer {
@@ -743,6 +811,14 @@ impl ToClient {
                     put_str(&mut payload, verb);
                 }
             }
+            Self::Surveyed { found } => {
+                payload.push(14);
+                put_u16(&mut payload, found.len() as u16);
+                for (chunk, soundings) in found {
+                    put_ivec2(&mut payload, *chunk);
+                    soundings.put(&mut payload);
+                }
+            }
             Self::Chunk { chunk, ground } => {
                 payload.push(5);
                 put_ivec2(&mut payload, *chunk);
@@ -856,6 +932,14 @@ impl ToClient {
                     flag => return Err(corrupt(format!("a boat occupied by flag {flag}"))),
                 },
             },
+            14 => {
+                let mut found = Vec::new();
+                for _ in 0..payload.u16()? {
+                    let chunk = payload.ivec2()?;
+                    found.push((chunk, payload.soundings()?));
+                }
+                Self::Surveyed { found }
+            }
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
         payload.finish()?;
@@ -1015,6 +1099,16 @@ impl<'a> Payload<'a> {
             .map_err(|_| corrupt("text that is not UTF-8 is not text".into()))
     }
 
+    /// One chunk's soundings, however long they turn out to be — a batch
+    /// carries them one after another, so the reader is told where each ends
+    /// rather than being told beforehand how long it will be.
+    fn soundings(&mut self) -> io::Result<survey::Soundings> {
+        let (found, rest) = survey::Soundings::take(self.bytes)
+            .ok_or_else(|| corrupt("soundings that are not soundings".into()))?;
+        self.bytes = rest;
+        Ok(found)
+    }
+
     fn chunk_payload(&mut self, water: bool, plants: usize) -> io::Result<ChunkPayload> {
         let bytes = self.take(ground::payload_bytes(water, plants))?;
         ChunkPayload::take(bytes, water, plants).ok_or_else(|| {
@@ -1036,7 +1130,30 @@ impl<'a> Payload<'a> {
 #[cfg(test)]
 mod tests {
     use super::ground::{Shade, Surface, Tone, FACET_TRIS, FACET_VERTS};
+    use super::survey::{Coast, Mark, Soundings};
     use super::*;
+
+    /// A chunk's worth of ink whose every byte is a different one, so that
+    /// anything which reordered the runs or the marks inside them shows.
+    fn a_coast() -> Soundings {
+        Soundings {
+            coast: vec![
+                Coast::new(vec![Mark::unpack([1, 2]), Mark::unpack([255, 0])], false),
+                Coast::new(
+                    vec![
+                        Mark::unpack([10, 20]),
+                        Mark::unpack([30, 40]),
+                        Mark::unpack([50, 60]),
+                    ],
+                    true,
+                ),
+            ],
+            shoal: vec![Coast::new(
+                vec![Mark::unpack([7, 8]), Mark::unpack([9, 11])],
+                false,
+            )],
+        }
+    }
 
     fn bytes_of_client(message: &ToServer) -> Vec<u8> {
         let mut out = Vec::new();
@@ -1211,6 +1328,14 @@ mod tests {
                 chunk: IVec2::new(6, -1),
                 ground: Some(a_chunk_with_a_lake()),
             },
+            ToClient::Surveyed {
+                found: vec![
+                    (IVec2::new(-2, 7), a_coast()),
+                    // Surveyed and blank, which is most of an ocean.
+                    (IVec2::new(-1, 7), Soundings::default()),
+                ],
+            },
+            ToClient::Surveyed { found: Vec::new() },
         ] {
             let bytes = bytes_of_server(&message);
             assert_eq!(ToClient::read(&mut bytes.as_slice()).unwrap(), message);
@@ -1560,6 +1685,43 @@ mod tests {
             ],
         );
 
+        // A survey: two chunks, one with a single open run on its waterline
+        // and one surveyed and blank. Written out whole, since between them
+        // they carry every field the encoding has.
+        assert_eq!(
+            bytes_of_server(&ToClient::Surveyed {
+                found: vec![
+                    (
+                        IVec2::new(5, -3),
+                        Soundings {
+                            coast: vec![Coast::new(
+                                vec![Mark::unpack([1, 2]), Mark::unpack([255, 0])],
+                                false,
+                            )],
+                            shoal: Vec::new(),
+                        },
+                    ),
+                    (IVec2::ZERO, Soundings::default()),
+                ],
+            }),
+            [
+                34, 0,  // length
+                14, // tag
+                2, 0, // two chunks
+                5, 0, 0, 0, // x = 5
+                0xFD, 0xFF, 0xFF, 0xFF, // z = -3
+                1, 0, // one run of waterline...
+                0, 0, // ...and no shoal line
+                0, // the run does not close
+                2, 0, // two marks
+                1, 2, // the first, x then z
+                255, 0, // the second, on the chunk's own edge
+                0, 0, 0, 0, // the second chunk: x = 0
+                0, 0, 0, 0, // z = 0
+                0, 0, 0, 0, // surveyed, and nothing found on it
+            ],
+        );
+
         // Open water: the whole message, since there is nothing in it.
         assert_eq!(
             bytes_of_server(&ToClient::Chunk {
@@ -1701,10 +1863,14 @@ mod tests {
         .is_err());
         assert!(wire.is_empty(), "half a frame reached the wire");
 
-        // And the server's ceiling is exactly the largest chunk there is —
-        // ground with water on it and as many plants as one may carry — so
-        // that answer fits with nothing to spare, and a plainer chunk fits
-        // with the difference to spare.
+        // And the server's ceiling covers both of the answers big enough to
+        // measure. The largest chunk of ground there is — with water on it
+        // and as many plants as one may carry — fits, and so does a batch of
+        // survey filled to its budget with the most torn chunk there could
+        // be on the end of it, which is what the ceiling actually stands at.
+        assert!(usize::from(MAX_SERVER_FRAME) >= 3 + SURVEY_BATCH_BYTES);
+        assert!(usize::from(MAX_SERVER_FRAME) >= 3 + 8 + survey::SOUNDINGS_BYTES);
+
         let mut most = a_chunk_with_a_lake();
         most.plants = vec![
             ground::Plant {
@@ -1721,9 +1887,10 @@ mod tests {
         });
         assert_eq!(
             biggest.len() - 2,
-            MAX_SERVER_FRAME as usize,
-            "a watered chunk under a full stand of plants is what the ceiling is for"
+            1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS),
+            "a watered chunk under a full stand of plants costs what it costs"
         );
+        assert!(biggest.len() - 2 <= MAX_SERVER_FRAME as usize);
         let lake = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
             ground: Some(a_chunk_with_a_lake()),
@@ -1736,6 +1903,24 @@ mod tests {
         assert_eq!(
             biggest.len() - lake.len(),
             ground::MAX_PLANTS * ground::PLANT_BYTES
+        );
+    }
+
+    #[test]
+    fn a_batch_of_survey_costs_what_its_chunks_cost() {
+        // What a server fills a message to its budget by. The count and the
+        // encoding are two pieces of arithmetic about one thing, and a batch
+        // built to fit a frame only fits while they agree.
+        let found = vec![
+            (IVec2::new(-2, 7), a_coast()),
+            (IVec2::ZERO, Soundings::default()),
+        ];
+        let spent: usize = found.iter().map(|(_, ink)| surveyed_bytes(ink)).sum();
+        let bytes = bytes_of_server(&ToClient::Surveyed { found });
+        assert_eq!(
+            bytes.len(),
+            2 + 1 + 2 + spent,
+            "the length and the count part"
         );
     }
 
@@ -1845,6 +2030,11 @@ mod tests {
         short_lake.push(2);
         short_lake.extend(std::iter::repeat_n(0, ground::PAYLOAD_BYTES));
         assert!(ToClient::read(&mut short_lake.as_slice()).is_err());
+
+        // A survey promising more chunks than it carries: the counts inside a
+        // batch are a reader's to believe only as far as the bytes go.
+        let short_survey = [3, 0, 14, 2, 0];
+        assert!(ToClient::read(&mut short_survey.as_slice()).is_err());
 
         // And a wire that simply ends is an ordinary end-of-file error.
         assert!(ToServer::read(&mut [].as_slice()).is_err());

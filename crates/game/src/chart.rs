@@ -10,13 +10,16 @@
 //! grant and both ends have to reach the same answer about a coast. This
 //! module holds one [`Survey`], asks it questions, and puts ink on paper.
 //!
-//! **Nothing here is generated, and nothing new crosses the wire.** A
-//! coastline is the sea-level contour of the height grid a chunk already
-//! arrived with (see [`protocol::ground::ChunkPayload`]), so the chart is drawn
-//! out of what the client was told and nothing else. That is deliberate: having
-//! *seen* a stretch of coast is a fact about one player's client, and a second
-//! client written against the protocol alone would keep a chart of its own the
-//! same way, without a byte being added to the session for it.
+//! **Nothing here surveys anything.** The survey belongs to the world: the
+//! server holds which chunks each player has been near enough to look at,
+//! works out what is on them, and says so — everything already surveyed when
+//! a player joins, and a batch more whenever sailing brings coast within
+//! sight (see [`protocol::ToClient::Surveyed`]). This module records what it
+//! is told and draws it, and has no rule of its own about what counts as
+//! seen. It could not honestly have one: a claim is judged against a coast
+//! the server has walked, and a client that decided for itself what it had
+//! seen would be a client whose chart and whose claims were about two
+//! different worlds.
 //!
 //! # The one thing that accumulates
 //!
@@ -25,7 +28,9 @@
 //! it has left behind, because the server is the one holding the world. The
 //! chart cannot do that — a coast is worth remembering exactly as long as the
 //! player is in the world — so it is the one structure here that has to be
-//! designed for a world with no edges.
+//! designed for a world with no edges. What arrives over the wire is told once
+//! and never told again, so what is on the sheet is only ever what was put
+//! there.
 //!
 //! What makes that affordable is throwing the ground away and keeping only the
 //! two lines worth drawing — where it meets the sea, and where the water over
@@ -105,28 +110,16 @@ use bevy::prelude::*;
 use bevy::text::{Font, FontSize, FontSource};
 use bevy::window::PrimaryWindow;
 
-use protocol::ground::{chunk_at, CHUNK_METRES};
-use protocol::survey::{in_sight, survey, Soundings, Survey, SurveyTally, SIGHT_RADIUS};
+use protocol::survey::{Soundings, Survey, SurveyTally};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::MapCamera;
 use crate::player::PlayerPlace;
-use crate::terrain::Ground;
 use crate::{AppState, Helm};
 
 // ---------------------------------------------------------------------------
-// Surveying
+// What has been surveyed
 // ---------------------------------------------------------------------------
-
-/// Chunks surveyed in any one frame.
-///
-/// A survey is cheap — marching squares across four thousand cells — but they
-/// arrive in clumps rather than spread out, an island's whole rectangle landing
-/// within a frame or two of itself, and a hundred at once would be a hitch
-/// exactly when the player has reached somewhere worth looking at. The rest are
-/// picked up over the following frames, and nothing is lost by waiting: a chunk
-/// in sight stays in sight, and stays in hand a good deal longer than that.
-const SURVEYS_PER_FRAME: usize = 8;
 
 /// Everything the player has seen of the world's coasts, and what they have
 /// called it.
@@ -227,84 +220,30 @@ impl Chart {
         self.survey.within(window.min, window.max)
     }
 
-    /// Records what one chunk's ground turned out to hold.
-    fn record(&mut self, chunk: IVec2, found: Soundings) {
+    /// Records what the world says one chunk holds — see
+    /// [`crate::net::receive`], which is the only caller and the only way ink
+    /// reaches this sheet.
+    pub(crate) fn record(&mut self, chunk: IVec2, found: Soundings) {
         self.survey.record(chunk, found);
     }
 
-    /// Everything surveyed, and every name written on the sheet, as plain
-    /// entries for the logbook to write down.
-    pub(crate) fn entries(&self) -> (Vec<(IVec2, Soundings)>, Vec<(IVec2, String)>) {
-        (
-            self.survey
-                .entries()
-                .map(|(chunk, found)| (chunk, found.clone()))
-                .collect(),
-            self.names
-                .iter()
-                .map(|(island, name)| (*island, name.clone()))
-                .collect(),
-        )
+    /// Every name written on the sheet, for the logbook to write down. The
+    /// survey itself is not in there: the world holds that, and tells it back
+    /// on the way in.
+    pub(crate) fn christenings(&self) -> Vec<(IVec2, String)> {
+        self.names
+            .iter()
+            .map(|(island, name)| (*island, name.clone()))
+            .collect()
     }
 
-    /// A chart rebuilt from a logbook's entries — the survey, and the
-    /// christenings, taken up from wherever the last visit left off.
-    pub(crate) fn from_entries(
-        soundings: impl IntoIterator<Item = (IVec2, Soundings)>,
-        names: impl IntoIterator<Item = (IVec2, String)>,
-    ) -> Self {
-        let mut survey = Survey::default();
-        for (chunk, found) in soundings {
-            survey.record(chunk, found);
-        }
+    /// A blank chart carrying the names a logbook kept — the christenings
+    /// taken up from wherever the last visit left off, on ink that has not
+    /// arrived yet.
+    pub(crate) fn named(names: impl IntoIterator<Item = (IVec2, String)>) -> Self {
         Self {
-            survey,
+            survey: Survey::default(),
             names: names.into_iter().collect(),
-        }
-    }
-}
-
-/// Surveys the chunks that have come within sight of the player.
-///
-/// Runs whatever the player is doing, the chart included — a boat left drifting
-/// keeps finding coast, and a sheet open over it should say so.
-fn take_soundings(
-    mut chart: ResMut<Chart>,
-    ground: Res<Ground>,
-    place: PlayerPlace,
-    cameras: Query<&MapCamera>,
-) {
-    // The player when there is one, and otherwise wherever the view is centred
-    // — which is where the player is about to be put down.
-    let Some(at) = place.on_the_map().or_else(|| {
-        cameras
-            .single()
-            .ok()
-            .map(|camera| Vec2::new(camera.focus.x, camera.focus.z))
-    }) else {
-        return;
-    };
-
-    let reach = (SIGHT_RADIUS / CHUNK_METRES).ceil() as i32;
-    let centre = chunk_at(at);
-    let mut surveyed = 0;
-    for dz in -reach..=reach {
-        for dx in -reach..=reach {
-            if surveyed >= SURVEYS_PER_FRAME {
-                return;
-            }
-            let chunk = centre + IVec2::new(dx, dz);
-            if chart.surveyed(chunk) || !in_sight(chunk, at) {
-                continue;
-            }
-            // Ground that has not arrived is passed over rather than recorded,
-            // and comes round again on a later frame — it is still in sight,
-            // and will be for a good while yet.
-            let Some(heights) = ground.heights(chunk) else {
-                continue;
-            };
-            chart.record(chunk, survey(&heights));
-            surveyed += 1;
         }
     }
 }
@@ -602,15 +541,7 @@ impl Plugin for ChartPlugin {
             .add_systems(OnEnter(AppState::InWorld), start_a_chart)
             .add_systems(OnExit(AppState::InWorld), stow_the_chart)
             .add_systems(OnExit(Helm::Chart), roll_up)
-            .add_systems(
-                Update,
-                (
-                    take_soundings
-                        .run_if(resource_exists::<Chart>.and_then(resource_exists::<Ground>)),
-                    chart_key,
-                )
-                    .run_if(in_state(AppState::InWorld)),
-            )
+            .add_systems(Update, chart_key.run_if(in_state(AppState::InWorld)))
             .add_systems(
                 Update,
                 (
@@ -634,12 +565,13 @@ impl Plugin for ChartPlugin {
     }
 }
 
-/// A world gets a blank chart — or, in a world this machine remembers, the
-/// chart the last visit left off with — and takes it with it when it goes:
+/// A world gets a blank chart — carrying, in a world this machine remembers,
+/// the names the last visit wrote on it — and takes it with it when it goes:
 /// what has been seen is a fact about *this* world, and carrying it into the
 /// next would draw one seed's islands on another's water. The logbook is
-/// keyed by the world's own id, which is what makes reloading it safe where
-/// carrying it over would not be.
+/// keyed by the world's own id, which is what makes reloading names safe
+/// where carrying them over would not be. The ink itself is the world's to
+/// hand back, and arrives over the wire moments later.
 fn start_a_chart(
     mut commands: Commands,
     mut view: ResMut<ChartView>,
@@ -2288,10 +2220,11 @@ fn rule_the_scale(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{run_frames, test_ground, world_app, FRAME};
+    use crate::testing::{run_frames, FRAME};
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
-    use protocol::ground::{FACET_METRES, FACET_VERTS};
+    use protocol::ground::{CHUNK_METRES, FACET_METRES, FACET_VERTS};
+    use protocol::survey::{survey, SIGHT_RADIUS};
     // How near a point drawn from a survey can be asked to land: the survey's
     // own two roundings, and no promise finer than them.
     use protocol::survey::{MARK_STEP, TOLERANCE};
@@ -2313,10 +2246,14 @@ mod tests {
 
     #[test]
     fn the_sight_radius_stays_inside_what_the_client_holds() {
-        // The survey never asks for ground: it reads what streaming has already
-        // brought in. If this stopped being true, chunks would come into sight
-        // that the client had never been sent, and the chart would have holes
-        // in it that nothing would ever come back to fill.
+        // The survey is the world's now, but the reach it works to still has
+        // to sit inside what streaming brings in. A chunk the server has
+        // surveyed for this player is one they are meant to be looking at, and
+        // two things here read the survey against the ground in hand: the
+        // compass rim, which marks charted land it can also see, and the haze,
+        // drawn to this same distance so that ink stops where the world does.
+        // Were this the longer of the two, both would be about ground the
+        // client had never been sent.
         const { assert!(SIGHT_RADIUS < crate::terrain::STREAM_RADIUS) };
     }
 
@@ -2740,32 +2677,34 @@ mod tests {
     }
 
     #[test]
-    fn the_survey_follows_the_player_and_stops_where_they_stop_seeing() {
-        // The whole behaviour, in a world already delivered: the coast near
-        // where the player is put down goes on the chart, and ground they have
-        // never been near stays off it — which is what makes half an island
-        // half an island.
-        let mut app = world_app();
-        app.add_plugins(ChartPlugin);
-        app.insert_resource(Chart::default());
-        app.insert_resource(test_ground());
-        run_frames(&mut app, 60);
+    fn a_telling_of_the_survey_is_ink_on_the_sheet() {
+        // The whole of what this module does about surveying now: the world
+        // says what a chunk holds and the sheet has it — no rule of its own
+        // about what has been seen, and nothing on the paper that was not
+        // told. Whether the *right* chunks are told is the server's promise,
+        // and its session tests are where that is asked.
+        let mut chart = Chart::default();
+        assert!(!chart.surveyed(IVec2::ZERO));
 
-        let chart = app.world().resource::<Chart>();
-        // The test island's waterline runs at about 200 m from the origin,
-        // which is where the player is put down.
-        let shore = chunk_at(Vec2::new(crate::testing::TEST_ISLAND_REACH, 0.0));
-        assert!(chart.surveyed(shore), "the shore was never surveyed");
+        let middle = Vec2::splat(CHUNK_METRES / 2.0);
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 40.0)));
+        // And a chunk the world called on and found blank, which is still
+        // surveyed — it is the difference between water somebody has crossed
+        // and water nobody has.
+        chart.record(IVec2::new(1, 0), Soundings::default());
 
-        let coast = Rect::from_corners(Vec2::splat(-400.0), Vec2::splat(400.0));
+        assert!(chart.surveyed(IVec2::ZERO) && chart.surveyed(IVec2::new(1, 0)));
+        assert_eq!(chart.surveys(), 2);
+        let paper = Rect::from_corners(Vec2::ZERO, Vec2::splat(CHUNK_METRES));
         assert!(
-            chart.within(coast).count() > 0,
-            "an island was surveyed and no coast came of it"
+            chart
+                .within(paper)
+                .any(|(_, found)| !found.coast.is_empty()),
+            "an island was told and no coast came of it"
         );
 
-        // And a chunk well past the horizon, which the player has never been
-        // anywhere near.
-        assert!(!chart.surveyed(chunk_at(Vec2::splat(4000.0))));
+        // Ground nobody has said anything about stays off the sheet.
+        assert!(!chart.surveyed(IVec2::new(30, 30)));
     }
 
     #[test]

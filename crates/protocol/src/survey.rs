@@ -30,6 +30,19 @@
 //! "surveyed the whole of it" a thing worth having done, and a claim worth
 //! something.
 //!
+//! Where somebody has been is a *way*, not a string of places: a hull between
+//! two position reports was somewhere, and coast it plainly ran past must not
+//! fall down the gap. See [`in_sight_along`], which is the rule, and
+//! [`in_sight`], which is the corner of it where nobody has moved.
+//!
+//! Deciding all this is the server's — it holds the chunks each player has
+//! surveyed and tells them what is on them (see
+//! [`crate::ToClient::Surveyed`]). A client draws what it is told. It could
+//! not honestly do otherwise: a claim is settled against a coast the server
+//! has walked, and a client with a rule of its own about what it had seen
+//! would be a client whose chart and whose claims were about two different
+//! worlds.
+//!
 //! Not a test against any camera: a survey that filled in and stopped filling
 //! in as a view was spun would record where a player had *looked* rather than
 //! where they had been, and the server — which has no camera at all — could
@@ -78,13 +91,13 @@ use crate::ground::{chunk_at, CHUNK_METRES, FACET_METRES, FACET_QUADS, FACET_VER
 /// on closing a coastline). It was most of a client's streaming radius once,
 /// and that surveyed whole islands from the anchorage off one corner of them.
 ///
-/// It sits far inside that streaming radius, which is what makes the survey
-/// safe rather than merely tidy: a chunk within sight is one a client is
-/// certain to be holding the ground of, so it never has to ask for anything or
-/// wait. A client's haze is drawn to this same number on purpose — the edge of
-/// what is worth recording and the edge of what can be made out are one
-/// distance, and it is this one, because this is the one both ends must agree
-/// on.
+/// It sits far inside a client's streaming radius, and that is what makes the
+/// survey safe rather than merely tidy: a chunk within sight is one the client
+/// is certain to be holding the ground of, so ink and ground arrive together
+/// and neither ever waits on the other. A client's haze is drawn to this same
+/// number on purpose — the edge of what is worth recording and the edge of
+/// what can be made out are one distance, and it is this one, because this is
+/// the one both ends must agree on.
 pub const SIGHT_RADIUS: f32 = 320.0;
 
 /// How far a surveyed line may stray from the contour it was taken from, in
@@ -240,10 +253,156 @@ pub fn survey(heights: &[f32]) -> Soundings {
     }
 }
 
-/// Whether any part of a chunk is within sight of a point.
+/// Whether any part of a chunk is within sight of a point — a way that goes
+/// nowhere; see [`in_sight_along`], which is the rule this is a corner of.
 pub fn in_sight(chunk: IVec2, at: Vec2) -> bool {
+    in_sight_along(chunk, at, at)
+}
+
+/// Whether any part of a chunk comes within sight of anywhere on the way from
+/// `from` to `to`.
+///
+/// The way rather than only the end of it, because where a player *is* arrives
+/// a few times a second and a hull between two of those reports was somewhere:
+/// a coast a fast boat plainly ran past must not fall down the gap between two
+/// positions. A survey is a record of where somebody has been, and being
+/// somewhere for a fifteenth of a second is having been there.
+///
+/// The distance is between the square and the whole segment, exactly, rather
+/// than sampled along it — samples spaced anything at all leave a scallop of
+/// coast between them uncovered, which is the same hole one report further
+/// apart. Both shapes are convex, so the nearest pair of points has a corner
+/// of one of them in it: the least of the two ends against the square and the
+/// square's four corners against the segment is the whole answer.
+pub fn in_sight_along(chunk: IVec2, from: Vec2, to: Vec2) -> bool {
     let corner = chunk.as_vec2() * CHUNK_METRES;
-    at.clamp(corner, corner + CHUNK_METRES).distance_squared(at) <= SIGHT_RADIUS * SIGHT_RADIUS
+    let (least, most) = (corner, corner + CHUNK_METRES);
+    let to_square = |at: Vec2| at.clamp(least, most).distance_squared(at);
+
+    let along = to - from;
+    let reach = along.length_squared();
+    let to_way = |at: Vec2| {
+        // A way that goes nowhere is its own nearest point, which is what the
+        // zero guard is for — and what makes [`in_sight`] this same function.
+        let t = if reach > 0.0 {
+            ((at - from).dot(along) / reach).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (from + along * t).distance_squared(at)
+    };
+
+    let nearest = to_square(from)
+        .min(to_square(to))
+        .min(to_way(least))
+        .min(to_way(Vec2::new(most.x, least.y)))
+        .min(to_way(most))
+        .min(to_way(Vec2::new(least.x, most.y)));
+    nearest <= SIGHT_RADIUS * SIGHT_RADIUS
+}
+
+// ---------------------------------------------------------------------------
+// Soundings, written down
+// ---------------------------------------------------------------------------
+
+/// The most bytes one chunk's soundings can take on the wire.
+///
+/// Derived rather than picked, because a frame's ceiling is worked out from it
+/// — see [`crate::ToClient::Surveyed`] — and what it has to promise is that
+/// one chunk's ink always fits one message, however torn its coast.
+///
+/// A level's contour runs along the edges of the facet grid, and every
+/// crossing belongs to exactly one run, so a level's marks are at most the
+/// edges there are: [`FACET_QUADS`] × [`FACET_VERTS`] of them each way. A run
+/// that is kept holds at least two marks, so the runs are at most half that
+/// again, and the worst case is where both bounds are tight at once. Two
+/// levels of it, and the two counts on the front.
+///
+/// It comes to a great deal more than any real coast: a chunk of ordinary
+/// shore is a few dozen bytes, and this is what a chunk would cost whose
+/// ground crossed the waterline at every facet of it. That is the point — a
+/// ceiling that only holds for plausible ground is not a ceiling.
+pub const SOUNDINGS_BYTES: usize = {
+    let crossings = FACET_QUADS * FACET_VERTS * 2;
+    2 * (crossings * 2 + crossings / 2 * 3) + 4
+};
+
+impl Soundings {
+    /// How many bytes these soundings take on the wire — what a server fills
+    /// a message to a budget by, so that the budget and the bytes that
+    /// actually go are one arithmetic rather than two.
+    pub fn bytes(&self) -> usize {
+        4 + self
+            .coast
+            .iter()
+            .chain(&self.shoal)
+            .map(|run| 3 + run.marks.len() * 2)
+            .sum::<usize>()
+    }
+
+    /// Appends these soundings: how many runs of each line, then the
+    /// waterline's runs and the shoal's, each as its closing flag, its count
+    /// of marks and the marks themselves.
+    ///
+    /// The counts are `u16` and cannot overflow one: the grid bounds both of
+    /// them far below that — see [`SOUNDINGS_BYTES`], which is the same
+    /// bound spent in bytes.
+    pub(crate) fn put(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(self.coast.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(self.shoal.len() as u16).to_le_bytes());
+        for run in self.coast.iter().chain(&self.shoal) {
+            out.push(u8::from(run.closed));
+            out.extend_from_slice(&(run.marks.len() as u16).to_le_bytes());
+            for mark in &run.marks {
+                out.extend_from_slice(&mark.pack());
+            }
+        }
+    }
+
+    /// Reads one chunk's soundings off the front of `bytes`, and hands back
+    /// what is left — a message carries a batch of them, so the reader has to
+    /// be told where each one ended.
+    ///
+    /// `None` for anything that is not soundings: a count that runs off the
+    /// end, or a flag byte that is neither shape of run.
+    pub(crate) fn take(bytes: &[u8]) -> Option<(Self, &[u8])> {
+        fn count(bytes: &[u8]) -> Option<(usize, &[u8])> {
+            let (head, rest) = bytes.split_at_checked(2)?;
+            Some((u16::from_le_bytes([head[0], head[1]]) as usize, rest))
+        }
+        // Nothing is reserved ahead of being read: the counts are a reader's
+        // to believe only as far as the bytes behind them go, and a frame
+        // claiming thousands of runs it has not got must cost nothing.
+        fn runs(bytes: &[u8], how_many: usize) -> Option<(Vec<Coast>, &[u8])> {
+            let mut rest = bytes;
+            let mut runs = Vec::new();
+            for _ in 0..how_many {
+                let (&flag, after) = rest.split_first()?;
+                let closed = match flag {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                };
+                let (marks, after) = count(after)?;
+                let (packed, after) = after.split_at_checked(marks * 2)?;
+                runs.push(Coast::new(
+                    packed
+                        .chunks_exact(2)
+                        .map(|pair| Mark::unpack([pair[0], pair[1]]))
+                        .collect(),
+                    closed,
+                ));
+                rest = after;
+            }
+            Some((runs, rest))
+        }
+
+        let (coasts, rest) = count(bytes)?;
+        let (shoals, rest) = count(rest)?;
+        let (coast, rest) = runs(rest, coasts)?;
+        let (shoal, rest) = runs(rest, shoals)?;
+        Some((Self { coast, shoal }, rest))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,12 +493,6 @@ impl Survey {
     /// Records what one chunk's ground turned out to hold.
     pub fn record(&mut self, chunk: IVec2, found: Soundings) {
         self.soundings.insert(chunk, found);
-    }
-
-    /// Every chunk surveyed, with what it found — for whoever is writing the
-    /// survey down.
-    pub fn entries(&self) -> impl Iterator<Item = (IVec2, &Soundings)> {
-        self.soundings.iter().map(|(chunk, found)| (*chunk, found))
     }
 
     /// Everything surveyed within a rectangle of the world, chunk by chunk.
@@ -1119,6 +1272,65 @@ mod tests {
             IVec2::ZERO,
             Vec2::new(CHUNK_METRES + SIGHT_RADIUS + 1.0, 64.0)
         ));
+    }
+
+    #[test]
+    fn a_chunk_sailed_past_between_two_reports_is_still_seen() {
+        // The hole a fast hull would otherwise leave. Two positions a
+        // kilometre apart — neither of them anywhere near this chunk — with
+        // the chunk sitting square on the line between them.
+        let chunk = IVec2::new(4, 0);
+        let (from, to) = (Vec2::new(0.0, 64.0), Vec2::new(1_024.0, 64.0));
+        assert!(!in_sight(chunk, from) && !in_sight(chunk, to));
+        assert!(
+            in_sight_along(chunk, from, to),
+            "a chunk was sailed through"
+        );
+
+        // And the way is a way, not a corridor without end: ground off to one
+        // side of it stays unsurveyed.
+        let aside = IVec2::new(4, 6);
+        assert!(!in_sight_along(aside, from, to));
+    }
+
+    #[test]
+    fn soundings_survive_being_written_down() {
+        // The wire's own copy of a chunk's ink, there and back — and the
+        // count of bytes a server fills a message by agreeing exactly with
+        // the bytes that go into it.
+        let middle = Vec2::splat(CHUNK_METRES / 2.0);
+        for found in [
+            survey(&a_cone(IVec2::ZERO, middle, 30.0)),
+            survey(&a_north_shore(50.0)),
+            // Surveyed and blank, which is most of an ocean.
+            Soundings::default(),
+        ] {
+            let mut written = Vec::new();
+            found.put(&mut written);
+            assert_eq!(written.len(), found.bytes(), "the count is not the bytes");
+            assert!(found.bytes() <= SOUNDINGS_BYTES);
+
+            // Read back off the front of a longer run of bytes, since a
+            // message carries a batch of these one after another.
+            written.extend([0xAB, 0xCD]);
+            let (read, rest) = Soundings::take(&written).expect("soundings");
+            assert_eq!(read, found);
+            assert_eq!(rest, [0xAB, 0xCD], "the reader lost its place");
+        }
+    }
+
+    #[test]
+    fn soundings_that_are_not_soundings_are_refused() {
+        // A count with nothing behind it, and a run of a shape that is
+        // neither open nor closed.
+        assert!(Soundings::take(&[1, 0, 0, 0]).is_none());
+        assert!(Soundings::take(&[1, 0, 0, 0, 9, 1, 0, 5, 5]).is_none());
+        assert!(Soundings::take(&[0, 0]).is_none());
+        // And nothing at all is a chunk surveyed and found blank.
+        assert_eq!(
+            Soundings::take(&[0, 0, 0, 0]).expect("blank soundings").0,
+            Soundings::default()
+        );
     }
 
     #[test]

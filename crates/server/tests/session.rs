@@ -1,11 +1,13 @@
 //! A server and its clients talking over real sockets: the handshake, the
 //! introductions, the relay, the ground, and leaving.
 
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{dequantize, CHUNK_METRES};
+use protocol::survey::{in_sight, in_sight_along, Soundings, SIGHT_RADIUS};
 use protocol::{BeastId, BeastKind, PlayerId, ToClient, ToServer, Token, PROTOCOL_VERSION};
 use server::{Host, Server, WorldConfig};
 use world::archipelago::Archipelago;
@@ -179,7 +181,9 @@ impl Client {
     /// that *are* about the sky or the beasts read for what they want with
     /// [`Client::hear_the_time`] and [`Client::hear_a_beast`]. The console
     /// vocabulary is skipped with them, being part of the same joining
-    /// chatter; the newcomer test reads it raw.
+    /// chatter; the newcomer test reads it raw. The survey too — every step
+    /// anybody takes may put more ink on their own chart, and the tests that
+    /// are about that read for it with [`Client::hear_the_survey`].
     fn hear(&self) -> ToClient {
         loop {
             match ToClient::read(&mut &self.0).expect("read") {
@@ -188,9 +192,42 @@ impl Client {
                 | ToClient::Beast { .. }
                 | ToClient::BeastGone { .. }
                 | ToClient::Boat { .. }
+                | ToClient::Surveyed { .. }
                 | ToClient::Vocabulary { .. } => continue,
                 message => return message,
             }
+        }
+    }
+
+    /// Every chunk this client has been told it has surveyed, gathered onto
+    /// `charted` until `enough` is happy with them — bounded like the beasts'
+    /// reader, since the rest of the session chatters on regardless and a
+    /// survey that never arrives must fail a test rather than hang it.
+    ///
+    /// Gathered *onto* what a test already holds, because a chunk is told
+    /// once: a survey read in two goes is two halves of one chart, and the
+    /// second go alone would look like ground that had gone missing.
+    fn hear_the_survey(
+        &self,
+        mut charted: HashMap<IVec2, Soundings>,
+        enough: impl Fn(&HashMap<IVec2, Soundings>) -> bool,
+    ) -> HashMap<IVec2, Soundings> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        if enough(&charted) {
+            return charted;
+        }
+        loop {
+            if let ToClient::Surveyed { found } = ToClient::read(&mut &self.0).expect("read") {
+                charted.extend(found);
+                if enough(&charted) {
+                    return charted;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "twenty seconds and the survey never came to {} chunks",
+                charted.len()
+            );
         }
     }
 
@@ -1273,6 +1310,184 @@ fn a_kept_world_cannot_be_hosted_twice_at_once() {
         Server::reopen(("127.0.0.1", 0), &path).is_ok(),
         "the lock outlived the session holding it"
     );
+}
+
+/// Every chunk within sight of a point, worked out the way the survey's own
+/// rule does — what a test expects to be told when a player stands still.
+fn in_sight_of(at: Vec2) -> Vec<IVec2> {
+    let reach = (SIGHT_RADIUS / CHUNK_METRES).ceil() as i32 + 2;
+    let home = chunk_at(at);
+    (-reach..=reach)
+        .flat_map(|dz| (-reach..=reach).map(move |dx| home + IVec2::new(dx, dz)))
+        .filter(|chunk| in_sight(*chunk, at))
+        .collect()
+}
+
+#[test]
+fn a_player_is_told_the_survey_of_where_they_are_put_down() {
+    // The survey is the world's: nobody has to look at anything to have it,
+    // and arriving is already having looked. Exactly the ground within sight
+    // of the spawn, and no more — the far side of the island they were put
+    // down beside is theirs to go round for.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let wanted = in_sight_of(spawn);
+
+    let charted = client.hear_the_survey(HashMap::new(), |charted| charted.len() >= wanted.len());
+    for chunk in &wanted {
+        assert!(charted.contains_key(chunk), "{chunk} was never surveyed");
+    }
+    for chunk in charted.keys() {
+        assert!(
+            in_sight(*chunk, spawn),
+            "{chunk} was surveyed from {spawn}, which cannot see it"
+        );
+    }
+    // And there is a coast in it: the world is entered a few dozen metres off
+    // one, so a survey of the spawn that found nothing found nothing wrong.
+    assert!(
+        charted.values().any(|ink| !ink.coast.is_empty()),
+        "the water off an island surveyed to no coast at all"
+    );
+}
+
+#[test]
+fn the_two_ends_survey_one_chunk_the_same_way() {
+    // The whole reason the server goes through a chunk's *payload* to survey
+    // it rather than asking the generator for its own heights. A client
+    // surveys what it was sent — heights the wire has rounded to sixteen bits
+    // — and a waterline traced across those is not quite the one traced
+    // across the numbers before them. Two ends that disagree about where a
+    // coast runs disagree about whether it closes, and so about whether
+    // anybody has been round it.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let charted = client.hear_the_survey(HashMap::new(), |charted| {
+        charted.len() >= in_sight_of(spawn).len()
+            && charted.values().any(|ink| !ink.coast.is_empty())
+    });
+
+    let (chunk, told) = charted
+        .iter()
+        .find(|(_, ink)| !ink.coast.is_empty())
+        .expect("some coast within sight of the spawn");
+    let ground = client.ask_for(*chunk).expect("ground under a coast");
+    let heights: Vec<f32> = ground.heights.iter().copied().map(dequantize).collect();
+    assert_eq!(
+        &protocol::survey::survey(&heights),
+        told,
+        "the server's {chunk} and a client's are two different coasts"
+    );
+}
+
+#[test]
+fn sailing_past_a_coast_earns_the_ground_it_passes() {
+    // The live half: a survey grows by going somewhere. What arrives is the
+    // ground the way brought into sight and nothing else — a voyage does not
+    // hand anybody the sea it did not cross.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let at_first = client.hear_the_survey(HashMap::new(), |charted| {
+        charted.len() >= in_sight_of(spawn).len()
+    });
+
+    // Half a kilometre along, which is several chunks of new water and, at
+    // the entry island's own coast, some new shore.
+    let out = spawn + Vec2::new(512.0, 0.0);
+    client.say(ToServer::Helm {
+        position: out,
+        heading: 0.0,
+    });
+
+    let wanted = in_sight_of(out);
+    let charted = client.hear_the_survey(at_first.clone(), |charted| {
+        wanted.iter().all(|chunk| charted.contains_key(chunk))
+    });
+    assert!(
+        charted.len() > at_first.len(),
+        "sailing half a kilometre earned nothing"
+    );
+    for chunk in charted.keys() {
+        assert!(
+            in_sight_along(*chunk, spawn, out),
+            "{chunk} is nowhere near the way from {spawn} to {out}"
+        );
+    }
+}
+
+#[test]
+fn a_crossing_between_two_reports_leaves_no_hole() {
+    // A hull under sail covers ground between one position report and the
+    // next, and the survey follows the way rather than its ends — or a fast
+    // boat would leave a stripe of unsurveyed water down the middle of its
+    // own wake.
+    let addr = host(7);
+    let (client, _id, spawn, _facing) = Client::join(addr);
+    let at_first = client.hear_the_survey(HashMap::new(), |charted| {
+        charted.len() >= in_sight_of(spawn).len()
+    });
+
+    let out = spawn + Vec2::new(1_536.0, 0.0);
+    let midway = chunk_at(spawn + (out - spawn) / 2.0);
+    assert!(
+        !in_sight(midway, spawn) && !in_sight(midway, out),
+        "the test's midpoint is visible from an end, and proves nothing"
+    );
+    client.say(ToServer::Helm {
+        position: out,
+        heading: 0.0,
+    });
+
+    let charted = client.hear_the_survey(at_first, |charted| charted.contains_key(&midway));
+    assert!(charted.contains_key(&midway));
+}
+
+#[test]
+fn a_returning_player_is_told_back_the_survey_they_left_with() {
+    // The world's memory of where somebody has been, kept to a file and
+    // handed back: the same chunks, and the same coast on them, worked out
+    // afresh from ground the world grew again. Only the coordinates are in
+    // the file — the ink being derived — so this is also the test that the
+    // deriving is stable.
+    let path = scratch("surveyed").join("one.world");
+    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = first.local_addr().expect("addr");
+    let host = first.spawn().expect("spawn");
+
+    let (client, _id, spawn, _facing, token) = Client::join_presenting(addr, None);
+    let out = spawn + Vec2::new(768.0, 0.0);
+    client.say(ToServer::Helm {
+        position: out,
+        heading: 0.0,
+    });
+    let wanted = in_sight_of(out);
+    let sailed = client.hear_the_survey(HashMap::new(), |charted| {
+        wanted.iter().all(|chunk| charted.contains_key(chunk))
+    });
+    drop(client);
+    // Dropping the host is leaving the world: the closing save has happened
+    // by the time the drop returns.
+    drop(host);
+
+    let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
+    let addr = again.local_addr().expect("addr");
+    let _host = again.spawn().expect("spawn");
+
+    let (client, _id, _spawn, _facing, dealt) = Client::join_presenting(addr, Some(token));
+    assert_eq!(dealt, token, "kept papers were re-dealt");
+    let told_back = client.hear_the_survey(HashMap::new(), |charted| {
+        sailed.keys().all(|chunk| charted.contains_key(chunk))
+    });
+    for (chunk, ink) in &sailed {
+        assert_eq!(
+            told_back.get(chunk),
+            Some(ink),
+            "{chunk} came back as a different coast"
+        );
+    }
 }
 
 /// A point in the shallows a shark calls home, found by walking the line

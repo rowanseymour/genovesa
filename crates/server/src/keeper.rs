@@ -5,18 +5,25 @@
 //! everything a session shows is not state: the terrain, the palms and the
 //! weather are functions of the seed and the world's age, and the beasts are
 //! raised around whoever is present. What is left — what cannot be re-derived
-//! and so is the whole of what a world *is* beyond its seed — fits in a few
-//! lines: which world this is, how old it is, what it is called, and where it
-//! last saw each player it has dealt papers to. The seed is the geography;
-//! this file is the history.
+//! and so is the whole of what a world *is* beyond its seed — is short: which
+//! world this is, how old it is, what it is called, where it last saw each
+//! player it has dealt papers to, and which ground each of them has been near
+//! enough to survey. The seed is the geography; this file is the history.
+//!
+//! A survey is the one part of it with any size to it — a voyage is thousands
+//! of chunks — and only the *coordinates* are written. What was found on them
+//! is ink, and ink is derived: the ground is a function of the seed, so the
+//! world can work the coastline out again in the time it takes to read the
+//! file. What no seed can say is where somebody went.
 //!
 //! The format is plain text, one `key value` per line under a versioned
 //! header, written sorted so that two saves of one state are byte-identical.
-//! Text because the whole file is smaller than one chunk of ground and will
-//! be looked at by people — moved between machines, backed up, read when
-//! something seems wrong — and a format version rather than tolerant parsing
-//! because a build that half-understands a file should refuse it whole, not
-//! quietly drop the half it never heard of.
+//! Text because the file is small — a well-sailed world is tens of kilobytes,
+//! against a single chunk of ground's sixteen — and will be looked at by
+//! people: moved between machines, backed up, read when something seems
+//! wrong. A format version rather than tolerant parsing, because a build that
+//! half-understands a file should refuse it whole, not quietly drop the half
+//! it never heard of.
 //!
 //! Writes are atomic — composed beside the file and renamed over it — and the
 //! previous version survives as `.old`, which [`load`] falls back to: the
@@ -37,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use glam::Vec2;
+use glam::{IVec2, Vec2};
 use protocol::{BeastKind, BoatId, BoatKind, Token, WorldId};
 
 /// The format this build writes, named in the file's first line. A file
@@ -82,16 +89,22 @@ pub(crate) struct WorldRecord {
     pub beasts: Vec<BeastRecord>,
 }
 
-/// Where the world last saw one player, and whether they were at a helm.
+/// Where the world last saw one player, whether they were at a helm, and what
+/// ground they have surveyed.
 ///
 /// `aboard` names a boat in [`WorldRecord::boats`], and it is a memory
 /// rather than a hold: boats have keepers, not owners, so on return the
 /// player is seated back only if the boat still lies free where they left
 /// it — see the join in `lib.rs` for what happens when it does not.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct PlayerRecord {
     pub position: Vec2,
     pub aboard: Option<BoatId>,
+    /// Every chunk this player has been near enough to look at — the record
+    /// of where they have been, and the whole of what a claim will one day
+    /// be judged against. Coordinates only: what is *on* them the world works
+    /// out again on the way in — see the module doc.
+    pub surveyed: Vec<IVec2>,
 }
 
 /// One boat, as the file keeps it. No occupant: who is aboard is session
@@ -411,6 +424,18 @@ fn compose(record: &WorldRecord) -> String {
             let _ = write!(out, " {:016x}", boat.0);
         }
         let _ = writeln!(out);
+        // A line of its own, because a voyage is thousands of chunks and a
+        // player's own line should stay a line somebody can read. Sorted, on
+        // the terms everything else here is: one state, one file.
+        if !player.surveyed.is_empty() {
+            let mut surveyed = player.surveyed.clone();
+            surveyed.sort_by_key(|chunk| (chunk.x, chunk.y));
+            let _ = write!(out, "surveyed {:016x}", token.0);
+            for chunk in surveyed {
+                let _ = write!(out, " {},{}", chunk.x, chunk.y);
+            }
+            let _ = writeln!(out);
+        }
     }
     let mut boats = record.boats.clone();
     boats.sort_by_key(|boat| boat.id.0);
@@ -463,6 +488,11 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
     let (mut id, mut seed, mut opening, mut age) = (None, None, None, None);
     let mut name = String::new();
     let mut players = HashMap::new();
+    // Held aside rather than written straight into the record they belong to,
+    // because a file may name a player's survey before it names the player —
+    // this one never does, but nothing else here depends on line order and
+    // this must not be the exception.
+    let mut surveys: HashMap<Token, Vec<IVec2>> = HashMap::new();
     let mut boats = Vec::new();
     let mut beasts = Vec::new();
     for line in lines {
@@ -499,7 +529,35 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 if !crate::reachable(position) {
                     return Err(format!("nobody was ever at {position}"));
                 }
-                players.insert(Token(hex(token)?), PlayerRecord { position, aboard });
+                players.insert(
+                    Token(hex(token)?),
+                    PlayerRecord {
+                        position,
+                        aboard,
+                        surveyed: Vec::new(),
+                    },
+                );
+            }
+            "surveyed" => {
+                let (token, chunks) = value
+                    .split_once(' ')
+                    .ok_or_else(|| format!("a survey of nowhere: `{line}`"))?;
+                let mut surveyed = Vec::new();
+                for field in chunks.split(' ') {
+                    let (x, z) = field
+                        .split_once(',')
+                        .ok_or_else(|| format!("`{field}` is not a chunk"))?;
+                    let chunk = IVec2::new(whole(x)?, whole(z)?);
+                    // The same reach a position is held to, in chunks: an
+                    // edited file is the one other door coordinates arrive
+                    // through, and ground past where the world resolves is
+                    // ground nobody ever looked at.
+                    if !crate::in_the_world(chunk) {
+                        return Err(format!("nobody ever surveyed {chunk}"));
+                    }
+                    surveyed.push(chunk);
+                }
+                surveys.insert(Token(hex(token)?), surveyed);
             }
             "boat" => {
                 let mut fields = value.split(' ');
@@ -557,6 +615,15 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
         }
     }
 
+    // A survey against a token no `player` line named belongs to nobody, and
+    // is dropped rather than refused: there is no position to hang it on, and
+    // it is ink that can be earned again by going back.
+    for (token, surveyed) in surveys {
+        if let Some(player) = players.get_mut(&token) {
+            player.surveyed = surveyed;
+        }
+    }
+
     let opening = opening.ok_or("no opening")?;
     let age = age.ok_or("no age")?;
     if !(0.0..1.0).contains(&opening) {
@@ -579,6 +646,12 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
 
 fn hex(value: &str) -> Result<u64, String> {
     u64::from_str_radix(value, 16).map_err(|_| format!("`{value}` is not sixteen hex digits"))
+}
+
+fn whole(value: &str) -> Result<i32, String> {
+    value
+        .parse::<i32>()
+        .map_err(|_| format!("`{value}` is not a chunk coordinate"))
 }
 
 fn finite(value: &str) -> Result<f32, String> {
@@ -618,13 +691,19 @@ mod tests {
                     PlayerRecord {
                         position: Vec2::new(12.5, -340.25),
                         aboard: Some(BoatId(0xB0A7)),
+                        // Out of order and either side of the origin, so a
+                        // save that sorted them wrong would still read back.
+                        surveyed: vec![IVec2::new(2, -1), IVec2::new(-40, 300), IVec2::new(0, 0)],
                     },
                 ),
                 (
                     Token(0xFFFF_0000_0000_0002),
+                    // Somebody who has been dealt papers and never looked at
+                    // anything, which writes no survey line at all.
                     PlayerRecord {
                         position: Vec2::new(-0.125, 9000.0),
                         aboard: None,
+                        surveyed: Vec::new(),
                     },
                 ),
             ]),
@@ -669,7 +748,20 @@ mod tests {
         assert_eq!(read.name, record.name);
         assert_eq!(read.opening, record.opening);
         assert_eq!(read.age, record.age);
-        assert_eq!(read.players, record.players);
+        // Composing sorts each player's survey, as it does the boats and the
+        // beasts, so the comparison is about content alone.
+        let players_sorted = |players: HashMap<Token, PlayerRecord>| {
+            let mut players: Vec<(Token, PlayerRecord)> = players.into_iter().collect();
+            for (_, player) in &mut players {
+                player.surveyed.sort_by_key(|chunk| (chunk.x, chunk.y));
+            }
+            players.sort_by_key(|(token, _)| token.0);
+            players
+        };
+        assert_eq!(
+            players_sorted(read.players),
+            players_sorted(record.players.clone())
+        );
         // Composing sorts the boats and the beasts, so compare content
         // rather than order.
         let boats_sorted = |mut boats: Vec<BoatRecord>| {
@@ -744,6 +836,18 @@ mod tests {
             (
                 "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1 2 nothex\n",
                 "an aboard that is not a boat's name",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1\n",
+                "a survey of nowhere",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3 4\n",
+                "surveyed chunks with no comma between them",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 99999999,0\n",
+                "a chunk past where the world resolves",
             ),
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");
