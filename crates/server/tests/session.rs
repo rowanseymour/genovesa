@@ -2199,11 +2199,11 @@ fn what_a_landing_taught_is_still_known_when_the_world_opens_again() {
 
 #[test]
 fn a_word_carved_after_a_visit_does_not_chase_the_chart_that_left() {
-    // What a chart holds is what was there when it was drawn. Somebody who
-    // read a cairn and sailed on keeps the word that was on the stones then —
-    // a rename reaches whoever is standing by to see it happen and nobody
-    // else, and the way to find out what an island is called now is the way it
-    // was the first time.
+    // A rename reaches whoever is in reach to watch it happen, and nobody
+    // else. Everybody else goes on drawing the word they last read until they
+    // are told of that cairn again — at the door, or on coming back into sight
+    // of it — which is what a chart is for and is a good deal cheaper than the
+    // world keeping every reader their own copy of every word.
     let addr = host(CLAIMABLE);
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
     alice.say(ToServer::Disembark { position: ashore });

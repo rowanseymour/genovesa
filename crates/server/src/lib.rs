@@ -518,8 +518,10 @@ pub(crate) struct Player {
     /// is big enough to be worth not copying there.
     surveyed: Surveyed,
     /// What this player has found out about other people's claims, by the
-    /// island each stands for — see [`Knowing`], and [`sight_the_cairns`],
-    /// which is the only thing that deepens it.
+    /// island each stands for — see [`Knowing`]. Two things deepen it and
+    /// nothing else does: [`sight_the_cairns`], as a voyage brings a cairn
+    /// within reach, and [`tell_the_cairn`], where stones that have just
+    /// changed are pushed to whoever is standing by to watch it happen.
     ///
     /// Small where the survey is huge — one entry per cairn this player has
     /// ever come near, against thousands of chunks — so it lives under the
@@ -2106,8 +2108,8 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
         .get(&island)
         .cloned();
     if let Some(claim) = held {
-        let mut players = shared.players.lock().expect("no poisoned lock");
-        tell_the_asker(&mut players, id, island, &claim);
+        let players = shared.players.lock().expect("no poisoned lock");
+        tell_the_asker(&players, id, island, &claim);
         return false;
     }
     // Nor for somebody who could not be building a cairn wherever they are:
@@ -2154,7 +2156,7 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
             (shared.report)(&format!("{id} claimed an island"));
             tell_the_cairn(&mut players, island, &claim, id);
         } else {
-            tell_the_asker(&mut players, id, island, &claim);
+            tell_the_asker(&players, id, island, &claim);
         }
     }
     // The shore was walked: everything that gets this far is an afoot asker
@@ -2209,7 +2211,7 @@ fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) -> bool {
     if granted {
         tell_the_cairn(&mut players, island, &told, id);
     } else {
-        tell_the_asker(&mut players, id, island, &told);
+        tell_the_asker(&players, id, island, &told);
     }
     granted
 }
@@ -2275,20 +2277,28 @@ fn tell_the_cairns_about(shared: &Shared, id: PlayerId) {
 }
 
 /// Brings one player's knowledge of one cairn up to what being `near` metres
-/// from it earns, and says what they know of it now.
+/// from it earns, and says what they know of it now and whether that is any
+/// deeper than what they knew a moment ago.
 ///
 /// The merge is [`Knowing`]'s ordering and nothing else: the deeper of what
 /// they knew and what they have just earned, never the newer. Sailing away from
 /// a cairn does not unlearn it, so this only ever climbs.
 ///
+/// Saying whether it climbed is what spares the caller looking the entry up
+/// itself to find out. [`sight_the_cairns`] tells a player only when something
+/// is news, and it asks this of every claim in the world on every position
+/// report, so one lookup here rather than one here and one there is worth the
+/// second half of the answer.
+///
 /// A claimant knows their own outright wherever they stand, and it is not
 /// written down: it is held by token in [`Shared::claims`] and is true whether
-/// or not this map says so — see [`Player::known`]. Answering without recording
-/// is why [`sight_the_cairns`] passes over a player's own cairns rather than
-/// finding one perpetually newsworthy.
-fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> Option<Knowing> {
+/// or not this map says so — see [`Player::known`]. Nothing was written, so
+/// nothing deepened, and that is the honest answer for it. Answering without
+/// recording is why [`sight_the_cairns`] passes over a player's own cairns
+/// rather than finding one perpetually newsworthy.
+fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> (Option<Knowing>, bool) {
     if claim.by == player.token {
-        return Some(Knowing::Visited);
+        return (Some(Knowing::Visited), false);
     }
     let earned = if near <= CAIRN_VISIT {
         Some(Knowing::Visited)
@@ -2302,12 +2312,13 @@ fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> Optio
     // Written back only when it is deeper, so that the common case — a player
     // standing about beside a cairn they already know — is a lookup and no
     // write at all.
-    if now > held {
+    let deeper = now > held;
+    if deeper {
         player
             .known
             .insert(island, now.expect("deeper than nothing is something"));
     }
-    now
+    (now, deeper)
 }
 
 /// Takes down whatever cairns the way from `from` to `to` brought within reach,
@@ -2326,10 +2337,16 @@ fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> Optio
 /// of what they have already been told, each of those would be a message about
 /// a heap of stones that has not moved.
 ///
-/// A walk of every claim in the world per report, which is a handful of
-/// distances and no allocation until something is actually found. It is bounded
-/// by how many islands anybody has claimed rather than by how far anyone has
-/// sailed, which is what makes it affordable to do this often.
+/// A walk of every claim in the world per report, bounded by how many islands
+/// anybody has claimed rather than by how far anybody has sailed, which is what
+/// makes it affordable to do this often. What it costs once a cairn is in reach
+/// is a `Vec` and a copy of every claim in it, carved name and all — so for a
+/// player parked beside one that is ten times a second, forever, news or no
+/// news. The copy is the price of the lock order rather than sloppiness: what
+/// counts as news is [`Player::known`]'s business, `known` lives under the
+/// roster's lock, and reaching for the roster with the claims still held is
+/// exactly the order [`Shared::claims`] forbids. So the claims are read, let
+/// go, and only then judged.
 ///
 /// The locks are taken one at a time in the order [`Shared::claims`] sets: the
 /// claims, let go; then the roster, which is where the knowing lives and where
@@ -2353,21 +2370,18 @@ fn sight_the_cairns(shared: &Shared, id: PlayerId, from: Vec2, to: Vec2) {
         return;
     };
     let theirs = player.token;
-    let told: Vec<ToClient> = within_reach
-        .into_iter()
+    for (island, claim, near) in within_reach {
         // Their own passed over: there is nothing about it they can learn by
         // going near it, they were told of it when they raised it and again at
         // every door since, and [`learns`] deliberately writes nothing down for
         // it — so without this it would be news on every report they ever make.
-        .filter(|(_, claim, _)| claim.by != theirs)
-        .filter_map(|(island, claim, near)| {
-            let before = player.known.get(&island).copied();
-            let now = learns(player, island, &claim, near);
-            (now > before).then(|| cairn_told_to(player, island, &claim, now))
-        })
-        .collect();
-    for message in told {
-        post(player, message);
+        if claim.by == theirs {
+            continue;
+        }
+        let (now, news) = learns(player, island, &claim, near);
+        if news {
+            post(player, cairn_told_to(player, island, &claim, now));
+        }
     }
 }
 
@@ -2413,25 +2427,38 @@ fn off_the_way(point: Vec2, from: Vec2, to: Vec2) -> f32 {
 /// The gate is [`CAIRN_SIGHT`]'s own rule kept honestly. A refusal carrying the
 /// cairn is how a picture corrects itself for somebody standing there and
 /// finding it already taken; ungated it would be a client with an island's
-/// identity in hand reading off who holds it, what they called it and where
-/// their cairn stands, from anywhere in the world. Sailing round a coast is
+/// identity in hand reading off that the place is spoken for and where the
+/// stones stand, from anywhere in the world. Sailing round a coast is
 /// what earns an identity, so the leak is small — and who holds what is
 /// something a player is meant to find out by going there.
 ///
 /// Answered every time and not only when it is news, unlike
 /// [`sight_the_cairns`]: an ask is owed an answer, or an honest client could
-/// not tell a refusal from a message that went nowhere. What the asker is
-/// standing near enough to have earned still decides what the answer *says*.
+/// not tell a refusal from a message that went nowhere.
+///
+/// But answered at the depth already held, and no deeper: this reads
+/// [`Player::known`] and never writes to it. What standing somewhere is worth
+/// is worked out along the way the [`Wake`] believes in and nowhere else, and a
+/// position report is a client's own word for where it is. Deepening here would
+/// hand a client the whole of that rule for the asking — an ask after an island
+/// somebody already holds is deliberately unpaced, so a jump onto the stones
+/// and a claim in the same breath would buy back the very name the sighting
+/// walk had just declined to give. An honest client loses nothing: their report
+/// ran [`sight_the_cairns`] before they ever got to ask, and whatever standing
+/// there earns is written down by then.
 fn tell_the_asker(
-    players: &mut HashMap<PlayerId, Player>,
+    players: &HashMap<PlayerId, Player>,
     asker: PlayerId,
     island: IVec2,
     claim: &Claim,
 ) {
-    if let Some(player) = players.get_mut(&asker) {
-        let near = player.position.distance(claim.at);
-        if near <= CAIRN_SIGHT {
-            let knowing = learns(player, island, claim, near);
+    if let Some(player) = players.get(&asker) {
+        if player.position.distance(claim.at) <= CAIRN_SIGHT {
+            let knowing = if claim.by == player.token {
+                Some(Knowing::Visited)
+            } else {
+                player.known.get(&island).copied()
+            };
             post(player, cairn_told_to(player, island, claim, knowing));
         }
     }
@@ -2444,28 +2471,33 @@ fn tell_the_asker(
 /// Told to everyone in reach whether or not it is news to them, and that is the
 /// difference from [`sight_the_cairns`]: the cairn itself has just changed, so
 /// a player standing beside one they already knew is exactly the player who
-/// needs to hear it. Somebody who read it once and has since sailed away is not
-/// told — their chart keeps the word that was on the stones when they were
-/// last there, which is what a chart is for.
+/// needs to hear it. What the world keeps of a player is how well they know a
+/// cairn and not a copy of the word they read off it, so a rename is pushed to
+/// whoever is in reach to watch it happen and everybody else reads the new word
+/// the next time they are told of that cairn at all — at the door, or on coming
+/// back into sight of it. Keeping the word per player instead would be a copy
+/// in the world's file for every stranger who ever landed, and charts left
+/// quietly disagreeing with the world for nothing.
+///
+/// Unlike [`sight_the_cairns`], the gate here is the position last *reported*
+/// rather than the way the [`Wake`] followed to it. There is no way to work it
+/// off: the stones may have come into existence a moment ago, and a run that
+/// was believed before they stood there says nothing about them. What holds it
+/// down is that this only runs at all when somebody's ask was granted, and
+/// granting is what [`CAIRN_PACE`] rations.
 fn tell_the_cairn(
     players: &mut HashMap<PlayerId, Player>,
     island: IVec2,
     claim: &Claim,
     asker: PlayerId,
 ) {
-    let told: Vec<(PlayerId, ToClient)> = players
-        .iter_mut()
-        .filter_map(|(id, player)| {
-            let near = player.position.distance(claim.at);
-            let knowing = learns(player, island, claim, near);
-            (near <= CAIRN_SIGHT || *id == asker)
-                .then(|| (*id, cairn_told_to(player, island, claim, knowing)))
-        })
-        .collect();
-    for (id, message) in told {
-        if let Some(player) = players.get(&id) {
-            post(player, message);
+    for (id, player) in players.iter_mut() {
+        let near = player.position.distance(claim.at);
+        if near > CAIRN_SIGHT && *id != asker {
+            continue;
         }
+        let (knowing, _) = learns(player, island, claim, near);
+        post(player, cairn_told_to(player, island, claim, knowing));
     }
 }
 
@@ -3018,6 +3050,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_cairn_is_measured_off_the_whole_way_and_not_its_ends() {
+        // The rule this function exists for, and the only one an endpoint test
+        // would not catch. A run the [`Wake`] believes can be most of
+        // SURVEY_SWEEP long and CAIRN_SIGHT is shorter than that, so the case
+        // that matters is a cairn passed close aboard somewhere in the middle
+        // of one: far from where the report started and far from where it
+        // ended, and seen all the same.
+        let (from, to) = (Vec2::new(-4_000.0, 0.0), Vec2::new(4_000.0, 0.0));
+        let passed = Vec2::new(0.0, 900.0);
+        assert!(
+            passed.distance(from) > CAIRN_SIGHT && passed.distance(to) > CAIRN_SIGHT,
+            "the cairn is within sight of an end of the way and proves nothing"
+        );
+        assert!(
+            off_the_way(passed, from, to) <= CAIRN_SIGHT,
+            "a cairn passed at {} metres was not in sight of the way it was passed on",
+            off_the_way(passed, from, to)
+        );
+
+        // The segment and not the line it lies on: a point beyond an end is off
+        // the way by the whole of how far past it lies, or a run would sight
+        // cairns lying ahead of anywhere anybody had got to.
+        assert_eq!(off_the_way(Vec2::new(9_000.0, 0.0), from, to), 5_000.0);
+        // Off the far end and off to the side with it, where the line the way
+        // lies on would answer 3,000 and the way itself answers 5,000.
+        assert_eq!(
+            off_the_way(Vec2::new(-8_000.0, -3_000.0), from, to),
+            5_000.0
+        );
+
+        // And a way that goes nowhere is its own nearest point, which is what
+        // makes this a plain distance for a player standing still.
+        assert_eq!(off_the_way(passed, from, from), from.distance(passed));
     }
 
     #[test]

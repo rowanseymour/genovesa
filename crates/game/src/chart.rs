@@ -1156,7 +1156,11 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
         .collect();
     let closed: Vec<IVec2> = islands.iter().map(|island| island.id).collect();
 
-    let above = (CAIRN_HEAP.y + CAIRN_STAFF + CAIRN_NAME_GAP) * metres_per_pixel;
+    // Half a line on top of the gap, `Text2d` hanging its lettering off the
+    // middle of the line where the gap is measured to the foot of it. Without
+    // it the name sits half a line lower than the constant says and its
+    // descenders come down over the banner.
+    let above = (CAIRN_HEAP.y + CAIRN_STAFF + CAIRN_NAME_GAP + NAME_SIZE / 2.0) * metres_per_pixel;
     written.extend(
         chart
             .cairns()
