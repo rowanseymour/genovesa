@@ -67,6 +67,29 @@
 //! the same on every machine — and the lettering a player reads is the
 //! lettering everybody else reads.
 //!
+//! # What the sheet knows, and how it came to
+//!
+//! Three things can be true of an island here, and they are earned three
+//! different ways:
+//!
+//! | on the paper | what it took |
+//! | --- | --- |
+//! | a cairn, unlettered | having seen the stones from offshore |
+//! | a cairn with a name beside it | having landed and read them |
+//! | a coastline, closed and lettered | having sailed the whole way round |
+//!
+//! Only the third is this sheet's own seeing, and only the third earns the
+//! right to claim. The first two arrive as [`Claimed`], which is somebody
+//! else's doing reported by the world, and neither of them puts a single stroke
+//! of coastline on the paper: a chart that let hearsay close a ring would be a
+//! chart a player could claim an island off having been *told* about it.
+//!
+//! The rule about how near is near enough is the server's alone and is not
+//! written down twice — see `server`'s cairn distances. What matters here is
+//! that a cairn with no name on it is not a puzzle: it is either an island
+//! nobody has christened or one whose stones this player has not been up to,
+//! and from a mile offshore those are the same thing.
+//!
 //! # Ink, not paper
 //!
 //! An old chart's character is easy to get from a paper texture and a wash of
@@ -156,9 +179,12 @@ pub struct Claimed {
     /// spot rather than the island's middle. A cairn is on a headland
     /// somebody chose, and where they chose is worth drawing.
     pub at: Vec2,
-    /// What it has been christened. Empty for a claim nobody has named yet:
-    /// the cairn goes up when the island is taken, and the name is written
-    /// after.
+    /// What it has been christened, as far as this player has any business
+    /// knowing. Empty for a claim nobody has named — the cairn goes up when the
+    /// island is taken and the name is written after — and empty just the same
+    /// for one whose stones this player has not been near enough to read. The
+    /// two are deliberately one thing on the wire and one thing here: from
+    /// offshore they are the same sight.
     pub name: String,
     /// Whether the player holds this one.
     pub yours: bool,
@@ -240,6 +266,19 @@ impl Chart {
         self.claims.get(&island)
     }
 
+    /// Every cairn this sheet has been told of, to be drawn — see
+    /// [`cairn_mark`].
+    ///
+    /// Not windowed the way the coast is. A cairn is one mark where a chunk of
+    /// coast is a run of line, so there is nothing to be saved by asking which
+    /// of them are on the paper before working out where they fall — and a
+    /// player has at most as many of these as there are claimed islands they
+    /// have been near, which is a handful where the coast is thousands of
+    /// chunks.
+    pub(crate) fn cairns(&self) -> impl Iterator<Item = (IVec2, &Claimed)> {
+        self.claims.iter().map(|(island, claim)| (*island, claim))
+    }
+
     /// The island a world point stands on, if this sheet has closed one round
     /// it — the survey's own question, asked in world metres rather than on
     /// the paper. What the claim key asks before it asks the world; see
@@ -318,6 +357,48 @@ const TICK_LENGTH: f32 = 4.5;
 const SHOAL_SPACING: f32 = 5.5;
 const SHOAL_DOT: f32 = 1.5;
 const SHOAL_SCATTER: f32 = 3.0;
+
+/// The cairn symbol, in pixels of paper — for the reason the line weights are
+/// in pixels: what a chart draws a beacon at is the engraver's business and not
+/// the world's, so it holds its size however far the sheet is zoomed.
+///
+/// The silhouette of the thing itself — a heap of stones, a staff out of it and
+/// a banner on the staff — rather than the plain triangle a chart draws a
+/// beacon with. What is standing out there is unmistakable at a mile, and the
+/// mark for it should be unmistakable on the paper: a player who has seen one
+/// on a headland knows this without being told what it means.
+///
+/// Drawn from the spot upward, so the *foot* of it is where the cairn stands.
+/// A symbol centred on its position would put the stones half a heap north of
+/// where they are, which on a chart is a lie about a landmark.
+///
+/// The proportions are the standing thing's own, and they have to be: a heap
+/// broader than it is tall, a staff several times its height, and a tall
+/// square-ended banner hanging down one side of the top. A steep little mound
+/// under a short pole with a tapering pennant on it is not a daymark, it is the
+/// flag on a golf green — which this world does not have and would rather not
+/// be reminded of.
+///
+/// Drawn hollow, and that is the part that took three tries to find. Filled, it
+/// is the only solid shape on a sheet that is otherwise all line — stroked
+/// coast, ticked shore, stippled shoal — so it reads as a marker dropped on a
+/// map rather than as something engraved on it, and every silhouette tried in
+/// that mode came out as some other solid object: a small tapering pennant on a
+/// short pole is a golf flag, and a heap tapering into a thin staff under a
+/// dark blob is a wine glass. In outline the same three shapes are a heap, a
+/// staff and a banner, because the eye is reading lines by then and not a
+/// blot.
+/// The banner hangs from the head of the staff and stops well short of the
+/// stones, as it does on the thing itself. Run down to meet them and the three
+/// shapes close up into one, which is where the wine glass came from.
+const CAIRN_HEAP: Vec2 = Vec2::new(12.0, 5.0);
+const CAIRN_STAFF: f32 = 15.0;
+const CAIRN_BANNER: Vec2 = Vec2::new(6.5, 8.0);
+const CAIRN_WEIGHT: f32 = 1.4;
+
+/// How far a cairn's own lettering sits off its mark, in pixels — clear of the
+/// banner rather than under it, so a name is never read through the staff.
+const CAIRN_NAME_GAP: f32 = 7.0;
 
 /// The hand the islands are named in: an italic cut of the Fell types, the
 /// letterforms of the seventeenth-century press — the nearest a flat sheet
@@ -1006,48 +1087,157 @@ fn engrave(
             .spawn(engraving("Chart coastline", mesh, ink, 1.0));
     }
 
-    // The names, over the ink. Every island the survey has closed carries
-    // one — the player's own if they have written one, and a placeholder
-    // until they do. The island under the pen shows the draft instead, caret
-    // and all: the lettering is the text field, because a chart is written
-    // on, not filled in. The walk is over the whole chart rather than the
-    // window — a chain can cross any number of chunks, so a ring cannot be
-    // closed from a window's worth — and only the lettering that lands on
-    // the paper is spawned.
-    for island in chart.islands() {
-        if !on_paper.contains(island.centre) {
-            continue;
+    // The cairns, over the coast they stand on. Every claim this sheet has been
+    // told of, which is every one its player has come near enough to see — see
+    // [`Claimed`], and the server, which is what decides that.
+    let mut cairns = Strokes::default();
+    for (_, claimed) in chart.cairns() {
+        let spot = on_the_sheet(claimed.at);
+        if on_paper.contains(spot) {
+            cairn_mark(&mut cairns, spot, metres_per_pixel);
         }
-        let lettered = match &naming {
-            Some(naming) if naming.island == island.id => format!("{}|", naming.draft),
-            _ => island
-                .name
-                .clone()
-                .unwrap_or_else(|| "Unnamed island".to_string()),
-        };
-        engraver.commands.spawn((
-            Name::new("Chart lettering"),
-            Engraving,
-            ChartSheet,
-            Text2d::new(lettered),
-            TextFont {
-                font: FontSource::Handle(engraver.lettering.0.clone()),
-                font_size: FontSize::Px(NAME_SIZE),
-                ..default()
-            },
-            TextColor(INK),
-            // Between the coast and the reader's own mark, scaled like the
-            // line weights so the name keeps its size on the paper.
-            Transform::from_translation(island.centre.extend(1.5))
-                .with_scale(Vec3::splat(metres_per_pixel)),
-            DespawnOnExit(Helm::Chart),
-        ));
+    }
+    if let Some(mesh) = cairns.mesh() {
+        let mesh = engraver.meshes.add(mesh);
+        let ink = engraver.inks.coast.clone();
+        engraver
+            .commands
+            .spawn(engraving("Chart cairns", mesh, ink, 1.2));
+    }
+
+    // The names, over the ink — see [`lettering`], which is where the whole of
+    // what goes on the paper is decided. Only what lands on this window's worth
+    // of it is spawned.
+    for (text, at) in lettering(&chart, naming.as_deref(), metres_per_pixel) {
+        if on_paper.contains(at) {
+            letter(&mut engraver, text, at, metres_per_pixel);
+        }
     }
 
     engraver.commands.insert_resource(Engraved {
         covered,
         metres_per_pixel,
     });
+}
+
+/// Every name that goes on the paper and where on it, in the sheet's own
+/// coordinates.
+///
+/// Two kinds of lettering, and which one a name gets is the whole of what this
+/// decides. An island **this survey has closed** is lettered across its own
+/// middle, the way a chart letters an island: the player has been round it,
+/// there is a shape to write on, and the name belongs to the shape. An island
+/// that is only a cairn — somebody else's, landed on and read but never sailed
+/// round — is lettered against the mark instead, because that is the only thing
+/// on the paper the name is true of. Writing it across a middle the sheet has
+/// not drawn would be lettering a shape nobody has seen.
+///
+/// A closed island is skipped in the second pass, or its name would be on the
+/// sheet twice. The island under the pen is the exception to everything: it
+/// shows the draft with its caret, because the lettering *is* the text field.
+///
+/// The walk is over the whole chart rather than a window of it — a chain can
+/// cross any number of chunks, so a ring cannot be closed from a window's worth
+/// — and the caller drops whatever falls off the paper.
+fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> Vec<(String, Vec2)> {
+    let islands = chart.islands();
+    let mut written: Vec<(String, Vec2)> = islands
+        .iter()
+        .map(|island| {
+            let text = match naming {
+                Some(naming) if naming.island == island.id => format!("{}|", naming.draft),
+                _ => island
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "Unnamed island".to_string()),
+            };
+            (text, island.centre)
+        })
+        .collect();
+    let closed: Vec<IVec2> = islands.iter().map(|island| island.id).collect();
+
+    // Half a line on top of the gap, `Text2d` hanging its lettering off the
+    // middle of the line where the gap is measured to the foot of it. Without
+    // it the name sits half a line lower than the constant says and its
+    // descenders come down over the banner.
+    let above = (CAIRN_HEAP.y + CAIRN_STAFF + CAIRN_NAME_GAP + NAME_SIZE / 2.0) * metres_per_pixel;
+    written.extend(
+        chart
+            .cairns()
+            .filter(|(island, claimed)| !claimed.name.is_empty() && !closed.contains(island))
+            .map(|(_, claimed)| {
+                (
+                    claimed.name.clone(),
+                    on_the_sheet(claimed.at) + Vec2::new(0.0, above),
+                )
+            }),
+    );
+    written
+}
+
+/// One name written on the paper, in the sheet's own hand.
+///
+/// Its own entity per name rather than one text mesh, because that is what
+/// `Text2d` is: the alternative is laying out glyphs here, which is a font
+/// engine and not a chart.
+fn letter(engraver: &mut Engraver, text: String, at: Vec2, metres_per_pixel: f32) {
+    engraver.commands.spawn((
+        Name::new("Chart lettering"),
+        Engraving,
+        ChartSheet,
+        Text2d::new(text),
+        TextFont {
+            font: FontSource::Handle(engraver.lettering.0.clone()),
+            font_size: FontSize::Px(NAME_SIZE),
+            ..default()
+        },
+        TextColor(INK),
+        // Between the coast and the reader's own mark, scaled like the line
+        // weights so the name keeps its size on the paper.
+        Transform::from_translation(at.extend(1.5)).with_scale(Vec3::splat(metres_per_pixel)),
+        DespawnOnExit(Helm::Chart),
+    ));
+}
+
+/// A cairn on the paper: a heap of stones, a staff out of it, and a banner.
+///
+/// `at` is the spot itself and the mark is built up from it — see
+/// [`CAIRN_HEAP`] for why it stands on its position rather than being centred
+/// on it. `scale` is metres to the pixel, the mark being measured in pixels of
+/// paper and drawn in metres of world.
+///
+/// The banner hangs one way always, and hangs rather than flies. Which way the
+/// wind is over there is not something a chart knows or should pretend to: this
+/// is a symbol for a thing, and a symbol that changed with the weather would be
+/// a chart that had to be redrawn every time the wind backed. The banner in the
+/// world streams on the true wind; the one on the paper is only saying that
+/// there is one.
+fn cairn_mark(out: &mut Strokes, at: Vec2, scale: f32) {
+    let paper = |pixels: f32| pixels * scale;
+    let heap = paper(CAIRN_HEAP.y);
+    let crown = at + Vec2::new(0.0, heap);
+    let top = at + Vec2::new(0.0, heap + paper(CAIRN_STAFF));
+
+    let weight = paper(CAIRN_WEIGHT);
+    let base = paper(CAIRN_HEAP.x) / 2.0;
+    let (wide, deep) = (paper(CAIRN_BANNER.x), paper(CAIRN_BANNER.y));
+
+    out.run(
+        &[at - Vec2::new(base, 0.0), at + Vec2::new(base, 0.0), crown],
+        true,
+        weight,
+    );
+    out.segment(crown, top, weight);
+    out.run(
+        &[
+            top,
+            top + Vec2::new(wide, 0.0),
+            top + Vec2::new(wide, -deep),
+            top + Vec2::new(0.0, -deep),
+        ],
+        true,
+        weight,
+    );
 }
 
 /// One layer of the drawn sheet.
@@ -2564,6 +2754,110 @@ mod tests {
         chart.claimed(id, middle, "   ", true);
         assert_eq!(chart.islands()[0].name, None);
         assert!(chart.claim(id).is_some(), "the cairn went with the name");
+    }
+
+    #[test]
+    fn a_name_read_off_a_cairn_is_lettered_against_it() {
+        // The second tier of knowing, on the paper. A player who has landed on
+        // somebody's island and read the stones knows what it is called before
+        // they have been round it — and there is no shape on this sheet to
+        // write that across, so it goes beside the mark it was read off.
+        let mut chart = Chart::default();
+        let stones = Vec2::new(4_000.0, -2_500.0);
+        chart.claimed(IVec2::new(9, -3), stones, "Ilha Verde", false);
+
+        let written = lettering(&chart, None, 1.0);
+        assert_eq!(written.len(), 1, "one cairn, one name");
+        assert_eq!(written[0].0, "Ilha Verde");
+        let (beside, spot) = (written[0].1, on_the_sheet(stones));
+        assert_eq!(beside.x, spot.x, "the name wandered off its own mark");
+        assert!(
+            beside.y > spot.y,
+            "the name was written through the cairn rather than above it"
+        );
+
+        // And a cairn with nothing legible on it letters nothing at all —
+        // which is an island nobody has christened, or one this player has not
+        // been up to. From here those are the same sight.
+        chart.claimed(IVec2::new(9, -3), stones, "", false);
+        assert!(lettering(&chart, None, 1.0).is_empty());
+    }
+
+    #[test]
+    fn an_island_sailed_round_is_lettered_once_and_across_itself() {
+        // The other half of that rule. Once a coast has been closed there is a
+        // shape to write on, so the name goes where a chart puts an island's
+        // name — and it must not also be written beside the cairn, or a player
+        // who sailed round an island they had already visited would watch its
+        // name come out twice.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+        chart.record(
+            IVec2::new(1, 0),
+            survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
+        );
+        let id = chart.islands()[0].id;
+        chart.claimed(id, middle + Vec2::new(40.0, 0.0), "Ilha Verde", false);
+
+        let written = lettering(&chart, None, 1.0);
+        assert_eq!(
+            written.len(),
+            1,
+            "an island both sailed round and visited was lettered twice"
+        );
+        assert_eq!(written[0].0, "Ilha Verde");
+        assert_eq!(
+            written[0].1,
+            chart.islands()[0].centre,
+            "the name was not written across the island"
+        );
+    }
+
+    #[test]
+    fn a_cairn_is_drawn_standing_on_its_own_spot() {
+        // A landmark's symbol says where the landmark is, and a mark centred on
+        // its position would put the stones half a heap north of where they
+        // stand. So it is built upward from the spot, and its foot is the
+        // cairn.
+        //
+        // "Its foot" to within half a stroke, the mark being drawn in outline
+        // and a stroke sitting astride the line it follows — so the underside
+        // of the base rule falls that far below the spot, as the seaward side
+        // of a coastline falls outside the coast. That is the width of the pen
+        // and not a claim about where anything is; what this is watching for is
+        // a whole heap's worth of drift.
+        let spot = Vec2::new(120.0, -45.0);
+        let nib = CAIRN_WEIGHT / 2.0;
+        let mut strokes = Strokes::default();
+        cairn_mark(&mut strokes, spot, 1.0);
+
+        let drawn: Vec<Vec2> = strokes
+            .positions
+            .iter()
+            .map(|point| Vec2::new(point[0], point[1]))
+            .collect();
+        assert!(!drawn.is_empty(), "the mark drew nothing");
+        assert!(
+            drawn.iter().all(|point| point.y >= spot.y - nib),
+            "the mark hangs below the spot it stands on"
+        );
+        assert!(
+            drawn.iter().any(|point| point.y <= spot.y + nib),
+            "the mark floats above the spot it stands on"
+        );
+        // And it holds its size on the paper: twice the metres to the pixel is
+        // twice the mark in metres, which is the same mark on the sheet.
+        let mut zoomed = Strokes::default();
+        cairn_mark(&mut zoomed, spot, 2.0);
+        let tallest = |strokes: &Strokes| {
+            strokes
+                .positions
+                .iter()
+                .map(|point| point[1] - spot.y)
+                .fold(f32::MIN, f32::max)
+        };
+        assert!((tallest(&zoomed) - tallest(&strokes) * 2.0).abs() < TOLERANCE);
     }
 
     #[test]

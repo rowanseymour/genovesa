@@ -111,6 +111,21 @@ pub(crate) struct PlayerRecord {
     /// be judged against. Coordinates only: what is *on* them the world works
     /// out again on the way in — see the module doc.
     pub surveyed: Vec<IVec2>,
+    /// What this player has found out about other people's claims, by the
+    /// island each stands for — see [`crate::Knowing`].
+    ///
+    /// Kept whole where the survey is kept as coordinates, and that is not an
+    /// inconsistency. A survey can be re-earned from the ground it was taken
+    /// over; knowing that somebody's cairn stands on a headland is a fact about
+    /// a *visit*, and there is nowhere to work it out from again. Lose it and
+    /// the player has to go back and look.
+    ///
+    /// A map and not a list of pairs, because the file cannot say two things
+    /// about one island and neither may the record it is written from — see
+    /// [`compose`], which writes a line per depth. A shape that could hold the
+    /// contradiction would be a shape a save could carry into a world that
+    /// then would not open.
+    pub known: HashMap<IVec2, crate::Knowing>,
 }
 
 /// One boat, as the file keeps it. No occupant: who is aboard is session
@@ -486,6 +501,31 @@ fn compose(record: &WorldRecord) -> String {
             }
             let _ = writeln!(out);
         }
+        // And what they know of other people's cairns, a line to each depth of
+        // knowing — see [`crate::Knowing`]. Two keys rather than one line with
+        // a word against every island, because there are only ever two answers
+        // and a file that says `sighted` and `visited` in so many words needs
+        // no key to read it by. Sorted, on the terms everything else here is.
+        for (key, depth) in [
+            ("sighted", crate::Knowing::Sighted),
+            ("visited", crate::Knowing::Visited),
+        ] {
+            let mut known: Vec<IVec2> = player
+                .known
+                .iter()
+                .filter(|(_, knowing)| **knowing == depth)
+                .map(|(island, _)| *island)
+                .collect();
+            if known.is_empty() {
+                continue;
+            }
+            known.sort_by_key(|island| (island.x, island.y));
+            let _ = write!(out, "{key} {:016x}", token.0);
+            for island in known {
+                let _ = write!(out, " {}:{}", island.x, island.y);
+            }
+            let _ = writeln!(out);
+        }
     }
     let mut boats = record.boats.clone();
     boats.sort_by_key(|boat| boat.id.0);
@@ -565,6 +605,9 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
     // this one never does, but nothing else here depends on line order and
     // this must not be the exception.
     let mut surveys: HashMap<Token, Vec<IVec2>> = HashMap::new();
+    // And likewise what each of them knows of other people's cairns, gathered
+    // across the two lines that can say it — see [`compose`].
+    let mut knowings: HashMap<Token, HashMap<IVec2, crate::Knowing>> = HashMap::new();
     let mut boats = Vec::new();
     let mut claims: Vec<ClaimRecord> = Vec::new();
     let mut beasts = Vec::new();
@@ -611,6 +654,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                         position,
                         aboard,
                         surveyed: Vec::new(),
+                        known: HashMap::new(),
                     },
                 );
                 if told.is_some() {
@@ -668,6 +712,46 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 // half-understood is what this format refuses.
                 if surveys.insert(Token(hex(token)?), surveyed).is_some() {
                     return Err(format!("one player's survey told twice: `{line}`"));
+                }
+            }
+            // What one player knows of other people's cairns, an island to a
+            // field — see [`crate::Knowing`], and [`compose`] for the two keys.
+            // Read strictly, on the survey's terms: the islands ascend, so a
+            // file that reads at all names each of them once — and once across
+            // *both* lines, which is the rule that matters, an island a player
+            // has both only sighted and been up to being a file that cannot
+            // say which. Two lines under one key are merged rather than
+            // refused, unlike two surveys: they say the same thing between them
+            // that one line would have said, and there is nothing to choose.
+            "sighted" | "visited" => {
+                let depth = match key {
+                    "sighted" => crate::Knowing::Sighted,
+                    _ => crate::Knowing::Visited,
+                };
+                let (token, islands) = value
+                    .split_once(' ')
+                    .ok_or_else(|| format!("a knowing of nothing: `{line}`"))?;
+                let known = knowings.entry(Token(hex(token)?)).or_default();
+                let mut previous: Option<(i32, i32)> = None;
+                for field in islands.split(' ') {
+                    let (x, z) = field
+                        .split_once(':')
+                        .ok_or_else(|| format!("`{field}` is not an island"))?;
+                    let island = IVec2::new(whole(x)?, whole(z)?);
+                    if previous.is_some_and(|before| (island.x, island.y) <= before) {
+                        return Err(format!("a knowing out of order at `{field}`"));
+                    }
+                    previous = Some((island.x, island.y));
+                    // The reach a claim's own identity is held to, and it has
+                    // to be the same one: these name the same islands, so a
+                    // knowing this refuses would be a world that will not open
+                    // over a fact about somebody's chart.
+                    if !crate::island_in_the_world(island) {
+                        return Err(format!("nobody ever saw a cairn on {island}"));
+                    }
+                    if known.insert(island, depth).is_some() {
+                        return Err(format!("one island known twice over: `{field}`"));
+                    }
                 }
             }
             "boat" => {
@@ -787,6 +871,13 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
             player.surveyed = surveyed;
         }
     }
+    // And what they knew, dropped on the same terms and for a nearer version
+    // of the same reason: there is nobody to have known it.
+    for (token, known) in knowings {
+        if let Some(player) = players.get_mut(&token) {
+            player.known = known;
+        }
+    }
 
     let opening = opening.ok_or("no opening")?;
     let age = age.ok_or("no age")?;
@@ -874,6 +965,15 @@ mod tests {
                         // Out of order and either side of the origin, so a
                         // save that sorted them wrong would still read back.
                         surveyed: vec![IVec2::new(2, -1), IVec2::new(-40, 300), IVec2::new(0, 0)],
+                        // Both depths of knowing, and both out of order, for
+                        // the same reason — and two islands to a depth, so a
+                        // line that could only carry one would be caught.
+                        known: HashMap::from([
+                            (IVec2::new(2, -1), crate::Knowing::Visited),
+                            (IVec2::new(-9, 4), crate::Knowing::Sighted),
+                            (IVec2::new(-40, 300), crate::Knowing::Sighted),
+                            (IVec2::new(0, 0), crate::Knowing::Visited),
+                        ]),
                     },
                 ),
                 (
@@ -884,6 +984,7 @@ mod tests {
                         position: Vec2::new(-0.125, 9000.0),
                         aboard: None,
                         surveyed: Vec::new(),
+                        known: HashMap::new(),
                     },
                 ),
             ]),
@@ -1046,6 +1147,15 @@ mod tests {
                             IVec2::splat(brink),
                             IVec2::new(brink, brink - 1),
                         ],
+                        // Both outermost identities the lattice carries, one
+                        // at each depth of knowing — the same two the claims
+                        // below stand on, because a knowing names an island the
+                        // very same way a claim does and so has the very same
+                        // edge to fall off.
+                        known: HashMap::from([
+                            (last_ring, crate::Knowing::Visited),
+                            (IVec2::splat(-brink * steps), crate::Knowing::Sighted),
+                        ]),
                     },
                 ),
                 (
@@ -1054,6 +1164,7 @@ mod tests {
                         position: -far,
                         aboard: None,
                         surveyed: Vec::new(),
+                        known: HashMap::new(),
                     },
                 ),
             ]),
@@ -1119,10 +1230,10 @@ mod tests {
         // here. These compose into lines the reader refuses, and one refused
         // line is the whole world — so what keeps them out of the file is that
         // they never reach [`compose`]: `beasts::Flock::records` drops a beast
-        // past the edge or making for past it, and `Shared::record` drops a
-        // claim whose island the lattice cannot carry back. This says what
-        // those filters are for, so that the next field's writer knows it owes
-        // one.
+        // past the edge or making for past it, and `Shared::record` drops both
+        // a claim whose island the lattice cannot carry back and a knowing
+        // about one. This says what those filters are for, so that the next
+        // field's writer knows it owes one.
         let brink = the_last_chunk();
         let past = crate::MAX_RANGE + 1.0;
         let beyond = (brink + 1) * u8::MAX as i32;
@@ -1175,6 +1286,19 @@ mod tests {
                 },
                 "a cairn standing past the end of the world",
             ),
+            (
+                WorldRecord {
+                    players: HashMap::from([(
+                        Token(7),
+                        PlayerRecord {
+                            known: HashMap::from([(IVec2::splat(beyond), crate::Knowing::Sighted)]),
+                            ..PlayerRecord::default()
+                        },
+                    )]),
+                    ..a_record()
+                },
+                "a cairn seen on an island that cannot be one",
+            ),
         ] {
             assert!(
                 parse(&compose(&record)).is_err(),
@@ -1200,6 +1324,7 @@ mod tests {
                 position: Vec2::ZERO,
                 aboard: None,
                 surveyed: sailed.clone(),
+                known: HashMap::new(),
             },
         );
 
