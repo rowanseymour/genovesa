@@ -146,31 +146,38 @@ the chart has; the other is blank paper until somebody goes round. A coast
 that has not been run right around is left open where the survey stopped,
 which is how a half-charted island looked before anybody had finished the job
 — and the chart knows when the job *is* finished, a coastline only closing
-once its whole shore has been followed, which is what claiming or naming an
-island will one day hang off.
+once its whole shore has been followed, which is what claiming and naming an
+island hang off.
 
-Everything on the sheet is drawn out of ground the client was already sent, so
-nothing about the chart crosses the wire and a client written from scratch
-would keep its own the same way. It is also the one thing that machine
-remembers rather than streams, which in a world with no edges is a question
-worth an answer —
-[`crates/game/src/chart.rs`](crates/game/src/chart.rs) is where it is given.
-A chart belongs to the world it was drawn in, and it outlives the visit: each
-world's survey is written into a logbook on the player's own machine, keyed to
-that world, and taken up again on returning. What it is never written into is
-the server — having seen a stretch of coast is a fact about one player's
-client, and stays one.
+What is on the sheet is what the world says this player has surveyed. The
+server holds which ground each of them has been near enough to look at, works
+the lines out of it and sends them; the client records what it is told and
+draws it, and has no rule of its own about what counts as seen. It could not
+honestly have one, a claim being settled against the coast the server watched
+somebody sail. So a chart is the world's memory rather than the machine's, and
+it is handed back on returning —
+[`crates/game/src/chart.rs`](crates/game/src/chart.rs) is the drawing of it.
+The one thing this machine keeps of a world between visits is the token the
+player holds it by, which by definition cannot live anywhere else.
 
-An island whose shore has been run right around can be named: click it on the
-sheet and the keyboard becomes the pen, because a chart is written on rather
-than filled in. The name is the sheet's own for now — nobody else's chart shows
-it — and what would make it public is claiming the island, which is the
-server's to grant. That is why what a *survey* is — how ground becomes a
-coastline, when a coastline closes, and what makes one an island — lives in
-[`crates/protocol/src/survey.rs`](crates/protocol/src/survey.rs) rather than in
-the client: a claim can only be settled by a server that works the coast out
-the same way, from the same chunks, without taking the claimant's word for any
-of it.
+An island whose shore has been run right around, and that the player is
+standing on, can be *claimed*, and a granted claim leaves a cairn: stones, a
+staff and a banner on the headland where the claimant stood, which anybody who
+sails past can see. The claim is what earns a name — click an island you hold
+and the keyboard becomes the pen, because a chart is written on rather than
+filled in — and the name rides with the claim, so what one player reads on the
+paper is what everybody reads. That is why what a *survey* is — how ground
+becomes a coastline, when a coastline closes, and what makes one an island —
+lives in [`crates/protocol/src/survey.rs`](crates/protocol/src/survey.rs)
+rather than in the client: a claim can only be settled by a server that works
+the coast out the same way, from the same chunks, without taking the
+claimant's word for any of it.
+
+![A cairn on a claimed island](docs/cairn.png)
+
+*A granted claim, on the scree cap of the island it speaks for. The banner
+streams on the true wind, on the same arithmetic a masthead pennant does — so
+a player anchored offshore can read the weather off somebody else's claim.*
 
 ## Playing together
 

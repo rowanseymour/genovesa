@@ -245,6 +245,23 @@ impl Connection {
         self.say(ToServer::Disembark { position });
     }
 
+    /// Claims the island the player is standing on, which the server grants
+    /// against its own survey or refuses — see [`crate::player`], which owns
+    /// the key. What comes back is a cairn, or nothing at all.
+    pub fn claim(&self, island: IVec2) {
+        self.say(ToServer::Claim { island });
+    }
+
+    /// Writes a name on an island this player holds. The name is the world's
+    /// to accept or refuse; nothing is drawn until it says so — see
+    /// [`crate::chart::write_through`].
+    pub fn christen(&self, island: IVec2, name: &str) {
+        self.say(ToServer::Name {
+            island,
+            name: name.to_string(),
+        });
+    }
+
     fn say(&self, message: ToServer) {
         if message.write(&mut &self.stream).is_err() {
             let _ = self.stream.shutdown(Shutdown::Both);
@@ -573,6 +590,7 @@ impl Plugin for NetPlugin {
             .init_resource::<crate::sky::Sky>()
             .init_resource::<crate::beasts::Beasts>()
             .init_resource::<crate::boat::Fleet>()
+            .init_resource::<crate::cairn::Cairns>()
             .init_resource::<crate::console::Console>()
             .add_systems(
                 OnEnter(AppState::InWorld),
@@ -595,11 +613,12 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 OnExit(AppState::InWorld),
-                // The fleet forgotten here as well as by the boat plugin —
-                // scuttling twice is writing a default twice, and an app
-                // with only one of the two plugins (the lean net tests')
-                // must still not carry one world's hulls into the next.
-                (disconnect, crate::boat::scuttle),
+                // The fleet forgotten here as well as by the boat plugin, and
+                // the cairns as well as by theirs — forgetting twice is
+                // clearing an empty map twice, and an app with only one of
+                // each pair of plugins (the lean net tests') must still not
+                // carry one world's hulls or stones into the next.
+                (disconnect, crate::boat::scuttle, crate::cairn::strike),
             );
     }
 }
@@ -639,6 +658,7 @@ struct Told<'w> {
     beasts: ResMut<'w, crate::beasts::Beasts>,
     console: ResMut<'w, crate::console::Console>,
     fleet: ResMut<'w, crate::boat::Fleet>,
+    cairns: ResMut<'w, crate::cairn::Cairns>,
     /// Optional where the rest are not: the sheet exists only inside a world,
     /// and the lean tests of this module run without one.
     chart: Option<ResMut<'w, crate::chart::Chart>>,
@@ -807,10 +827,27 @@ fn receive(
                     );
                 }
             }
-            // Heard and not yet drawn: the cairn's model, the key that plants
-            // one and the mark it leaves on the chart are the client's half of
-            // claiming, and land with it.
-            ToClient::Cairn { .. } => {}
+            ToClient::Cairn {
+                island,
+                at,
+                name,
+                yours,
+            } => {
+                // Believed within the same reason the beasts are: a cairn is
+                // stood on the ground at this point every frame until the
+                // ground arrives, and one telling of a place that is not a
+                // place would be a staff at NaN for the rest of the session.
+                if at.is_finite() {
+                    told.cairns.told(&mut commands, island, at);
+                    // The sheet and the world hear the same word. What the
+                    // island is called is the world's to say now — a name
+                    // rides with the claim it was written on — so this is the
+                    // only way lettering reaches the chart.
+                    if let Some(chart) = told.chart.as_mut() {
+                        chart.claimed(island, at, &name, yours);
+                    }
+                }
+            }
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } | ToClient::World { .. } => {}
@@ -1381,6 +1418,56 @@ mod tests {
             .world()
             .resource::<crate::chart::Chart>()
             .surveyed(shore));
+    }
+
+    #[test]
+    fn a_telling_of_a_cairn_stands_it_in_the_world_and_letters_the_sheet() {
+        // A cairn is the one thing that reaches both at once: the world gets
+        // the stones, and the sheet gets the name — which arrives no other
+        // way now that a name rides the claim it is written on.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+        app.insert_resource(crate::chart::Chart::default());
+
+        let island = IVec2::new(76, 255);
+        let at = Vec2::new(120.0, -40.0);
+        (ToClient::Cairn {
+            island,
+            at,
+            name: "Isla Genovesa".to_string(),
+            yours: true,
+        })
+        .write(&mut &server)
+        .expect("cairn");
+
+        run_until(&mut app, "the cairn is heard of", |app| {
+            app.world()
+                .resource::<crate::chart::Chart>()
+                .claim(island)
+                .is_some()
+        });
+
+        // On the paper: the name, and whose it is.
+        let chart = app.world().resource::<crate::chart::Chart>();
+        assert_eq!(chart.name(island), Some("Isla Genovesa"));
+        let claimed = chart.claim(island).expect("a claim was told");
+        assert_eq!(claimed.at, at);
+        assert!(claimed.yours, "the player's own cairn read as a stranger's");
+
+        // And standing in the world, at the point it was told of — with no
+        // height yet, this app having no ground for it to settle onto.
+        let mut standing = app
+            .world_mut()
+            .query::<(&crate::cairn::Cairn, &Transform)>();
+        let (cairn, place) = standing
+            .iter(app.world())
+            .next()
+            .expect("a cairn was raised");
+        assert_eq!(cairn.island, island);
+        assert_eq!(place.translation.x, at.x);
+        assert_eq!(place.translation.z, at.y);
     }
 
     #[test]

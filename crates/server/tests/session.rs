@@ -2074,6 +2074,47 @@ fn a_name_the_wire_will_not_carry_leaves_the_cairn_as_it_was() {
 }
 
 #[test]
+fn a_returning_player_is_told_their_own_claims_however_far_off_they_are() {
+    // The cairns near where somebody is put down are told because they are
+    // things standing in sight; a player's own are told because they are
+    // theirs. Sail away from your island, hang up, come back, and the sheet
+    // has to letter it and open the pen on it — a client that was not told
+    // draws its own island blank and will not write on it, with nothing to
+    // say why.
+    let addr = host(CLAIMABLE);
+    let (client, token, island, ashore) = sail_round_the_island(addr, None);
+    client.say(ToServer::Disembark { position: ashore });
+    client.say(ToServer::Claim { island });
+    let _ = client.hear_a_cairn();
+    client.say(ToServer::Name {
+        island,
+        name: "Ilha Verde".to_string(),
+    });
+    assert_eq!(client.hear_a_cairn().2, "Ilha Verde");
+
+    // Away on foot, four kilometres of it — well past `CAIRN_SIGHT` — and
+    // then the line drops. One connection is read in order, so the walk is
+    // filed before the hang-up that follows it.
+    let away = ashore + Vec2::new(4_096.0, 0.0);
+    client.say(ToServer::Move { position: away });
+    let watcher = Client::join(addr).0;
+    drop(client);
+    // Somebody else hearing the departure is what says it has been filed: the
+    // world remembers a leaver before anyone is told they left, and a rejoin
+    // that raced it would be met as a stranger.
+    while !matches!(watcher.hear(), ToClient::Left { .. }) {}
+
+    let (client, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(token));
+    assert_eq!(dealt, token, "the papers were not the ones handed over");
+    assert_eq!(spawn, away, "the world put them back somewhere else");
+    let (told, at, name, yours) = client.hear_a_cairn();
+    assert_eq!(told, island, "some other island was told");
+    assert_eq!(at, ashore, "the cairn moved while they were away");
+    assert_eq!(name, "Ilha Verde", "the island came back unlettered");
+    assert!(yours, "they came back a stranger to their own claim");
+}
+
+#[test]
 fn a_claim_and_its_name_survive_the_world_being_closed() {
     // An island claimed is a thing another player is barred from, so of
     // everything a world file keeps it is the part that has to come back

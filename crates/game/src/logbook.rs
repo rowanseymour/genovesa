@@ -1,16 +1,18 @@
-//! The logbook: what this machine still keeps of a world between visits —
-//! an interim home, and shrinking on purpose.
+//! The logbook: the one thing this machine keeps of a world between visits.
 //!
-//! The design this serves is *world stop and restart*, not save-and-load:
-//! the server's world file is the world's continuity, and a client is meant
-//! to keep nothing a rejoin cannot answer. Two things remain here on their
-//! way to that. The **token** stays for good — it is the player's credential
-//! for a world, the client's half of a secret, and has to live with the
-//! client by definition. The **island names** stay until claims land: what a
-//! player calls an island is nothing the coast could tell anybody, so until
-//! a name can ride with a claim it is this machine's alone. The survey the
-//! book once carried is gone, and the berth before it: both are the world's
-//! now, told over the wire like the players, the boats and the beasts.
+//! The design this serves is *world stop and restart*, not save-and-load: the
+//! server's world file is the world's continuity, and a client keeps nothing a
+//! rejoin cannot answer. What is left here is the **token** alone — the
+//! player's credential for a world, the client's half of a secret, and the one
+//! thing that has to live on this side by definition, since a world that
+//! handed it back on request would be a world where anybody could be anybody.
+//!
+//! Everything else has gone the same way in turn: the berth, then the survey,
+//! and now the island names, which went when a name stopped being a private
+//! note and started riding with the claim it is written on. All of it is the
+//! world's, told over the wire like the players, the boats and the beasts.
+//! This module is what is left when a client is finally only a client, and it
+//! is not expected to shrink further.
 //!
 //! Books are keyed by the [`WorldId`] the server names in its handshake —
 //! never by address, since a world moved to another host is meant to still
@@ -31,22 +33,17 @@ use bevy::prelude::*;
 
 use protocol::{Token, WorldId};
 
-use crate::chart::Chart;
 use crate::net::Session;
 use crate::AppState;
 
 /// The format this build writes, named in the file's first line.
 const FORMAT: u32 = 1;
 
-/// Seconds between writes while in the world. The closing write on the way
-/// out is the one that matters; these are insurance against never reaching
-/// it, priced by what a crash costs: half a minute of christenings.
-const KEEP_INTERVAL: f32 = 30.0;
-
 /// This machine's memory of the world the player is in. Present exactly
-/// while a remembered world is being played: inserted on the way in (see
-/// [`for_session`]), written and removed on the way out — a test's world, or
-/// an ephemeral one opened from the command line, never has one.
+/// while a remembered world is being played: inserted and written on the way
+/// in (see [`for_session`] and [`open_the_log`]), removed on the way out — a
+/// test's world, or an ephemeral one opened from the command line, never has
+/// one.
 #[derive(Resource)]
 pub struct Logbook {
     /// Where this logbook lives, or `None` on a machine with nowhere to keep
@@ -54,17 +51,6 @@ pub struct Logbook {
     path: Option<PathBuf>,
     /// The token this player holds the world by — presented next visit.
     token: Token,
-    /// The names the player has written on their islands, by island id — the
-    /// working copy is the [`Chart`] resource, read back in here each time
-    /// the book is written.
-    names: Vec<(IVec2, String)>,
-}
-
-impl Logbook {
-    /// A chart carrying this world's christenings, for the ink to arrive on.
-    pub fn charted(&self) -> Chart {
-        Chart::named(self.names.iter().cloned())
-    }
 }
 
 /// The logbook for a session about to be entered, or `None` for a session
@@ -84,7 +70,6 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
         Read::Missing => Logbook {
             path: place_for(connection.world),
             token: connection.token,
-            names: Vec::new(),
         },
         // A book that exists and cannot be read is left exactly where it is
         // — no path, so nothing this session writes can land on it. The one
@@ -93,7 +78,6 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
         Read::Refused => Logbook {
             path: None,
             token: connection.token,
-            names: Vec::new(),
         },
     };
     book.token = connection.token;
@@ -135,10 +119,9 @@ fn read(world: WorldId) -> Read {
         return Read::Missing;
     };
     match parse(&text) {
-        Ok((token, names)) => Read::Book(Logbook {
+        Ok(token) => Read::Book(Logbook {
             path: Some(path),
             token,
-            names,
         }),
         Err(why) => {
             // A book this build cannot read is left where it is, unwritten
@@ -154,50 +137,42 @@ pub struct LogbookPlugin;
 
 impl Plugin for LogbookPlugin {
     fn build(&self, app: &mut App) {
+        // Written on the way in rather than on a beat. There is one thing in
+        // a logbook now and it is settled before the world opens, so a timer
+        // would be a timer spent writing the same bytes over the same bytes —
+        // and writing it at once is what makes a crashed first session still
+        // leave the player their name in that world.
         app.add_systems(
-            Update,
-            keep_the_log.run_if(in_state(AppState::InWorld).and_then(resource_exists::<Logbook>)),
+            OnEnter(AppState::InWorld),
+            open_the_log.run_if(resource_exists::<Logbook>),
         )
-        // Closed before the chart is stowed, or there would be nothing left
-        // to write down. Conditioned like the systems above: a world nobody
-        // remembers has no book to close, and leaving one must not be an
-        // error.
+        // A world nobody remembers has no book to close, and leaving one must
+        // not be an error.
         .add_systems(
             OnExit(AppState::InWorld),
-            close_the_log
-                .run_if(resource_exists::<Logbook>)
-                .before(crate::chart::stow_the_chart),
+            close_the_log.run_if(resource_exists::<Logbook>),
         );
     }
 }
 
-/// Writes the book on a slow beat — insurance, not the record; see
-/// [`KEEP_INTERVAL`].
-fn keep_the_log(
-    time: Res<Time>,
-    mut logbook: ResMut<Logbook>,
-    chart: Option<Res<Chart>>,
-    mut last: Local<f32>,
-) {
-    if time.elapsed_secs() - *last < KEEP_INTERVAL {
-        return;
-    }
-    *last = time.elapsed_secs();
-    write_down(&mut logbook, chart.as_deref());
+/// The one write: the token this world dealt, kept where the next visit's
+/// handshake will look for it.
+fn open_the_log(logbook: Res<Logbook>) {
+    write_down(&logbook);
 }
 
-/// The closing write, and the book put away: the next world is a different
-/// book, and finding this one still on the shelf would write one world's
-/// coasts against another's id.
-fn close_the_log(mut commands: Commands, mut logbook: ResMut<Logbook>, chart: Option<Res<Chart>>) {
-    write_down(&mut logbook, chart.as_deref());
+/// The book put away: the next world is a different book, and finding this one
+/// still on the shelf would write one world's papers against another's id.
+///
+/// Nothing is written here. There is one thing in a logbook and it was written
+/// on the way in — see [`open_the_log`] — so a closing write would be the same
+/// bytes over the same bytes, and a session that gained something to say would
+/// have to say it here anyway.
+fn close_the_log(mut commands: Commands) {
     commands.remove_resource::<Logbook>();
 }
 
-fn write_down(logbook: &mut Logbook, chart: Option<&Chart>) {
-    if let Some(chart) = chart {
-        logbook.names = chart.christenings();
-    }
+fn write_down(logbook: &Logbook) {
     let Some(path) = &logbook.path else {
         return;
     };
@@ -221,25 +196,10 @@ fn compose(logbook: &Logbook) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "genovesa logbook {FORMAT}");
     let _ = writeln!(out, "token {:016x}", logbook.token.0);
-    // Sorted, so that one book is one file, byte for byte, whatever order the
-    // chart's map hands its islands out in.
-    let mut names: Vec<&(IVec2, String)> = logbook.names.iter().collect();
-    names.sort_by_key(|(island, _)| (island.x, island.y));
-    for (island, name) in names {
-        // A name is one line of the book, so it must be one line of text:
-        // anything a control character could do to the format is dropped
-        // rather than written into it.
-        let name: String = name.chars().filter(|c| !c.is_control()).collect();
-        if !name.is_empty() {
-            let _ = writeln!(out, "name {} {} {name}", island.x, island.y);
-        }
-    }
     out
 }
 
-type Parsed = (Token, Vec<(IVec2, String)>);
-
-fn parse(text: &str) -> Result<Parsed, String> {
+fn parse(text: &str) -> Result<Token, String> {
     let mut lines = text.lines();
     match lines.next() {
         Some(header) if header == format!("genovesa logbook {FORMAT}") => {}
@@ -248,7 +208,6 @@ fn parse(text: &str) -> Result<Parsed, String> {
     }
 
     let mut token = None;
-    let mut names = Vec::new();
     for line in lines {
         if line.is_empty() {
             continue;
@@ -264,34 +223,16 @@ fn parse(text: &str) -> Result<Parsed, String> {
                 ))
             }
             // Keys an earlier format-1 build wrote and this one has outgrown
-            // — the berth moved to the server with the boats, and the survey
-            // after it. Read past, not refused: a book's token is this
-            // player's name in that world, and refusing the file over ink the
-            // world can hand back would make them a stranger where they have
-            // a history.
-            "aboard" | "ashore" | "coast" | "shoal" => {}
-            "name" => {
-                let mut fields = value.splitn(3, ' ');
-                let island = IVec2::new(
-                    whole(fields.next().ok_or("a name with no island")?)?,
-                    whole(fields.next().ok_or("a name with half an island")?)?,
-                );
-                let text = fields.next().filter(|text| !text.is_empty());
-                names.push((
-                    island,
-                    text.ok_or("a name with nothing written")?.to_string(),
-                ));
-            }
+            // — the berth went to the server with the boats, the survey after
+            // it, and the names with the claims they now ride on. Read past,
+            // not refused: a book's token is this player's name in that
+            // world, and refusing the file over what the world can hand back
+            // would make them a stranger where they have a history.
+            "aboard" | "ashore" | "coast" | "shoal" | "name" => {}
             other => return Err(format!("unknown key `{other}`")),
         }
     }
-    Ok((token.ok_or("no token")?, names))
-}
-
-fn whole(value: &str) -> Result<i32, String> {
-    value
-        .parse::<i32>()
-        .map_err(|_| format!("`{value}` is not a chunk coordinate"))
+    token.ok_or_else(|| "no token".to_string())
 }
 
 #[cfg(test)]
@@ -302,41 +243,29 @@ mod tests {
         Logbook {
             path: None,
             token: Token(0x00C0_FFEE_0000_0007),
-            names: vec![
-                (IVec2::new(701, -512), "Windward Reach".to_string()),
-                (IVec2::new(-8, 4), "Skull Rock".to_string()),
-            ],
         }
     }
 
     #[test]
     fn a_logbook_survives_the_round_trip() {
         let book = a_book();
-        let (token, names) = parse(&compose(&book)).expect("parse what was composed");
+        let token = parse(&compose(&book)).expect("parse what was composed");
         assert_eq!(token, book.token);
-        // Composing sorts the names — one book, one file — so they come back
-        // in that order whatever order they were held in; sorting both sides
-        // makes the comparison about content alone.
-        let sorted = |mut names: Vec<(IVec2, String)>| {
-            names.sort_by_key(|(island, _)| (island.x, island.y));
-            names
-        };
-        assert_eq!(sorted(names), sorted(book.names.clone()));
     }
 
     #[test]
     fn the_keys_of_an_older_book_are_read_past() {
-        // A format-1 book from before the berth moved to the server, and
-        // before the survey followed it: what this build has outgrown is
-        // passed over rather than refused, because the token on the second
-        // line is this player's name in that world.
-        let (token, names) = parse(concat!(
+        // A format-1 book from before the berth moved to the server, before
+        // the survey followed it, and before a name became something a claim
+        // carries: what this build has outgrown is passed over rather than
+        // refused, because the token on the second line is this player's name
+        // in that world and losing it would make them a stranger there.
+        let token = parse(concat!(
             "genovesa logbook 1\ntoken 2a\nashore 1 2 3 4 5 6 7\naboard 1.5\n",
             "coast 0 0 o0011fffe\nshoal 0 0 c0a0b\nname 3 4 Skull Rock\n",
         ))
         .expect("an old book still reads");
         assert_eq!(token, Token(0x2A));
-        assert_eq!(names, [(IVec2::new(3, 4), "Skull Rock".to_string())]);
     }
 
     #[test]
@@ -348,14 +277,6 @@ mod tests {
             (
                 "genovesa logbook 1\ntoken 1\nfuture stuff\n",
                 "a key this build has never heard of",
-            ),
-            (
-                "genovesa logbook 1\ntoken 1\nname 1 2\n",
-                "a name with nothing written",
-            ),
-            (
-                "genovesa logbook 1\ntoken 1\nname 1 x Skull Rock\n",
-                "a name against half an island",
             ),
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");

@@ -53,15 +53,19 @@
 //!
 //! # Names
 //!
-//! An island the survey has closed can be *named*: clicking one on the sheet
+//! An island this player has *claimed* can be named: clicking one on the sheet
 //! puts a caret on its lettering and the keyboard becomes the pen — there is
-//! no dialog, because a chart is written on, not filled in. The name is
-//! written against the ring's identity ([`protocol::survey::Island::id`]),
-//! which is a fact about the coast and so the same on every machine, and the
-//! name itself is the chart's own to keep: it lives and dies with the sheet,
-//! exactly as what the sheet has seen does. A *claim*, when there is one, is
-//! the server's to grant off that same identity — and a name worth showing to
-//! anybody else would ride with the claim.
+//! no dialog, because a chart is written on, not filled in. The pen does not
+//! open on anything else, an island nobody holds having nothing to write on
+//! and somebody else's having nothing this player may write.
+//!
+//! Nothing is lettered here. A name rides the claim it is written on, so what
+//! Enter does is offer it to the world; the world grants or refuses it, and
+//! the cairn comes back saying whatever it now says. Both the claim and the
+//! name are settled against the ring's identity
+//! ([`protocol::survey::Island::id`]), which is a fact about the coast and so
+//! the same on every machine — and the lettering a player reads is the
+//! lettering everybody else reads.
 //!
 //! # Ink, not paper
 //!
@@ -132,8 +136,32 @@ use crate::{AppState, Helm};
 #[derive(Resource, Default)]
 pub struct Chart {
     survey: Survey,
-    /// What the player has christened their islands, keyed by [`Island::id`].
-    names: HashMap<IVec2, String>,
+    /// The claims this player has been told of, keyed by [`Island::id`] — see
+    /// [`Claimed`]. Not the player's own notes: an island's name belongs to
+    /// the claim it was written on, so everything here arrived over the wire
+    /// and none of it outlives the visit.
+    claims: HashMap<IVec2, Claimed>,
+}
+
+/// A claimed island, as this sheet knows it: where the cairn stands, what it
+/// is called, and whether it is the player's own.
+///
+/// A cairn is the only reason a name is on the sheet at all. An island nobody
+/// has claimed is drawn and unlettered, however many times its own discoverer
+/// has sailed round it, because a name is a thing you plant rather than a
+/// thing you think.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Claimed {
+    /// Where the cairn stands, in world metres — so the sheet can mark the
+    /// spot rather than the island's middle. A cairn is on a headland
+    /// somebody chose, and where they chose is worth drawing.
+    pub at: Vec2,
+    /// What it has been christened. Empty for a claim nobody has named yet:
+    /// the cairn goes up when the island is taken, and the name is written
+    /// after.
+    pub name: String,
+    /// Whether the player holds this one.
+    pub yours: bool,
 }
 
 /// An island the survey has closed, carried onto the sheet to be lettered.
@@ -188,25 +216,44 @@ impl Chart {
                 // The reach needs no crossing: the longer side of a box is the
                 // longer side of it whichever way up the box is drawn.
                 extent: island.extent,
-                name: self.names.get(&island.id).cloned(),
+                name: self.name(island.id).map(str::to_string),
             })
             .collect()
     }
 
-    /// Writes a name against an island — [`Island::id`] says which — or,
-    /// given only whitespace, washes it off again.
-    pub fn christen(&mut self, island: IVec2, name: &str) {
-        let name = name.trim();
-        if name.is_empty() {
-            self.names.remove(&island);
-        } else {
-            self.names.insert(island, name.to_string());
-        }
+    /// Takes down what the world says about a claimed island — see
+    /// [`crate::net::receive`], which is the only caller. A cairn is told
+    /// again whenever its word changes, so this overwrites wholesale.
+    pub(crate) fn claimed(&mut self, island: IVec2, at: Vec2, name: &str, yours: bool) {
+        self.claims.insert(
+            island,
+            Claimed {
+                at,
+                name: name.trim().to_string(),
+                yours,
+            },
+        );
     }
 
-    /// What an island is called, if the player has called it anything.
+    /// The claim on an island, if this sheet has been told of one.
+    pub fn claim(&self, island: IVec2) -> Option<&Claimed> {
+        self.claims.get(&island)
+    }
+
+    /// The island a world point stands on, if this sheet has closed one round
+    /// it — the survey's own question, asked in world metres rather than on
+    /// the paper. What the claim key asks before it asks the world; see
+    /// [`crate::player::claim_the_island`].
+    pub fn island_under(&self, at: Vec2) -> Option<IVec2> {
+        self.survey.island_under(at).map(|island| island.id)
+    }
+
+    /// What an island is called, if it is claimed and named.
     pub fn name(&self, island: IVec2) -> Option<&str> {
-        self.names.get(&island).map(String::as_str)
+        self.claims
+            .get(&island)
+            .map(|claimed| claimed.name.as_str())
+            .filter(|name| !name.is_empty())
     }
 
     /// Everything surveyed within a rectangle of the world, chunk by chunk.
@@ -225,26 +272,6 @@ impl Chart {
     /// reaches this sheet.
     pub(crate) fn record(&mut self, chunk: IVec2, found: Soundings) {
         self.survey.record(chunk, found);
-    }
-
-    /// Every name written on the sheet, for the logbook to write down. The
-    /// survey itself is not in there: the world holds that, and tells it back
-    /// on the way in.
-    pub(crate) fn christenings(&self) -> Vec<(IVec2, String)> {
-        self.names
-            .iter()
-            .map(|(island, name)| (*island, name.clone()))
-            .collect()
-    }
-
-    /// A blank chart carrying the names a logbook kept — the christenings
-    /// taken up from wherever the last visit left off, on ink that has not
-    /// arrived yet.
-    pub(crate) fn named(names: impl IntoIterator<Item = (IVec2, String)>) -> Self {
-        Self {
-            survey: Survey::default(),
-            names: names.into_iter().collect(),
-        }
     }
 }
 
@@ -565,26 +592,22 @@ impl Plugin for ChartPlugin {
     }
 }
 
-/// A world gets a blank chart — carrying, in a world this machine remembers,
-/// the names the last visit wrote on it — and takes it with it when it goes:
-/// what has been seen is a fact about *this* world, and carrying it into the
-/// next would draw one seed's islands on another's water. The logbook is
-/// keyed by the world's own id, which is what makes reloading names safe
-/// where carrying them over would not be. The ink itself is the world's to
-/// hand back, and arrives over the wire moments later.
-fn start_a_chart(
-    mut commands: Commands,
-    mut view: ResMut<ChartView>,
-    logbook: Option<Res<crate::logbook::Logbook>>,
-) {
-    commands.insert_resource(logbook.map_or_else(Chart::default, |logbook| logbook.charted()));
+/// A world gets a blank sheet, and takes it with it when it goes: what has
+/// been seen is a fact about *this* world, and carrying it into the next would
+/// draw one seed's islands on another's water.
+///
+/// Blank even in a world this machine has been in before, and that is not a
+/// thing lost. Everything that was ever on the sheet is the world's to hand
+/// back — the ink as [`protocol::ToClient::Surveyed`], the lettering riding
+/// the cairns it is written on — and all of it arrives over the wire moments
+/// later. A name kept on this side would be a name only this player could
+/// read.
+fn start_a_chart(mut commands: Commands, mut view: ResMut<ChartView>) {
+    commands.insert_resource(Chart::default());
     *view = ChartView::default();
 }
 
-/// Pub within the crate so the logbook's closing write can order itself
-/// before this: a chart stowed first would be a chart with nothing left to
-/// write down.
-pub(crate) fn stow_the_chart(mut commands: Commands) {
+fn stow_the_chart(mut commands: Commands) {
     commands.remove_resource::<Chart>();
     commands.remove_resource::<Engraved>();
 }
@@ -1162,15 +1185,24 @@ fn escape_key(
 }
 
 /// The pen at work: letters typed go into the draft, Backspace takes one
-/// back, and Enter writes the name against the island — where writing an
-/// emptied draft washes the name off, which is how a mistake is undone.
+/// back, and Enter offers the draft to the world — see [`write_through`],
+/// which is where it goes and what becomes of it.
+///
+/// Emptying the field and pressing Enter is *not* an erasure. The world
+/// refuses a name it cannot carry rather than washing one off (see the
+/// server's own `christen`), so the cairn goes on saying what it said and the
+/// lettering does not change. That is the behaviour wanted here for now: a
+/// name is a thing you plant, and taking one down again is a different ask
+/// from "the wire will not carry this". There is no way to unname an island,
+/// and it is worth saying plainly rather than leaving the empty field looking
+/// like one.
 ///
 /// Asks what the keyboard *typed* rather than which positions were pressed,
 /// the same way the console and the menus' two fields do, so a name can hold
 /// whatever a layout can produce.
 fn write_the_name(
     mut commands: Commands,
-    mut chart: ResMut<Chart>,
+    online: Option<Res<crate::net::Online>>,
     naming: Option<ResMut<Naming>>,
     mut presses: MessageReader<KeyboardInput>,
 ) {
@@ -1189,7 +1221,7 @@ fn write_the_name(
         }
         match press.key_code {
             KeyCode::Enter | KeyCode::NumpadEnter => {
-                chart.christen(naming.island, &naming.draft);
+                write_through(&online, naming.island, &naming.draft);
                 commands.remove_resource::<Naming>();
                 return;
             }
@@ -1263,7 +1295,8 @@ impl Pointer<'_, '_> {
 /// name lost to a stray click would be the sheet eating somebody's work.
 fn click_to_name(
     mut commands: Commands,
-    mut chart: ResMut<Chart>,
+    chart: Res<Chart>,
+    online: Option<Res<crate::net::Online>>,
     view: Res<ChartView>,
     naming: Option<Res<Naming>>,
     mut pointer: Pointer,
@@ -1274,18 +1307,41 @@ fn click_to_name(
 
     let hit = hit_island(&chart.islands(), at, view.metres_per_pixel);
     if let Some(naming) = naming {
-        chart.christen(naming.island, &naming.draft);
+        write_through(&online, naming.island, &naming.draft);
         commands.remove_resource::<Naming>();
         // Clicking the island being written is only ever finishing it.
         if hit.as_ref().map(|island| island.id) == Some(naming.island) {
             return;
         }
     }
-    if let Some(island) = hit {
+    // The pen only opens on an island this player holds. Naming is what a
+    // claim earns — a cairn is what a name is written on — so there is
+    // nothing to write on an island nobody has claimed, and nothing this
+    // player may write on somebody else's. The sheet says so by simply not
+    // taking the pen up, which is the quietest way to say it.
+    if let Some(island) = hit.filter(|island| ours(&chart, island.id)) {
         commands.insert_resource(Naming {
             island: island.id,
             draft: island.name.unwrap_or_default(),
         });
+    }
+}
+
+/// Whether this island is one the player holds — see [`click_to_name`].
+fn ours(chart: &Chart, island: IVec2) -> bool {
+    chart.claim(island).is_some_and(|claimed| claimed.yours)
+}
+
+/// Sends a christening to the world, which is the only place a name lives.
+///
+/// Nothing is written on the sheet here. The name goes up, the server judges
+/// it — it holds the claim, and refuses a name rather than repairing one —
+/// and the cairn is told back with whatever it now says. So the lettering a
+/// player sees is always the lettering everybody else sees, and a name the
+/// world would not carry never appears on the paper at all.
+fn write_through(online: &Option<Res<crate::net::Online>>, island: IVec2, draft: &str) {
+    if let Some(online) = online {
+        online.connection.christen(island, draft);
     }
 }
 
@@ -2481,9 +2537,10 @@ mod tests {
     }
 
     #[test]
-    fn christening_an_island_letters_it_by_name() {
-        // The names ride the islands the walk finds: written against the id,
-        // read back off the island — and only whitespace washes them off.
+    fn a_claim_letters_the_island_it_was_written_on() {
+        // A name reaches the sheet by riding a cairn — see [`Chart::claimed`],
+        // which is what the world's word lands in. Written against the ring's
+        // id, read back off the island the walk finds.
         let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
         let mut chart = Chart::default();
         chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
@@ -2493,12 +2550,48 @@ mod tests {
         );
 
         let id = chart.islands()[0].id;
-        chart.christen(id, "  Isla Genovesa  ");
+        // Unclaimed, it is drawn and unlettered however well it is known.
+        assert_eq!(chart.islands()[0].name, None);
+
+        chart.claimed(id, middle, "  Isla Genovesa  ", true);
         assert_eq!(chart.islands()[0].name.as_deref(), Some("Isla Genovesa"));
         assert_eq!(chart.name(id), Some("Isla Genovesa"));
+        assert!(chart.claim(id).is_some_and(|claimed| claimed.yours));
 
-        chart.christen(id, "   ");
+        // A claim with nothing written on it yet is a cairn without a name:
+        // the island is spoken for, and the paper says so by the mark rather
+        // than by lettering.
+        chart.claimed(id, middle, "   ", true);
         assert_eq!(chart.islands()[0].name, None);
+        assert!(chart.claim(id).is_some(), "the cairn went with the name");
+    }
+
+    #[test]
+    fn the_pen_only_opens_on_an_island_this_player_holds() {
+        // The filter a hit goes through in [`click_to_name`], asked of the
+        // three things an island can be. Naming is what a claim earns: there
+        // is nothing to write on an island nobody has taken, and nothing this
+        // player may write on somebody else's. The sheet says so by simply not
+        // taking the pen up.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+        chart.record(
+            IVec2::new(1, 0),
+            survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
+        );
+        let id = chart.islands()[0].id;
+
+        assert!(
+            !ours(&chart, id),
+            "the pen opened on an island nobody has claimed"
+        );
+
+        chart.claimed(id, middle, "Isla Ajena", false);
+        assert!(!ours(&chart, id), "the pen opened on a stranger's island");
+
+        chart.claimed(id, middle, "Isla Genovesa", true);
+        assert!(ours(&chart, id), "the pen would not open on our own island");
     }
 
     #[test]
@@ -2522,7 +2615,13 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_name_is_written_by_enter() {
+    fn a_typed_name_is_taken_up_and_enter_puts_the_pen_down() {
+        // What Enter does now is send: a name belongs to the claim it is
+        // written on, so the world is asked and the sheet waits to be told —
+        // see [`write_through`]. Nothing is lettered here, and with no session
+        // to send down there is nowhere for the name to go, which is exactly
+        // what this app is. What can still be watched is the pen: the letters
+        // gather in the draft, and Enter puts it down.
         let mut app = keyed_app();
         press(&mut app, KeyCode::KeyM);
         assert_eq!(helm(&app), Helm::Chart);
@@ -2533,13 +2632,21 @@ mod tests {
             draft: String::new(),
         });
         type_word(&mut app, "Skull Rock");
-        type_key(&mut app, KeyCode::Enter, "\r");
+        assert_eq!(
+            app.world().resource::<Naming>().draft,
+            "Skull Rock",
+            "the letters did not reach the draft"
+        );
 
-        let world = app.world();
-        assert_eq!(world.resource::<Chart>().name(island), Some("Skull Rock"));
+        type_key(&mut app, KeyCode::Enter, "\r");
         assert!(
-            world.get_resource::<Naming>().is_none(),
+            app.world().get_resource::<Naming>().is_none(),
             "the pen is still down"
+        );
+        assert_eq!(
+            app.world().resource::<Chart>().name(island),
+            None,
+            "the sheet lettered a name the world had not confirmed"
         );
     }
 
@@ -2556,14 +2663,12 @@ mod tests {
         // Far past the cap, so the surplus has something to be dropped from.
         type_word(&mut app, &"a".repeat(NAME_LENGTH + 9));
         type_key(&mut app, KeyCode::Backspace, "\u{8}");
-        type_key(&mut app, KeyCode::Enter, "\r");
 
-        let written = app
-            .world()
-            .resource::<Chart>()
-            .name(island)
-            .expect("a name was written");
-        assert_eq!(written.chars().count(), NAME_LENGTH - 1);
+        // Read off the draft rather than the sheet: what is typed is this
+        // side's business, and what is *written* is the world's — see
+        // [`a_typed_name_is_taken_up_and_enter_puts_the_pen_down`].
+        let drafted = &app.world().resource::<Naming>().draft;
+        assert_eq!(drafted.chars().count(), NAME_LENGTH - 1);
     }
 
     #[test]
