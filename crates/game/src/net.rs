@@ -613,11 +613,12 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 OnExit(AppState::InWorld),
-                // The fleet forgotten here as well as by the boat plugin —
-                // scuttling twice is writing a default twice, and an app
-                // with only one of the two plugins (the lean net tests')
-                // must still not carry one world's hulls into the next.
-                (disconnect, crate::boat::scuttle),
+                // The fleet forgotten here as well as by the boat plugin, and
+                // the cairns as well as by theirs — forgetting twice is
+                // clearing an empty map twice, and an app with only one of
+                // each pair of plugins (the lean net tests') must still not
+                // carry one world's hulls or stones into the next.
+                (disconnect, crate::boat::scuttle, crate::cairn::strike),
             );
     }
 }
@@ -837,7 +838,7 @@ fn receive(
                 // ground arrives, and one telling of a place that is not a
                 // place would be a staff at NaN for the rest of the session.
                 if at.is_finite() {
-                    told.cairns.told(&mut commands, island, at, yours);
+                    told.cairns.told(&mut commands, island, at);
                     // The sheet and the world hear the same word. What the
                     // island is called is the world's to say now — a name
                     // rides with the claim it was written on — so this is the

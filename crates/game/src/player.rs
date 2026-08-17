@@ -1235,6 +1235,119 @@ mod tests {
         );
     }
 
+    /// A chart with one closed island on it, centred where a test wants one.
+    ///
+    /// Built rather than sailed: this side's survey arrives over the wire, and
+    /// what the claim key reads is the sheet. The block of chunks is what
+    /// closes the ring — a cone with no water recorded round it is a coast
+    /// that has not been shown to end.
+    fn a_chart_with_an_island_at(middle: Vec2) -> Chart {
+        use protocol::ground::{CHUNK_METRES, FACET_VERTS};
+        use protocol::survey::survey;
+
+        // Comfortably past [`protocol::survey::LEAST_ISLAND`], so the ring is
+        // an island rather than a skerry, and comfortably inside one chunk, so
+        // the block of water round it closes the ring.
+        const REACH: f32 = 60.0;
+
+        let heights = |chunk: IVec2| -> Vec<f32> {
+            let base = chunk.as_vec2() * CHUNK_METRES;
+            (0..FACET_VERTS * FACET_VERTS)
+                .map(|i| {
+                    let local = Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32)
+                        * FACET_METRES;
+                    REACH - (base + local).distance(middle)
+                })
+                .collect()
+        };
+        let mut chart = Chart::default();
+        let home = (middle / CHUNK_METRES).floor().as_ivec2();
+        for down in -1..=1 {
+            for across in -1..=1 {
+                let chunk = home + IVec2::new(across, down);
+                chart.record(chunk, survey(&heights(chunk)));
+            }
+        }
+        chart
+    }
+
+    #[test]
+    fn the_claim_key_asks_from_the_beach_and_says_nothing_from_the_helm() {
+        // Both halves of what this side judges for itself. A cairn is built by
+        // somebody standing on the ground, so the key is dead at the helm —
+        // and afoot inside a ring the sheet has closed, it asks, the world
+        // being the one that rules on it.
+        use crate::net::{fake_server, Online};
+        use protocol::ToServer;
+
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = crate::net::Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set timeout");
+
+        let mut app = shore_app();
+        let afloat = boat_transform(&mut app).translation.xz();
+        app.insert_resource(a_chart_with_an_island_at(afloat));
+        app.insert_resource(Online::new(connection));
+
+        // Aboard, standing inside the very ring that would earn it: nothing
+        // crosses. The silence is bracketed by a word said after it, a socket
+        // that has gone quiet being indistinguishable from one that never
+        // spoke.
+        press_claim(&mut app);
+        app.world()
+            .resource::<Online>()
+            .connection
+            .command("help".to_string());
+        assert_eq!(
+            next_word(&server),
+            ToServer::Command {
+                line: "help".to_string()
+            },
+            "the helm asked for a cairn"
+        );
+
+        // Ashore, and the same key asks — for the island the sheet says is
+        // underfoot, which is the only thing this side has to offer.
+        press_board(&mut app);
+        assert_eq!(aboard(&mut app), None, "the player is still aboard");
+        let standing = player_transform(&mut app).translation.xz();
+        let island = app
+            .world()
+            .resource::<Chart>()
+            .island_under(standing)
+            .expect("the walker stepped out inside the test island's ring");
+        press_claim(&mut app);
+        assert_eq!(next_word(&server), ToServer::Claim { island });
+    }
+
+    /// The next thing the client actually *says*, past the traffic every
+    /// session carries anyway: where the player is, and the step ashore that
+    /// put them there. None of it is what the claim key is about.
+    fn next_word(server: &std::net::TcpStream) -> protocol::ToServer {
+        use protocol::ToServer;
+        loop {
+            match ToServer::read(&mut &*server).expect("a word from the client") {
+                ToServer::Move { .. } | ToServer::Helm { .. } | ToServer::Disembark { .. } => {
+                    continue
+                }
+                word => return word,
+            }
+        }
+    }
+
+    /// One press of the claim key, released again afterwards.
+    fn press_claim(app: &mut App) {
+        hold(app, KeyCode::KeyC);
+        run_frames(app, 1);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyC);
+        run_frames(app, 1);
+    }
+
     fn place_in<T>(world: &mut World, read: impl FnOnce(PlayerPlace) -> T) -> T {
         read(
             SystemState::<PlayerPlace>::new(world)

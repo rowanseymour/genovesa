@@ -53,15 +53,19 @@
 //!
 //! # Names
 //!
-//! An island the survey has closed can be *named*: clicking one on the sheet
+//! An island this player has *claimed* can be named: clicking one on the sheet
 //! puts a caret on its lettering and the keyboard becomes the pen — there is
-//! no dialog, because a chart is written on, not filled in. The name is
-//! written against the ring's identity ([`protocol::survey::Island::id`]),
-//! which is a fact about the coast and so the same on every machine, and the
-//! name itself is the chart's own to keep: it lives and dies with the sheet,
-//! exactly as what the sheet has seen does. A *claim*, when there is one, is
-//! the server's to grant off that same identity — and a name worth showing to
-//! anybody else would ride with the claim.
+//! no dialog, because a chart is written on, not filled in. The pen does not
+//! open on anything else, an island nobody holds having nothing to write on
+//! and somebody else's having nothing this player may write.
+//!
+//! Nothing is lettered here. A name rides the claim it is written on, so what
+//! Enter does is offer it to the world; the world grants or refuses it, and
+//! the cairn comes back saying whatever it now says. Both the claim and the
+//! name are settled against the ring's identity
+//! ([`protocol::survey::Island::id`]), which is a fact about the coast and so
+//! the same on every machine — and the lettering a player reads is the
+//! lettering everybody else reads.
 //!
 //! # Ink, not paper
 //!
@@ -588,27 +592,22 @@ impl Plugin for ChartPlugin {
     }
 }
 
-/// A world gets a blank chart — carrying, in a world this machine remembers,
-/// the names the last visit wrote on it — and takes it with it when it goes:
-/// what has been seen is a fact about *this* world, and carrying it into the
-/// next would draw one seed's islands on another's water. The logbook is
-/// keyed by the world's own id, which is what makes reloading names safe
-/// where carrying them over would not be. The ink itself is the world's to
-/// hand back, and arrives over the wire moments later.
-fn start_a_chart(
-    mut commands: Commands,
-    mut view: ResMut<ChartView>,
-    logbook: Option<Res<crate::logbook::Logbook>>,
-) {
-    let _ = logbook;
+/// A world gets a blank sheet, and takes it with it when it goes: what has
+/// been seen is a fact about *this* world, and carrying it into the next would
+/// draw one seed's islands on another's water.
+///
+/// Blank even in a world this machine has been in before, and that is not a
+/// thing lost. Everything that was ever on the sheet is the world's to hand
+/// back — the ink as [`protocol::ToClient::Surveyed`], the lettering riding
+/// the cairns it is written on — and all of it arrives over the wire moments
+/// later. A name kept on this side would be a name only this player could
+/// read.
+fn start_a_chart(mut commands: Commands, mut view: ResMut<ChartView>) {
     commands.insert_resource(Chart::default());
     *view = ChartView::default();
 }
 
-/// Pub within the crate so the logbook's closing write can order itself
-/// before this: a chart stowed first would be a chart with nothing left to
-/// write down.
-pub(crate) fn stow_the_chart(mut commands: Commands) {
+fn stow_the_chart(mut commands: Commands) {
     commands.remove_resource::<Chart>();
     commands.remove_resource::<Engraved>();
 }
@@ -1186,8 +1185,17 @@ fn escape_key(
 }
 
 /// The pen at work: letters typed go into the draft, Backspace takes one
-/// back, and Enter writes the name against the island — where writing an
-/// emptied draft washes the name off, which is how a mistake is undone.
+/// back, and Enter offers the draft to the world — see [`write_through`],
+/// which is where it goes and what becomes of it.
+///
+/// Emptying the field and pressing Enter is *not* an erasure. The world
+/// refuses a name it cannot carry rather than washing one off (see the
+/// server's own `christen`), so the cairn goes on saying what it said and the
+/// lettering does not change. That is the behaviour wanted here for now: a
+/// name is a thing you plant, and taking one down again is a different ask
+/// from "the wire will not carry this". There is no way to unname an island,
+/// and it is worth saying plainly rather than leaving the empty field looking
+/// like one.
 ///
 /// Asks what the keyboard *typed* rather than which positions were pressed,
 /// the same way the console and the menus' two fields do, so a name can hold
@@ -2556,6 +2564,34 @@ mod tests {
         chart.claimed(id, middle, "   ", true);
         assert_eq!(chart.islands()[0].name, None);
         assert!(chart.claim(id).is_some(), "the cairn went with the name");
+    }
+
+    #[test]
+    fn the_pen_only_opens_on_an_island_this_player_holds() {
+        // The filter a hit goes through in [`click_to_name`], asked of the
+        // three things an island can be. Naming is what a claim earns: there
+        // is nothing to write on an island nobody has taken, and nothing this
+        // player may write on somebody else's. The sheet says so by simply not
+        // taking the pen up.
+        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
+        let mut chart = Chart::default();
+        chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
+        chart.record(
+            IVec2::new(1, 0),
+            survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
+        );
+        let id = chart.islands()[0].id;
+
+        assert!(
+            !ours(&chart, id),
+            "the pen opened on an island nobody has claimed"
+        );
+
+        chart.claimed(id, middle, "Isla Ajena", false);
+        assert!(!ours(&chart, id), "the pen opened on a stranger's island");
+
+        chart.claimed(id, middle, "Isla Genovesa", true);
+        assert!(ours(&chart, id), "the pen would not open on our own island");
     }
 
     #[test]

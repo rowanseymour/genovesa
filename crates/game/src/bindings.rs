@@ -76,8 +76,8 @@ impl Action {
 
     /// Where the action starts out: WASD to drive, F to step ashore or
     /// aboard, R to wait a night out, M for the chart, C to claim, and Q/E to
-    /// turn the view — WASD and Q/E being what the game had before any of this was
-    /// configurable.
+    /// turn the view — WASD and Q/E being what the game had before any of
+    /// this was configurable.
     pub fn default_key(self) -> KeyCode {
         match self {
             Action::MoveForward => KeyCode::KeyW,

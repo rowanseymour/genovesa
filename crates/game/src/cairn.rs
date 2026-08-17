@@ -22,9 +22,13 @@
 //! thing that is merely tall.
 //!
 //! The banner streams on the true wind, on the same arithmetic a boat's
-//! pennant uses — see [`crate::boat::pennant_pose`]. Cloth is cloth, and two
+//! pennant uses — see [`crate::boat::pennant_pose`] — and is cut from the same
+//! mesh at another size, [`crate::boat::pennant_mesh`]. Cloth is cloth, and two
 //! rules for how it lies would show up the first time a player anchored off a
-//! cairn and watched their own masthead disagree with it.
+//! cairn and watched their own masthead disagree with it. The pose and the
+//! shape go together: the pose says the cloth runs down -Z from a tie at the
+//! origin and hangs down -Y, and a banner built to any other convention would
+//! be aimed across the wind rather than along it.
 //!
 //! # Standing it on the ground
 //!
@@ -35,12 +39,18 @@
 //! terrain, deliberately, so a daymark is in sight before the shore it stands
 //! on resolves. So a cairn waits [`Unfooted`] until there is ground to stand
 //! on, exactly as an arriving player does.
+//!
+//! It waits *unseen*. The gap between the two distances is half a kilometre of
+//! sailing, and a cairn drawn at its told point before its ground arrives is a
+//! cairn standing on the open sea for the whole of the approach, which then
+//! jumps onto the headland as the shore streams in. Hidden until it is footed,
+//! the daymark simply appears with the island it belongs to.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::boat::pennant_pose;
+use crate::boat::{pennant_mesh, pennant_pose};
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
 use crate::{matte, AppState};
@@ -53,6 +63,17 @@ use crate::{matte, AppState};
 /// than a landmark — without making it the tallest thing on a small island.
 const STAFF: f32 = 9.0;
 
+/// How deep the staff is driven into the heap, in metres — a staff resting on
+/// the stones would be a staff the first blow took away. What it costs is that
+/// the head stands this much lower than [`STAFF`] above the stones, which is
+/// why the height of the head is worked out once rather than written twice.
+const SUNK: f32 = 0.3;
+
+/// How far below the head of the staff the banner is tied, in metres. The
+/// staff showing above the cloth is what says *staff* rather than *pole with a
+/// flag glued on the end*.
+const TIE_BELOW: f32 = 0.5;
+
 /// The cairn of stones at its foot: how far across the base is, and how high
 /// it is heaped, in metres.
 ///
@@ -62,12 +83,14 @@ const STAFF: f32 = 9.0;
 const STONES: (f32, f32) = (2.4, 1.6);
 
 /// The banner: how far it flies from the staff, and how deep it hangs, in
-/// metres.
+/// metres — the two dimensions [`pennant_mesh`] is cut to.
 ///
 /// Big enough to be the thing the eye catches at a mile — see the module doc —
 /// which makes it far larger, in proportion, than the pennant at a masthead.
 /// A pennant is read by its own crew from ten metres; this is read by a
-/// stranger from a thousand.
+/// stranger from a thousand. Deeper in proportion too: a masthead flag is a
+/// narrow streamer because it is read for its *direction*, where this one is
+/// read for being there at all, and a streamer at a mile is a thread.
 const BANNER: (f32, f32) = (2.6, 1.4);
 
 /// The stone a cairn is piled from. The world's rock, near enough: a cairn is
@@ -104,53 +127,49 @@ pub struct Cairns {
 }
 
 impl Cairns {
-    /// A word about a cairn: the first one builds it, and later ones are the
-    /// same stones with a new word on them — a christening, or a claim that
-    /// changed hands. Where it *stands* never changes, a cairn being a pile of
-    /// rock rather than a thing that moves, so a later telling only rewrites
-    /// what the sheet says about it.
-    /// The stones go up bare here and are [`dress`]ed a moment later, which is
-    /// the beasts' arrangement and for their reason: this is called from the
+    /// A word about a cairn: the first one builds it, and there is nothing in
+    /// the world for a later one to change. A cairn is told again when it is
+    /// christened, and a name is the *sheet's* to letter — see
+    /// [`crate::chart`], which hears the same word. Where the stones stand
+    /// never changes, a cairn being a pile of rock rather than a thing that
+    /// moves, and nothing about how they are drawn depends on whose they are.
+    /// So a second telling is quietly nothing here.
+    ///
+    /// The stones go up bare and are [`dress`]ed a moment later, which is the
+    /// beasts' arrangement and for their reason: this is called from the
     /// session's drain, which already has both hands on the hulls' meshes, and
     /// two system parameters cannot each hold the asset store.
-    pub fn told(&mut self, commands: &mut Commands, island: IVec2, at: Vec2, yours: bool) {
-        if let Some(&standing) = self.standing.get(&island) {
-            commands.entity(standing).insert(Cairn { island, yours });
+    pub fn told(&mut self, commands: &mut Commands, island: IVec2, at: Vec2) {
+        if self.standing.contains_key(&island) {
             return;
         }
         let cairn = commands
             .spawn((
                 Name::new(format!("Cairn {}, {}", island.x, island.y)),
-                Cairn { island, yours },
+                Cairn { island },
                 Unfooted,
                 DespawnOnExit(AppState::InWorld),
                 Transform::from_xyz(at.x, 0.0, at.y),
-                Visibility::default(),
+                // Not shown until it is standing on something — see the module
+                // doc, and [`stand_the_cairns`], which is what reveals it.
+                Visibility::Hidden,
             ))
             .id();
         self.standing.insert(island, cairn);
     }
-
-    /// Forgets every cairn: the world is over. The entities take themselves
-    /// out, being `DespawnOnExit`; what is cleared here is this side of the
-    /// bookkeeping, which would otherwise hand out the entity ids of a world
-    /// nobody is in any more.
-    fn forget(&mut self) {
-        self.standing.clear();
-    }
 }
 
 /// One cairn, as this client draws it.
+///
+/// Whose it is is not on it. Nothing in the world is drawn differently for a
+/// claim being the player's own — a stranger's cairn is exactly as much of a
+/// daymark as your own, and one that announced itself by its colour would be a
+/// claim nobody had to sail up to. It is the *sheet* that cares: see
+/// [`crate::chart`], which is told the same word and keeps `yours` on it.
 #[derive(Component)]
 pub struct Cairn {
     /// The island it speaks for.
     pub island: IVec2,
-    /// Whether the player is the one who built it. Nothing in the world is
-    /// drawn differently for it — a stranger's cairn is exactly as much of a
-    /// daymark as your own, and a claim that announced itself by its colour
-    /// would be a claim nobody had to sail up to. It is the *sheet* that
-    /// cares: see [`crate::chart`].
-    pub yours: bool,
 }
 
 /// A cairn waiting for ground to stand on — see the module doc.
@@ -158,8 +177,12 @@ pub struct Cairn {
 struct Unfooted;
 
 /// The cairns still waiting for ground, as a query.
-type Waiting<'w, 's> =
-    Query<'w, 's, (Entity, &'static mut Transform), (With<Cairn>, With<Unfooted>)>;
+type Waiting<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static mut Transform, &'static mut Visibility),
+    (With<Cairn>, With<Unfooted>),
+>;
 
 /// The banner on the staff, and the bearing it is streaming on.
 ///
@@ -171,10 +194,13 @@ struct Banner {
     bearing: f32,
 }
 
-/// What building a cairn needs in hand, bundled because the telling arrives
-/// inside [`crate::net::receive`], which is already holding the hulls' kit.
+/// What building a cairn needs in hand — the two asset stores and the pieces
+/// cut from them — bundled so that [`dress`] is one system parameter rather
+/// than three. Nothing else builds a cairn: the telling arrives in
+/// [`crate::net::receive`], which already has both hands on the hulls' kit and
+/// so cannot hold these too, and putting the bare stones up is all it does.
 #[derive(bevy::ecs::system::SystemParam)]
-pub struct CairnKit<'w, 's> {
+struct CairnKit<'w, 's> {
     meshes: ResMut<'w, Assets<Mesh>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
     /// The pieces every cairn is built from, made once and cloned per cairn:
@@ -183,7 +209,7 @@ pub struct CairnKit<'w, 's> {
     stonework: Local<'s, Option<Stonework>>,
 }
 
-/// The handles [`raise`] deals from — see [`CairnKit::stonework`].
+/// The handles [`dress`] deals from — see [`CairnKit::stonework`].
 #[derive(Clone)]
 struct Stonework {
     stone: Handle<StandardMaterial>,
@@ -221,10 +247,19 @@ fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<Entity, Added<
             // in it.
             heap: kit.meshes.add(Cone::new(across / 2.0, high)),
             staff: kit.meshes.add(Cylinder::new(0.09, STAFF)),
-            banner: kit.meshes.add(Rectangle::new(flies, hangs)),
+            // The masthead's own cloth at another size, and it has to be: the
+            // pose it is aimed by is the pennant's — tie at the origin, cloth
+            // down -Z and hanging -Y — and a rectangle from the shape library
+            // lies in the XY plane about its own middle, which is a banner
+            // aimed across the wind, straddling the staff, and swinging flat
+            // into the horizontal every time the wind drops.
+            banner: kit.meshes.add(pennant_mesh(flies, hangs)),
         })
         .clone();
 
+    // The head of the staff, which is what the banner is tied below and the
+    // one height in a cairn that is worked out rather than written down.
+    let head = high + STAFF - SUNK;
     for cairn in &raised {
         commands.entity(cairn).with_children(|children| {
             children.spawn((
@@ -237,37 +272,40 @@ fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<Entity, Added<
                 Name::new("Staff"),
                 Mesh3d(stonework.staff.clone()),
                 MeshMaterial3d(stonework.timber.clone()),
-                // Standing in the heap rather than on it: a staff resting on
-                // the stones would be a staff the first blow took away.
-                Transform::from_xyz(0.0, high + STAFF / 2.0 - 0.3, 0.0),
+                // Standing in the heap rather than on it — see [`SUNK`].
+                Transform::from_xyz(0.0, head - STAFF / 2.0, 0.0),
             ));
             children.spawn((
                 Name::new("Banner"),
                 Banner { bearing: 0.0 },
                 Mesh3d(stonework.banner.clone()),
                 MeshMaterial3d(stonework.cloth.clone()),
-                // Aimed by [`fly_the_banner`]; the height is the only part of
-                // this that stays put. Hung a little below the head so the
-                // staff shows above it, which is what says *staff* rather
-                // than *pole with a flag glued on the end*.
-                Transform::from_xyz(0.0, high + STAFF - hangs, 0.0),
+                // The tie, which is where the cloth is made fast and so the
+                // only part of the banner that stays put: the rest of it is
+                // [`fly_the_banner`]'s, and hangs and streams from here.
+                Transform::from_xyz(0.0, head - TIE_BELOW, 0.0),
             ));
         });
     }
 }
 
-/// Stands the cairns on the ground once there is ground to stand them on.
+/// Stands the cairns on the ground once there is ground to stand them on, and
+/// shows them the moment they are standing on it.
 ///
 /// The same job [`crate::player::find_footing`] does for an arriving player,
 /// and for the same reason: the point the world named is on the plane, and
-/// what height that is depends on ground this client may not have yet.
+/// what height that is depends on ground this client may not have yet. The
+/// showing is the same frame as the settling and not a moment later — the
+/// whole reason a cairn is hidden is that it would otherwise be drawn
+/// somewhere it is not.
 fn stand_the_cairns(mut commands: Commands, ground: Option<Res<Ground>>, mut waiting: Waiting) {
     let Some(ground) = ground else {
         return;
     };
-    for (cairn, mut place) in &mut waiting {
+    for (cairn, mut place, mut shown) in &mut waiting {
         if let Some(height) = ground.height(place.translation.x, place.translation.z) {
             place.translation.y = height;
+            *shown = Visibility::Inherited;
             commands.entity(cairn).remove::<Unfooted>();
         }
     }
@@ -299,9 +337,17 @@ fn fly_the_banner(
     }
 }
 
-/// Clears the bookkeeping on the way out of a world — see [`Cairns::forget`].
-fn strike(mut cairns: ResMut<Cairns>) {
-    cairns.forget();
+/// Forgets every cairn: the world is over. The entities take themselves out,
+/// being `DespawnOnExit`; what is cleared here is this side of the
+/// bookkeeping, which would otherwise hand out the entity ids of a world
+/// nobody is in any more.
+///
+/// Run from [`crate::net::NetPlugin`] as well as from this one, on the fleet's
+/// terms: `receive` is what writes this resource, so an app with the net
+/// plugin and not this one must still not carry one world's cairns into the
+/// next. Clearing an empty map twice costs nothing.
+pub(crate) fn strike(mut cairns: ResMut<Cairns>) {
+    cairns.standing.clear();
 }
 
 pub struct CairnPlugin;
@@ -322,5 +368,194 @@ impl Plugin for CairnPlugin {
                 (dress, stand_the_cairns, fly_the_banner).run_if(in_state(AppState::InWorld)),
             )
             .add_systems(OnExit(AppState::InWorld), strike);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::asset::AssetPlugin;
+    use bevy::ecs::system::SystemState;
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::{TimePlugin, TimeUpdateStrategy};
+
+    use super::*;
+    use crate::testing::{set_wind, test_ground, FRAME};
+
+    /// A headless app with the cairn systems and nothing else: no ground until
+    /// a test hands some over, which is the state a cairn told from further
+    /// off than terrain streams actually arrives in.
+    fn cairn_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            TimePlugin,
+            StatesPlugin,
+            CairnPlugin,
+        ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+        .init_state::<AppState>()
+        .init_asset::<Mesh>()
+        .init_resource::<Assets<StandardMaterial>>();
+        app.update();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InWorld);
+        app.update();
+        app
+    }
+
+    /// A word about a cairn, exactly as the session's drain delivers one —
+    /// through `Commands`, which is why [`Cairns`] keeps its own map at all.
+    fn tell(app: &mut App, island: IVec2, at: Vec2) {
+        let mut state: SystemState<(Commands, ResMut<Cairns>)> = SystemState::new(app.world_mut());
+        let (mut commands, mut cairns) = state.get_mut(app.world_mut()).expect("the drain's hands");
+        cairns.told(&mut commands, island, at);
+        state.apply(app.world_mut());
+    }
+
+    /// Every cairn standing, with what is built on it and whether it is shown.
+    fn standing(app: &mut App) -> Vec<(IVec2, usize, Visibility, Vec3)> {
+        app.world_mut()
+            .query::<(&Cairn, &Children, &Visibility, &Transform)>()
+            .iter(app.world())
+            .map(|(cairn, children, shown, place)| {
+                (cairn.island, children.len(), *shown, place.translation)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_second_word_about_one_cairn_builds_nothing_new() {
+        // A cairn is told again when it is christened, and a christening is a
+        // word about the *sheet*: the stones are where they were, and dressing
+        // them twice would leave one cairn wearing two staffs and two banners.
+        let mut app = cairn_app();
+        let island = IVec2::new(76, 255);
+        tell(&mut app, island, Vec2::new(120.0, -40.0));
+        app.update();
+        assert_eq!(
+            standing(&mut app),
+            vec![(island, 3, Visibility::Hidden, Vec3::new(120.0, 0.0, -40.0))],
+            "the stones, the staff and the banner did not go up as one cairn"
+        );
+
+        tell(&mut app, island, Vec2::new(120.0, -40.0));
+        app.update();
+        let after = standing(&mut app);
+        assert_eq!(after.len(), 1, "a christening raised a second cairn");
+        assert_eq!(after[0].1, 3, "a christening dressed the cairn again");
+    }
+
+    #[test]
+    fn a_cairn_waits_unseen_until_there_is_ground_to_stand_on() {
+        // The half-kilometre between what the server tells and what the client
+        // streams: told first, and drawn only once the shore it stands on has
+        // arrived — see the module doc.
+        let mut app = cairn_app();
+        let island = IVec2::new(3, -2);
+        let at = Vec2::new(50.0, 0.0);
+        tell(&mut app, island, at);
+        app.update();
+        assert_eq!(
+            standing(&mut app),
+            vec![(island, 3, Visibility::Hidden, Vec3::new(at.x, 0.0, at.y))],
+            "a cairn was drawn standing on the sea"
+        );
+
+        // The ground turns up: the same frame settles it and shows it.
+        let ground = test_ground();
+        let height = ground.height(at.x, at.y).expect("the test island");
+        app.insert_resource(ground);
+        app.update();
+        assert_eq!(
+            standing(&mut app),
+            vec![(
+                island,
+                3,
+                Visibility::Inherited,
+                Vec3::new(at.x, height, at.y)
+            )],
+            "the cairn never took its footing"
+        );
+        assert!(
+            app.world_mut()
+                .query_filtered::<(), With<Unfooted>>()
+                .iter(app.world())
+                .next()
+                .is_none(),
+            "a footed cairn is still queued for ground"
+        );
+    }
+
+    #[test]
+    fn a_banner_swings_the_short_way_round_a_wind_crossing_north() {
+        // The only arithmetic in the module. A banner lying just west of north
+        // and a wind gone just east of it are a tenth of a turn apart; taken
+        // as a raw difference they are nine tenths, and every banner in the
+        // archipelago sweeps the long way round at once.
+        let mut app = cairn_app();
+        tell(&mut app, IVec2::ZERO, Vec2::ZERO);
+        app.update();
+
+        let lying = 3.0;
+        let mut banners = app.world_mut().query::<&mut Banner>();
+        banners
+            .single_mut(app.world_mut())
+            .expect("a cairn flies one banner")
+            .bearing = lying;
+        // A wind whose cloth wants to lie at -3.0 radians — a tenth of a turn
+        // the other side of the cut, and hard enough that the pose is a
+        // bearing rather than a calm holding the old one.
+        let wanted = -3.0_f32;
+        let strong = 8.0;
+        set_wind(
+            &mut app,
+            Vec2::new(-wanted.sin() * strong, -wanted.cos() * strong),
+        );
+        app.update();
+
+        let swung = app
+            .world_mut()
+            .query::<&Banner>()
+            .single(app.world())
+            .expect("a cairn flies one banner")
+            .bearing;
+        assert!(
+            swung > lying,
+            "the banner went the long way about: {lying} to {swung}"
+        );
+        assert!(
+            swung - lying < 0.05,
+            "the banner swung {} radians in a frame",
+            swung - lying
+        );
+    }
+
+    #[test]
+    fn leaving_the_world_forgets_the_cairns() {
+        // The entities go with the state, being `DespawnOnExit`; what has to
+        // be said here is that the bookkeeping goes too, or the next world's
+        // first telling would find an entity id from the last one.
+        let mut app = cairn_app();
+        let island = IVec2::new(1, 1);
+        tell(&mut app, island, Vec2::ZERO);
+        app.update();
+
+        for state in [AppState::MainMenu, AppState::InWorld] {
+            app.world_mut()
+                .resource_mut::<NextState<AppState>>()
+                .set(state);
+            app.update();
+        }
+        assert!(standing(&mut app).is_empty(), "a cairn outlived its world");
+
+        tell(&mut app, island, Vec2::new(9.0, 9.0));
+        app.update();
+        assert_eq!(
+            standing(&mut app),
+            vec![(island, 3, Visibility::Hidden, Vec3::new(9.0, 0.0, 9.0))],
+            "the next world's cairn went looking for the last one's entity"
+        );
     }
 }

@@ -220,11 +220,15 @@ const SURVEY_SLAB: usize = 64;
 /// a client streams something like a kilometre around its camera — and narrow
 /// enough that who holds what is something a player finds out by going there.
 ///
+/// It does not gate a player's own claims, which they are told on joining
+/// wherever they stand — see [`tell_the_cairns_about`], where the difference
+/// is argued. Nothing is leaked by telling somebody what they already hold.
+///
 /// What this is deliberately not is a rule about *knowing*. A player who sails
-/// up to a claimed island mid-session hears nothing until they ask, and what
-/// answers them is the refusal, which carries the cairn that is already there.
-/// A chart that remembers the coasts it has passed — sighting, as against
-/// visiting — is a slice of its own.
+/// up to somebody else's claimed island mid-session hears nothing until they
+/// ask, and what answers them is the refusal, which carries the cairn that is
+/// already there. A chart that remembers the coasts it has passed — sighting,
+/// as against visiting — is a slice of its own.
 const CAIRN_SIGHT: f32 = 1_536.0;
 
 /// How often one player may have a cairn raised or rewritten, at most.
@@ -1616,10 +1620,11 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // down is: what it earns is the ground within sight of that spot.
     let put_down = wake.at;
     survey_the_way(&shared, id, &mut wake, put_down);
-    // And the cairns standing where they have been put down — the world's
-    // other players' doing, told as any other thing in the world is. Outside
-    // the roster's hold, the claims being a leaf lock nothing may reach for
-    // with the roster in hand.
+    // And the cairns: the ones standing where they have been put down, told
+    // as any other thing in the world is, and every one of their own wherever
+    // it stands — a claim is a thing its holder is entitled to know they still
+    // hold. Outside the roster's hold, the claims being a leaf lock nothing
+    // may reach for with the roster in hand.
     tell_the_cairns_about(&shared, id, put_down);
 
     // When this player last had a cairn raised, and when they last had one
@@ -2125,24 +2130,51 @@ fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) -> bool {
 }
 
 /// Tells a joining player the cairns standing near where they have been put
-/// down — the same proximity the raising of one is told by.
+/// down — the same proximity the raising of one is told by — and every one of
+/// their own, however far away it stands.
+///
+/// The two rules are not the same rule. Somebody else's cairn is a thing in
+/// the world, told to whoever could be looking at it, and [`CAIRN_SIGHT`] is
+/// what keeps who-holds-what something a player finds out by going there. A
+/// player's own claim is theirs to know: it is on the wire as `yours`, they
+/// are the only one who may write on it, and there is no other way for them to
+/// hear of it again. A client that is not told is a client whose sheet draws
+/// its own island blank and will not open the pen on it — their island,
+/// unnameable, with nothing to say why — for as long as they stay away from
+/// it. So the proximity is kept for everybody else's and dropped for theirs.
+///
+/// This is a rule about *rejoining*, and not the missing slice: a player who
+/// sails up to somebody else's claimed island mid-session still hears nothing
+/// until they ask. Streaming cairns into sight as a coast comes up belongs
+/// with presence-gated knowledge generally — see [`CAIRN_SIGHT`] — and is
+/// deliberately not here.
+///
+/// The locks are taken one at a time in the order [`Shared::claims`] sets: the
+/// roster for the token, let go; the claims, let go; and the roster again to
+/// post.
 fn tell_the_cairns_about(shared: &Shared, id: PlayerId, at: Vec2) {
-    let near: Vec<(IVec2, Claim)> = {
+    let Some(token) = ({
+        let players = shared.players.lock().expect("no poisoned lock");
+        players.get(&id).map(|player| player.token)
+    }) else {
+        return;
+    };
+    let worth_telling: Vec<(IVec2, Claim)> = {
         let claims = shared.claims.lock().expect("no poisoned lock");
         claims
             .iter()
-            .filter(|(_, claim)| claim.at.distance(at) <= CAIRN_SIGHT)
+            .filter(|(_, claim)| claim.by == token || claim.at.distance(at) <= CAIRN_SIGHT)
             .map(|(island, claim)| (*island, claim.clone()))
             .collect()
     };
-    if near.is_empty() {
+    if worth_telling.is_empty() {
         return;
     }
     let players = shared.players.lock().expect("no poisoned lock");
     let Some(player) = players.get(&id) else {
         return;
     };
-    for (island, claim) in near {
+    for (island, claim) in worth_telling {
         post(player, cairn_told_to(player, island, &claim));
     }
 }

@@ -40,9 +40,10 @@ use crate::AppState;
 const FORMAT: u32 = 1;
 
 /// This machine's memory of the world the player is in. Present exactly
-/// while a remembered world is being played: inserted on the way in (see
-/// [`for_session`]), written and removed on the way out — a test's world, or
-/// an ephemeral one opened from the command line, never has one.
+/// while a remembered world is being played: inserted and written on the way
+/// in (see [`for_session`] and [`open_the_log`]), removed on the way out — a
+/// test's world, or an ephemeral one opened from the command line, never has
+/// one.
 #[derive(Resource)]
 pub struct Logbook {
     /// Where this logbook lives, or `None` on a machine with nowhere to keep
@@ -160,12 +161,14 @@ fn open_the_log(logbook: Res<Logbook>) {
     write_down(&logbook);
 }
 
-/// The book put away: the next world is a different book, and finding this
-/// one still on the shelf would write one world's papers against another's
-/// id. Written again on the way past in case a session ever gains something
-/// to say — today it is the same bytes.
-fn close_the_log(mut commands: Commands, logbook: ResMut<Logbook>) {
-    write_down(&logbook);
+/// The book put away: the next world is a different book, and finding this one
+/// still on the shelf would write one world's papers against another's id.
+///
+/// Nothing is written here. There is one thing in a logbook and it was written
+/// on the way in — see [`open_the_log`] — so a closing write would be the same
+/// bytes over the same bytes, and a session that gained something to say would
+/// have to say it here anyway.
+fn close_the_log(mut commands: Commands) {
     commands.remove_resource::<Logbook>();
 }
 
