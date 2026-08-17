@@ -36,8 +36,9 @@ use bevy::prelude::*;
 use protocol::ground::FACET_METRES;
 
 use crate::bindings::{Action, KeyBindings};
-use crate::boat::Boat;
+use crate::boat::{Boat, Fleet, HullId, Vessel};
 use crate::figure::FigurePlugin;
+use crate::net::Online;
 use crate::terrain::Ground;
 use crate::{AppState, Helm};
 
@@ -126,6 +127,37 @@ pub struct Afoot;
 #[derive(Component)]
 pub struct Player;
 
+/// A walker put down before the ground under them had streamed in — entry
+/// on foot, whose height the wire never carries. [`find_footing`] settles
+/// them onto the ground the moment there is ground to stand on.
+#[derive(Component)]
+pub struct Unsettled;
+
+/// The walkers still waiting for ground to stand on, as a query — see
+/// [`Unsettled`]. Not aboard anything: a player on a deck stands on the
+/// deck, and the hull's own transform is not theirs to write.
+type Waiting<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static mut Transform),
+    (With<Player>, With<Unsettled>, Without<ChildOf>),
+>;
+
+/// Settles an [`Unsettled`] walker onto the ground once it has arrived.
+/// Height only: where they stand is the server's word, and which way they
+/// face was entry's guess to make.
+fn find_footing(mut commands: Commands, ground: Option<Res<Ground>>, mut walkers: Waiting) {
+    for (walker, mut place) in &mut walkers {
+        let standing = ground
+            .as_ref()
+            .and_then(|g| g.height(place.translation.x, place.translation.z));
+        if let Some(height) = standing {
+            place.translation.y = height;
+            commands.entity(walker).remove::<Unsettled>();
+        }
+    }
+}
+
 /// The player and whatever they are aboard, as a query.
 type Players<'w, 's> = Query<'w, 's, (Entity, Option<&'static ChildOf>), With<Player>>;
 
@@ -213,13 +245,18 @@ impl Plugin for PlayerPlugin {
         // The figure comes with the player rather than being added beside
         // them in `main`: it is nothing but how this entity is drawn, and a
         // player spawned without one would be invisible.
-        app.add_plugins(FigurePlugin).add_systems(
-            Update,
-            (embark_or_land, walk)
-                .chain()
-                .in_set(Afoot)
-                .run_if(in_state(Helm::Sailing)),
-        );
+        app.add_plugins(FigurePlugin)
+            .init_resource::<Fleet>()
+            .add_systems(
+                Update,
+                (embark_or_land, walk)
+                    .chain()
+                    .in_set(Afoot)
+                    .run_if(in_state(Helm::Sailing)),
+            )
+            // Outside the pause and the helm's own set: a walker waiting
+            // for their ground should find it even while the menu is up.
+            .add_systems(Update, find_footing.run_if(in_state(AppState::InWorld)));
     }
 }
 
@@ -307,6 +344,22 @@ fn wading(ground: Option<&Ground>, at: Vec2) -> f32 {
     }
 }
 
+/// Every hull the gunwale key might mean, as a query: where each lies, the
+/// sailing state of the one this player steers — the others have none — and
+/// the name it answers to on the wire, which is how a served world's helm is
+/// told apart from a local one's.
+type Vessels<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Transform,
+        Option<&'static mut Boat>,
+        Option<&'static HullId>,
+    ),
+    With<Vessel>,
+>;
+
 /// Crosses the gunwale, whichever way the player is facing it: ashore it
 /// boards the nearest boat in reach, aboard it steps off onto the nearest
 /// walkable ground. One key for both because they are one threshold, and
@@ -330,13 +383,16 @@ fn wading(ground: Option<&Ground>, at: Vec2) -> f32 {
 /// hierarchy at the identity, the marker comes off, and the helm answers
 /// again — with the sails as the player left them, making sail being a
 /// deliberate act rather than a side effect of stepping aboard.
+#[allow(clippy::too_many_arguments)]
 fn embark_or_land(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     mut commands: Commands,
     ground: Option<Res<Ground>>,
+    online: Option<Res<Online>>,
+    mut fleet: ResMut<Fleet>,
     players: Query<(Entity, &Transform, Option<&ChildOf>), With<Player>>,
-    mut boats: Query<(Entity, &Transform, &mut Boat)>,
+    mut vessels: Vessels,
 ) {
     if !keys.just_pressed(bindings.key(Action::Board)) {
         return;
@@ -348,7 +404,10 @@ fn embark_or_land(
 
     match aboard {
         Some(aboard) => {
-            let Ok((_, boat, mut hull)) = boats.get_mut(aboard.parent()) else {
+            let Ok((hull_entity, boat, sailing, _)) = vessels.get_mut(aboard.parent()) else {
+                return;
+            };
+            let Some(mut hull) = sailing else {
                 return;
             };
             if !hull.at_rest() {
@@ -367,13 +426,27 @@ fn embark_or_land(
                     .with_rotation(Quat::from_rotation_y(f32::atan2(-stepped.x, -stepped.y))),
                 DespawnOnExit(AppState::InWorld),
             ));
+            // The step is the client's, having judged the footing; what the
+            // wire is owed is the fact of it. The server frees the helm for
+            // anyone, and this side gives the hull back to its moorings. A
+            // world with no server behind it — the headless tests' — keeps
+            // the whole exchange local, exactly as it always was.
+            if let Some(online) = online {
+                online.connection.disembark(spot);
+                fleet.hand_back(&mut commands, hull_entity, boat);
+            }
         }
         None => {
             let at = place.translation.xz();
-            let Some((boat, _, hull)) = boats
+            let Some((boat, _, sailing, named)) = vessels
                 .iter()
-                .filter(|(_, transform, _)| transform.translation.xz().distance(at) <= BOARD_REACH)
-                .min_by(|(_, a, _), (_, b, _)| {
+                .filter(|(_, transform, _, _)| {
+                    transform.translation.xz().distance(at) <= BOARD_REACH
+                })
+                // A helm that is visibly somebody's is not offered — the
+                // server would refuse the ask anyway, and this spares it.
+                .filter(|(_, _, _, named)| named.is_none_or(|named| !fleet.manned(named.0)))
+                .min_by(|(_, a, _, _), (_, b, _, _)| {
                     a.translation
                         .xz()
                         .distance(at)
@@ -382,12 +455,25 @@ fn embark_or_land(
             else {
                 return;
             };
-            // Standing at the helm, not at the hull's origin: that origin is
-            // the waterline, which is most of a metre down inside the boat.
-            commands
-                .entity(player)
-                .remove::<DespawnOnExit<AppState>>()
-                .insert((ChildOf(boat), Transform::from_translation(hull.helm())));
+            match (&online, named) {
+                // A served world's helm is asked for, never taken: the
+                // player steps aboard when the telling grants it — see
+                // [`crate::boat::Fleet::told`] — which over the loopback is
+                // the next frame, and across a real sea is still a blink.
+                (Some(online), Some(named)) => online.connection.board(named.0),
+                // Offline, boarding is immediate, as it always was. Standing
+                // at the helm, not at the hull's origin: that origin is the
+                // waterline, which is most of a metre down inside the boat.
+                _ => {
+                    let Some(hull) = sailing else {
+                        return;
+                    };
+                    commands
+                        .entity(player)
+                        .remove::<DespawnOnExit<AppState>>()
+                        .insert((ChildOf(boat), Transform::from_translation(hull.helm())));
+                }
+            }
         }
     }
 }

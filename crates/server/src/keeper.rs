@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::Vec2;
-use protocol::{BeastKind, Token, WorldId};
+use protocol::{BeastKind, BoatId, BoatKind, Token, WorldId};
 
 /// The format this build writes, named in the file's first line. A file
 /// carrying a different number is refused whole rather than guessed at —
@@ -70,11 +70,39 @@ pub(crate) struct WorldRecord {
     /// number that keeps a reopened world mid-story: the sun stands where it
     /// stood, and a gale quit out of is a gale returned to.
     pub age: f32,
-    /// Where the world last saw each player it has dealt papers to.
-    pub players: HashMap<Token, Vec2>,
+    /// What the world knows of each player it has dealt papers to — see
+    /// [`PlayerRecord`].
+    pub players: HashMap<Token, PlayerRecord>,
+    /// Every boat there is. Boats are world entities with lasting names —
+    /// see [`protocol::BoatId`] — so unlike the beasts this is not a
+    /// summary of a performance but the roster itself.
+    pub boats: Vec<BoatRecord>,
     /// The beasts alive when the world was last written — see
     /// [`BeastRecord`], and `beasts` for how the warden takes them back up.
     pub beasts: Vec<BeastRecord>,
+}
+
+/// Where the world last saw one player, and whether they were at a helm.
+///
+/// `aboard` names a boat in [`WorldRecord::boats`], and it is a memory
+/// rather than a hold: boats have keepers, not owners, so on return the
+/// player is seated back only if the boat still lies free where they left
+/// it — see the join in `lib.rs` for what happens when it does not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PlayerRecord {
+    pub position: Vec2,
+    pub aboard: Option<BoatId>,
+}
+
+/// One boat, as the file keeps it. No occupant: who is aboard is session
+/// state — everyone aboard anything steps out of the record when the world
+/// stops, and where they step back in is the players' own records' business.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BoatRecord {
+    pub id: BoatId,
+    pub kind: BoatKind,
+    pub position: Vec2,
+    pub heading: f32,
 }
 
 impl WorldRecord {
@@ -87,6 +115,7 @@ impl WorldRecord {
             opening: crate::OPENING,
             age: 0.0,
             players: HashMap::new(),
+            boats: Vec::new(),
             beasts: Vec::new(),
         }
     }
@@ -129,6 +158,20 @@ fn kind_of(word: &str) -> Option<BeastKind> {
         "shark" => Some(BeastKind::Shark),
         "dolphins" => Some(BeastKind::Dolphins),
         "whale" => Some(BeastKind::Whale),
+        _ => None,
+    }
+}
+
+/// The boats' own spellings, on the beasts' terms.
+fn hull_word_of(kind: BoatKind) -> &'static str {
+    match kind {
+        BoatKind::Sloop => "sloop",
+    }
+}
+
+fn hull_kind_of(word: &str) -> Option<BoatKind> {
+    match word {
+        "sloop" => Some(BoatKind::Sloop),
         _ => None,
     }
 }
@@ -358,8 +401,29 @@ fn compose(record: &WorldRecord) -> String {
     // a map hands its entries out in.
     let mut players: Vec<_> = record.players.iter().collect();
     players.sort_by_key(|(token, _)| token.0);
-    for (token, position) in players {
-        let _ = writeln!(out, "player {:016x} {} {}", token.0, position.x, position.y);
+    for (token, player) in players {
+        let _ = write!(
+            out,
+            "player {:016x} {} {}",
+            token.0, player.position.x, player.position.y
+        );
+        if let Some(boat) = player.aboard {
+            let _ = write!(out, " {:016x}", boat.0);
+        }
+        let _ = writeln!(out);
+    }
+    let mut boats = record.boats.clone();
+    boats.sort_by_key(|boat| boat.id.0);
+    for boat in boats {
+        let _ = writeln!(
+            out,
+            "boat {:016x} {} {} {} {}",
+            boat.id.0,
+            hull_word_of(boat.kind),
+            boat.position.x,
+            boat.position.y,
+            boat.heading
+        );
     }
     // Sorted likewise — by kind and then by where they stood, the bits
     // standing in for an order nobody reads but everybody can reproduce.
@@ -399,6 +463,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
     let (mut id, mut seed, mut opening, mut age) = (None, None, None, None);
     let mut name = String::new();
     let mut players = HashMap::new();
+    let mut boats = Vec::new();
     let mut beasts = Vec::new();
     for line in lines {
         if line.is_empty() {
@@ -426,6 +491,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     fields.next().ok_or("a player with no position")?,
                     fields.next().ok_or("a player with half a position")?,
                 );
+                let aboard = fields.next().map(hex).transpose()?.map(BoatId);
                 if fields.next().is_some() {
                     return Err(format!("too much about one player: `{line}`"));
                 }
@@ -433,7 +499,30 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 if !crate::reachable(position) {
                     return Err(format!("nobody was ever at {position}"));
                 }
-                players.insert(Token(hex(token)?), position);
+                players.insert(Token(hex(token)?), PlayerRecord { position, aboard });
+            }
+            "boat" => {
+                let mut fields = value.split(' ');
+                let (id, kind, x, y, heading) = (
+                    fields.next().ok_or("a boat with no name")?,
+                    fields.next().ok_or("a boat of no kind")?,
+                    fields.next().ok_or("a boat with no position")?,
+                    fields.next().ok_or("a boat with half a position")?,
+                    fields.next().ok_or("a boat with no heading")?,
+                );
+                if fields.next().is_some() {
+                    return Err(format!("too much about one boat: `{line}`"));
+                }
+                let position = Vec2::new(finite(x)?, finite(y)?);
+                if !crate::reachable(position) {
+                    return Err(format!("no boat ever lay at {position}"));
+                }
+                boats.push(BoatRecord {
+                    id: BoatId(hex(id)?),
+                    kind: hull_kind_of(kind).ok_or_else(|| format!("no such boat as a {kind}"))?,
+                    position,
+                    heading: finite(heading)?,
+                });
             }
             "beast" => {
                 let fields: Vec<&str> = value.split(' ').collect();
@@ -483,6 +572,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
         opening,
         age,
         players,
+        boats,
         beasts,
     })
 }
@@ -523,9 +613,35 @@ mod tests {
             opening: 0.35,
             age: 1234.5,
             players: HashMap::from([
-                (Token(7), Vec2::new(12.5, -340.25)),
-                (Token(0xFFFF_0000_0000_0002), Vec2::new(-0.125, 9000.0)),
+                (
+                    Token(7),
+                    PlayerRecord {
+                        position: Vec2::new(12.5, -340.25),
+                        aboard: Some(BoatId(0xB0A7)),
+                    },
+                ),
+                (
+                    Token(0xFFFF_0000_0000_0002),
+                    PlayerRecord {
+                        position: Vec2::new(-0.125, 9000.0),
+                        aboard: None,
+                    },
+                ),
             ]),
+            boats: vec![
+                BoatRecord {
+                    id: BoatId(0xB0A7),
+                    kind: BoatKind::Sloop,
+                    position: Vec2::new(12.5, -340.25),
+                    heading: 1.5,
+                },
+                BoatRecord {
+                    id: BoatId(0xDEAD),
+                    kind: BoatKind::Sloop,
+                    position: Vec2::new(64.0, 8.0),
+                    heading: -2.25,
+                },
+            ],
             beasts: vec![
                 // One living where it stands, one still bound somewhere.
                 BeastRecord {
@@ -554,7 +670,13 @@ mod tests {
         assert_eq!(read.opening, record.opening);
         assert_eq!(read.age, record.age);
         assert_eq!(read.players, record.players);
-        // Composing sorts the beasts, so compare content rather than order.
+        // Composing sorts the boats and the beasts, so compare content
+        // rather than order.
+        let boats_sorted = |mut boats: Vec<BoatRecord>| {
+            boats.sort_by_key(|boat| boat.id.0);
+            boats
+        };
+        assert_eq!(boats_sorted(read.boats), boats_sorted(record.boats.clone()));
         let sorted = |mut beasts: Vec<BeastRecord>| {
             beasts.sort_by_key(|beast| (word_of(beast.kind), beast.position.x.to_bits()));
             beasts
@@ -610,6 +732,18 @@ mod tests {
             (
                 "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast whale 1e30 0 5\n",
                 "a beast past where the world resolves",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2\n",
+                "a boat with no heading",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 canoe 1 2 3\n",
+                "a boat of a kind nothing sails",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1 2 nothex\n",
+                "an aboard that is not a boat's name",
             ),
         ] {
             assert!(parse(text).is_err(), "swallowed {what}");

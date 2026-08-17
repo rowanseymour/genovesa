@@ -1070,16 +1070,8 @@ fn settle_dialing(
     view.enter(session.connection.spawn, session.connection.facing);
 
     // The logbook first, while the session is still whole: what the chart
-    // and the boat read on their way into the world, for a world this
-    // machine remembers. A restored berth also aims the view — the hull
-    // comes back on its own heading, and the camera belongs behind it, not
-    // wherever the menu's drifting sea last left the bearing.
+    // reads on its way into the world, for a world this machine remembers.
     if let Some(logbook) = crate::logbook::for_session(&session) {
-        match logbook.berth {
-            Some(crate::logbook::Berth::Aboard { heading }) => view.yaw = heading,
-            Some(crate::logbook::Berth::Ashore { facing, .. }) => view.yaw = facing,
-            None => {}
-        }
         commands.insert_resource(logbook);
     }
     if let Some(host) = session.hosting {
@@ -1845,22 +1837,22 @@ mod tests {
     }
 
     #[test]
-    fn start_launches_the_boat_where_the_view_opens() {
-        // The path a player actually takes into a world: the welcome moves the
-        // view onto the served spawn *and then* enters, so the boat has to be
-        // put down where the view ended up rather than wherever it was
-        // pointing when the menu was on screen. Out by that much and the boat
-        // is a kilometre of ocean away from the only place anyone looks.
+    fn entering_a_served_world_afoot_stands_the_player_on_the_spawn() {
+        // The path a player actually takes into a world: the welcome moves
+        // the view onto the served spawn *and then* enters. This fake
+        // server seats nobody at any helm and tells of no boats, so what
+        // entry owes is a walker standing exactly where the server said —
+        // the hulls are the server's to tell, not entry's to invent.
         let (address, _socket) = fake_server(Vec2::new(100.0, -200.0), Vec2::new(100.0, -400.0));
         let mut app = test_app(AppState::JoinWorld);
-        // Time for the steering the boat plugin brings with it; the menu's own
-        // systems never ask what o'clock it is. Assets for the boat's own
-        // model, which it is spawned out of a file.
+        // Time for the reporting the net plugin brings with it; the menu's
+        // own systems never ask what o'clock it is. Assets because a boat
+        // telling would arrive as meshes.
         app.add_plugins((
             TaskPoolPlugin::default(),
             AssetPlugin::default(),
             bevy::time::TimePlugin,
-            crate::boat::BoatPlugin,
+            crate::net::NetPlugin,
         ))
         .init_asset::<Mesh>()
         .init_resource::<Assets<StandardMaterial>>();
@@ -1870,15 +1862,15 @@ mod tests {
         run_until(&mut app, "the world is entered", |app| {
             *app.world().resource::<State<AppState>>().get() == AppState::InWorld
         });
+        app.update();
 
-        let focus = app.world().resource::<View>().focus;
         let at = app
             .world_mut()
-            .query_filtered::<&Transform, With<crate::boat::Boat>>()
+            .query_filtered::<&Transform, With<crate::player::Player>>()
             .single(app.world())
-            .expect("entering a world should launch a boat")
+            .expect("entering a served world afoot should stand a walker up")
             .translation;
-        assert_eq!(Vec2::new(at.x, at.z), Vec2::new(focus.x, focus.z));
+        assert_eq!(Vec2::new(at.x, at.z), Vec2::new(100.0, -200.0));
     }
 
     #[test]

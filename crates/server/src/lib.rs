@@ -31,7 +31,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
-use protocol::{BeastKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION};
+use protocol::{
+    BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
+};
 use world::archipelago::Archipelago;
 
 pub use keeper::{data_dir, kept_worlds, KeptWorld};
@@ -55,6 +57,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// altogether is noticed rather than buffered forever. A full queue at this
 /// depth is a few megabytes and several seconds of a client saying nothing,
 /// which is not "briefly behind" — see [`post`], which hangs up on it.
+///
+/// The arrival's burst is also one word per boat in the world, the whole
+/// fleet being introduced at the door, so this is the ceiling any future
+/// sizing of the fleet has to be read against: a world holding boats in the
+/// hundreds would be a world whose newcomers arrive into a full outbox.
 const OUTBOX_DEPTH: usize = 256;
 
 /// How many chunk requests may be waiting to be generated, across the whole
@@ -95,6 +102,31 @@ const CACHE_SWEEP: Duration = Duration::from_secs(5);
 /// Public so a test of the welcome can pin "players enter on the world's
 /// spawn" without repeating the number.
 pub const SPAWN_SCATTER: f32 = 12.0;
+
+/// How near a boat a player must stand for a boarding to be granted, in
+/// metres. The client only offers the key within arm's reach of a hull —
+/// its own boarding reach is a stride or two — so this is that reach with
+/// room for the tenth of a second by which the two machines' pictures of a
+/// moving player differ.
+const BOARD_GRANT: f32 = 12.0;
+
+/// How far a remembered boat may lie from where its returning keeper left
+/// it and still be theirs to resume at, in metres. After a clean stop the
+/// two agree exactly; a boat found beyond this has been sailed somewhere by
+/// somebody else in the meantime, and its old keeper enters in a fresh hull
+/// rather than being teleported to wherever their old one was abandoned.
+const KEPT_BERTH: f32 = 16.0;
+
+/// How far from where an arrival is being put down a free hull nobody has
+/// ever touched may lie and still be handed to them rather than a new one
+/// minted, in metres — see [`BoatState::virgin`].
+///
+/// Wide enough to swallow the whole spawn scatter several times over, so the
+/// join-and-hang-up loop this exists to bound is handed the same boat back
+/// every time however the arrivals are strewn; narrow enough that a returner
+/// entering on some far coast gets a hull where *they* are rather than being
+/// pointed at one waiting off the entry island.
+const SPARE_BERTH: f32 = 64.0;
 
 /// How often a listening server looks up from its accept to see whether it
 /// has been asked to stop.
@@ -223,12 +255,23 @@ pub(crate) struct Shared {
     next_id: AtomicU32,
     pub(crate) players: Mutex<HashMap<PlayerId, Player>>,
     /// Where the world last saw each player not currently in it, by the
-    /// token it dealt them. What [`ToServer::Papers`] is answered from, and
-    /// — merged with the roster, which holds the players who are here — what
-    /// a save writes down. Loaded from the world's file when there is one,
-    /// and kept regardless, so leaving and rejoining works even in a world
-    /// nobody is keeping.
-    remembered: Mutex<HashMap<Token, Vec2>>,
+    /// token it dealt them — and whether they were at a helm. What
+    /// [`ToServer::Papers`] is answered from, and — merged with the roster,
+    /// which holds the players who are here — what a save writes down.
+    /// Loaded from the world's file when there is one, and kept regardless,
+    /// so leaving and rejoining works even in a world nobody is keeping.
+    remembered: Mutex<HashMap<Token, keeper::PlayerRecord>>,
+    /// Every boat in the world, by its lasting name — the vehicles, which
+    /// are entities of the world and never anybody's appendage: they
+    /// outlive visits, lie at anchor while unoccupied, and change hands by
+    /// [`ToServer::Board`].
+    ///
+    /// Lock order: a thread holding [`Shared::players`] may take this — the
+    /// welcome and the helm words work on both at once — and nothing
+    /// holding this ever reaches for the roster; takers with no roster
+    /// business (the saves) take it alone. That one-way rule is why the
+    /// pair cannot deadlock.
+    pub(crate) boats: Mutex<HashMap<BoatId, BoatState>>,
     /// The file this world survives in, if it is being kept: `None` is an
     /// ephemeral world — a test's, or a dedicated server nobody asked to
     /// remember — which lives exactly as long as its process.
@@ -286,6 +329,10 @@ pub(crate) struct Player {
     /// dealt there, and where the world will file their position when they
     /// leave. See [`protocol::Token`].
     token: Token,
+    /// The boat this player occupies, if any — the roster's half of what
+    /// [`BoatState::occupant`] says from the boat's side. The two are only
+    /// ever written together, under the lock order [`Shared::boats`] sets.
+    aboard: Option<BoatId>,
     /// When this player last asked for the night to be over, if they have —
     /// see [`ToServer::WantDawn`], which stands only for [`WAIT_LAPSE`].
     waiting_since: Option<Instant>,
@@ -305,6 +352,32 @@ impl Player {
         self.waiting_since
             .is_some_and(|asked| now.duration_since(asked) < WAIT_LAPSE)
     }
+}
+
+/// One boat, as the session holds it: its file record's fields plus the
+/// two things the file never keeps — whose hands are on the helm right now,
+/// and whether the hull has ever been sailed at all.
+pub(crate) struct BoatState {
+    pub(crate) kind: BoatKind,
+    pub(crate) position: Vec2,
+    pub(crate) heading: f32,
+    pub(crate) occupant: Option<PlayerId>,
+    /// Whether nobody has ever done anything with this hull — a boat minted
+    /// for an arrival who never sailed it, never boarded it and never
+    /// stepped off it. A virgin hull lying free is offered to the next
+    /// arrival instead of minting another, which is what bounds the fleet
+    /// against a client that joins and hangs up in a loop: the loop is
+    /// handed the same boat every time. Session-local — a loaded boat is not
+    /// virgin, its being in the file at all meaning somebody's story touched
+    /// it.
+    ///
+    /// Cleared by all three of sailing, boarding and stepping off, because
+    /// any of them makes the hull somebody's: a boat a live player parked on
+    /// a beach and walked away from must not be handed out from under them
+    /// on the strength of never having been *reported* moved. The loop this
+    /// bounds does none of the three — it joins and hangs up — so the bound
+    /// costs nothing.
+    pub(crate) virgin: bool,
 }
 
 impl Server {
@@ -361,6 +434,28 @@ impl Server {
                 next_id: AtomicU32::new(1),
                 players: Mutex::new(HashMap::new()),
                 remembered: Mutex::new(record.players),
+                boats: Mutex::new(
+                    record
+                        .boats
+                        .into_iter()
+                        .map(|boat| {
+                            (
+                                boat.id,
+                                BoatState {
+                                    kind: boat.kind,
+                                    position: boat.position,
+                                    heading: boat.heading,
+                                    // Occupancy is session state: everyone
+                                    // stepped out of the record when the
+                                    // world stopped, and steps back in at
+                                    // the door — see the welcome.
+                                    occupant: None,
+                                    virgin: false,
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
                 keeper,
                 stopping: AtomicBool::new(false),
                 started: Instant::now(),
@@ -823,15 +918,35 @@ impl Shared {
     /// The locks are taken one at a time, never nested, like every other
     /// path through them.
     fn record(&self) -> keeper::WorldRecord {
-        let aboard: Vec<(Token, Vec2)> = {
+        let here: Vec<(Token, keeper::PlayerRecord)> = {
             let players = self.players.lock().expect("no poisoned lock");
             players
                 .values()
-                .map(|player| (player.token, player.position))
+                .map(|player| {
+                    (
+                        player.token,
+                        keeper::PlayerRecord {
+                            position: player.position,
+                            aboard: player.aboard,
+                        },
+                    )
+                })
                 .collect()
         };
         let mut players = self.remembered.lock().expect("no poisoned lock").clone();
-        players.extend(aboard);
+        players.extend(here);
+        let boats = {
+            let boats = self.boats.lock().expect("no poisoned lock");
+            boats
+                .iter()
+                .map(|(id, boat)| keeper::BoatRecord {
+                    id: *id,
+                    kind: boat.kind,
+                    position: boat.position,
+                    heading: boat.heading,
+                })
+                .collect()
+        };
         let beasts = self.beasts.lock().expect("no poisoned lock").clone();
         keeper::WorldRecord {
             id: self.world_id,
@@ -840,6 +955,7 @@ impl Shared {
             opening: self.opening,
             age: self.age(),
             players,
+            boats,
             beasts,
         }
     }
@@ -975,7 +1091,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         let remembered = shared.remembered.lock().expect("no poisoned lock");
         match presented {
             Some(token) => match remembered.get(&token) {
-                Some(&position) => (token, Some(position)),
+                Some(&record) => (token, Some(record)),
                 None => (Token(keeper::mint()), None),
             },
             None => (Token(keeper::mint()), None),
@@ -999,13 +1115,14 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     });
 
     let mut player = Player {
-        position: returning_to.unwrap_or_else(|| shared.spawn_for(id)),
+        position: returning_to.map_or_else(|| shared.spawn_for(id), |record| record.position),
         token,
+        aboard: None,
         waiting_since: None,
         outbox,
         line: stream,
     };
-    let mut returning = returning_to.is_some();
+    let mut returning = returning_to;
 
     // Onto the roster and then welcomed, under one hold of the lock.
     //
@@ -1051,27 +1168,110 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         if players.values().any(|other| other.token == player.token) {
             player.token = Token(keeper::mint());
             player.position = shared.spawn_for(id);
-            returning = false;
+            returning = None;
+        }
+
+        // Where this player enters, and at whose helm — the boats being
+        // world entities with keepers rather than owners. A newcomer's
+        // story starts aboard: the world mints them a sloop on the spawn.
+        // A returner who left at a helm is seated back into that boat only
+        // if it still lies free where they left it; otherwise somebody has
+        // taken it up or sailed it off in the meantime, and the world
+        // minting a fresh hull where the returner stood is the interim
+        // answer until there is any other way to be on open water. A
+        // returner who left ashore enters on their own feet, their old
+        // boat — wherever it now lies — being one of the tellings below.
+        //
+        // Inside the roster's hold, with the boats' lock nested under it —
+        // the one nesting [`Shared::boats`]'s order allows — so the seat is
+        // taken before anyone can be told about the boat it claims.
+        // The way the hull a returner is seated at lies — what their view
+        // is opened along, there being no entry island to face them at.
+        let mut bow = None;
+        {
+            let mut boats = shared.boats.lock().expect("no poisoned lock");
+            let fresh_hull = |boats: &mut HashMap<BoatId, BoatState>, at: Vec2| {
+                // A virgin hull lying free where this arrival is being put
+                // down is theirs before any new one is minted — see
+                // [`BoatState::virgin`] and [`SPARE_BERTH`]:
+                // it is what keeps a join-and-hang-up loop from growing the
+                // fleet, and it reads as the world having a boat ready
+                // rather than conjuring one.
+                let handed_down = boats.iter_mut().find(|(_, boat)| {
+                    boat.virgin
+                        && boat.occupant.is_none()
+                        && boat.position.distance(at) <= SPARE_BERTH
+                });
+                if let Some((&boat, state)) = handed_down {
+                    state.occupant = Some(id);
+                    return (boat, state.position);
+                }
+                let boat = BoatId(keeper::mint());
+                boats.insert(
+                    boat,
+                    BoatState {
+                        kind: BoatKind::Sloop,
+                        position: at,
+                        heading: aimed(at, shared.facing),
+                        occupant: Some(id),
+                        virgin: true,
+                    },
+                );
+                (boat, at)
+            };
+            player.aboard = match returning {
+                None => {
+                    let (boat, at) = fresh_hull(&mut boats, player.position);
+                    player.position = at;
+                    Some(boat)
+                }
+                Some(record) => match record.aboard {
+                    None => None,
+                    Some(kept) => match boats.get_mut(&kept) {
+                        Some(boat)
+                            if boat.occupant.is_none()
+                                && boat.position.distance(record.position) <= KEPT_BERTH =>
+                        {
+                            boat.occupant = Some(id);
+                            player.position = boat.position;
+                            bow = Some(boat.heading);
+                            Some(kept)
+                        }
+                        _ => {
+                            let (boat, at) = fresh_hull(&mut boats, record.position);
+                            player.position = at;
+                            bow = boats.get(&boat).map(|state| state.heading);
+                            Some(boat)
+                        }
+                    },
+                },
+            };
         }
 
         let welcome = ToClient::Welcome {
             id,
             spawn: player.position,
-            // A returning player is not put down beside the entry island, so
-            // its centre is nothing to turn their view towards: their own
-            // position names no direction, which leaves the bearing to the
-            // client, exactly as a world with no island to look at does.
-            facing: if returning {
-                player.position
-            } else {
-                shared.facing
+            // A returning player is not put down beside the entry island,
+            // so its centre is nothing to turn their view towards. Seated
+            // at a helm, they open looking the way the hull lies — the view
+            // behind their own bow. Afoot, their own position names no
+            // direction, which leaves the bearing to the client, exactly as
+            // a world with no island to look at does.
+            facing: match (returning.is_some(), bow) {
+                (false, _) => shared.facing,
+                (true, Some(heading)) => {
+                    player.position + Vec2::new(-heading.sin(), -heading.cos()) * 64.0
+                }
+                (true, None) => player.position,
             },
             token: player.token,
+            aboard: player.aboard,
         };
         let arrival = ToClient::Joined {
             id,
             position: player.position,
         };
+        let seated = player.aboard;
         players.insert(id, player);
 
         let newcomer = &players[&id];
@@ -1107,6 +1307,38 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 );
             }
         }
+        // Every boat there is, the hulls being as much of the scene as the
+        // players — and everyone else hears about the one this arrival
+        // minted or took up, under the same hold as the arrival itself.
+        {
+            let boats = shared.boats.lock().expect("no poisoned lock");
+            for (boat, state) in boats.iter() {
+                post(
+                    newcomer,
+                    ToClient::Boat {
+                        id: *boat,
+                        kind: state.kind,
+                        position: state.position,
+                        heading: state.heading,
+                        occupant: state.occupant,
+                    },
+                );
+            }
+            if let Some(boat) = seated {
+                let state = &boats[&boat];
+                broadcast(
+                    &players,
+                    id,
+                    ToClient::Boat {
+                        id: boat,
+                        kind: state.kind,
+                        position: state.position,
+                        heading: state.heading,
+                        occupant: state.occupant,
+                    },
+                );
+            }
+        }
         broadcast(&players, id, arrival);
     }
     (shared.report)(&format!("{id} joined"));
@@ -1120,10 +1352,126 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         match ToServer::read(&mut reader) {
             Ok(ToServer::Move { position }) if reachable(position) => {
                 let mut players = shared.players.lock().expect("no poisoned lock");
-                if let Some(player) = players.get_mut(&id) {
+                // Quietly ignored from a player at a helm, on Helm's own
+                // terms: a `Move` can honestly cross a boarding grant on
+                // the wire, and believing it would walk the player away
+                // from a boat everyone else sees them steering.
+                let afoot = players
+                    .get_mut(&id)
+                    .filter(|player| player.aboard.is_none());
+                if let Some(player) = afoot {
                     player.position = position;
+                    broadcast(&players, id, ToClient::Moved { id, position });
                 }
-                broadcast(&players, id, ToClient::Moved { id, position });
+            }
+            Ok(ToServer::Helm { position, heading })
+                if reachable(position) && heading.is_finite() =>
+            {
+                let mut players = shared.players.lock().expect("no poisoned lock");
+                // The rider goes with the vehicle: one report moves both.
+                // Quietly ignored from a player occupying nothing — see the
+                // wire's own doc for how that happens honestly.
+                let steering = players
+                    .get_mut(&id)
+                    .and_then(|player| player.aboard.inspect(|_| player.position = position));
+                if let Some(boat) = steering {
+                    let kind = {
+                        let mut boats = shared.boats.lock().expect("no poisoned lock");
+                        let state = boats.get_mut(&boat).expect("a boat once boarded exists");
+                        state.position = position;
+                        state.heading = heading;
+                        // Sailed, so no longer the spare hull the spawn
+                        // hands to arrivals — see [`BoatState::virgin`].
+                        state.virgin = false;
+                        state.kind
+                    };
+                    broadcast(
+                        &players,
+                        id,
+                        ToClient::Boat {
+                            id: boat,
+                            kind,
+                            position,
+                            heading,
+                            occupant: Some(id),
+                        },
+                    );
+                }
+            }
+            Ok(ToServer::Board { boat }) => {
+                let mut players = shared.players.lock().expect("no poisoned lock");
+                let Some(player) = players.get_mut(&id) else {
+                    break;
+                };
+                let (answer, granted) = {
+                    let mut boats = shared.boats.lock().expect("no poisoned lock");
+                    // A boat this world never made is a broken or hostile
+                    // client, and there is no state to answer with.
+                    let Some(state) = boats.get_mut(&boat) else {
+                        break;
+                    };
+                    // Granted only to somebody on their own feet beside an
+                    // empty helm; anything else leaves the boat as it was,
+                    // and the state is the whole of the answer either way.
+                    let granted = player.aboard.is_none()
+                        && state.occupant.is_none()
+                        && state.position.distance(player.position) <= BOARD_GRANT;
+                    if granted {
+                        state.occupant = Some(id);
+                        // Taken up, so no longer the spare hull the spawn
+                        // hands to arrivals — see [`BoatState::virgin`].
+                        state.virgin = false;
+                        player.aboard = Some(boat);
+                        player.position = state.position;
+                    }
+                    (
+                        ToClient::Boat {
+                            id: boat,
+                            kind: state.kind,
+                            position: state.position,
+                            heading: state.heading,
+                            occupant: state.occupant,
+                        },
+                        granted,
+                    )
+                };
+                // A grant is news for everyone, the asker included — the
+                // telling is what seats them. A refusal changed nothing and
+                // is news only to the one who asked: answered to them alone,
+                // or a client could make the whole roster's outboxes carry
+                // its pestering of a distant helm.
+                if granted {
+                    broadcast_all(&players, answer);
+                } else if let Some(player) = players.get(&id) {
+                    post(player, answer);
+                }
+            }
+            Ok(ToServer::Disembark { position }) if reachable(position) => {
+                let mut players = shared.players.lock().expect("no poisoned lock");
+                if let Some(player) = players.get_mut(&id) {
+                    // Ignored when not aboard, on Helm's terms.
+                    if let Some(boat) = player.aboard.take() {
+                        player.position = position;
+                        let told = {
+                            let mut boats = shared.boats.lock().expect("no poisoned lock");
+                            let state = boats.get_mut(&boat).expect("a boat once boarded exists");
+                            state.occupant = None;
+                            // Somebody's, and left where they left it: a hull
+                            // parked ashore is not spare, whether or not it
+                            // was ever sailed — see [`BoatState::virgin`].
+                            state.virgin = false;
+                            ToClient::Boat {
+                                id: boat,
+                                kind: state.kind,
+                                position: state.position,
+                                heading: state.heading,
+                                occupant: None,
+                            }
+                        };
+                        broadcast_all(&players, told);
+                        broadcast(&players, id, ToClient::Moved { id, position });
+                    }
+                }
             }
             Ok(ToServer::WantDawn) => {
                 // Noted rather than acted on: whether the night actually
@@ -1182,21 +1530,56 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         let players = shared.players.lock().expect("no poisoned lock");
         players
             .get(&id)
-            .map(|player| (player.token, player.position))
+            .map(|player| (player.token, player.position, player.aboard))
     };
-    if let Some((token, position)) = leaving {
+    if let Some((token, position, aboard)) = leaving {
         shared
             .remembered
             .lock()
             .expect("no poisoned lock")
-            .insert(token, position);
+            .insert(token, keeper::PlayerRecord { position, aboard });
     }
     {
         let mut players = shared.players.lock().expect("no poisoned lock");
         players.remove(&id);
         broadcast(&players, id, ToClient::Left { id });
+        // The helm they held is anyone's now: an offline player's boat lies
+        // at anchor, visible and takeable, and being seated back into it on
+        // return is a memory rather than a hold. Told under the same hold
+        // as the departure, so nobody hears of a free boat before its
+        // keeper has left.
+        if let Some((_, _, Some(boat))) = leaving {
+            let told = {
+                let mut boats = shared.boats.lock().expect("no poisoned lock");
+                boats.get_mut(&boat).map(|state| {
+                    state.occupant = None;
+                    ToClient::Boat {
+                        id: boat,
+                        kind: state.kind,
+                        position: state.position,
+                        heading: state.heading,
+                        occupant: None,
+                    }
+                })
+            };
+            if let Some(told) = told {
+                broadcast_all(&players, told);
+            }
+        }
     }
     (shared.report)(&format!("{id} left"));
+}
+
+/// The yaw that points a hull standing at `at` toward `toward` — the
+/// client's own drawing convention, forward being -Z turned by the yaw
+/// about the vertical. Zero when the two coincide, which names no direction
+/// and leaves the bow pointing north.
+fn aimed(at: Vec2, toward: Vec2) -> f32 {
+    let along = toward - at;
+    if along == Vec2::ZERO {
+        return 0.0;
+    }
+    f32::atan2(-along.x, -along.y)
 }
 
 /// Whether a reported position is one a player could actually be standing at:

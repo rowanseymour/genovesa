@@ -221,6 +221,52 @@ impl BeastKind {
     }
 }
 
+/// A boat, as the server counts them — and unlike a player's or a beast's,
+/// a *lasting* name: minted when the boat first touches the water and
+/// written in the world's file for the boat's whole life, because a
+/// player's record says which boat they were last aboard and has to still
+/// mean it next session.
+///
+/// A boat is a vehicle, not a part of any player. It outlives visits, lies
+/// at anchor wherever its last helmsman left it — visible to everyone,
+/// including while that player is offline — and its helm belongs to whoever
+/// reaches it first. See [`ToClient::Boat`] for how one is told, and
+/// [`ToServer::Board`] for how one changes hands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BoatId(pub u64);
+
+impl std::fmt::Display for BoatId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "boat {:016x}", self.0)
+    }
+}
+
+/// What a boat is, which — as with the beasts — is the whole of what a
+/// client is told beyond where it stands and who is aboard. One kind today;
+/// the lineup this is the seam for runs from a rowing boat to a
+/// square-rigger, and each lands as a byte here when it becomes a vehicle
+/// rather than a model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BoatKind {
+    /// A small Bermuda sloop: the boat every player's story starts aboard.
+    Sloop,
+}
+
+impl BoatKind {
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Sloop),
+            _ => None,
+        }
+    }
+
+    fn byte(self) -> u8 {
+        match self {
+            Self::Sloop => 0,
+        }
+    }
+}
+
 /// What a client may say.
 ///
 /// Positions are metres on the world's ground plane, as everywhere else in
@@ -247,8 +293,30 @@ pub enum ToServer {
     /// honestly, a world file lost or the world rebuilt, and the join
     /// simply starts them afresh.
     Papers { token: Option<Token> },
-    /// Where the player now is.
+    /// Where the player now is, on their own feet. A player at a helm says
+    /// [`ToServer::Helm`] instead — the server carries a rider with their
+    /// vehicle, and a `Move` from somebody aboard would be a player walking
+    /// away from a boat they are still steering.
     Move { position: Vec2 },
+    /// Where this player has sailed the boat they occupy: its position and
+    /// its heading, a yaw about the vertical. The boat and the player move
+    /// together — the wire carries no separate word for the rider, a rider
+    /// being wherever their vehicle is.
+    ///
+    /// Quietly ignored from a player occupying nothing, rather than fatal:
+    /// a boarding the server refused can cross a helm report already on the
+    /// wire, and neither end has done anything wrong.
+    Helm { position: Vec2, heading: f32 },
+    /// Asks for a boat's helm. Granted when the boat is unoccupied and the
+    /// player is near it, and answered either way by a [`ToClient::Boat`]
+    /// telling whose `occupant` says how it came out — there is no separate
+    /// refusal, the boat's state being the whole of the answer. Whoever
+    /// asks first is aboard: boats have keepers, not owners.
+    Board { boat: BoatId },
+    /// Steps off the occupied boat, landing at `position` — the walker's
+    /// own spot, chosen by the client that judged the footing. The boat
+    /// stays where it lies, at anchor for anyone.
+    Disembark { position: Vec2 },
     /// Ground, please — one chunk of it, named by its coordinate on the world
     /// grid of [`ground::CHUNK_METRES`] squares.
     ///
@@ -304,11 +372,18 @@ pub enum ToClient {
     /// one dealt on the spot if not. A client keeps whatever arrives here,
     /// filed under the world's id: it is the name the next visit will be
     /// known by.
+    ///
+    /// `aboard` is the boat this player holds the helm of as they enter —
+    /// the one the world minted for their arrival, or the one it seated
+    /// them back into. `None` is a player entering on their own feet: they
+    /// left ashore, and their boat lies wherever they left it, one telling
+    /// among the [`ToClient::Boat`]s that follow the welcome.
     Welcome {
         id: PlayerId,
         spawn: Vec2,
         facing: Vec2,
         token: Token,
+        aboard: Option<BoatId>,
     },
     /// The version the server speaks, sent instead of a welcome when the
     /// client's is not it. The connection closes after.
@@ -425,6 +500,24 @@ pub enum ToClient {
     BeastGone {
         id: BeastId,
     },
+    /// A boat, wherever it lies: one message is both the introduction and
+    /// every change after, as with the beasts — a client keys its hulls by
+    /// id and redraws whatever a telling moves. Sent for every boat when a
+    /// client joins, on every change of hands, and as an occupied boat's
+    /// helm reports come in; an unoccupied boat is telling-quiet, lying
+    /// exactly where its last telling left it.
+    ///
+    /// `heading` is a yaw about the vertical — how the hull is pointed,
+    /// which is drawing the wire must carry: a client eases another
+    /// player's boat between tellings, and a hull is not a capsule that
+    /// looks the same from every side.
+    Boat {
+        id: BoatId,
+        kind: BoatKind,
+        position: Vec2,
+        heading: f32,
+        occupant: Option<PlayerId>,
+    },
     /// The server's answer to a [`ToServer::Command`], sent to the player
     /// who typed it and nobody else: plain text for the console the line
     /// was typed into, whether the command was served or not understood.
@@ -486,6 +579,19 @@ impl ToServer {
                     }
                 }
             }
+            Self::Helm { position, heading } => {
+                payload.push(6);
+                put_vec2(&mut payload, *position);
+                put_f32(&mut payload, *heading);
+            }
+            Self::Board { boat } => {
+                payload.push(7);
+                put_u64(&mut payload, boat.0);
+            }
+            Self::Disembark { position } => {
+                payload.push(8);
+                put_vec2(&mut payload, *position);
+            }
         }
         write_frame(to, &payload, MAX_CLIENT_FRAME)
     }
@@ -515,6 +621,16 @@ impl ToServer {
                     flag => return Err(corrupt(format!("papers flagged {flag}"))),
                 },
             },
+            6 => Self::Helm {
+                position: payload.vec2()?,
+                heading: payload.f32()?,
+            },
+            7 => Self::Board {
+                boat: BoatId(payload.u64()?),
+            },
+            8 => Self::Disembark {
+                position: payload.vec2()?,
+            },
             tag => return Err(corrupt(format!("unknown client message tag {tag}"))),
         };
         payload.finish()?;
@@ -532,12 +648,20 @@ impl ToClient {
                 spawn,
                 facing,
                 token,
+                aboard,
             } => {
                 payload.push(0);
                 put_u32(&mut payload, id.0);
                 put_vec2(&mut payload, *spawn);
                 put_vec2(&mut payload, *facing);
                 put_u64(&mut payload, token.0);
+                match aboard {
+                    None => payload.push(0),
+                    Some(boat) => {
+                        payload.push(1);
+                        put_u64(&mut payload, boat.0);
+                    }
+                }
             }
             Self::Refused { version } => {
                 payload.push(1);
@@ -587,6 +711,26 @@ impl ToClient {
                 payload.push(9);
                 put_u32(&mut payload, id.0);
             }
+            Self::Boat {
+                id,
+                kind,
+                position,
+                heading,
+                occupant,
+            } => {
+                payload.push(13);
+                put_u64(&mut payload, id.0);
+                payload.push(kind.byte());
+                put_vec2(&mut payload, *position);
+                put_f32(&mut payload, *heading);
+                match occupant {
+                    None => payload.push(0),
+                    Some(player) => {
+                        payload.push(1);
+                        put_u32(&mut payload, player.0);
+                    }
+                }
+            }
             Self::Reply { text } => {
                 payload.push(10);
                 put_str(&mut payload, text);
@@ -634,6 +778,11 @@ impl ToClient {
                 spawn: payload.vec2()?,
                 facing: payload.vec2()?,
                 token: Token(payload.u64()?),
+                aboard: match payload.u8()? {
+                    0 => None,
+                    1 => Some(BoatId(payload.u64()?)),
+                    flag => return Err(corrupt(format!("a welcome aboard flagged {flag}"))),
+                },
             },
             1 => Self::Refused {
                 version: payload.u16()?,
@@ -692,6 +841,19 @@ impl ToClient {
             },
             12 => Self::World {
                 id: WorldId(payload.u64()?),
+            },
+            13 => Self::Boat {
+                id: BoatId(payload.u64()?),
+                kind: BoatKind::from_byte(payload.u8()?).ok_or_else(|| {
+                    corrupt("a boat of a kind this build has never heard of".into())
+                })?,
+                position: payload.vec2()?,
+                heading: payload.f32()?,
+                occupant: match payload.u8()? {
+                    0 => None,
+                    1 => Some(PlayerId(payload.u32()?)),
+                    flag => return Err(corrupt(format!("a boat occupied by flag {flag}"))),
+                },
             },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
@@ -948,6 +1110,14 @@ mod tests {
             ToServer::Papers {
                 token: Some(Token(0x0102_0304_0506_0708)),
             },
+            ToServer::Helm {
+                position: at,
+                heading: 1.25,
+            },
+            ToServer::Board {
+                boat: BoatId(0x0102_0304_0506_0708),
+            },
+            ToServer::Disembark { position: at },
         ] {
             let bytes = bytes_of_client(&message);
             assert_eq!(ToServer::read(&mut bytes.as_slice()).unwrap(), message);
@@ -959,10 +1129,32 @@ mod tests {
                 spawn: at,
                 facing: Vec2::new(-1.0, 2.0),
                 token: Token(0x0102_0304_0506_0708),
+                aboard: Some(BoatId(0x0807_0605_0403_0201)),
+            },
+            ToClient::Welcome {
+                id: PlayerId(3),
+                spawn: at,
+                facing: Vec2::new(-1.0, 2.0),
+                token: Token(0x0102_0304_0506_0708),
+                aboard: None,
             },
             ToClient::Refused { version: 9 },
             ToClient::World {
                 id: WorldId(0x0807_0605_0403_0201),
+            },
+            ToClient::Boat {
+                id: BoatId(12),
+                kind: BoatKind::Sloop,
+                position: at,
+                heading: -0.5,
+                occupant: Some(PlayerId(3)),
+            },
+            ToClient::Boat {
+                id: BoatId(13),
+                kind: BoatKind::Sloop,
+                position: at,
+                heading: 2.0,
+                occupant: None,
             },
             ToClient::Joined {
                 id: PlayerId(1),
@@ -1099,6 +1291,40 @@ mod tests {
                 8, 7, 6, 5, 4, 3, 2, 1, // the token, LE
             ],
         );
+        assert_eq!(
+            bytes_of_client(&ToServer::Helm {
+                position: Vec2::new(1.5, -2.0),
+                heading: 0.75,
+            }),
+            [
+                13, 0, // length
+                6, // tag
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // y = -2.0
+                0, 0, 0x40, 0x3F, // heading = 0.75
+            ],
+        );
+        assert_eq!(
+            bytes_of_client(&ToServer::Board {
+                boat: BoatId(0x0102_0304_0506_0708),
+            }),
+            [
+                9, 0, // length
+                7, // tag
+                8, 7, 6, 5, 4, 3, 2, 1, // the boat, LE
+            ],
+        );
+        assert_eq!(
+            bytes_of_client(&ToServer::Disembark {
+                position: Vec2::new(1.5, -2.0),
+            }),
+            [
+                9, 0, // length
+                8, // tag
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // y = -2.0
+            ],
+        );
 
         assert_eq!(
             bytes_of_server(&ToClient::Welcome {
@@ -1106,9 +1332,10 @@ mod tests {
                 spawn: Vec2::new(1.5, -2.0),
                 facing: Vec2::new(-2.0, 1.5),
                 token: Token(0x0102_0304_0506_0708),
+                aboard: Some(BoatId(0x0807_0605_0403_0201)),
             }),
             [
-                29, 0, // length
+                38, 0, // length
                 0, // tag
                 7, 0, 0, 0, // id
                 0, 0, 0xC0, 0x3F, // spawn x = 1.5
@@ -1116,7 +1343,31 @@ mod tests {
                 0, 0, 0, 0xC0, // facing x = -2.0 — the spawn's axes swapped,
                 0, 0, 0xC0, 0x3F, // facing z = 1.5, so a confused pair shows
                 8, 7, 6, 5, 4, 3, 2, 1, // the token dealt, LE
+                1, // at a helm...
+                1, 2, 3, 4, 5, 6, 7, 8, // ...of this boat, LE
             ],
+        );
+        // Entering on foot differs in exactly the flag and the boat's absence.
+        assert_eq!(
+            bytes_of_server(&ToClient::Welcome {
+                id: PlayerId(7),
+                spawn: Vec2::new(1.5, -2.0),
+                facing: Vec2::new(-2.0, 1.5),
+                token: Token(0x0102_0304_0506_0708),
+                aboard: None,
+            })[..],
+            [
+                &[30u8, 0][..],
+                &bytes_of_server(&ToClient::Welcome {
+                    id: PlayerId(7),
+                    spawn: Vec2::new(1.5, -2.0),
+                    facing: Vec2::new(-2.0, 1.5),
+                    token: Token(0x0102_0304_0506_0708),
+                    aboard: Some(BoatId(0x0807_0605_0403_0201)),
+                })[2..31],
+                &[0u8][..],
+            ]
+            .concat()[..],
         );
         assert_eq!(
             bytes_of_server(&ToClient::World {
@@ -1128,6 +1379,44 @@ mod tests {
                 1, 2, 3, 4, 5, 6, 7, 8, // the id, LE
             ],
         );
+        assert_eq!(
+            bytes_of_server(&ToClient::Boat {
+                id: BoatId(7),
+                kind: BoatKind::Sloop,
+                position: Vec2::new(1.5, -2.0),
+                heading: 0.75,
+                occupant: Some(PlayerId(9)),
+            }),
+            [
+                27, 0,  // length
+                13, // tag
+                7, 0, 0, 0, 0, 0, 0, 0, // the boat, LE
+                0, // kind: sloop
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // y = -2.0
+                0, 0, 0x40, 0x3F, // heading = 0.75
+                1,    // somebody at the helm...
+                9, 0, 0, 0, // ...this player, LE
+            ],
+        );
+        // A boat lying empty differs in exactly the flag and the missing hand.
+        let occupied = bytes_of_server(&ToClient::Boat {
+            id: BoatId(7),
+            kind: BoatKind::Sloop,
+            position: Vec2::new(1.5, -2.0),
+            heading: 0.75,
+            occupant: Some(PlayerId(9)),
+        });
+        let empty = bytes_of_server(&ToClient::Boat {
+            id: BoatId(7),
+            kind: BoatKind::Sloop,
+            position: Vec2::new(1.5, -2.0),
+            heading: 0.75,
+            occupant: None,
+        });
+        assert_eq!(empty[..2], [23, 0], "an empty boat is shorter by its hand");
+        assert_eq!(empty[2..24], occupied[2..24], "emptiness moved the fields");
+        assert_eq!(empty[24], 0, "nobody at the helm is flag 0");
         assert_eq!(
             bytes_of_server(&ToClient::Refused { version: 9 }),
             [3, 0, 1, 9, 0],
