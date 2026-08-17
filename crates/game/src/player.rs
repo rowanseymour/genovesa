@@ -165,6 +165,14 @@ impl PlayerPlace<'_, '_> {
         self.at().map(|at| at.xz())
     }
 
+    /// Whether the player is aboard something rather than standing on their
+    /// own feet. `false` outside a match, there being nobody to be either.
+    pub fn aboard(&self) -> bool {
+        self.players
+            .single()
+            .is_ok_and(|(_, aboard)| aboard.is_some())
+    }
+
     /// Which way the carrier is pointing on the map, as a unit vector — the
     /// hull's own bow, or the walker's own face. `None` outside a match, and
     /// `None` for a carrier standing so exactly on end that its forward has no

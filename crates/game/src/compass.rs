@@ -47,6 +47,12 @@
 //! sight: it says what the player could have noticed and did not, and nothing
 //! about what is over the horizon.
 //!
+//! Which makes it a sailing instrument, and it is drawn as one: ashore the
+//! ring goes out altogether. Everything it could mark from a beach is either
+//! the island underfoot or in plain view across it, and a rim of arcs saying
+//! *land, that way* to somebody standing on land is the instrument talking
+//! over the picture instead of filling it in.
+//!
 //! Nothing about it crosses the wire. The sweep reads the chunks this machine
 //! was already sent, so a client written against the protocol alone would
 //! carry the same ring for the same nothing — which is the arrangement the
@@ -421,6 +427,22 @@ fn mark_the_land(
     let Some(at) = player.on_the_map() else {
         return;
     };
+    // Ashore the ring goes out. It exists for the land this camera does not
+    // show, and a player standing on an island is looking at the island —
+    // every mark it could draw would be for ground already filling the
+    // picture, or for the hill they are walking up. Wiped rather than frozen,
+    // and the sweep forgotten with it, so stepping back aboard reads the
+    // horizon afresh instead of showing where the shore was when they landed.
+    if !player.aboard() {
+        if swept.at.is_some() {
+            *swept = Swept::default();
+            for (_, mut node, mut colour) in &mut marks {
+                node.height = Val::Px(BAND.1);
+                *colour = BackgroundColor(Color::NONE);
+            }
+        }
+        return;
+    }
     let held = ground.land_held();
     let surveyed = chart.surveys();
     let stood_still = swept
@@ -815,6 +837,7 @@ fn turn_card(cameras: Query<&MapCamera>, mut cards: Query<&mut UiTransform, With
 mod tests {
     use super::*;
     use crate::camera::MapCameraPlugin;
+    use crate::player::Player;
     use crate::Helm;
     use bevy::input::mouse::AccumulatedMouseScroll;
     use bevy::state::app::StatesPlugin;
@@ -1092,6 +1115,53 @@ mod tests {
         assert!(
             found.iter().all(Option::is_none),
             "the chunk the player stands on claimed a bearing"
+        );
+    }
+
+    /// Stands a player in a world with one island due east of them, aboard a
+    /// boat or on their own feet, and runs a frame.
+    fn a_player_off_an_island(aboard: bool) -> App {
+        let mut app = test_app();
+
+        let mut ground = Ground::default();
+        ground.deliver(IVec2::new(3, 0), Some(a_hill()));
+        app.insert_resource(ground);
+        app.insert_resource(Chart::default());
+
+        let at = Transform::from_xyz(CHUNK_METRES / 2.0, 0.0, CHUNK_METRES / 2.0);
+        let player = app.world_mut().spawn((Player, at)).id();
+        if aboard {
+            // A hull under them: being aboard is being somebody's child, which
+            // is what `PlayerPlace` resolves a carrier through.
+            let boat = app.world_mut().spawn(at).id();
+            app.world_mut().entity_mut(player).insert(ChildOf(boat));
+        }
+        app.update();
+        app
+    }
+
+    /// How many marks the ring is showing.
+    fn marks_lit(app: &mut App) -> usize {
+        app.world_mut()
+            .query::<(&LandMark, &BackgroundColor)>()
+            .iter(app.world())
+            .filter(|(_, colour)| colour.0.alpha() > 0.0)
+            .count()
+    }
+
+    /// The ring is a sailing instrument. Ashore everything it could mark is
+    /// the island underfoot or in plain view across it, so it goes out — and
+    /// comes back on boarding rather than staying wiped.
+    #[test]
+    fn the_ring_is_only_drawn_afloat() {
+        let mut afloat = a_player_off_an_island(true);
+        assert!(marks_lit(&mut afloat) > 0, "afloat, land east lit nothing");
+
+        let mut ashore = a_player_off_an_island(false);
+        assert_eq!(
+            marks_lit(&mut ashore),
+            0,
+            "ashore, the ring was still reading"
         );
     }
 

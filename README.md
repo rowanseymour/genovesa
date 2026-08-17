@@ -108,7 +108,9 @@ coast near enough to make out, and the brightest of them are the shores not on
 the chart yet. This camera looks down rather than out, so an island a few
 hundred metres off can be outside the picture altogether — near enough to walk
 up the beach of, and nothing on screen to say so. Without the ring the next
-landfall is a matter of sailing at random until one turns up.
+landfall is a matter of sailing at random until one turns up. It is an
+instrument for sailing and goes dark once the player steps ashore, there being
+nothing it could point at from a beach that the island is not already showing.
 
 The look is flat-shaded facets in a small fixed palette — no textures and no
 gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
