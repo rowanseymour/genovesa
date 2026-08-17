@@ -2,7 +2,7 @@
 //!
 //! A wake is foam, and the sea already knows how to paint foam — so nothing
 //! here draws anything. This module keeps a short history of where the boat's
-//! stem has been and hands it to the sea's own shader, which lays the same
+//! bow has been and hands it to the sea's own shader, which lays the same
 //! white it lays surf and whitecaps in, on the same surface, riding the same
 //! swell. That is the whole reason for doing it this way rather than as a
 //! ribbon of geometry towed behind the hull: a mesh laid on the water would
@@ -10,10 +10,11 @@
 //! anywhere it did not it would either float over a crest or sink into it.
 //! Painted by the surface itself, the wake is *on* the water by construction.
 //!
-//! What the shader gets is a [`Track`]: a polyline of recent stem positions,
-//! each carrying how long ago it was laid and how fast the hull was moving
-//! when it was. Everything else is worked out from that, and two things are
-//! painted off it —
+//! What the shader gets is a [`Track`]: a polyline of points the bow has
+//! lately laid — a shoulder's radius abaft the stem; [`lay_the_wake`] says
+//! why — each carrying how long ago it was laid and how fast the hull was
+//! moving when it was. Everything else is worked out from that, and two
+//! things are painted off it —
 //!
 //! - the **boil**, solid white close about the hull and for a second or two
 //!   astern, which is the water the hull itself is turning over; and
@@ -157,14 +158,7 @@ const BREAKUP: f32 = 3.0;
 /// track's doing, not a fade's.
 const STIRS: f32 = 0.6;
 
-/// The least a hull must have moved for the point it is leaving behind to
-/// name a direction, in metres. A centimetre: far enough that the shader's
-/// arithmetic on the segment is arithmetic rather than noise, and short
-/// enough that a hull under way clears it in a frame at any frame rate worth
-/// drawing at.
-const NUDGE: f32 = 0.01;
-
-/// One point of the track a hull has left behind: where its stem was, how
+/// One point of the track a hull has left behind: where its bow was, how
 /// long ago that was, and how fast it was going at the time.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Mark {
@@ -173,11 +167,11 @@ struct Mark {
     way: f32,
 }
 
-/// Where the boat has been lately: the stem where it is this frame, and the
+/// Where the boat has been lately: the bow where it is this frame, and the
 /// points laid behind it, newest first.
 ///
 /// The head is kept apart from them because it is not a laid point — it is
-/// carried, moved to wherever the stem now is every single frame, and only
+/// carried, moved to wherever the bow now is every single frame, and only
 /// the points behind it stand still and age. Without it the white water would
 /// start up to [`STEP`] behind a moving hull, appearing and disappearing at
 /// the bow as each new point went down; with it the foam is welded to the
@@ -193,9 +187,10 @@ pub struct Track {
 const LAID: usize = TRAIL - 1;
 
 impl Track {
-    /// Ages the track and brings its head to where the stem is now, `way`
-    /// being how fast the hull says it is going.
-    fn follow(&mut self, stem: Vec2, way: f32, dt: f32) {
+    /// Ages the track and brings its head to `at` — wherever the hull is
+    /// laying its white this frame — `way` being how fast the hull says it
+    /// is going.
+    fn follow(&mut self, at: Vec2, way: f32, dt: f32) {
         let way = way.abs().min(FASTEST);
 
         // A hull that has covered more ground than it could possibly have
@@ -204,7 +199,7 @@ impl Track {
         // track behind it is a place it has never been. Kept, it would be
         // joined to where the boat now is by one straight segment across
         // however much ocean lies between.
-        let travelled = self.head.map_or(0.0, |head| head.at.distance(stem));
+        let travelled = self.head.map_or(0.0, |head| head.at.distance(at));
         if travelled > FASTEST * dt + 1.0 {
             self.laid.clear();
             // And where it came from is not somewhere it sailed from either,
@@ -233,27 +228,18 @@ impl Track {
         let stepped = self
             .laid
             .front()
-            .is_none_or(|newest| newest.at.distance(stem) >= STEP);
-        // What goes down is where the hull *was*, never where it is, and only
-        // once it has left there far enough to say which way it went. Both
-        // halves are the same requirement: the shader reads the segment from
-        // the head to the newest point to know which way the bow is parting
-        // the water, and refuses to round the foam off in front of it. A
-        // segment of no length names no direction, and for the frame it lasts
-        // a cap of white blinks on across the bow — every three metres, which
-        // reads as a fault rather than as a wake. Nothing is lost by waiting a
-        // frame: the head is the hull, and the head is already drawn.
+            .is_none_or(|newest| newest.at.distance(at) >= STEP);
+        // What goes down is where the hull *was*, never where it is: the
+        // head is the hull, and the head is already drawn, so laying the
+        // point the hull is leaving keeps the track a step dense without
+        // ever putting two live points on one spot.
         if let Some(previous) = self.head {
-            if stepped && way >= STIRS && previous.at.distance(stem) > NUDGE {
+            if stepped && way >= STIRS {
                 self.laid.push_front(previous);
                 self.laid.truncate(LAID);
             }
         }
-        self.head = Some(Mark {
-            at: stem,
-            age: 0.0,
-            way,
-        });
+        self.head = Some(Mark { at, age: 0.0, way });
     }
 
     /// The track as the shader takes it, and the box it lies in.
@@ -337,8 +323,17 @@ fn lay_the_wake(
     let Some((transform, boat)) = boats.iter().next() else {
         return;
     };
+    // The track is laid a shoulder's radius abaft the stem, not on it. The
+    // foam's forward edge is the cap the shader wraps round the head, and
+    // that cap's radius is this same half-width — so laid on the stem, as it
+    // was first, the white led the bow by half a beam of open water. Set
+    // back by exactly the radius, the cap's edge falls on the stem itself
+    // and the wake opens from the bow point instead of leading it.
+    let stem_half = boat.beam() * 0.5 * SHOULDER;
     track.follow(
-        transform.transform_point(boat.stem()).xz(),
+        transform
+            .transform_point(boat.stem() + Vec3::Z * stem_half)
+            .xz(),
         boat.way(),
         time.delta_secs(),
     );
@@ -346,7 +341,6 @@ fn lay_the_wake(
     let (Some(window), Some(mut materials)) = (window, materials) else {
         return;
     };
-    let stem_half = boat.beam() * 0.5 * SHOULDER;
     let (points, bounds) = track.packed(stem_half);
     let wash = Vec4::new(stem_half, SPREAD, ARM, LIFE);
     let boil = Vec4::new(BOIL.0, BOIL.1, BREAKUP, STIRS);
@@ -397,16 +391,16 @@ mod tests {
     }
 
     #[test]
-    fn the_head_of_the_track_is_the_stem_itself() {
+    fn the_head_of_the_track_is_the_bow_itself() {
         // What keeps the white water attached to the hull: whatever the boat
-        // did this frame, the newest point of the track is where its stem now
+        // did this frame, the newest point of the track is where its bow now
         // is, to the metre and not to the step.
         let mut track = Track::default();
         for step in 0..200 {
-            let stem = Vec2::new(step as f32 * 0.17, (step as f32 * 0.03).sin() * 4.0);
-            track.follow(stem, 10.0, FRAME);
+            let bow = Vec2::new(step as f32 * 0.17, (step as f32 * 0.03).sin() * 4.0);
+            track.follow(bow, 10.0, FRAME);
             let head = track.head.expect("a followed track has a head");
-            assert_eq!(head.at, stem, "the track's head left the stem behind");
+            assert_eq!(head.at, bow, "the track's head left the bow behind");
             assert_eq!(head.age, 0.0, "the head aged while it was still the head");
         }
     }
@@ -469,31 +463,6 @@ mod tests {
             track.laid.is_empty(),
             "a hull carried its old wake across the world with it"
         );
-    }
-
-    #[test]
-    fn the_first_segment_always_has_a_direction() {
-        // The shader reads the track's first segment to know which way the
-        // bow is parting the water, and refuses to round the wake off in
-        // front of it. A segment of no length names no direction, so on any
-        // frame where the head and the newest laid point coincide that
-        // refusal lapses and a cap of foam appears across the bow — for one
-        // frame, every three metres, which reads as a flicker rather than as
-        // anything to do with a wake. Every frame of a whole wake's worth of
-        // sailing, including the ones a point goes down on.
-        let mut track = Track::default();
-        let mut at = Vec2::ZERO;
-        for _ in 0..(LIFE * 2.0 / FRAME) as usize {
-            at += Vec2::new(0.8, 0.6) * 10.0 * FRAME;
-            track.follow(at, 10.0, FRAME);
-            let head = track.head.expect("a followed track has a head");
-            if let Some(newest) = track.laid.front() {
-                assert!(
-                    newest.at.distance(head.at) > 1e-4,
-                    "the track's first segment collapsed at {at}"
-                );
-            }
-        }
     }
 
     #[test]
@@ -589,11 +558,12 @@ mod tests {
     }
 
     #[test]
-    fn the_wake_is_laid_from_the_stem_of_the_boat_the_game_launches() {
+    fn the_wake_is_laid_at_the_bow_of_the_boat_the_game_launches() {
         // The wiring rather than the shape: in a real world the system finds
-        // the hull that was launched, and the point it lays is that hull's
-        // stem — not its origin amidships, which is where getting this wrong
-        // would put the foam, half a boat's length behind the bow.
+        // the hull that was launched, and the point it lays is a shoulder's
+        // radius abaft that hull's stem — so the cap the shader wraps round
+        // the head ends on the stem, and the white neither leads the bow nor
+        // sits amidships, half a boat's length behind it.
         let mut app = crate::testing::world_app();
         app.update();
 
@@ -601,7 +571,10 @@ mod tests {
         let (transform, boat) = boats
             .single(app.world())
             .expect("a world should have a boat in it");
-        let stem = transform.transform_point(boat.stem()).xz();
+        let shoulder = boat.beam() * 0.5 * SHOULDER;
+        let bow = transform
+            .transform_point(boat.stem() + Vec3::Z * shoulder)
+            .xz();
         let amidships = transform.translation.xz();
 
         let head = app
@@ -609,7 +582,7 @@ mod tests {
             .resource::<Track>()
             .head
             .expect("a boat afloat should have the head of a track");
-        assert_eq!(head.at, stem, "the wake is laid somewhere the stem is not");
+        assert_eq!(head.at, bow, "the wake is laid somewhere the bow is not");
         assert!(
             head.at.distance(amidships) > 1.0,
             "the wake is laid amidships"

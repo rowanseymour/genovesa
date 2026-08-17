@@ -266,15 +266,16 @@ fn wake_foam(at: vec2<f32>) -> f32 {
         let along = older.xy - newer.xy;
         let run = dot(along, along);
         let raw = select(0.0, dot(at - newer.xy, along) / run, run > 1e-6);
-        // The track begins at the stem, and the first segment does not round
-        // its end off: water forward of the stem has not been sailed through
-        // yet, and treating distance-to-the-end as the shape puts a cap of
-        // foam across the bow of a boat that has not made it. Only the first
-        // — an older segment whose own curve has brought it round in front of
-        // the bow is wake the boat really did lay, and still shows.
-        if (i == 1 && raw < 0.0) {
-            continue;
-        }
+        // The clamp rounds every end off. Water off either end of a segment
+        // is measured to the nearer point, so each joint of the track wears a
+        // cap — the same answer the neighbouring segment gives anyway — and
+        // the head wears a half-disc of white whose forward edge falls on the
+        // stem, because `wake.rs` lays the head that cap's radius abaft it.
+        // Both other shapes for the bow were tried: the head on the stem
+        // itself put the cap's white half a beam out in front of a boat that
+        // had not made it, and chopping the cap off ended the foam on a ruled
+        // line across the bow — the one shape water never makes. Rounded and
+        // set back, the wake opens from the bow point.
         let t = clamp(raw, 0.0, 1.0);
         let reach = distance(at, mix(newer.xy, older.xy, t));
         if (reach < nearest) {
