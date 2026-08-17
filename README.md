@@ -173,6 +173,12 @@ rather than in the client: a claim can only be settled by a server that works
 the coast out the same way, from the same chunks, without taking the
 claimant's word for any of it.
 
+![A cairn on a claimed island](docs/cairn.png)
+
+*A granted claim, on the scree cap of the island it speaks for. The banner
+streams on the true wind, on the same arithmetic a masthead pennant does — so
+a player anchored offshore can read the weather off somebody else's claim.*
+
 ## Playing together
 
 Every world is a served world. The server generates the ocean and hands it out

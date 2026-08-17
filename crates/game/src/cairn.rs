@@ -15,20 +15,21 @@
 //! on the island; a marker drawn in screen space says *the game* is telling
 //! you something, where a stone and a flag on a headland says *somebody was
 //! here*, which is the whole of what a claim means. It also has to survive
-//! being looked at from a mile out, at sea level, from a boat that is moving —
-//! so it is built as a real daymark is built: a cairn of stone for the mass, a
-//! staff for the height, and a banner for the movement, because at that
-//! distance the eye finds the thing that *moves* long before it finds the
-//! thing that is merely tall.
+//! being looked at from off the coast, at sea level, from a boat that is
+//! moving — so it is built as a real daymark is built: a cairn of stone for
+//! the mass, a staff for the height, and a banner for the movement, because at
+//! any distance the eye finds the thing that *moves* long before it finds the
+//! thing that is merely tall. How far it actually carries is [`STAFF`]'s
+//! business, and less far than the first draft of this paragraph claimed.
 //!
 //! The banner streams on the true wind, on the same arithmetic a boat's
-//! pennant uses — see [`crate::boat::pennant_pose`] — and is cut from the same
-//! mesh at another size, [`crate::boat::pennant_mesh`]. Cloth is cloth, and two
+//! pennant uses — see [`crate::boat::pennant_pose`]. Cloth is cloth, and two
 //! rules for how it lies would show up the first time a player anchored off a
-//! cairn and watched their own masthead disagree with it. The pose and the
-//! shape go together: the pose says the cloth runs down -Z from a tie at the
-//! origin and hangs down -Y, and a banner built to any other convention would
-//! be aimed across the wind rather than along it.
+//! cairn and watched their own masthead disagree with it. The *shape* is its
+//! own ([`banner_mesh`]), cut to the convention that pose aims things in: a
+//! tie at the origin, the cloth running down -Z and hanging down -Y. Built to
+//! any other convention it would be aimed across the wind rather than along
+//! it, which is what a rectangle from the shape library did.
 //!
 //! # Standing it on the ground
 //!
@@ -50,7 +51,10 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::boat::{pennant_mesh, pennant_pose};
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::PrimitiveTopology;
+
+use crate::boat::pennant_pose;
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
 use crate::{matte, AppState};
@@ -58,40 +62,49 @@ use crate::{matte, AppState};
 /// How tall the staff stands above the stones, in metres.
 ///
 /// A daymark is a thing to be seen from off the coast, and this is the number
-/// that decides from how far. Nine metres puts the banner above the palms it
-/// will usually be standing among — which is the point of a daymark rather
-/// than a landmark — without making it the tallest thing on a small island.
-const STAFF: f32 = 9.0;
+/// that decides from how far. It was nine metres — a human-scale flagstaff —
+/// until somebody stood one up and looked at it: against a camera that sits
+/// hundreds of metres off and terrain drawn in facets tens of metres across,
+/// nine metres is a pin on a golf green. Twenty is a beacon, which is what
+/// this is: not a flagpole somebody planted but a mark built to be found.
+///
+/// It does not carry a mile. Nothing built at a size this world could believe
+/// would — at a kilometre a cloth this size is a few pixels of colour, which
+/// is enough to notice and not enough to read. What carries at that range is
+/// the mark on the chart, which is the survey's business and not this one's.
+const STAFF: f32 = 20.0;
 
 /// How deep the staff is driven into the heap, in metres — a staff resting on
 /// the stones would be a staff the first blow took away. What it costs is that
 /// the head stands this much lower than [`STAFF`] above the stones, which is
 /// why the height of the head is worked out once rather than written twice.
-const SUNK: f32 = 0.3;
+const SUNK: f32 = 0.8;
 
 /// How far below the head of the staff the banner is tied, in metres. The
 /// staff showing above the cloth is what says *staff* rather than *pole with a
 /// flag glued on the end*.
-const TIE_BELOW: f32 = 0.5;
+const TIE_BELOW: f32 = 1.2;
 
 /// The cairn of stones at its foot: how far across the base is, and how high
 /// it is heaped, in metres.
 ///
 /// Wide enough to read as built rather than dropped, and low enough that the
-/// staff is plainly the tall part. It is also what a player walks up to, so it
-/// is on the scale of a thing somebody could have piled by hand.
-const STONES: (f32, f32) = (2.4, 1.6);
+/// staff is plainly the tall part. Six metres across is a heap somebody spent
+/// a day on, which is the right amount of work for a thing that says *this one
+/// is mine*: at the two metres it started out as it read as a stone somebody
+/// tripped over rather than as anything anybody meant.
+const STONES: (f32, f32) = (6.0, 3.0);
 
 /// The banner: how far it flies from the staff, and how deep it hangs, in
-/// metres — the two dimensions [`pennant_mesh`] is cut to.
+/// metres.
 ///
-/// Big enough to be the thing the eye catches at a mile — see the module doc —
-/// which makes it far larger, in proportion, than the pennant at a masthead.
-/// A pennant is read by its own crew from ten metres; this is read by a
-/// stranger from a thousand. Deeper in proportion too: a masthead flag is a
-/// narrow streamer because it is read for its *direction*, where this one is
-/// read for being there at all, and a streamer at a mile is a thread.
-const BANNER: (f32, f32) = (2.6, 1.4);
+/// Big enough to be the thing the eye catches on the approach, which makes it
+/// far larger — and far deeper in proportion — than the pennant at a masthead.
+/// A masthead flag is a narrow streamer because it is read for its
+/// *direction*, by its own crew, from ten metres. This one is read by a
+/// stranger, from as far off as it carries, for being there at all: a streamer
+/// at that range is a thread, so this is a flag.
+const BANNER: (f32, f32) = (7.0, 3.6);
 
 /// The stone a cairn is piled from. The world's rock, near enough: a cairn is
 /// built out of whatever the island had, and an island's high ground is scree.
@@ -245,7 +258,21 @@ fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<Entity, Added<
             // loose rock stands at, and the flat facets of a low-sided cone
             // are what a pile of rock looks like in a world with no textures
             // in it.
-            heap: kit.meshes.add(Cone::new(across / 2.0, high)),
+            // Seven sides and its own normals per facet, which is the world's
+            // own language: everything here is flat-shaded, and the shape
+            // library's default cone is smooth enough to read as a grey egg
+            // sitting on faceted ground. The vertices are unwelded first —
+            // flat normals cannot be computed over shared ones, which is a
+            // panic rather than a warning and does not show up until
+            // something actually builds the mesh.
+            heap: kit.meshes.add(
+                Cone::new(across / 2.0, high)
+                    .mesh()
+                    .resolution(7)
+                    .build()
+                    .with_duplicated_vertices()
+                    .with_computed_flat_normals(),
+            ),
             staff: kit.meshes.add(Cylinder::new(0.09, STAFF)),
             // The masthead's own cloth at another size, and it has to be: the
             // pose it is aimed by is the pennant's — tie at the origin, cloth
@@ -253,7 +280,7 @@ fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<Entity, Added<
             // lies in the XY plane about its own middle, which is a banner
             // aimed across the wind, straddling the staff, and swinging flat
             // into the horizontal every time the wind drops.
-            banner: kit.meshes.add(pennant_mesh(flies, hangs)),
+            banner: kit.meshes.add(banner_mesh(flies, hangs)),
         })
         .clone();
 
@@ -292,7 +319,42 @@ fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<Entity, Added<
 /// Stands the cairns on the ground once there is ground to stand them on, and
 /// shows them the moment they are standing on it.
 ///
-/// The same job [`crate::player::find_footing`] does for an arriving player,
+/// The cloth: a square-ended banner, cut to the convention
+/// [`pennant_pose`] aims things in — tied at the origin, flying down -Z and
+/// hanging down -Y.
+///
+/// Its own shape rather than the pennant's, though it borrows the pennant's
+/// arithmetic and its belly. A pennant is tapered, and a tapered flag on a
+/// staff is a *pennant*: on a stone heap it reads as a pin on a golf green,
+/// which is a thing this world spent a screenshot finding out. A claim is a
+/// flag planted, so the cloth is square-ended and deep, and reads as one.
+///
+/// The belly is why this is nine vertices rather than six: a flat quad edge-on
+/// to the camera disappears, and a cloth with a curve in it catches the light
+/// on one side. Unindexed, so each facet keeps its own normal — the flat
+/// shading everything here is drawn in.
+fn banner_mesh(flies: f32, hangs: f32) -> Mesh {
+    let tie = Vec3::ZERO;
+    let foot = Vec3::new(0.0, -hangs, 0.0);
+    let head = Vec3::new(0.0, 0.0, -flies);
+    let clew = Vec3::new(0.0, -hangs, -flies);
+    // Out to one side, deepest around the middle of the cloth, by a tenth of
+    // the fly — the pennant's proportion, on a bigger flag.
+    let belly = Vec3::new(flies * 0.1, -hangs * 0.5, -flies * 0.5);
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![
+            tie, foot, belly, foot, clew, belly, clew, head, belly, head, tie, belly,
+        ],
+    )
+    .with_computed_flat_normals()
+}
+
 /// and for the same reason: the point the world named is on the plane, and
 /// what height that is depends on ground this client may not have yet. The
 /// showing is the same frame as the settling and not a moment later — the
