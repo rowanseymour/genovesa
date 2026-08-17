@@ -570,7 +570,7 @@ impl Chart {
 
     /// Everything surveyed, and every name written on the sheet, as plain
     /// entries for the logbook to write down.
-    pub(crate) fn entries(&self) -> (Vec<(IVec2, Soundings)>, Vec<(IVec2, String)>) {
+    pub(crate) fn entries(&self) -> (Entries<Soundings>, Entries<String>) {
         (
             self.soundings
                 .iter()
@@ -585,6 +585,8 @@ impl Chart {
 
     /// A chart rebuilt from a logbook's entries — the survey, and the
     /// christenings, taken up from wherever the last visit left off.
+    ///
+    /// See [`Entries`] for the shape both directions share.
     pub(crate) fn from_entries(
         soundings: impl IntoIterator<Item = (IVec2, Soundings)>,
         names: impl IntoIterator<Item = (IVec2, String)>,
@@ -595,6 +597,12 @@ impl Chart {
         }
     }
 }
+
+/// One side of the chart's memory as the logbook writes it down: what was
+/// found at each chunk, or what each island was christened — keyed entries
+/// rather than the maps they live in here, so the book's format owes nothing
+/// to how the chart happens to index them.
+pub(crate) type Entries<T> = Vec<(IVec2, T)>;
 
 /// A mark as a point on the world-wide step lattice: 255 whole steps to a
 /// chunk, so a run ending on a chunk's boundary and the run continuing it next
