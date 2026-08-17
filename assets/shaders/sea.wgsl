@@ -356,12 +356,20 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // camera, and the surface is one sheet drawn straight through
     // everything — so without this the sea stands inside the bilges of any
     // hull whose sole is where a real one's is. No water is drawn inside
-    // the hull's waterline footprint: an ellipse in the hull's own frame,
-    // sized by the Rust side so its edge lands within the planking, where
-    // the hull's own timber hides the seam from every angle that matters.
-    // Per fragment rather than per vertex because the whole boat is smaller
-    // than one sea facet.
-    if (sea.hole_axes.w > 0.5 && distance(in.world_position.xz, sea.hole.xy) < sea.hole_axes.x + sea.hole_axes.z) {
+    // the hull's waterline footprint: two superellipse halves in the hull's
+    // own frame, sized by the Rust side so its edge lands within the
+    // planking, where the hull's own timber hides the seam from every angle
+    // that matters. Per fragment rather than per vertex because the whole
+    // boat is smaller than one sea facet.
+    //
+    // The circle is only a cheap first refusal, so it has to be a bound and
+    // not a guess: no point of the footprint is further from its centre
+    // than the beam plus its longer end, whichever end that is. Bounding on
+    // the bow alone would be a hole with its stern quietly cut off on the
+    // day some boat's transom reaches further aft than its stem does
+    // forward.
+    let hole_reach = sea.hole_axes.z + max(sea.hole_axes.x, sea.hole_shape.z);
+    if (sea.hole_axes.w > 0.5 && distance(in.world_position.xz, sea.hole.xy) < hole_reach) {
         let rel = in.world_position.xz - sea.hole.xy;
         let ahead = sea.hole.zw;
         let along = dot(rel, ahead);

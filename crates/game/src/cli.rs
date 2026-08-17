@@ -278,8 +278,12 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
             }
             "--resolution" => args.resolution = resolution(value)?,
             "--boat" => {
-                args.boat = crate::boat::HullKind::named(value)
-                    .ok_or_else(|| format!("`{value}` is not a boat — try ship or rowboat"))?;
+                args.boat = crate::boat::HullKind::named(value).ok_or_else(|| {
+                    format!(
+                        "`{value}` is not a boat — try {}",
+                        crate::boat::HullKind::choices()
+                    )
+                })?;
             }
             // Takes a copy of the view as it stands, which is what makes the
             // options before a shot its own and the ones after it the next
@@ -634,6 +638,19 @@ mod tests {
         assert_eq!(args.config.seed, 7);
     }
 
+    /// The dev switch a capture run has to ask for on the command line,
+    /// there being no console to type `set boat` at.
+    #[test]
+    fn a_run_rigs_the_boat_it_asks_for() {
+        assert_eq!(ok("").boat, crate::boat::HullKind::Ship);
+        assert_eq!(
+            ok("--boat rowboat").boat,
+            crate::boat::HullKind::Rowboat,
+            "the one kind worth asking for by name"
+        );
+        assert_eq!(ok("--boat ship").boat, crate::boat::HullKind::Ship);
+    }
+
     #[test]
     fn rejects_what_it_cannot_make_sense_of() {
         assert!(parse_args("--nonsense 1").is_err());
@@ -650,5 +667,6 @@ mod tests {
         assert!(parse_args("--state elsewhere").is_err());
         assert!(parse_args("--resolution 2560").is_err());
         assert!(parse_args("--resolution 0x1440").is_err());
+        assert!(parse_args("--boat dinghy").is_err(), "no such boat");
     }
 }

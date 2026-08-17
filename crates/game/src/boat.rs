@@ -75,6 +75,13 @@ pub enum HullKind {
 }
 
 impl HullKind {
+    /// Every kind there is, and the order the two places that offer a
+    /// choice of one offer them in. Written down once because a kind added
+    /// to the enum and not to this list is a boat no word can reach: both
+    /// [`HullKind::named`] and [`HullKind::choices`] are read off it, so
+    /// the console and the command line learn a new boat together.
+    const ALL: [Self; 2] = [Self::Ship, Self::Rowboat];
+
     /// The dimensions and manners this kind of boat is driven by.
     fn hull(self) -> &'static Hull {
         match self {
@@ -93,9 +100,15 @@ impl HullKind {
 
     /// The kind a word names, or `None` for a word that names no boat.
     pub fn named(name: &str) -> Option<Self> {
-        [HullKind::Ship, HullKind::Rowboat]
-            .into_iter()
-            .find(|kind| kind.name() == name)
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
+    /// The words there are, as a phrase to be told off with — "ship or
+    /// rowboat". What both the console and the command line answer a word
+    /// they do not know with, so neither can go stale while the other is
+    /// taught a new boat.
+    pub fn choices() -> String {
+        Self::ALL.map(Self::name).join(" or ")
     }
 }
 
@@ -548,8 +561,11 @@ const FLUTTER: (f32, f32) = (0.16, 7.0);
 
 /// A boat in the world: what kind it is, and what it is doing.
 ///
-/// `hull` is the kind — the ship for now, and the rest is the sailing state.
-/// `way` is the speed the hull is actually making along its heading, in
+/// `kind` and the `hull` its dimensions are copied from are what the boat is
+/// sailed as, and are only ever set together — by [`Boat::of`], and by
+/// [`refit`] when the dev switch says otherwise, which is also what holds
+/// them to the [`Rigged`] the entity is dressed in. The rest is the sailing
+/// state. `way` is the speed the hull is actually making along its heading, in
 /// metres per second, ahead positive — the state the eased throttle lives
 /// in. The keys name a speed; [`steer`] brings `way` towards it.
 ///
@@ -592,11 +608,6 @@ impl Boat {
             roll: 0.0,
             sails_set: false,
         }
-    }
-
-    /// Which kind of boat this is — what the dev switch compares against.
-    pub fn kind(&self) -> HullKind {
-        self.kind
     }
 
     /// Sets the sails: the wind has the hull until [`furl`] takes it back.
@@ -682,22 +693,36 @@ struct Sail;
 #[derive(Component)]
 struct Fitting;
 
+/// What a hull is currently dressed as — the kind whose [`Fitting`]s are
+/// hanging off it, written by [`rig`] and by nothing else.
+///
+/// The kind lives on the entity rather than only on [`Boat`] because a hull
+/// outlives the sailing systems: stepping ashore takes the `Boat` off and
+/// leaves the fittings standing, and the wire deals every hull back as a
+/// ship — so a `Boat` that has just been re-inserted says nothing about
+/// what the entity is actually wearing. The invariant [`refit`] keeps is
+/// that this says what the hull is dressed as, a `Boat` alongside it agrees
+/// with it, and the dev switch is what both are brought to.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct Rigged(HullKind);
+
 /// A hull the sea is cut away inside — the shape of the hole, which is the
-/// hull's waterline outline as a superellipse in its own frame. Sized so the
-/// edge lands within the planking's thickness at the waterline: a hair too
-/// wide shows a dark sliver of missing sea against the topsides, a hair too
-/// narrow a sliver of sea inside the bilges, and of the two the sliver
-/// outside is the one the hull's own freeboard hides.
+/// hull's waterline outline in its own frame: two superellipse halves
+/// sharing their beam at the widest station, cut square at the transom.
+/// Two halves because one ellipse cannot be a boat — fat enough for the
+/// transom's corners it wraps whole metres of clear water round the bow,
+/// fine enough for the bow it pinches at the quarters and lets slivers of
+/// sea into the sternsheets.
+///
+/// Sized so the edge lands within the planking's thickness at the
+/// waterline: a hair too wide shows a dark sliver of missing sea against
+/// the topsides, a hair too narrow a sliver of sea inside the bilges, and
+/// of the two the sliver outside is the one the hull's own freeboard hides.
 ///
 /// On the boat entity itself rather than among its fittings, and read off
 /// the entity rather than off [`Boat`], so a moored open hull keeps its
 /// hole after its `Boat` comes off with the crew. [`cut_the_water`] is what
 /// reads it.
-/// The outline is two superellipse halves sharing their beam at the widest
-/// station, cut square at the transom — because one ellipse cannot be a
-/// boat: fat enough for the transom's corners it wraps whole metres of
-/// clear water round the bow, fine enough for the bow it pinches at the
-/// quarters and lets slivers of sea into the sternsheets.
 #[derive(Component, Clone, Copy)]
 struct OpenHull {
     /// Metres from the widest station forward to where the outline closes
@@ -1043,28 +1068,33 @@ fn spawn_hull(
 /// makes the entity *look* like a boat, marked [`Fitting`] so that [`refit`]
 /// can take one kind off and put another on.
 fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: HullKind) {
+    commands.entity(hull).insert(Rigged(kind));
+
+    // The sea's hole is the kind's, off its [`Hull`] — and taken away again
+    // for a closed one, a refit being a hull changing kind under the same
+    // entity: an open boat re-rigged as a ship that kept its footprint
+    // would sail a hole around with it.
+    if let Some(open) = kind.hull().open_footprint {
+        commands.entity(hull).insert(open);
+    } else {
+        commands.entity(hull).remove::<OpenHull>();
+    }
+
     // The rowboat is rigged and so has to arrive as a whole scene — see
     // [`ROWBOAT_MODEL`]. The file's own materials come along with it, and
     // `models::paint` dresses the meshes in the shared white matte as they
     // turn up, the same way the figure's and the sharks' are.
     if kind == HullKind::Rowboat {
-        let open = ROWBOAT
-            .open_footprint
-            .expect("the rowboat is an open boat");
-        commands
-            .entity(hull)
-            .insert(open)
-            .with_child((
-                Name::new("Rowboat"),
-                Fitting,
-                WorldAssetRoot(
-                    kit.assets
-                        .load(GltfAssetLabel::Scene(0).from_asset(ROWBOAT_MODEL)),
-                ),
-            ));
+        commands.entity(hull).with_child((
+            Name::new("Rowboat"),
+            Fitting,
+            WorldAssetRoot(
+                kit.assets
+                    .load(GltfAssetLabel::Scene(0).from_asset(ROWBOAT_MODEL)),
+            ),
+        ));
         return;
     }
-    commands.entity(hull).remove::<OpenHull>();
 
     // The ship's model carries its own colours on its facets — see the
     // master's NOTES — so the timber is drawn with one white matte that does
@@ -1144,6 +1174,14 @@ fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: HullKind)
 /// kind: the old fittings come off, the new kind's go on, the hull's manners
 /// change with it, and whoever is aboard is stood at the new hull's helm.
 ///
+/// Two things can disagree with the switch and they are asked separately,
+/// because either can be wrong on its own. [`Rigged`] is what the hull is
+/// dressed as; [`Boat`] is the manners it is sailed by, and it is the one
+/// the wire can reset underneath a rig — [`Fleet::told`] deals a ship's
+/// `Boat` back on every helm grant, so a hull left ashore in rowboat rig and
+/// boarded again arrives dressed as a dinghy and sailed as a ship. Whichever
+/// of the two is out, the switch is what it is brought back to.
+///
 /// Temporary in intent — the switch exists so the rowboat can be seen in the
 /// water at all — and honest in shape: what crosses the wire never mentions
 /// the kind, so under a server this is one client redressing its own hull
@@ -1152,32 +1190,39 @@ fn refit(
     mut commands: Commands,
     mut kit: HullKit,
     toggles: Res<Toggles>,
-    mut boats: Query<(Entity, &mut Boat, &Children)>,
+    mut boats: Query<(Entity, &Rigged, &mut Boat, &Children)>,
     fittings: Query<(), With<Fitting>>,
     players: Query<(Entity, &ChildOf), With<Player>>,
 ) {
-    for (hull, mut boat, children) in &mut boats {
-        if boat.kind() == toggles.boat {
+    for (hull, rigged, mut boat, children) in &mut boats {
+        if rigged.0 == toggles.boat && boat.kind == toggles.boat {
             continue;
         }
-        for child in children {
-            if fittings.contains(*child) {
-                commands.entity(*child).despawn();
+        if rigged.0 != toggles.boat {
+            for child in children {
+                if fittings.contains(*child) {
+                    commands.entity(*child).despawn();
+                }
             }
+            rig(&mut commands, &mut kit, hull, toggles.boat);
         }
-        // The dynamics carry over rather than resetting: [`float`] and
-        // [`steer`] strip the tilt they applied last frame by the angles
-        // stored here, so zeroing them under a transform still wearing them
-        // would leave the new boat permanently heeled.
-        *boat = Boat {
-            way: boat.way,
-            heel: boat.heel,
-            pitch: boat.pitch,
-            roll: boat.roll,
-            sails_set: boat.sails_set,
-            ..Boat::of(toggles.boat)
-        };
-        rig(&mut commands, &mut kit, hull, toggles.boat);
+        if boat.kind != toggles.boat {
+            // The dynamics carry over rather than resetting: [`float`] and
+            // [`steer`] strip the tilt they applied last frame by the angles
+            // stored here, so zeroing them under a transform still wearing
+            // them would leave the new boat permanently heeled.
+            *boat = Boat {
+                way: boat.way,
+                heel: boat.heel,
+                pitch: boat.pitch,
+                roll: boat.roll,
+                sails_set: boat.sails_set,
+                ..Boat::of(toggles.boat)
+            };
+        }
+        // Whichever was out, the deck under anybody aboard has just moved —
+        // a ship's quarterdeck stands where a dinghy's sole is knee-deep in
+        // water — so they are stood at the new hull's helm either way.
         for (player, of) in &players {
             if of.parent() == hull {
                 commands
@@ -2117,17 +2162,12 @@ mod tests {
             ROWBOAT.length
         );
 
-        // The sole — below the waterline, which is what the sea's hole is
-        // for — is where anybody aboard stands: a plane of corners at
+        // The sole is where anybody aboard stands: a plane of corners at
         // exactly the helm deck's height, spanning the helm's station.
         let plane: Vec<&Vec3> = corners
             .iter()
             .filter(|c| (c.y - ROWBOAT.helm_deck).abs() < 1e-3)
             .collect();
-        assert!(
-            ROWBOAT.helm_deck < -0.05,
-            "the sole is back above the waterline — is the sea's hole still earning its keep?"
-        );
         let fore = plane.iter().map(|c| c.z).fold(f32::MAX, f32::min);
         let aft = plane.iter().map(|c| c.z).fold(f32::MIN, f32::max);
         assert!(
@@ -2136,6 +2176,137 @@ mod tests {
             ROWBOAT.helm_deck,
             ROWBOAT.helm_station
         );
+        // And that plane is under water, which is the whole of what the
+        // sea's hole buys: a master re-lofted with its floor standing above
+        // the waterline is a boat that no longer needs cutting for, and
+        // would be drawn dry by a sea that was never cut.
+        let sole = plane.iter().map(|c| c.y).fold(f32::MIN, f32::max);
+        assert!(
+            sole < -0.05,
+            "the sole is {sole}, back above the waterline — is the sea's hole still earning its keep?"
+        );
+
+        // The footprint the sea is cut away inside, against the hull it was
+        // read off. The master's NOTES say it plainly: re-loft the hull and
+        // these numbers are stale — too narrow and the sea leaks back into
+        // the bilges, too wide and a moat of missing water shows round the
+        // bow — and stale is exactly what nothing else here would notice.
+        // The footprint is measured from its own centre, `abaft` aft of
+        // amidships, so the model's stem and transom have to be carried back
+        // to that centre before they can be compared.
+        let open = ROWBOAT.open_footprint.expect("the rowboat is an open boat");
+        // The couple of centimetres the outline is allowed to stand proud of
+        // the planking, being read a little above the water: enough to hide
+        // under the freeboard, not enough to show as clear water.
+        let proud = 0.05;
+        let stem = open.abaft - bow;
+        assert!(
+            (stem..stem + proud).contains(&open.semi_bow),
+            "the hole reaches {} forward of its centre, not the {stem} the stem stands at",
+            open.semi_bow
+        );
+        assert!(
+            (open.transom - (transom - open.abaft)).abs() < proud,
+            "the hole is cut square {} abaft its centre, not at the transom at {}",
+            open.transom,
+            transom - open.abaft
+        );
+    }
+
+    /// The one hull in a headless match, and what it is currently dressed
+    /// as, sailed as, and standing anybody aboard at.
+    fn hull(app: &mut App) -> Entity {
+        app.world_mut()
+            .query_filtered::<Entity, With<Vessel>>()
+            .single(app.world())
+            .expect("a match should have a hull in it")
+    }
+
+    fn rigged(app: &mut App) -> HullKind {
+        let hull = hull(app);
+        app.world()
+            .entity(hull)
+            .get::<Rigged>()
+            .expect("a hull is dressed as something")
+            .0
+    }
+
+    fn sailed(app: &mut App) -> HullKind {
+        let hull = hull(app);
+        app.world()
+            .entity(hull)
+            .get::<Boat>()
+            .expect("a hull somebody has the helm of")
+            .kind
+    }
+
+    fn cut_for(app: &mut App) -> bool {
+        let hull = hull(app);
+        app.world().entity(hull).contains::<OpenHull>()
+    }
+
+    fn stood_at(app: &mut App) -> f32 {
+        app.world_mut()
+            .query_filtered::<&Transform, With<Player>>()
+            .single(app.world())
+            .expect("a player aboard")
+            .translation
+            .y
+    }
+
+    /// The dev switch's own knot, and the reason a hull carries its kind
+    /// twice. What the entity is *dressed* as outlives the sailing systems;
+    /// what it is *sailed* as is dealt fresh by every helm grant, always as
+    /// a ship — so either can be the one that disagrees with the switch, and
+    /// a refit that only watched one of them would leave a dinghy sailing
+    /// with a ship's manners or a ship wearing a dinghy's hole in the sea.
+    #[test]
+    fn a_hull_is_rigged_and_sailed_as_the_switch_says() {
+        let mut app = test_app();
+        assert_eq!(rigged(&mut app), HullKind::Ship);
+        assert_eq!(sailed(&mut app), HullKind::Ship);
+        assert!(!cut_for(&mut app), "a closed hull needs no hole");
+
+        app.world_mut().resource_mut::<Toggles>().boat = HullKind::Rowboat;
+        app.update();
+        assert_eq!(rigged(&mut app), HullKind::Rowboat);
+        assert_eq!(sailed(&mut app), HullKind::Rowboat);
+        assert!(cut_for(&mut app), "an open boat is cut for");
+        assert_eq!(stood_at(&mut app), ROWBOAT.helm_deck);
+
+        // A helm grant, as [`Fleet::told`] deals one: a ship's `Boat` on a
+        // hull the switch still says is a rowboat. The boat is brought to
+        // the rig rather than the rig left disagreeing with it.
+        let hull = hull(&mut app);
+        app.world_mut()
+            .entity_mut(hull)
+            .insert(Boat::of(HullKind::Ship));
+        app.update();
+        assert_eq!(rigged(&mut app), HullKind::Rowboat);
+        assert_eq!(sailed(&mut app), HullKind::Rowboat);
+        assert_eq!(stood_at(&mut app), ROWBOAT.helm_deck);
+
+        // And the other way about. Stepping ashore takes the `Boat` off and
+        // leaves the fittings standing, so a hull moored in rowboat rig
+        // while the switch goes back to a ship is boarded again wearing the
+        // wrong boat entirely.
+        app.world_mut().entity_mut(hull).remove::<Boat>();
+        app.world_mut().resource_mut::<Toggles>().boat = HullKind::Ship;
+        app.update();
+        assert_eq!(
+            rigged(&mut app),
+            HullKind::Rowboat,
+            "a hull nobody is aboard is left as it lies"
+        );
+
+        app.world_mut()
+            .entity_mut(hull)
+            .insert(Boat::of(HullKind::Ship));
+        app.update();
+        assert_eq!(rigged(&mut app), HullKind::Ship);
+        assert_eq!(sailed(&mut app), HullKind::Ship);
+        assert!(!cut_for(&mut app), "the hole went with the dinghy");
+        assert_eq!(stood_at(&mut app), SHIP.helm_deck);
     }
 
     #[test]

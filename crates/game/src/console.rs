@@ -355,7 +355,7 @@ fn boat(value: &str, state: &mut HullKind) -> String {
             *state = kind;
             format!("{BOAT} {}", kind.name())
         }
-        None => format!("`{BOAT}` is ship or rowboat — `set boat rowboat`"),
+        None => format!("`{BOAT}` is {} — `set boat rowboat`", HullKind::choices()),
     }
 }
 
@@ -551,6 +551,8 @@ mod tests {
         assert_eq!(toggles.reach, 450.0);
         assert_eq!(set(&["reach", "default"], &mut toggles), "reach 900m");
         assert_eq!(toggles.reach, crate::HAZE_END);
+        assert_eq!(set(&["boat", "rowboat"], &mut toggles), "boat rowboat");
+        assert_eq!(toggles.boat, HullKind::Rowboat);
         assert_eq!(set(&["shadows", "on"], &mut toggles), "shadows on");
         assert!(toggles.shadows);
     }
@@ -584,6 +586,15 @@ mod tests {
         let not_metres = set(&["reach", "far"], &mut toggles);
         assert!(not_metres.contains("metres"), "unhelpful: {not_metres}");
         assert_eq!(toggles.reach, crate::HAZE_END);
+
+        // The boat's answer names the boats there are, which is the only
+        // way to find out what to type.
+        let not_a_boat = set(&["boat", "dinghy"], &mut toggles);
+        assert!(
+            not_a_boat.contains("ship or rowboat"),
+            "unhelpful: {not_a_boat}"
+        );
+        assert_eq!(toggles.boat, HullKind::Ship);
     }
 
     /// A headless app at the helm, with the console systems and the states
