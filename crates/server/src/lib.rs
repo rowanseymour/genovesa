@@ -260,6 +260,12 @@ pub(crate) struct Shared {
     /// each with the spot the command already found water at, absorbed into
     /// the flock on the next beat — see [`beasts::mind_the_beasts`].
     pub(crate) summoned: Mutex<Vec<(BeastKind, Vec2)>>,
+    /// The beasts as the world last knew them: loaded from its file at bind,
+    /// taken back up by the warden's first beat, and rewritten with the
+    /// living flock on every beat after — which is what a save writes down,
+    /// whichever side of the first beat it lands. See
+    /// [`beasts::mind_the_beasts`] for both halves.
+    pub(crate) beasts: Mutex<Vec<keeper::BeastRecord>>,
     report: Report,
 }
 
@@ -366,6 +372,7 @@ impl Server {
                 skipped: Mutex::new(record.age),
                 commanded_wind: Mutex::new(None),
                 summoned: Mutex::new(Vec::new()),
+                beasts: Mutex::new(record.beasts),
                 report: Box::new(|_| {}),
             }),
         })
@@ -825,6 +832,7 @@ impl Shared {
         };
         let mut players = self.remembered.lock().expect("no poisoned lock").clone();
         players.extend(aboard);
+        let beasts = self.beasts.lock().expect("no poisoned lock").clone();
         keeper::WorldRecord {
             id: self.world_id,
             seed: self.world.seed(),
@@ -832,6 +840,7 @@ impl Shared {
             opening: self.opening,
             age: self.age(),
             players,
+            beasts,
         }
     }
 
