@@ -316,9 +316,6 @@ fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<Entity, Added<
     }
 }
 
-/// Stands the cairns on the ground once there is ground to stand them on, and
-/// shows them the moment they are standing on it.
-///
 /// The cloth: a square-ended banner, cut to the convention
 /// [`pennant_pose`] aims things in — tied at the origin, flying down -Z and
 /// hanging down -Y.
@@ -355,10 +352,14 @@ fn banner_mesh(flies: f32, hangs: f32) -> Mesh {
     .with_computed_flat_normals()
 }
 
-/// and for the same reason: the point the world named is on the plane, and
-/// what height that is depends on ground this client may not have yet. The
-/// showing is the same frame as the settling and not a moment later — the
-/// whole reason a cairn is hidden is that it would otherwise be drawn
+/// Stands the cairns on the ground once there is ground to stand them on, and
+/// shows them the moment they are standing on it.
+///
+/// The arrangement an arriving walker is put down by — see [`crate::player`]'s
+/// own settling — and for the same reason: the point the world named is on the
+/// plane, and what height that is depends on ground this client may not have
+/// yet. The showing is the same frame as the settling and not a moment later —
+/// the whole reason a cairn is hidden is that it would otherwise be drawn
 /// somewhere it is not.
 fn stand_the_cairns(mut commands: Commands, ground: Option<Res<Ground>>, mut waiting: Waiting) {
     let Some(ground) = ground else {
