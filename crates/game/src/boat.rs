@@ -20,6 +20,8 @@
 //! the waterline rather than at the keel or the deck, which is what lets
 //! [`float`] put it down by simply setting the height of the surface it is on.
 
+use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
+use bevy::animation::{AnimationClip, AnimationPlayer};
 use bevy::asset::RenderAssetUsages;
 use bevy::gltf::GltfAssetLabel;
 use bevy::math::Vec3Swizzles;
@@ -32,6 +34,7 @@ use protocol::{BoatId, PlayerId};
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
 use crate::debug::Toggles;
+use crate::models::above;
 use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
@@ -47,6 +50,29 @@ const MODEL: &str = "models/boat.glb";
 /// skinned mesh has to arrive as a whole scene or it is a shape with no
 /// skeleton behind it.
 const ROWBOAT_MODEL: &str = "models/rowboat.glb";
+
+/// The rowboat's clips, by their position in the file — held to their names
+/// by `the_rowboat_ships_its_oars_and_pulls_them`. Two states and not a dial:
+/// oars in, and one full turn of the stroke — the master's NOTES say why
+/// nothing should stand halfway between them.
+const STOWED: usize = 0;
+const STROKE: usize = 1;
+
+/// Water covered by one turn of the stroke cycle, in metres — a little more
+/// than the hull's own length, which is what a steady pull moves a dinghy.
+///
+/// The figure's stride constant, worn by a boat, and a number here for the
+/// same reason: it is not *in* the file. A clip knows how long it lasts in
+/// seconds, not how far the boat it is drawn in would travel. Re-key a
+/// different stroke and this wants matching, or the blades will slip through
+/// the water.
+const PULL: f32 = 3.5;
+
+/// How fast the oars come out and go in again, in e-foldings per second —
+/// see [`eased`]. Brisk on purpose: crossing between the two clips sweeps
+/// the looms through the gunwale, which is what shipping the oars looks like
+/// and is fine taken quickly, but nothing to be left standing halfway in.
+const SHIPPING: f32 = 8.0;
 
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —
@@ -647,6 +673,43 @@ struct Sail;
 #[derive(Component)]
 struct Fitting;
 
+/// The rowboat scene hung under a hull — what [`conduct_the_oars`] looks for
+/// above an arriving animation player, so the oars claim only their own: the
+/// figure walking the same hull's deck arrives through the very same query.
+#[derive(Component)]
+struct Oared;
+
+/// The rowboat's two clips, mixed and ready to play: the graph both hang in,
+/// the node each occupies, and the stroke's own handle, which [`row`] needs
+/// to ask how long one turn of the cycle lasts. One graph for every dinghy
+/// that will ever be rowed — a graph describes the clips, not any boat
+/// rowing to them.
+#[derive(Resource)]
+struct Rowing {
+    graph: Handle<AnimationGraph>,
+    stowed: AnimationNodeIndex,
+    stroke: AnimationNodeIndex,
+    cycle: Handle<AnimationClip>,
+}
+
+/// An animation player that is a rowboat's, and whose hull it is pulling —
+/// the figure's dancer arrangement (see [`crate::figure`]), worn by a boat.
+/// The state lives here rather than on the hull because a hull outlives its
+/// sailing systems: ashore the [`Boat`] comes off, and the oars settle
+/// stowed on a boat with no sailing state at all.
+#[derive(Component)]
+struct Rower {
+    hull: Entity,
+    /// Where in the stroke cycle the oars are, as a fraction of one turn —
+    /// advanced by the water the hull covers rather than by time, so the
+    /// blades bite at whatever speed the boat is making and backing water
+    /// pulls the cycle backwards.
+    phase: f32,
+    /// How much of the stroke shows against the stowed pose, eased between
+    /// 0 and 1 on [`SHIPPING`] and snapped at both ends.
+    out: f32,
+}
+
 /// What a hull is currently dressed as — the kind whose [`Fitting`]s are
 /// hanging off it, written by [`rig`] and by nothing else.
 ///
@@ -896,6 +959,7 @@ impl Plugin for BoatPlugin {
             // are new tellings, and a fleet carried over would pin their
             // ids to entities that no longer exist.
             .add_systems(OnExit(AppState::InWorld), scuttle)
+            .add_systems(Startup, mix_the_oars)
             // Only for a world with no server behind it — see [`launch`].
             // A served world's boats arrive as tellings instead.
             .add_systems(
@@ -908,10 +972,10 @@ impl Plugin for BoatPlugin {
                 // not motion — it sets the hull to the height of the ground
                 // under it — so leaving it running means a chunk arriving
                 // under the pause menu is settled on before the player looks
-                // again. The pennant and the sail come last, and outside the
-                // pause for the same reason: both are drawn off the hull's
-                // rotation, and reading it before this frame's steering wrote
-                // it leaves the cloth a frame behind its mast.
+                // again. The pennant, the sail and the oars come after, and
+                // outside the pause for the same reason: all are drawn off
+                // what the hull's steering wrote, and reading it before this
+                // frame's steering wrote it leaves them a frame behind.
                 (
                     // The dev boat switch first, so a frame that changes the
                     // kind sails and floats the hull it settled on.
@@ -920,6 +984,10 @@ impl Plugin for BoatPlugin {
                     float,
                     fly_the_pennant,
                     trim_the_sails,
+                    // Conducted before rowed, so a scene that arrived this
+                    // frame rows this frame.
+                    conduct_the_oars,
+                    row,
                     // The hulls nobody here is steering, ridden after the
                     // one that is: same water, same frame.
                     moor,
@@ -1032,6 +1100,7 @@ fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: HullKind)
         commands.entity(hull).with_child((
             Name::new("Rowboat"),
             Fitting,
+            Oared,
             WorldAssetRoot(
                 kit.assets
                     .load(GltfAssetLabel::Scene(0).from_asset(ROWBOAT_MODEL)),
@@ -1463,6 +1532,129 @@ fn fly_the_pennant(
     }
 }
 
+/// Mixes the rowboat's two clips together once for the whole run, exactly as
+/// the figure's gaits are. Both hang at full weight — a node's weight
+/// *multiplies* what the player asks for rather than being a starting value
+/// it overrides — and the mixing is done entirely by what [`row`] sets on
+/// the playing animations.
+fn mix_the_oars(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+) {
+    let mut graph = AnimationGraph::new();
+    let root = graph.root;
+    let blend = graph.add_blend(1.0, root);
+    let cycle: Handle<AnimationClip> =
+        assets.load(GltfAssetLabel::Animation(STROKE).from_asset(ROWBOAT_MODEL));
+
+    let stowed = graph.add_clip(
+        assets.load(GltfAssetLabel::Animation(STOWED).from_asset(ROWBOAT_MODEL)),
+        1.0,
+        blend,
+    );
+    let stroke = graph.add_clip(cycle.clone(), 1.0, blend);
+
+    commands.insert_resource(Rowing {
+        graph: graphs.add(graph),
+        stowed,
+        stroke,
+        cycle,
+    });
+}
+
+/// Readies a rowboat's oars as its scene finishes arriving: the loader puts
+/// an [`AnimationPlayer`] on the root of whatever it found animated, and
+/// this hands the rowboat's the graph and starts both clips — the stroke
+/// *paused*, because it is played to be seeked; see [`row`].
+fn conduct_the_oars(
+    mut commands: Commands,
+    rowing: Res<Rowing>,
+    hierarchy: Query<&ChildOf>,
+    oared: Query<(), With<Oared>>,
+    hulls: Query<(), With<Vessel>>,
+    mut arrivals: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
+) {
+    for (entity, mut player) in &mut arrivals {
+        // Somebody else's model: the figure standing on this very deck
+        // arrives through the same query, and its player is the gait's.
+        if above(&hierarchy, &oared, entity).is_none() {
+            continue;
+        }
+        // And whose hull the oars pull, so the stroke is seeked by that
+        // hull's own way.
+        let Some(hull) = above(&hierarchy, &hulls, entity) else {
+            continue;
+        };
+
+        commands.entity(entity).insert((
+            AnimationGraphHandle(rowing.graph.clone()),
+            Rower {
+                hull,
+                phase: 0.0,
+                out: 0.0,
+            },
+        ));
+        player.play(rowing.stowed).repeat();
+        player.play(rowing.stroke).repeat().pause();
+    }
+}
+
+/// Rows the oars by the way the hull is making: the stroke seeked to the
+/// point the hull's own advance has pulled it round to, and shown only while
+/// there is a pull asked for or way still on — at rest the oars lie stowed.
+///
+/// The same seek-by-ground-covered arrangement the walking figure uses, with
+/// [`Boat::way`] standing in for measuring the transform: [`steer`] advances
+/// the hull by exactly `way * dt` and zeroes the way it grounds on, so
+/// reading the way after it *is* reading the water covered this frame. The
+/// drive itself is still flat — see [`steer`] — so the hull glides evenly
+/// while the blades circle; giving the surge to the stroke is the step not
+/// yet taken.
+///
+/// Nothing happens until the clip has loaded, which is a frame or two after
+/// the rig — the oars hold the file's rest pose until then.
+fn row(
+    time: Res<Time>,
+    rowing: Res<Rowing>,
+    clips: Res<Assets<AnimationClip>>,
+    boats: Query<&Boat>,
+    mut rowers: Query<(&mut Rower, &mut AnimationPlayer)>,
+) {
+    let Some(cycle) = clips.get(&rowing.cycle).map(AnimationClip::duration) else {
+        return;
+    };
+    let dt = time.delta_secs();
+
+    for (mut rower, mut player) in &mut rowers {
+        // A hull nobody is aboard has no sailing state at all: a moored
+        // dinghy lies with its oars in.
+        let (way, pulling) = boats
+            .get(rower.hull)
+            .map_or((0.0, false), |boat| (boat.way, boat.sails_set));
+        rower.phase = (rower.phase + way * dt / PULL).rem_euclid(1.0);
+
+        // Out while a pull is asked for or the hull still carries way: the
+        // glide after the last pull still moves water past the blades, and
+        // oars shipped mid-glide would be snatched in mid-stroke. Pulling
+        // against a beach holds them out too, frozen where the way died,
+        // which is what leaning on stopped oars looks like.
+        let target = if pulling || way != 0.0 { 1.0 } else { 0.0 };
+        rower.out = settled(
+            rower.out + (target - rower.out) * eased(SHIPPING, dt),
+            target,
+        );
+
+        if let Some(stroke) = player.animation_mut(rowing.stroke) {
+            stroke.set_weight(rower.out);
+            stroke.seek_to(rower.phase * cycle);
+        }
+        if let Some(stowed) = player.animation_mut(rowing.stowed) {
+            stowed.set_weight(1.0 - rower.out);
+        }
+    }
+}
+
 /// Keeps the boat on the surface it is over: the ground where the ground
 /// stands proud of the water, and the swell where it does not — the same rule
 /// the other players' markers ride. [`Ground::surface`] is this with a flat
@@ -1716,8 +1908,9 @@ fn steer(
         match hull.mast {
             Some(_) => hull.speed * sail_drive(transform.forward().xz(), conditions.wind()),
             // Rowed: the oars pull whatever the wind is doing. A flat
-            // drive for now — when the stroke is worked into the game the
-            // surge will belong to the animation.
+            // drive still — [`row`] seeks the stroke to match the way made
+            // here, and giving the surge to the stroke is the step not yet
+            // taken.
             None => hull.speed,
         }
     } else if astern {
@@ -2193,10 +2386,174 @@ mod tests {
 
     #[test]
     fn the_rowboat_ships_its_oars_and_pulls_them() {
-        // The two states a boat with oars in it has, and the order a clip is
-        // asked for by. Renaming an action in Blender is a keystroke, and the
-        // boat that came back would row with its oars lying in the bilges.
-        assert_eq!(clip_names(ROWBOAT_MODEL), ["stowed", "stroke"]);
+        // The two states a boat with oars in it has, and the position the
+        // game asks for each at. Renaming or reordering an action in Blender
+        // is a keystroke, and the boat that came back would row with its
+        // oars lying in the bilges.
+        let clips = clip_names(ROWBOAT_MODEL);
+        assert_eq!(clips.get(STOWED).map(String::as_str), Some("stowed"));
+        assert_eq!(clips.get(STROKE).map(String::as_str), Some("stroke"));
+        assert_eq!(clips.len(), 2);
+    }
+
+    /// Stands in for the stroke clip the file would have brought, so the
+    /// seeking can be tested without a render app to load a glTF with. One
+    /// second long, which makes a seek time a fraction of the cycle read
+    /// directly.
+    const CYCLE: f32 = 1.0;
+
+    /// A match refitted to the rowboat, with a stand-in stroke clip loaded
+    /// and an animation player under the scene where the loader would have
+    /// put one — returned alongside the app, ready to be read.
+    fn rowing_app() -> (App, Entity) {
+        let mut app = test_app();
+        app.world_mut().resource_mut::<Toggles>().boat = HullKind::Rowboat;
+        app.update();
+
+        let (cycle, stroke) = {
+            let rowing = app.world().resource::<Rowing>();
+            (rowing.cycle.clone(), rowing.stroke)
+        };
+        let mut clip = AnimationClip::default();
+        clip.set_duration(CYCLE);
+        app.world_mut()
+            .resource_mut::<Assets<AnimationClip>>()
+            .insert(&cycle, clip)
+            .expect("the stand-in clip goes where the real one would");
+
+        let scene = app
+            .world_mut()
+            .query_filtered::<Entity, With<Oared>>()
+            .single(app.world())
+            .expect("the refit hung no rowboat scene");
+        let rower = app
+            .world_mut()
+            .spawn((AnimationPlayer::default(), ChildOf(scene)))
+            .id();
+        run_frames(&mut app, 2);
+        assert!(
+            app.world()
+                .entity(rower)
+                .get::<AnimationPlayer>()
+                .expect("a rower")
+                .animation(stroke)
+                .is_some(),
+            "the oars were never conducted"
+        );
+        (app, rower)
+    }
+
+    /// The stroke's seek time and weight and the stowed pose's weight, as
+    /// the oars are playing them.
+    fn oars_of(app: &mut App, rower: Entity) -> (f32, f32, f32) {
+        let rowing = app.world().resource::<Rowing>();
+        let (stroke, stowed) = (rowing.stroke, rowing.stowed);
+        let player = app
+            .world()
+            .entity(rower)
+            .get::<AnimationPlayer>()
+            .expect("a rower");
+        let pulling = player.animation(stroke).expect("the stroke is playing");
+        let resting = player
+            .animation(stowed)
+            .expect("the stowed pose is playing");
+        assert!(
+            (pulling.weight() + resting.weight() - 1.0).abs() < 1e-4,
+            "the blend does not add up: {} and {}",
+            pulling.weight(),
+            resting.weight()
+        );
+        (pulling.seek_time(), pulling.weight(), resting.weight())
+    }
+
+    #[test]
+    fn the_oars_lie_stowed_at_rest_and_pull_by_the_water_covered() {
+        // The whole point of driving the stroke by distance, exactly as the
+        // figure's run is: one pull is PULL metres of water, so the blades
+        // cannot slip under a hull moving at some other speed — and the clip
+        // never advances on its own, pausing it being what leaves the way in
+        // charge.
+        let (mut app, rower) = rowing_app();
+
+        // At rest, nothing asked: the stowed pose carries all the weight.
+        let (_, pulling, stowed) = oars_of(&mut app, rower);
+        assert_eq!((pulling, stowed), (0.0, 1.0), "the oars are out at rest");
+
+        let from = boat(&mut app).translation;
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 60);
+
+        let covered = boat(&mut app).translation.xz().distance(from.xz());
+        assert!(covered > 0.5, "not enough water covered to tell");
+        let (seek, pulling, _) = oars_of(&mut app, rower);
+        assert!(pulling > 0.9, "a hull under oars is only {pulling} pulling");
+        let expected = (covered / PULL).rem_euclid(1.0) * CYCLE;
+        assert!(
+            (seek - expected).abs() < 0.01,
+            "{covered:.2} m of water left the stroke at {seek:.3} s, not {expected:.3}"
+        );
+        assert!(
+            app.world()
+                .entity(rower)
+                .get::<AnimationPlayer>()
+                .expect("a rower")
+                .animation(app.world().resource::<Rowing>().stroke)
+                .expect("the stroke is playing")
+                .is_paused(),
+            "the stroke is running on its own clock"
+        );
+
+        // Oars in and the glide run off: the boat settles back to stowed —
+        // exactly, both ways being snapped, so a resting boat holds one pose
+        // frame after frame.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowUp);
+        tap(&mut app, KeyCode::ArrowDown);
+        run_frames(&mut app, SETTLED);
+        assert_eq!(way_on(&mut app), 0.0);
+        let (_, pulling, stowed) = oars_of(&mut app, rower);
+        assert_eq!((pulling, stowed), (0.0, 1.0), "the oars were left out");
+    }
+
+    #[test]
+    fn backing_water_pulls_the_stroke_backwards() {
+        // Half a pull astern runs the same cycle the other way, without a
+        // second clip existing — the phase wraps below zero to the top of
+        // the turn.
+        let (mut app, rower) = rowing_app();
+        hold(&mut app, KeyCode::ArrowDown);
+        run_frames(&mut app, 30);
+
+        let (seek, pulling, _) = oars_of(&mut app, rower);
+        assert!(pulling > 0.0, "backing water never got the oars out");
+        assert!(
+            seek > CYCLE * 0.5,
+            "the stroke ran forwards on a boat backing water: {seek}"
+        );
+    }
+
+    #[test]
+    fn the_figure_aboard_is_not_taken_for_oars() {
+        // The loader puts an animation player on anything animated it finds,
+        // and a figure standing in the rowboat is under the same hull — only
+        // the players under the rowboat's own scene are the oars'.
+        let (mut app, _) = rowing_app();
+        let figure = app
+            .world_mut()
+            .query_filtered::<Entity, With<Player>>()
+            .single(app.world())
+            .expect("a match should have a player in it");
+        let stranger = app
+            .world_mut()
+            .spawn((AnimationPlayer::default(), ChildOf(figure)))
+            .id();
+        run_frames(&mut app, 2);
+
+        assert!(
+            app.world().entity(stranger).get::<Rower>().is_none(),
+            "the walker's own player was taken for oars"
+        );
     }
 
     #[test]
