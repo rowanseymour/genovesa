@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
-use bevy::window::ExitCondition;
+use bevy::window::{ExitCondition, WindowResolution};
 
 use game::ambience::AmbiencePlugin;
 use game::backdrop::BackdropPlugin;
@@ -30,13 +30,14 @@ use game::menu::MenuPlugin;
 use game::models::ModelsPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
 use game::player::PlayerPlugin;
+use game::settings::{self, DisplaySettings, SettingsPlugin};
 use game::sky::SkyPlugin;
 use game::stopping::StoppingPlugin;
 use game::terrain::TerrainPlugin;
 use game::trees::TreesPlugin;
 use game::wake::WakePlugin;
 use game::wildlife::WildlifePlugin;
-use game::{AppState, Helm, WINDOW};
+use game::{AppState, Helm};
 
 fn main() -> ExitCode {
     let mut args = match cli::parse(std::env::args().skip(1).collect()) {
@@ -92,7 +93,22 @@ fn main() -> ExitCode {
 fn run(args: Args, session: Option<Session>) {
     let mut app = App::new();
 
-    app.add_plugins(DefaultPlugins.set(window_plugin(&args)).set(asset_plugin()));
+    // Read off the file before the window is built, because the window is
+    // built out of it — see [`settings::opening`]. A capture run reads
+    // nothing: a picture asked for by the command line has to come out the
+    // same on any machine, and the settings are this machine's.
+    let display = if args.is_capture() {
+        DisplaySettings::default()
+    } else {
+        settings::load()
+    };
+    app.insert_resource(display);
+
+    app.add_plugins(
+        DefaultPlugins
+            .set(window_plugin(&args, &display))
+            .set(asset_plugin()),
+    );
 
     // Capturing has no window, so nothing drives the frame loop — winit's
     // runner has no events to wait on. Run frames back to back instead, as
@@ -165,7 +181,7 @@ fn run(args: Args, session: Option<Session>) {
             // conditioning on a book being open — then the sheet the menus
             // stand on, and the menus. Nested only because a plugin tuple
             // holds fifteen.
-            (LogbookPlugin, BackdropPlugin, MenuPlugin),
+            (LogbookPlugin, BackdropPlugin, MenuPlugin, SettingsPlugin),
             // The session — harmless offline, its systems conditioning on a
             // joined one — and the machine's own way of asking this to quit,
             // which matters most in a run that is hosting: the world is
@@ -224,7 +240,7 @@ fn bundled_assets() -> Option<String> {
 
 /// A window to play in, or none at all when the run is only here to write
 /// pictures.
-fn window_plugin(args: &Args) -> WindowPlugin {
+fn window_plugin(args: &Args, display: &DisplaySettings) -> WindowPlugin {
     if args.is_capture() {
         return WindowPlugin {
             primary_window: None,
@@ -235,10 +251,12 @@ fn window_plugin(args: &Args) -> WindowPlugin {
         };
     }
 
+    let (mode, size) = settings::opening(display);
     WindowPlugin {
         primary_window: Some(Window {
             title: "Genovesa".into(),
-            resolution: (WINDOW.x, WINDOW.y).into(),
+            mode,
+            resolution: WindowResolution::new(size.x, size.y),
             ..default()
         }),
         ..default()
