@@ -570,6 +570,12 @@ pub(crate) struct BoatState {
     /// Still not ownership, which boats do not have: it says nothing about who
     /// may row this hull, only whose doing it was that it is in the water.
     ///
+    /// The claim is the hull's and not the player's, so a player can hold more
+    /// than one — board two beached dinghies in turn, stepping out of each,
+    /// and both say they are theirs. The hoists then take whichever they find
+    /// first, which is arbitrary and left so: nobody is stranded, since only a
+    /// free hull is ever taken, and the fleet does not grow either way.
+    ///
     /// Session-local, like [`BoatState::virgin`] and for a plainer reason —
     /// a [`PlayerId`] is minted per connection, so a name written to
     /// [`keeper::BoatRecord`] would answer to nobody in the world that read it
@@ -1517,11 +1523,11 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     // cheating — boats have keepers and not owners, so the
                     // dinghy somebody beached and logged off beside is one
                     // another player may honestly row away while they are
-                    // gone. So they are dealt a hull, and the same one an
-                    // arrival gets: `fresh_hull` hands down a free virgin
-                    // sloop within [`SPARE_BERTH`] before it mints, so a
-                    // player logging in and out on one beach is handed the
-                    // same boat back rather than a new one every time.
+                    // gone. So they are dealt a hull, the same way an arrival
+                    // is. What keeps that from repeating on one beach is the
+                    // arm above rather than anything here: a player dealt one
+                    // leaves at a helm, and a helm is resumed rather than
+                    // re-dealt.
                     //
                     // Where they stood, which for somebody who rowed ashore is
                     // the waterline, and inland for somebody who walked. A
@@ -2171,11 +2177,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             if let Some(boat) = hoisted {
                 boats.remove(&boat);
             }
-            // Nothing worth saying about a hull lying free when the next word
-            // is that it is gone.
-            let told = helm
-                .filter(|boat| Some(*boat) != hoisted)
-                .and_then(|boat| boats.get(&boat).map(|state| state.told(boat)));
+            // The freed helm is never the hull just hoisted — the find above
+            // passes over it — so this says a hull lies free without any risk
+            // of contradicting the going that follows.
+            let told = helm.and_then(|boat| boats.get(&boat).map(|state| state.told(boat)));
             (told, hoisted)
         };
         if let Some(told) = told {

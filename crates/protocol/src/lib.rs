@@ -430,10 +430,14 @@ pub enum ToServer {
     /// The hull that is lowered need not be a new one, and a grant may take
     /// one away: a rowing boat already lying free where this one is asked
     /// for is the boat that goes over the side, and whatever boat the asker
-    /// last lowered is hoisted out of the world if it still lies free —
-    /// [`ToClient::BoatGone`], after the two tellings above. A player has
-    /// one boat in the water at a time; a client that draws its own tender
-    /// before the answer comes must be ready for either.
+    /// last had in the water is hoisted out of the world if it still lies
+    /// free — [`ToClient::BoatGone`], after the two tellings above. Last
+    /// *had*, rather than last lowered: a rowing boat belongs to whoever
+    /// took it up most recently, by lowering it or by boarding it, so the
+    /// boat a grant retires may be one the asker found afloat and rowed
+    /// rather than one they ever put over a side. A player has one boat in
+    /// the water at a time; a client that draws its own tender before the
+    /// answer comes must be ready for either.
     ///
     /// The way back aboard is [`ToServer::Board`] from the rowing boat's
     /// thwarts: the grant seats the asker at the ship's helm and the tender
