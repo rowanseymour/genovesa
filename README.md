@@ -258,13 +258,22 @@ off the coast of the same island, at the helm of a boat the world provides —
 and other players appear in their actual boats, or as coloured markers when
 they are ashore on their own feet.
 
+The shore is reached the way sailors reach one: anchor at a safe distance and
+take the ship's boat in. One key at the helm lowers the rowing boat alongside
+and steps you down into it; rowed in until its keel takes the sand, the same
+key steps you ashore, and the dinghy waits on the beach. Lay it back
+alongside the ship and the key crosses you to the helm, the boat going aboard
+with you. A ship's own rail is never the way ashore — its keel is stopped by
+water the dinghy barely notices, which is what the little boat is *for*.
+
 Boats are the world's, not the players': the server tracks every hull, and a
-boat is used rather than owned. Step ashore and yours lies at anchor exactly
-where you left it — visible to everyone, including while you are away — and
-an empty helm belongs to whoever reaches it first, your own included. Leave
-a world at a helm and you return to it, provided nobody has sailed it off in
-the meantime; harbours slowly collect the boats of players who never came
-back, which is the world remembering having been lived in.
+boat is used rather than owned. Step ashore and the boats you leave lie
+exactly where you left them — the ship at anchor, the dinghy on the beach,
+visible to everyone, including while you are away — and an empty helm or
+thwart belongs to whoever reaches it first, your own included. Leave a world
+at a helm and you return to it, provided nobody has sailed it off in the
+meantime; harbours slowly collect the boats of players who never came back,
+which is the world remembering having been lived in.
 
 The server also owns the sea's creatures worth agreeing on: sharks patrol
 the shallows with their fins cutting the surface, dolphin pods and the odd

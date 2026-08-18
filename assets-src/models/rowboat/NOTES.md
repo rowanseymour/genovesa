@@ -77,11 +77,11 @@ taken briskly, but nothing should be left standing halfway.
 
 ## What the game does with it
 
-The world does not deal one out yet: the only way afloat is the dev switch —
-`set boat rowboat` at the console, `--boat rowboat` on a command line — which
-redresses the player's own hull on this client alone. The numbers the game
-holds this file to are the `ROWBOAT` hull's in `crates/game/src/boat.rs` —
-length, draft, the sole and the sea-hole footprint above — pinned by
+This is the ship's boat: the world deals one out whenever a ship's helm
+lowers it to go ashore, and takes it back aboard with the boarding that lays
+it alongside again. The numbers the game holds this file to are the
+`ROWBOAT` hull's in `crates/game/src/boat.rs` — length, draft, the sole and
+the sea-hole footprint above — pinned by
 `the_rowboat_model_is_the_dinghy_the_game_floats` the way the ship's are.
 Still the file's to give and the game's to be pinned to; what is not settled
 yet is where somebody aboard *sits*, the rower not being rigged.

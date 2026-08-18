@@ -203,7 +203,8 @@ const BEAST_WORDS: [(BeastKind, &str); 3] = [
 ];
 
 /// And the boats', on the same terms.
-const HULL_WORDS: [(BoatKind, &str); 1] = [(BoatKind::Sloop, "sloop")];
+const HULL_WORDS: [(BoatKind, &str); 2] =
+    [(BoatKind::Sloop, "sloop"), (BoatKind::Rowboat, "rowboat")];
 
 /// How this file spells a kind.
 fn spelling<K: PartialEq>(table: &[(K, &'static str)], kind: K) -> &'static str {
@@ -1082,7 +1083,7 @@ mod tests {
                 },
                 BoatRecord {
                     id: BoatId(0xDEAD),
-                    kind: BoatKind::Sloop,
+                    kind: BoatKind::Rowboat,
                     position: Vec2::new(64.0, 8.0),
                     heading: -2.25,
                 },

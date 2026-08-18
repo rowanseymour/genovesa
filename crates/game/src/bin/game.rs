@@ -179,10 +179,6 @@ fn run(args: Args, session: Option<Session>) {
             },
         ));
 
-    // After the plugins, whose init made the toggles exist — the boat plugin
-    // does it even for capture runs, which carry no console.
-    app.world_mut().resource_mut::<game::debug::Toggles>().boat = args.boat;
-
     app.run();
 }
 
