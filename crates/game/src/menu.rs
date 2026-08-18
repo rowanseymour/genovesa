@@ -4,7 +4,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource, FontStyle};
-use bevy::window::{Monitor, PrimaryMonitor};
+use bevy::window::{Monitor, PrimaryMonitor, PrimaryWindow};
 
 use std::time::SystemTime;
 
@@ -1679,10 +1679,15 @@ fn display_actions(
 /// panel every frame.
 fn refresh_display(
     settings: Res<DisplaySettings>,
-    monitors: Query<&Monitor, With<PrimaryMonitor>>,
+    monitors: Query<(Entity, &Monitor, Has<PrimaryMonitor>)>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut readouts: Query<(&DisplayText, &mut Text)>,
 ) {
-    let monitor = monitors.iter().next();
+    // The screen this window is on, which on two monitors is not the primary
+    // one and is the only one the caveat can honestly be about — see
+    // [`settings::showing_on`].
+    let monitor =
+        settings::showing_on(windows.single().ok(), monitors.iter()).map(|(_, screen)| screen);
     for (which, mut text) in &mut readouts {
         let saying = match which {
             DisplayText::Fullscreen => switch_label(settings.fullscreen).to_string(),
@@ -1691,7 +1696,9 @@ fn refresh_display(
             // Only worth a word when the display has no such mode, and only
             // then about the screen it would have filled: windowed, a size is
             // a size and every display can do it.
-            DisplayText::Caveat if settings::available(settings.resolution, monitor) => {
+            DisplayText::Caveat
+                if !settings.fullscreen || settings::available(settings.resolution, monitor) =>
+            {
                 String::new()
             }
             DisplayText::Caveat => format!(
@@ -2284,18 +2291,23 @@ mod tests {
         app
     }
 
-    /// Sends the keypress the controls screen reads: a real one carries both
-    /// the position pressed and what that position typed, and the screen wants
+    /// A keypress as the controls screen reads it: a real one carries both the
+    /// position pressed and what that position typed, and the screen wants
     /// each for a different purpose.
-    fn type_key(app: &mut App, key: KeyCode, typed: &str) {
-        app.world_mut().write_message(KeyboardInput {
+    fn a_press(key: KeyCode, typed: &str) -> KeyboardInput {
+        KeyboardInput {
             key_code: key,
             logical_key: Key::Character(typed.into()),
             state: ButtonState::Pressed,
             text: None,
             repeat: false,
             window: Entity::PLACEHOLDER,
-        });
+        }
+    }
+
+    /// Sends one, down the channel [`settings_keys`] reads.
+    fn type_key(app: &mut App, key: KeyCode, typed: &str) {
+        app.world_mut().write_message(a_press(key, typed));
         app.update();
     }
 
@@ -2345,9 +2357,28 @@ mod tests {
         pressed
     }
 
-    /// Taps a key for exactly one frame. Releasing afterwards matters: a key
-    /// still held down never counts as just-pressed again.
+    /// Taps a key for exactly one frame, down the channel [`options_keys`]
+    /// reads. Releasing afterwards matters: a key still held down never counts
+    /// as just-pressed again.
     fn press_key(app: &mut App, key: KeyCode) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(key);
+        app.update();
+
+        let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        input.release(key);
+        input.clear();
+    }
+
+    /// One key, hit the way a keyboard hits it: both channels at once. A real
+    /// press is a message *and* a button held down for a frame, and the menus
+    /// read it both ways — [`options_keys`] off the button, [`settings_keys`]
+    /// off the message. A test that writes only the channel the system it is
+    /// about happens to read can never catch the two of them answering the
+    /// same press.
+    fn hit_key(app: &mut App, key: KeyCode, typed: &str) {
+        app.world_mut().write_message(a_press(key, typed));
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(key);
@@ -2947,6 +2978,54 @@ mod tests {
         assert_eq!(state(&app), AppState::MainMenu);
     }
 
+    /// And Escape is Back on every rung of it, stopping at the menu it started
+    /// from rather than carrying on into whatever is behind that.
+    #[test]
+    fn escape_walks_back_down_the_options_ladder_one_rung_at_a_time() {
+        let mut app = test_app(AppState::MainMenu);
+        click(&mut app, MenuButton::Options);
+        click(&mut app, MenuButton::Display);
+        assert_eq!(state(&app), AppState::Display);
+
+        for expected in [AppState::Options, AppState::MainMenu] {
+            press_key(&mut app, KeyCode::Escape);
+            // The frame the transition lands on.
+            app.update();
+            assert_eq!(state(&app), expected);
+        }
+        // A press with nowhere left to go leaves the menu where it is.
+        press_key(&mut app, KeyCode::Escape);
+        app.update();
+        assert_eq!(state(&app), AppState::MainMenu);
+    }
+
+    /// The one key two systems both hear, on the one screen where they would
+    /// disagree about it. Escape arrives as a message and as a held button at
+    /// once, and on the controls screen [`settings_keys`] must be the only one
+    /// to act on it: with a row armed it means "not that key" and the screen
+    /// stays put, and with none armed it is one rung down rather than two.
+    #[test]
+    fn one_escape_on_the_controls_screen_is_answered_once() {
+        let mut app = test_app(AppState::MainMenu);
+        click(&mut app, MenuButton::Options);
+        click(&mut app, MenuButton::Controls);
+
+        click(&mut app, MenuButton::Rebind(Action::MoveForward));
+        hit_key(&mut app, KeyCode::Escape, "\u{1b}");
+        // A frame in which a step back would have landed, had one been taken.
+        app.update();
+        assert_eq!(waiting_on(&app), None, "the row is still waiting for a key");
+        assert_eq!(
+            state(&app),
+            AppState::Controls,
+            "cancelling a row also left the screen"
+        );
+
+        hit_key(&mut app, KeyCode::Escape, "\u{1b}");
+        app.update();
+        assert_eq!(state(&app), AppState::Options, "one press, one rung");
+    }
+
     /// What a display row currently reads on its right-hand button.
     fn row_says(app: &mut App, which: DisplayText) -> String {
         app.world_mut()
@@ -2995,12 +3074,22 @@ mod tests {
     /// A machine that has reported no monitors cannot promise a resolution
     /// below native, and the screen owns up to it rather than pretending.
     /// Headless is exactly that machine, which is what makes this testable.
+    ///
+    /// Only about filling the screen, though: a caveat is a word about a
+    /// display mode, and a window has no need of one.
     #[test]
     fn a_resolution_the_screen_cannot_promise_is_owned_up_to() {
         let mut app = test_app(AppState::Display);
         assert_eq!(row_says(&mut app, DisplayText::Caveat), "");
 
         click(&mut app, MenuButton::CycleResolution);
+        assert_eq!(
+            row_says(&mut app, DisplayText::Caveat),
+            "",
+            "a windowed size was called impossible, and it is only a size"
+        );
+
+        click(&mut app, MenuButton::ToggleFullscreen);
         assert!(
             row_says(&mut app, DisplayText::Caveat).contains("no 2160p mode"),
             "the screen claimed a mode it has no monitor to ask about"

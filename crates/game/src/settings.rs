@@ -21,6 +21,9 @@
 //! monitor is the one that says which of those exist — see [`mode_for`]. A
 //! display with nothing that size keeps its own, and the screen says so rather
 //! than pretending.
+//!
+//! And "the monitor" means one monitor, the one the window is on, for every
+//! question asked of it here and on the display screen — see [`showing_on`].
 
 use std::fmt::Write as _;
 use std::fs;
@@ -30,7 +33,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use bevy::window::{
     Monitor, MonitorSelection, PrimaryMonitor, PrimaryWindow, VideoMode, VideoModeSelection,
-    WindowMode,
+    WindowMode, WindowPosition,
 };
 
 use crate::{AppState, Helm};
@@ -129,17 +132,22 @@ pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        // Read once, here, rather than in a startup system: the binary builds
-        // its window out of these — see `window_plugin` — so they have to be
-        // known before there is an app to run a system in.
-        app.init_resource::<DisplaySettings>().add_systems(
-            Update,
-            dress_the_window.run_if(resource_exists::<DisplaySettings>),
-        );
-        // Written when the screen that changes them is left, which is one
-        // write per visit rather than one per press of a cycling button. Both
-        // ways to the screen — see [`crate::menu`].
-        app.add_systems(OnExit(AppState::Display), keep_settings)
+        // Shared with the menu that changes them and the overlay that draws
+        // beside them — see [`crate::menu`] and [`crate::debug`] — each
+        // initialising it for its own tests. A real run has them off the file
+        // before there is an app at all, the first window being built out of
+        // them: `bin/game.rs` reads them and inserts them over this.
+        app.init_resource::<DisplaySettings>()
+            .init_resource::<AsOpened>()
+            .add_systems(Update, dress_the_window);
+        // Noted on the way into the screen that changes them and written on
+        // the way out, which is one write per visit rather than one per press
+        // of a cycling button — and none at all for a visit that changed
+        // nothing, which is what [`load`] promises a file this build cannot
+        // read. Both ways to the screen — see [`crate::menu`].
+        app.add_systems(OnEnter(AppState::Display), note_settings)
+            .add_systems(OnEnter(Helm::Display), note_settings)
+            .add_systems(OnExit(AppState::Display), keep_settings)
             .add_systems(OnExit(Helm::Display), keep_settings);
     }
 }
@@ -150,26 +158,31 @@ impl Plugin for SettingsPlugin {
 /// to what it should be, every pass, rather than when a switch is thrown. It
 /// has to be, because what it should be can change with nothing here changing
 /// at all — a run comes up before winit has reported a single monitor, so a
-/// resolution wanting an exclusive mode has to settle for borderless on frame
-/// one and get what it asked for a frame or two later. Comparing before writing
-/// is what keeps that from marking `Window` changed forever, which the backdrop
-/// would answer by re-ruling its sheet forever.
+/// resolution wanting an exclusive mode has to settle for borderless until
+/// there is a screen to read one off. Comparing before writing is what keeps
+/// that from marking `Window` changed forever, which the backdrop would answer
+/// by re-ruling its sheet forever.
 ///
-/// The *size* is the opposite and deliberately so: written only when the
-/// settings themselves change. Asserted every pass, it would undo the player
-/// dragging the window's own corner, over and over, as fast as they could drag
-/// it.
+/// The *size* is compared too, but against the size this system last asked
+/// for rather than against the window's own. That difference is the whole of
+/// what leaves a dragged window alone: a drag changes the window and not what
+/// this wants, so nothing is written and the drag stands. What does change
+/// what this wants is the screen turning up — a width follows from the shape
+/// of the display, and the guess made before there was one to ask is only
+/// right on a widescreen — so that lands a frame or two in, once, and then
+/// stops.
 fn dress_the_window(
     settings: Res<DisplaySettings>,
-    monitors: Query<(Entity, &Monitor), With<PrimaryMonitor>>,
+    monitors: Query<(Entity, &Monitor, Has<PrimaryMonitor>)>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut asked_for: Local<Option<UVec2>>,
 ) {
     // A capture run has no window at all, and asks for its size on the command
     // line instead — see [`crate::capture`].
     let Ok(mut window) = windows.single_mut() else {
         return;
     };
-    let monitor = monitors.iter().next();
+    let monitor = showing_on(Some(&window), monitors.iter());
 
     let wanted = if settings.fullscreen {
         fullscreen_mode(settings.resolution, monitor)
@@ -184,16 +197,81 @@ fn dress_the_window(
     // count of pixels by another route. Left alone while fullscreen, where the
     // mode above has already said how big the surface is and writing a size
     // over it would only fight winit.
-    if settings.is_changed() && !settings.fullscreen {
-        let shape = monitor.map_or(UVec2::new(16, 9), |(_, monitor)| monitor.physical_size());
-        let size = match settings.resolution {
-            Resolution::Native => crate::WINDOW,
-            Resolution::Rows(rows) => UVec2::new(width_for(shape, rows), rows),
-        };
+    if settings.fullscreen {
+        return;
+    }
+    // A shape to work a width out of, and 16:9 until there is a screen to ask
+    // — the same guess [`opening`] makes, and replaced by the real one on the
+    // frame a monitor arrives.
+    let shape = monitor.map_or(UVec2::new(16, 9), |(_, screen)| screen.physical_size());
+    let size = match settings.resolution {
+        Resolution::Native => crate::WINDOW,
+        Resolution::Rows(rows) => UVec2::new(width_for(shape, rows), rows),
+    };
+    if *asked_for != Some(size) {
+        *asked_for = Some(size);
         window
             .resolution
             .set_physical_resolution(size.x.max(1), size.y.max(1));
     }
+}
+
+/// The monitor a window is on, named by the entity that carries it.
+///
+/// "The screen" has to mean one screen and go on meaning the same one: the
+/// modes a resolution is checked against, the monitor a fullscreen is asked
+/// of, the shape a windowed width follows from and the caveat the display
+/// screen prints are four questions about the display the player is looking
+/// at, and on a second monitor they have different answers from the primary's.
+/// Asking [`PrimaryMonitor`] for all four is how a game fullscreen on the
+/// second screen answers "1080p" by taking a mode off the first and dragging
+/// itself over there to wear it.
+///
+/// Worked out from the geometry, winit's own idea of a current monitor not
+/// being readable from here: the displays lie side by side in one space of
+/// physical pixels, so the screen a window is on is the one it covers most of.
+/// A window whose corner is not a number yet — one still being created —
+/// covers nothing, and the primary monitor stands in for it, as it does for a
+/// run with no window of its own at all.
+pub fn showing_on<'a>(
+    window: Option<&Window>,
+    monitors: impl IntoIterator<Item = (Entity, &'a Monitor, bool)>,
+) -> Option<(Entity, &'a Monitor)> {
+    let rect = window.and_then(seen_at);
+    let (mut best, mut most) = (None, 0);
+    let mut primary = None;
+    for (entity, monitor, is_primary) in monitors {
+        if is_primary {
+            primary = Some((entity, monitor));
+        }
+        let covered = rect.map_or(0, |rect| overlap(rect, monitor));
+        if covered > most {
+            (best, most) = (Some((entity, monitor)), covered);
+        }
+    }
+    best.or(primary)
+}
+
+/// Where a window's pixels are in the space the monitors share, or `None` for
+/// one whose corner the window manager has not answered for yet.
+fn seen_at(window: &Window) -> Option<IRect> {
+    let WindowPosition::At(corner) = window.position else {
+        return None;
+    };
+    Some(IRect::from_corners(
+        corner,
+        corner + window.resolution.physical_size().as_ivec2(),
+    ))
+}
+
+/// How many of a window's pixels fall on this monitor.
+fn overlap(window: IRect, monitor: &Monitor) -> i64 {
+    let screen = IRect::from_corners(
+        monitor.physical_position,
+        monitor.physical_position + monitor.physical_size().as_ivec2(),
+    );
+    let shared = window.intersect(screen);
+    i64::from(shared.width()) * i64::from(shared.height())
 }
 
 /// How the window should first come up, for the binary that builds it before
@@ -209,10 +287,13 @@ fn dress_the_window(
 /// they wanted.
 pub fn opening(settings: &DisplaySettings) -> (WindowMode, UVec2) {
     let mode = if settings.fullscreen {
-        // `Primary` rather than the `Current` everything after this uses, and
-        // the difference is real: "current" means the monitor the window is
-        // on, and a window being created is not on one yet. Asking anyway gets
-        // "cannot find current monitor" out of winit and a guess for an answer.
+        // `Primary`, because a window being created is not on a monitor yet
+        // and there is no other honest answer: naming the one it is on takes
+        // a monitor to name. It is the answer [`fullscreen_mode`] gives while
+        // no monitor has been reported, too, so the first pass over this
+        // window finds the mode already right and writes nothing — a write of
+        // a *different* guess would only be asking winit the same unanswerable
+        // question a frame later.
         WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
     } else {
         WindowMode::Windowed
@@ -224,7 +305,7 @@ pub fn opening(settings: &DisplaySettings) -> (WindowMode, UVec2) {
     (mode, size)
 }
 
-/// The fullscreen this resolution asks for.
+/// The fullscreen this resolution asks for, on the screen the window is on.
 ///
 /// Borderless for native, which is the mode that behaves itself: it takes the
 /// desktop as it finds it and gives it back the same way. A resolution below
@@ -232,17 +313,20 @@ pub fn opening(settings: &DisplaySettings) -> (WindowMode, UVec2) {
 /// in which the display itself changes size — and a display with nothing that
 /// tall keeps borderless rather than being forced into a shape it has not
 /// offered.
+///
+/// Every answer names the screen it was worked out on rather than saying
+/// `Current` and trusting winit to agree, so a mode and the monitor it is
+/// asked of are the same monitor. Before any has been reported there is
+/// nothing to name and `Primary` stands in — see [`opening`].
 fn fullscreen_mode(resolution: Resolution, monitor: Option<(Entity, &Monitor)>) -> WindowMode {
-    let borderless = WindowMode::BorderlessFullscreen(MonitorSelection::Current);
+    let Some((entity, screen)) = monitor else {
+        return WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
+    };
+    let borderless = WindowMode::BorderlessFullscreen(MonitorSelection::Entity(entity));
     let Resolution::Rows(rows) = resolution else {
         return borderless;
     };
-    let Some((entity, monitor)) = monitor else {
-        return borderless;
-    };
-    match mode_for(monitor, rows) {
-        // Named by the monitor it was read off rather than by `Current`, so
-        // the mode and the screen it is being asked of are the same screen.
+    match mode_for(screen, rows) {
         Some(mode) => WindowMode::Fullscreen(
             MonitorSelection::Entity(entity),
             VideoModeSelection::Specific(mode),
@@ -304,15 +388,32 @@ pub fn load() -> DisplaySettings {
             // Left where it is rather than written over, the way a logbook this
             // build cannot read is: the file is somebody's preferences, and
             // failing to understand it is no licence to throw it away. The run
-            // plays on the defaults, and only a visit to the screen — which is
-            // somebody saying what they want in so many words — replaces it.
+            // plays on the defaults, and only somebody saying what they want in
+            // so many words — a switch actually thrown, not merely a screen
+            // opened and left — replaces it. See [`keep_settings`].
             warn!("cannot read the display settings: {why}");
             DisplaySettings::default()
         }
     }
 }
 
-fn keep_settings(settings: Res<DisplaySettings>) {
+/// What the settings were when the display screen was opened, so that leaving
+/// it can tell a change from a look.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct AsOpened(DisplaySettings);
+
+fn note_settings(settings: Res<DisplaySettings>, mut opened: ResMut<AsOpened>) {
+    opened.0 = *settings;
+}
+
+/// Writes what the screen was left set to, and only if leaving it left
+/// anything different. A visit that threw no switch has said nothing, and
+/// there is a file this build could not read that it must not answer with the
+/// defaults it fell back on — see [`load`].
+fn keep_settings(settings: Res<DisplaySettings>, opened: Res<AsOpened>) {
+    if *settings == opened.0 {
+        return;
+    }
     let Some(path) = place() else {
         return;
     };
@@ -417,14 +518,22 @@ fn on(value: &str) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    use bevy::window::WindowResolution;
+
     use super::*;
 
     fn a_monitor(modes: &[(u32, u32, u32)]) -> Monitor {
+        a_monitor_at(IVec2::ZERO, UVec2::new(3840, 2160), modes)
+    }
+
+    /// A monitor somewhere in the space the displays share, which is what
+    /// tells one from another — see [`showing_on`].
+    fn a_monitor_at(at: IVec2, size: UVec2, modes: &[(u32, u32, u32)]) -> Monitor {
         Monitor {
             name: None,
-            physical_width: 3840,
-            physical_height: 2160,
-            physical_position: IVec2::ZERO,
+            physical_width: size.x,
+            physical_height: size.y,
+            physical_position: at,
             refresh_rate_millihertz: Some(60_000),
             scale_factor: 2.0,
             video_modes: modes
@@ -435,6 +544,16 @@ mod tests {
                     refresh_rate_millihertz: *hz,
                 })
                 .collect(),
+        }
+    }
+
+    /// A window's corner and how big it is, which between them say which
+    /// screen it is on.
+    fn a_window_at(at: IVec2, size: UVec2) -> Window {
+        Window {
+            position: WindowPosition::At(at),
+            resolution: WindowResolution::new(size.x, size.y),
+            ..default()
         }
     }
 
@@ -531,6 +650,66 @@ mod tests {
         assert_eq!(mode.refresh_rate_millihertz, 120_000);
     }
 
+    /// Two displays side by side, and a window on the right-hand one. Every
+    /// question this file asks about "the screen" has to be asked of that one:
+    /// answering with the primary is how a fullscreen picked on the second
+    /// monitor takes a mode off the first and hauls the window over to it.
+    #[test]
+    fn the_screen_is_the_one_the_window_is_on_rather_than_the_first_one() {
+        let left = a_monitor_at(IVec2::ZERO, UVec2::new(1920, 1080), &[(1920, 1080, 60_000)]);
+        let right = a_monitor_at(
+            IVec2::new(1920, 0),
+            UVec2::new(2560, 1600),
+            &[(2560, 1600, 60_000)],
+        );
+        let (first, second) = (
+            Entity::from_raw_u32(1).expect("an entity"),
+            Entity::from_raw_u32(2).expect("an entity"),
+        );
+        let screens = [(first, &left, true), (second, &right, false)];
+
+        let over_there = a_window_at(IVec2::new(2100, 200), UVec2::new(1280, 720));
+        let (entity, monitor) = showing_on(Some(&over_there), screens).expect("a screen to be on");
+        assert_eq!(entity, second);
+        assert_eq!(monitor.physical_size(), UVec2::new(2560, 1600));
+
+        // And a window mostly on the first is on the first, a window straddling
+        // the two counting as on whichever it shows more of.
+        let mostly_here = a_window_at(IVec2::new(1600, 200), UVec2::new(600, 400));
+        assert_eq!(
+            showing_on(Some(&mostly_here), screens).map(|(entity, _)| entity),
+            Some(first)
+        );
+    }
+
+    /// The screen cannot always be told, and the primary is the stand-in: a
+    /// window still being created has no corner to compare, and a run drawing
+    /// pictures off screen has no window at all.
+    #[test]
+    fn a_window_that_is_on_no_screen_yet_falls_back_to_the_first() {
+        let primary = a_monitor(&[]);
+        let other = a_monitor_at(IVec2::new(4000, 0), UVec2::new(1920, 1080), &[]);
+        let (first, second) = (
+            Entity::from_raw_u32(1).expect("an entity"),
+            Entity::from_raw_u32(2).expect("an entity"),
+        );
+        let screens = [(first, &primary, true), (second, &other, false)];
+
+        let placeless = Window::default();
+        assert_eq!(
+            showing_on(Some(&placeless), screens).map(|(entity, _)| entity),
+            Some(first)
+        );
+        assert_eq!(
+            showing_on(None, screens).map(|(entity, _)| entity),
+            Some(first)
+        );
+        // And a machine that has reported no monitors has nothing to answer
+        // with, which every caller here already knows how to hear.
+        let none: [(Entity, &Monitor, bool); 0] = [];
+        assert!(showing_on(Some(&placeless), none).is_none());
+    }
+
     #[test]
     fn a_window_keeps_the_shape_of_the_screen_it_is_on() {
         // A resolution is a count of pixels, never a change of shape: 1080
@@ -561,6 +740,23 @@ mod tests {
             .clone()
     }
 
+    /// The window's own corner, dragged.
+    fn drag_to(app: &mut App, size: UVec2) {
+        let window = app
+            .world_mut()
+            .query_filtered::<Entity, With<PrimaryWindow>>()
+            .iter(app.world())
+            .next()
+            .expect("a window");
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("a window")
+            .resolution
+            .set_physical_resolution(size.x, size.y);
+        app.update();
+    }
+
     #[test]
     fn fullscreen_fills_the_screen_and_windowed_gives_it_back() {
         let mut app = a_windowed_app(DisplaySettings::default());
@@ -569,10 +765,11 @@ mod tests {
         app.world_mut().resource_mut::<DisplaySettings>().fullscreen = true;
         app.update();
         // Borderless, no monitor here having offered a mode to be exclusive
-        // about — see [`fullscreen_mode`].
+        // about — and on the primary, there being none to name and nothing
+        // else honest to say — see [`fullscreen_mode`].
         assert_eq!(
             the_window(&mut app).mode,
-            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
         );
 
         app.world_mut().resource_mut::<DisplaySettings>().fullscreen = false;
@@ -591,31 +788,57 @@ mod tests {
         });
         assert_eq!(the_window(&mut app).resolution.physical_size().y, 720);
 
-        // The corner, dragged.
-        let window = app
-            .world_mut()
-            .query_filtered::<Entity, With<PrimaryWindow>>()
-            .iter(app.world())
-            .next()
-            .expect("a window");
-        app.world_mut()
-            .entity_mut(window)
-            .get_mut::<Window>()
-            .expect("a window")
-            .resolution
-            .set_physical_resolution(1000, 800);
-        app.update();
+        drag_to(&mut app, UVec2::new(1000, 800));
         assert_eq!(
             the_window(&mut app).resolution.physical_size(),
             UVec2::new(1000, 800),
             "the drag was undone"
         );
 
-        // And asking for a resolution still takes, the settings having
-        // changed this time.
+        // And asking for a resolution still takes, this being a size the
+        // system has not asked for before rather than the one it already has.
         app.world_mut().resource_mut::<DisplaySettings>().resolution = Resolution::Rows(1080);
         app.update();
         assert_eq!(the_window(&mut app).resolution.physical_size().y, 1080);
+    }
+
+    /// The width follows from the shape of the screen, and the screen turns up
+    /// late: a run comes up before winit has reported a monitor, so the first
+    /// size is worked out on a guess of 16:9. The frame the real shape arrives
+    /// the window has to be put right, though not a setting has moved — the
+    /// whole reason [`width_for`] exists is a display that is not widescreen.
+    #[test]
+    fn a_window_is_resized_when_the_screen_it_is_on_becomes_known() {
+        let mut app = a_windowed_app(DisplaySettings {
+            resolution: Resolution::Rows(1080),
+            ..DisplaySettings::default()
+        });
+        // The guess, nothing having yet said this is not a widescreen.
+        assert_eq!(
+            the_window(&mut app).resolution.physical_size(),
+            UVec2::new(1920, 1080)
+        );
+
+        app.world_mut().spawn((
+            a_monitor_at(IVec2::ZERO, UVec2::new(2560, 1600), &[]),
+            PrimaryMonitor,
+        ));
+        app.update();
+        assert_eq!(
+            the_window(&mut app).resolution.physical_size(),
+            UVec2::new(1728, 1080),
+            "the window kept a width guessed before there was a screen to ask"
+        );
+
+        // Once, and no more: with the shape settled, a corner dragged after it
+        // stands, exactly as it does on a machine that never had a monitor to
+        // report.
+        drag_to(&mut app, UVec2::new(1000, 800));
+        assert_eq!(
+            the_window(&mut app).resolution.physical_size(),
+            UVec2::new(1000, 800),
+            "the drag was undone"
+        );
     }
 
     /// The whole point of keeping a file: what was set last time is what the
@@ -625,8 +848,10 @@ mod tests {
     /// one file would fail each other on whichever machine ran them at once.
     ///
     /// Written on the way *out* of the screen rather than on every press, so
-    /// what this has to show is that leaving is enough, and that a run which
-    /// never opened the screen writes nothing over what is already there.
+    /// what this has to show is that leaving is enough — and that nothing is
+    /// written by a run that never opened the screen, or by a visit that
+    /// looked and changed nothing, since a file this build cannot read is
+    /// promised it will not be answered with the defaults it fell back on.
     #[test]
     fn leaving_the_display_screen_keeps_the_settings_for_next_time() {
         use bevy::state::app::StatesPlugin;
@@ -649,6 +874,19 @@ mod tests {
             app.update();
         }
         assert!(!path.exists(), "a file was written by nobody");
+
+        // Nor does opening the screen itself, and leaving without touching a
+        // row. Looking is not saying.
+        for screen in [AppState::Display, AppState::Options] {
+            app.world_mut()
+                .resource_mut::<NextState<AppState>>()
+                .set(screen);
+            app.update();
+        }
+        assert!(
+            !path.exists(),
+            "a file was written by a visit that said nothing"
+        );
 
         // Opening the screen, changing every setting on it and leaving does.
         let wanted = DisplaySettings {
