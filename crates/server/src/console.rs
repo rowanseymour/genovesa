@@ -16,7 +16,7 @@
 use glam::Vec2;
 use protocol::{clock, BeastKind, PlayerId, ToClient};
 
-use crate::{beasts, broadcast_all, Shared};
+use crate::{beasts, broadcast_all, Held, Shared};
 
 /// What `help` says. One line per command, in the imperative the commands
 /// themselves are written in.
@@ -93,7 +93,7 @@ fn spawn(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
     };
 
     let near = {
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         players.get(&from).map(|player| player.position)
     };
     let Some(near) = near else {
@@ -139,11 +139,7 @@ fn spawn(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
         (BeastKind::Dolphins, many) => format!("{many} pods surface"),
         (BeastKind::Whale, many) => format!("{many} whales surface"),
     };
-    shared
-        .summoned
-        .lock()
-        .expect("no poisoned lock")
-        .extend(raised);
+    shared.summoned.held().extend(raised);
     format!("{announced}, the nearest {nearest:.0} m away")
 }
 
@@ -161,7 +157,7 @@ fn time(shared: &Shared, args: &[&str]) -> String {
 
     let phase = shared.wind_forward_to(target);
     {
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         broadcast_all(&players, ToClient::Daylight { phase });
     }
     format!("the day has run on to {}", clock(phase))
@@ -238,7 +234,7 @@ mod tests {
         );
         // And three quarters of a day were skipped to get there, not a
         // quarter unwound.
-        let skipped = *shared.skipped.lock().expect("no poisoned lock");
+        let skipped = *shared.skipped.held();
         assert!(
             (skipped - 0.75 * protocol::DAY_SECONDS).abs() < 1.0,
             "the way to an earlier hour is forward through {} seconds, not {skipped}",
@@ -252,7 +248,7 @@ mod tests {
         assert!(interpret(&shared, PlayerId(1), "time").contains("6:30"));
         assert!(interpret(&shared, PlayerId(1), "time dusk").contains("dusk"));
         // And a refused hour moved nothing.
-        assert_eq!(*shared.skipped.lock().expect("no poisoned lock"), 0.0);
+        assert_eq!(*shared.skipped.held(), 0.0);
     }
 
     #[test]
@@ -268,10 +264,7 @@ mod tests {
         // Given back, the wind is the world's own function of the clock
         // again — whatever that is right now, it is not held anywhere.
         interpret(&shared, PlayerId(1), "weather natural");
-        assert_eq!(
-            *shared.commanded_wind.lock().expect("no poisoned lock"),
-            None
-        );
+        assert_eq!(*shared.commanded_wind.held(), None);
 
         let refused = interpret(&shared, PlayerId(1), "weather sirocco");
         assert!(refused.contains("sirocco"), "unhelpful: {refused}");
@@ -287,7 +280,7 @@ mod tests {
         let refused = interpret(&shared, PlayerId(9), "spawn kraken");
         assert!(refused.contains("kraken"), "unhelpful: {refused}");
         assert!(
-            shared.summoned.lock().expect("no poisoned lock").is_empty(),
+            shared.summoned.held().is_empty(),
             "something was summoned anyway"
         );
     }

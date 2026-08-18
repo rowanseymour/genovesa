@@ -37,7 +37,7 @@
 //! two processes hosting one world at once, each saving over the other —
 //! two histories written to one name, which is the quiet way to lose one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
@@ -197,37 +197,37 @@ pub(crate) struct BeastRecord {
     pub left: u32,
 }
 
-/// A kind as the file spells it — and [`kind_of`] reads it back. Words
-/// rather than the wire's bytes because this file is read by people.
-fn word_of(kind: BeastKind) -> &'static str {
-    match kind {
-        BeastKind::Shark => "shark",
-        BeastKind::Dolphins => "dolphins",
-        BeastKind::Whale => "whale",
-    }
+/// How the file spells the beasts. Words rather than the wire's bytes because
+/// this file is read by people.
+///
+/// One table read both ways — see [`spelling`] and [`spelt`] — rather than a
+/// pair of matches, because a spelling written twice is a spelling that can be
+/// changed once: a world saved saying one word and refused for saying it is
+/// the whole file lost.
+const BEAST_WORDS: [(BeastKind, &str); 3] = [
+    (BeastKind::Shark, "shark"),
+    (BeastKind::Dolphins, "dolphins"),
+    (BeastKind::Whale, "whale"),
+];
+
+/// And the boats', on the same terms.
+const HULL_WORDS: [(BoatKind, &str); 1] = [(BoatKind::Sloop, "sloop")];
+
+/// How this file spells a kind.
+fn spelling<K: PartialEq>(table: &[(K, &'static str)], kind: K) -> &'static str {
+    table
+        .iter()
+        .find(|(known, _)| *known == kind)
+        .map(|(_, word)| *word)
+        .expect("every kind is spelt in its own table")
 }
 
-fn kind_of(word: &str) -> Option<BeastKind> {
-    match word {
-        "shark" => Some(BeastKind::Shark),
-        "dolphins" => Some(BeastKind::Dolphins),
-        "whale" => Some(BeastKind::Whale),
-        _ => None,
-    }
-}
-
-/// The boats' own spellings, on the beasts' terms.
-fn hull_word_of(kind: BoatKind) -> &'static str {
-    match kind {
-        BoatKind::Sloop => "sloop",
-    }
-}
-
-fn hull_kind_of(word: &str) -> Option<BoatKind> {
-    match word {
-        "sloop" => Some(BoatKind::Sloop),
-        _ => None,
-    }
+/// The kind a word spells, if the table has one.
+fn spelt<K: Copy>(table: &[(K, &'static str)], word: &str) -> Option<K> {
+    table
+        .iter()
+        .find(|(_, spelling)| *spelling == word)
+        .map(|(kind, _)| *kind)
 }
 
 /// A held world file: the path saves go to, and the lock that says this
@@ -357,21 +357,67 @@ pub fn kept_worlds(dir: &Path) -> Vec<KeptWorld> {
             if path.extension().is_none_or(|ext| ext != EXTENSION) {
                 return None;
             }
-            let record = load(&path).ok()?;
-            let kept = fs::metadata(&path)
+            // The backup behind it if the file itself will not read, on
+            // [`load`]'s own terms: a world that lost power mid-save is a
+            // world a reopen still recovers, so it belongs in the list.
+            let mut world = read_heading(&path)
+                .or_else(|_| read_heading(&sibling(&path, "old")))
+                .ok()?;
+            world.kept = fs::metadata(&path)
                 .and_then(|meta| meta.modified())
                 .unwrap_or(UNIX_EPOCH);
-            Some(KeptWorld {
-                path,
-                id: record.id,
-                name: record.name,
-                age: record.age,
-                kept,
-            })
+            world.path = path;
+            Some(world)
         })
         .collect();
     worlds.sort_by_key(|world| std::cmp::Reverse(world.kept));
     worlds
+}
+
+/// What a listing needs off the front of a world's file, without reading the
+/// world.
+///
+/// Everything a row shows is written in the first few lines — see
+/// [`compose`] — and everything after them is the history: a well-sailed
+/// world's survey is thousands of chunks per player, and [`load`] works the
+/// lot of it into a record. A screen offering five worlds would parse
+/// megabytes to letter five rows with an id, a name and a day count, on the
+/// frame it opens. So this stops at the first line that is none of its
+/// business, which the sorted format guarantees comes after all of them.
+///
+/// Held to the same header as [`load`], and refusing on the same terms: a file
+/// this build cannot read is not a world it should offer to reopen. What it
+/// does *not* do is validate the rest — a world whose history is corrupt still
+/// belongs in the list, so that reopening it is what complains, properly and
+/// with the whole file in hand.
+fn read_heading(path: &Path) -> Result<KeptWorld, String> {
+    heading(&fs::read_to_string(path).map_err(|error| error.to_string())?)
+}
+
+/// The heading itself, off text that has already been read.
+fn heading(text: &str) -> Result<KeptWorld, String> {
+    let lines = past_the_header(text)?;
+
+    let (mut id, mut age) = (None, None);
+    let mut name = String::new();
+    for line in lines {
+        match line.split_once(' ') {
+            Some(("id", value)) => id = Some(WorldId(hex(value)?)),
+            Some(("name", value)) => name = value.to_string(),
+            Some(("age", value)) => age = Some(finite(value)?),
+            // The seed and the opening hour are a world's own business, and
+            // everything past them is its history.
+            Some(("seed" | "opening", _)) => {}
+            _ => break,
+        }
+    }
+    Ok(KeptWorld {
+        path: PathBuf::new(),
+        id: id.ok_or("no id")?,
+        name,
+        age: age.ok_or("no age")?,
+        kept: UNIX_EPOCH,
+    })
 }
 
 /// Throws a kept world away: the file, the backup behind it, and the lock
@@ -480,6 +526,19 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The first line read and agreed with, and the rest of the file to go on
+/// with. Both readers start here — the listing and the load — because a build
+/// that half-understands a file must refuse it whole, and the two would be
+/// disagreeing about which files those are the moment one of them was changed.
+fn past_the_header(text: &str) -> Result<std::str::Lines<'_>, String> {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(header) if header == format!("genovesa world {FORMAT}") => Ok(lines),
+        Some(other) => Err(format!("not a world this build keeps: `{other}`")),
+        None => Err("an empty file".to_string()),
+    }
+}
+
 fn compose(record: &WorldRecord) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "genovesa world {FORMAT}");
@@ -569,7 +628,7 @@ fn compose(record: &WorldRecord) -> String {
             out,
             "boat {:016x} {} {} {} {}",
             boat.id.0,
-            hull_word_of(boat.kind),
+            spelling(&HULL_WORDS, boat.kind),
             boat.position.x,
             boat.position.y,
             boat.heading
@@ -602,7 +661,7 @@ fn compose(record: &WorldRecord) -> String {
     let mut beasts = record.beasts.clone();
     beasts.sort_by_key(|beast| {
         (
-            word_of(beast.kind),
+            spelling(&BEAST_WORDS, beast.kind),
             beast.position.x.to_bits(),
             beast.position.y.to_bits(),
         )
@@ -611,7 +670,7 @@ fn compose(record: &WorldRecord) -> String {
         let _ = write!(
             out,
             "beast {} {} {} {}",
-            word_of(beast.kind),
+            spelling(&BEAST_WORDS, beast.kind),
             beast.position.x,
             beast.position.y,
             beast.left
@@ -625,12 +684,7 @@ fn compose(record: &WorldRecord) -> String {
 }
 
 fn parse(text: &str) -> Result<WorldRecord, String> {
-    let mut lines = text.lines();
-    match lines.next() {
-        Some(header) if header == format!("genovesa world {FORMAT}") => {}
-        Some(other) => return Err(format!("not a world this build keeps: `{other}`")),
-        None => return Err("an empty file".to_string()),
-    }
+    let lines = past_the_header(text)?;
 
     let (mut id, mut seed, mut opening, mut age) = (None, None, None, None);
     let mut name = String::new();
@@ -645,6 +699,10 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
     let mut knowings: HashMap<Token, HashMap<IVec2, crate::Knowing>> = HashMap::new();
     let mut boats = Vec::new();
     let mut claims: Vec<ClaimRecord> = Vec::new();
+    // Which islands the claims have already named, so that spotting the one
+    // thing a file may not say twice is a lookup rather than a walk of
+    // everything read so far.
+    let mut claimed: HashSet<IVec2> = HashSet::new();
     let mut beasts = Vec::new();
     for line in lines {
         if line.is_empty() {
@@ -676,10 +734,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 if fields.next().is_some() {
                     return Err(format!("too much about one player: `{line}`"));
                 }
-                let position = Vec2::new(finite(x)?, finite(y)?);
-                if !crate::reachable(position) {
-                    return Err(format!("nobody was ever at {position}"));
-                }
+                let position = spot(x, y, "nobody was ever")?;
                 // Once each, on the same terms the surveys are: a file
                 // naming one player twice cannot say which of the two the
                 // world went on with.
@@ -801,13 +856,11 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 if fields.next().is_some() {
                     return Err(format!("too much about one boat: `{line}`"));
                 }
-                let position = Vec2::new(finite(x)?, finite(y)?);
-                if !crate::reachable(position) {
-                    return Err(format!("no boat ever lay at {position}"));
-                }
+                let position = spot(x, y, "no boat ever lay")?;
                 boats.push(BoatRecord {
                     id: BoatId(hex(id)?),
-                    kind: hull_kind_of(kind).ok_or_else(|| format!("no such boat as a {kind}"))?,
+                    kind: spelt(&HULL_WORDS, kind)
+                        .ok_or_else(|| format!("no such boat as a {kind}"))?,
                     position,
                     heading: finite(heading)?,
                 });
@@ -835,10 +888,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 if !crate::island_in_the_world(island) {
                     return Err(format!("nobody ever sailed round {island}"));
                 }
-                let at = Vec2::new(finite(ax)?, finite(az)?);
-                if !crate::reachable(at) {
-                    return Err(format!("no cairn ever stood at {at}"));
-                }
+                let at = spot(ax, az, "no cairn ever stood")?;
                 // Held to the wire's own rule as well as the file's, so that
                 // what a hand-edited file can put on a cairn is what a player
                 // could have put there. A name that fails it is dropped and
@@ -852,10 +902,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     .unwrap_or_default();
                 // Once each, on the terms the players are: an island claimed
                 // twice is a file that cannot say whose it is.
-                if claims
-                    .iter()
-                    .any(|held: &ClaimRecord| held.island == island)
-                {
+                if !claimed.insert(island) {
                     return Err(format!("one island claimed twice: `{line}`"));
                 }
                 claims.push(ClaimRecord {
@@ -865,29 +912,23 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     name,
                 });
             }
+            // A beast that had arrived and one that was still going are the
+            // two shapes this line comes in, and saying so outright is the
+            // whole of the reading — see [`compose`], which writes the goal
+            // only when there is one.
             "beast" => {
                 let fields: Vec<&str> = value.split(' ').collect();
-                let ([kind, x, y, left], goal) = (
-                    fields
-                        .get(..4)
-                        .and_then(|head| <[&str; 4]>::try_from(head).ok())
-                        .ok_or_else(|| format!("half a beast: `{line}`"))?,
-                    &fields[4.min(fields.len())..],
-                );
-                let goal = match goal {
-                    [] => None,
-                    [gx, gy] => Some(Vec2::new(finite(gx)?, finite(gy)?)),
-                    _ => return Err(format!("too much about one beast: `{line}`")),
-                };
-                let position = Vec2::new(finite(x)?, finite(y)?);
-                for spot in goal.iter().chain([&position]) {
-                    if !crate::reachable(*spot) {
-                        return Err(format!("no beast ever swam at {spot}"));
+                let (kind, x, y, left, goal) = match fields.as_slice() {
+                    [kind, x, y, left] => (kind, x, y, left, None),
+                    [kind, x, y, left, gx, gy] => {
+                        (kind, x, y, left, Some(spot(gx, gy, "no beast ever swam")?))
                     }
-                }
+                    _ => return Err(format!("not one beast: `{line}`")),
+                };
                 beasts.push(BeastRecord {
-                    kind: kind_of(kind).ok_or_else(|| format!("no such beast as a {kind}"))?,
-                    position,
+                    kind: spelt(&BEAST_WORDS, kind)
+                        .ok_or_else(|| format!("no such beast as a {kind}"))?,
+                    position: spot(x, y, "no beast ever swam")?,
                     goal,
                     left: left
                         .parse::<u32>()
@@ -958,6 +999,23 @@ fn whole(value: &str) -> Result<i32, String> {
     value
         .parse::<i32>()
         .map_err(|_| format!("`{value}` is not a chunk coordinate"))
+}
+
+/// A pair of fields as a place in the world, held to the reach the world
+/// resolves over.
+///
+/// Every position this file carries comes through here — a player's, a boat's,
+/// a cairn's, a beast's and the spot it was making for — because a hand-edited
+/// file is the one door coordinates arrive through that no session vouched
+/// for, and a place a thousand kilometres past where the world resolves is one
+/// nothing downstream is written to survive. `nobody` names what could not
+/// have been there, the complaint being for whoever opens the file to read.
+fn spot(x: &str, z: &str, nobody: &str) -> Result<Vec2, String> {
+    let at = Vec2::new(finite(x)?, finite(z)?);
+    if !crate::reachable(at) {
+        return Err(format!("{nobody} at {at}"));
+    }
+    Ok(at)
 }
 
 fn finite(value: &str) -> Result<f32, String> {
@@ -1116,7 +1174,12 @@ mod tests {
             "a claim came back as somebody else's island"
         );
         let sorted = |mut beasts: Vec<BeastRecord>| {
-            beasts.sort_by_key(|beast| (word_of(beast.kind), beast.position.x.to_bits()));
+            beasts.sort_by_key(|beast| {
+                (
+                    spelling(&BEAST_WORDS, beast.kind),
+                    beast.position.x.to_bits(),
+                )
+            });
             beasts
         };
         assert_eq!(sorted(read.beasts), sorted(record.beasts.clone()));
@@ -1559,6 +1622,42 @@ mod tests {
 
         // And nowhere at all is simply no worlds.
         assert!(kept_worlds(&dir.join("nowhere")).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_listing_says_what_a_load_would_without_reading_the_world() {
+        // The two readers of one file, held to each other. A listing stops
+        // reading at the history — see [`heading`] — and the whole point of
+        // that is the megabytes of survey it does not touch, so nothing but a
+        // test says the two still agree about the few lines they share.
+        let dir = scratch();
+        let path = dir.join("one.world");
+        let keeper = Keeper::hold(&path).expect("hold");
+        let record = a_record();
+        keeper.save(&record).expect("save");
+
+        let listed = kept_worlds(&dir);
+        let [world] = listed.as_slice() else {
+            panic!("one world was kept and {} listed", listed.len());
+        };
+        let loaded = load(&path).expect("load");
+        assert_eq!(
+            (world.id, &world.name, world.age),
+            (loaded.id, &loaded.name, loaded.age)
+        );
+        assert_eq!(world.path, path, "the row does not open the world it names");
+
+        // And a save the power interrupted is still a world to be offered,
+        // for the reason a reopen still recovers it — the listing falls back
+        // to the same backup [`load`] does.
+        keeper.save(&record).expect("second save");
+        fs::write(&path, "genovesa wor").expect("tear");
+        assert_eq!(
+            kept_worlds(&dir).len(),
+            1,
+            "a recoverable world dropped off the list"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

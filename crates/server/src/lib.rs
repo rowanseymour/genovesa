@@ -27,7 +27,7 @@ use std::io;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -328,6 +328,26 @@ const WIND_STEP: f32 = 0.25;
 /// `Server` is one type however it reports, and defaulted to silence: what a
 /// library does to somebody's stdout is not the library's decision.
 type Report = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Taking one of this session's locks.
+///
+/// Every lock in here is taken the same way and for the same reason: poisoning
+/// means a thread panicked while holding it, and a session with a panicked
+/// thread in it is a session that is over — there is no state left worth
+/// carrying on with, so the honest answer is the panic the guard already
+/// carries. Said seventy times over in the same seven words it read as
+/// ceremony; said once here it is a rule, and the code below is left saying
+/// which lock it wants and nothing else.
+pub(crate) trait Held<T> {
+    /// This lock, held.
+    fn held(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> Held<T> for Mutex<T> {
+    fn held(&self) -> MutexGuard<'_, T> {
+        self.lock().expect("no poisoned lock")
+    }
+}
 
 /// One player's survey, held behind a lock of its own rather than inside the
 /// roster's — see [`Player::surveyed`].
@@ -632,6 +652,28 @@ pub(crate) struct BoatState {
     pub(crate) virgin: bool,
 }
 
+impl BoatState {
+    /// This hull as a client hears of it.
+    ///
+    /// Every telling of a boat goes through here — the welcome's whole fleet,
+    /// a helm's report, a boarding granted or refused, a step ashore, a
+    /// departure leaving a hull at anchor — because what a client is told
+    /// about a boat is one fact and not six, and a telling that left one
+    /// field behind would be a hull that quietly disagreed with itself at one
+    /// end of the wire. The id is handed in rather than kept: a boat's lasting
+    /// name is what the roster files it under, and a state does not carry its
+    /// own key.
+    fn told(&self, id: BoatId) -> ToClient {
+        ToClient::Boat {
+            id,
+            kind: self.kind,
+            position: self.position,
+            heading: self.heading,
+            occupant: self.occupant,
+        }
+    }
+}
+
 impl Server {
     /// Binds the listener, makes a fresh world, and asks it where it is
     /// entered.
@@ -900,7 +942,7 @@ impl Drop for Host {
         // like — which it is — and at this end it is what lets their threads
         // reach the departure they would otherwise never get to.
         {
-            let players = self.shared.players.lock().expect("no poisoned lock");
+            let players = self.shared.players.held();
             for player in players.values() {
                 let _ = player.line.shutdown(Shutdown::Both);
             }
@@ -953,7 +995,7 @@ fn accept(listener: &TcpListener, shared: &Arc<Shared>, wanted: &mpsc::SyncSende
         if swept.elapsed() >= CACHE_SWEEP {
             swept = Instant::now();
             let where_everyone_is: Vec<Vec2> = {
-                let players = shared.players.lock().expect("no poisoned lock");
+                let players = shared.players.held();
                 players.values().map(|player| player.position).collect()
             };
             shared
@@ -1012,7 +1054,7 @@ fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
             // guard is dropped before any of that happens. What matters is
             // that the work itself runs on all of them at once, and it does.
             let request = {
-                let queue = requests.lock().expect("no poisoned lock");
+                let queue = requests.held();
                 queue.recv()
             };
             // The channel has closed, which means every sender has gone: the
@@ -1033,7 +1075,7 @@ fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
             // hears, so an answer cannot overtake the departure of the player
             // it was for. Somebody who left while their ground was being made
             // is simply no longer here, and the answer goes nowhere.
-            let players = shared.players.lock().expect("no poisoned lock");
+            let players = shared.players.held();
             if let Some(player) = players.get(&request.for_player) {
                 post(player, answer);
             }
@@ -1096,7 +1138,7 @@ fn watch_the_sky(shared: &Arc<Shared>) {
             }
 
             if !news.is_empty() {
-                let players = shared.players.lock().expect("no poisoned lock");
+                let players = shared.players.held();
                 for word in news {
                     broadcast_all(&players, word);
                 }
@@ -1113,7 +1155,7 @@ impl Shared {
     /// time passes at all, which is what makes quitting mid-gale and
     /// reloading land back in the same gale rather than past it.
     fn age(&self) -> f32 {
-        let skipped = *self.skipped.lock().expect("no poisoned lock");
+        let skipped = *self.skipped.held();
         self.started.elapsed().as_secs_f32() + skipped
     }
 
@@ -1128,7 +1170,7 @@ impl Shared {
     /// waited out is weather passing too — a crew at anchor through till
     /// dawn has sat out some of the blow.
     fn wind(&self) -> Vec2 {
-        let commanded = *self.commanded_wind.lock().expect("no poisoned lock");
+        let commanded = *self.commanded_wind.held();
         commanded.unwrap_or_else(|| world::weather::wind(self.world.seed(), self.age()))
     }
 
@@ -1136,7 +1178,7 @@ impl Shared {
     /// world. The sky thread notices the answer to [`Shared::wind`] moving
     /// and tells everyone, exactly as it does when the real weather turns.
     fn command_wind(&self, wind: Option<Vec2>) {
-        *self.commanded_wind.lock().expect("no poisoned lock") = wind;
+        *self.commanded_wind.held() = wind;
     }
 
     /// Runs the world's clock forward to the next time it reads `target`,
@@ -1148,7 +1190,7 @@ impl Shared {
     /// [`ToClient::Daylight`] makes holds. Asking for the very hour it is
     /// moves nothing.
     fn wind_forward_to(&self, target: f32) -> f32 {
-        let mut skipped = self.skipped.lock().expect("no poisoned lock");
+        let mut skipped = self.skipped.held();
         // The phase worked out inline rather than asked of [`Shared::phase`],
         // which takes this same lock — and it has to be under the lock, or a
         // night being run off between the read and the write would be run
@@ -1186,7 +1228,7 @@ impl Shared {
         // beside it the handle to the one thing it cannot — the survey, whose
         // own lock is taken below with this one let go.
         let present: Vec<(Token, keeper::PlayerRecord, Surveyed)> = {
-            let players = self.players.lock().expect("no poisoned lock");
+            let players = self.players.held();
             players
                 .values()
                 .map(|player| {
@@ -1206,18 +1248,14 @@ impl Shared {
         let here: Vec<(Token, keeper::PlayerRecord)> = present
             .into_iter()
             .map(|(token, mut record, surveyed)| {
-                record.surveyed = surveyed
-                    .lock()
-                    .expect("no poisoned lock")
-                    .charted()
-                    .collect();
+                record.surveyed = surveyed.held().charted().collect();
                 (token, record)
             })
             .collect();
-        let mut players = self.remembered.lock().expect("no poisoned lock").clone();
+        let mut players = self.remembered.held().clone();
         players.extend(here);
         let boats = {
-            let boats = self.boats.lock().expect("no poisoned lock");
+            let boats = self.boats.held();
             boats
                 .iter()
                 .map(|(id, boat)| keeper::BoatRecord {
@@ -1229,7 +1267,7 @@ impl Shared {
                 .collect()
         };
         let claims = {
-            let claims = self.claims.lock().expect("no poisoned lock");
+            let claims = self.claims.held();
             claims
                 .iter()
                 // Nothing the file could not be read back saying, on the terms
@@ -1248,7 +1286,7 @@ impl Shared {
                 })
                 .collect()
         };
-        let beasts = self.beasts.lock().expect("no poisoned lock").clone();
+        let beasts = self.beasts.held().clone();
         keeper::WorldRecord {
             id: self.world_id,
             seed: self.world.seed(),
@@ -1297,7 +1335,7 @@ impl Shared {
         // while the players ahead of them are being looked at.
         let now = Instant::now();
         {
-            let players = self.players.lock().expect("no poisoned lock");
+            let players = self.players.held();
             let all_waiting = !players.is_empty()
                 && players
                     .values()
@@ -1313,7 +1351,7 @@ impl Shared {
         // carrying the morning away with it.
         let to_dawn = (protocol::DAYBREAK - phase).rem_euclid(1.0) * protocol::DAY_SECONDS;
         let run = (tick.as_secs_f32() * (NIGHT_PACE - 1.0)).min(to_dawn);
-        *self.skipped.lock().expect("no poisoned lock") += run;
+        *self.skipped.held() += run;
         true
     }
 
@@ -1390,7 +1428,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // because the world's memory and a client's can part ways honestly: a
     // world file lost, or a world rebuilt under the same address.
     let (token, returning_to) = {
-        let remembered = shared.remembered.lock().expect("no poisoned lock");
+        let remembered = shared.remembered.held();
         match presented {
             Some(token) => match remembered.get(&token) {
                 Some(record) => (token, Some(record.clone())),
@@ -1476,7 +1514,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     let wind = shared.wind();
     let phase = shared.phase();
     {
-        let mut players = shared.players.lock().expect("no poisoned lock");
+        let mut players = shared.players.held();
 
         // A world that has already ended has nobody to introduce and no way to
         // hear of anyone arriving now. Its drop set this before reaching for
@@ -1525,7 +1563,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         // is opened along, there being no entry island to face them at.
         let mut bow = None;
         {
-            let mut boats = shared.boats.lock().expect("no poisoned lock");
+            let mut boats = shared.boats.held();
             let fresh_hull = |boats: &mut HashMap<BoatId, BoatState>, at: Vec2| {
                 // A virgin hull lying free where this arrival is being put
                 // down is theirs before any new one is minted — see
@@ -1647,32 +1685,12 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         // players — and everyone else hears about the one this arrival
         // minted or took up, under the same hold as the arrival itself.
         {
-            let boats = shared.boats.lock().expect("no poisoned lock");
+            let boats = shared.boats.held();
             for (boat, state) in boats.iter() {
-                post(
-                    newcomer,
-                    ToClient::Boat {
-                        id: *boat,
-                        kind: state.kind,
-                        position: state.position,
-                        heading: state.heading,
-                        occupant: state.occupant,
-                    },
-                );
+                post(newcomer, state.told(*boat));
             }
             if let Some(boat) = seated {
-                let state = &boats[&boat];
-                broadcast(
-                    &players,
-                    id,
-                    ToClient::Boat {
-                        id: boat,
-                        kind: state.kind,
-                        position: state.position,
-                        heading: state.heading,
-                        occupant: state.occupant,
-                    },
-                );
+                broadcast(&players, id, boats[&boat].told(boat));
             }
         }
         broadcast(&players, id, arrival);
@@ -1685,7 +1703,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // for a returner is usually nothing new either. Outside the roster's hold,
     // both of them, because both mean asking the world for ground.
     let mut wake = {
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         Wake::opening(
             players
                 .get(&id)
@@ -1725,7 +1743,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         match ToServer::read(&mut reader) {
             Ok(ToServer::Move { position }) if reachable(position) => {
                 let walked = {
-                    let mut players = shared.players.lock().expect("no poisoned lock");
+                    let mut players = shared.players.held();
                     // Quietly ignored from a player at a helm, on Helm's own
                     // terms: a `Move` can honestly cross a boarding grant on
                     // the wire, and believing it would walk the player away
@@ -1751,7 +1769,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 if reachable(position) && heading.is_finite() =>
             {
                 let sailed = {
-                    let mut players = shared.players.lock().expect("no poisoned lock");
+                    let mut players = shared.players.held();
                     // The rider goes with the vehicle: one report moves both.
                     // Quietly ignored from a player occupying nothing — see the
                     // wire's own doc for how that happens honestly.
@@ -1759,27 +1777,17 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                         .get_mut(&id)
                         .and_then(|player| player.aboard.inspect(|_| player.position = position));
                     if let Some(boat) = steering {
-                        let kind = {
-                            let mut boats = shared.boats.lock().expect("no poisoned lock");
+                        let told = {
+                            let mut boats = shared.boats.held();
                             let state = boats.get_mut(&boat).expect("a boat once boarded exists");
                             state.position = position;
                             state.heading = heading;
                             // Sailed, so no longer the spare hull the spawn
                             // hands to arrivals — see [`BoatState::virgin`].
                             state.virgin = false;
-                            state.kind
+                            state.told(boat)
                         };
-                        broadcast(
-                            &players,
-                            id,
-                            ToClient::Boat {
-                                id: boat,
-                                kind,
-                                position,
-                                heading,
-                                occupant: Some(id),
-                            },
-                        );
+                        broadcast(&players, id, told);
                     }
                     steering.is_some()
                 };
@@ -1791,12 +1799,12 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 }
             }
             Ok(ToServer::Board { boat }) => {
-                let mut players = shared.players.lock().expect("no poisoned lock");
+                let mut players = shared.players.held();
                 let Some(player) = players.get_mut(&id) else {
                     break;
                 };
                 let (answer, granted) = {
-                    let mut boats = shared.boats.lock().expect("no poisoned lock");
+                    let mut boats = shared.boats.held();
                     // A boat this world never made is a broken or hostile
                     // client, and there is no state to answer with.
                     let Some(state) = boats.get_mut(&boat) else {
@@ -1816,16 +1824,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                         player.aboard = Some(boat);
                         player.position = state.position;
                     }
-                    (
-                        ToClient::Boat {
-                            id: boat,
-                            kind: state.kind,
-                            position: state.position,
-                            heading: state.heading,
-                            occupant: state.occupant,
-                        },
-                        granted,
-                    )
+                    (state.told(boat), granted)
                 };
                 // Where a granted boarding has put them, kept for the survey
                 // below while the roster is still in hand.
@@ -1850,27 +1849,21 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             }
             Ok(ToServer::Disembark { position }) if reachable(position) => {
                 let mut stepped = false;
-                let mut players = shared.players.lock().expect("no poisoned lock");
+                let mut players = shared.players.held();
                 if let Some(player) = players.get_mut(&id) {
                     // Ignored when not aboard, on Helm's terms.
                     if let Some(boat) = player.aboard.take() {
                         stepped = true;
                         player.position = position;
                         let told = {
-                            let mut boats = shared.boats.lock().expect("no poisoned lock");
+                            let mut boats = shared.boats.held();
                             let state = boats.get_mut(&boat).expect("a boat once boarded exists");
                             state.occupant = None;
                             // Somebody's, and left where they left it: a hull
                             // parked ashore is not spare, whether or not it
                             // was ever sailed — see [`BoatState::virgin`].
                             state.virgin = false;
-                            ToClient::Boat {
-                                id: boat,
-                                kind: state.kind,
-                                position: state.position,
-                                heading: state.heading,
-                                occupant: None,
-                            }
+                            state.told(boat)
                         };
                         broadcast_all(&players, told);
                         broadcast(&players, id, ToClient::Moved { id, position });
@@ -1924,7 +1917,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 // runs depends on what everyone else wants — see
                 // [`Shared::run_off_the_night`], which is where the sky
                 // thread reads this.
-                let mut players = shared.players.lock().expect("no poisoned lock");
+                let mut players = shared.players.held();
                 if let Some(player) = players.get_mut(&id) {
                     player.waiting_since = Some(Instant::now());
                 }
@@ -1937,7 +1930,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 // chose each other — and the host's log says who asked what.
                 let reply = console::interpret(&shared, id, &line);
                 (shared.report)(&format!("{id}: {line}"));
-                let players = shared.players.lock().expect("no poisoned lock");
+                let players = shared.players.held();
                 if let Some(player) = players.get(&id) {
                     post(player, ToClient::Reply { text: reply });
                 }
@@ -1973,7 +1966,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // taken one after the other, never together, like every other path
     // through them.
     let last_seen = {
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         players.get(&id).map(|player| {
             (
                 player.token,
@@ -1994,24 +1987,16 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             keeper::PlayerRecord {
                 position,
                 aboard,
-                surveyed: surveyed
-                    .lock()
-                    .expect("no poisoned lock")
-                    .charted()
-                    .collect(),
+                surveyed: surveyed.held().charted().collect(),
                 known,
             },
         )
     });
     if let Some((token, record)) = &leaving {
-        shared
-            .remembered
-            .lock()
-            .expect("no poisoned lock")
-            .insert(*token, record.clone());
+        shared.remembered.held().insert(*token, record.clone());
     }
     {
-        let mut players = shared.players.lock().expect("no poisoned lock");
+        let mut players = shared.players.held();
         players.remove(&id);
         broadcast(&players, id, ToClient::Left { id });
         // The helm they held is anyone's now: an offline player's boat lies
@@ -2021,16 +2006,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         // keeper has left.
         if let Some(boat) = leaving.and_then(|(_, record)| record.aboard) {
             let told = {
-                let mut boats = shared.boats.lock().expect("no poisoned lock");
+                let mut boats = shared.boats.held();
                 boats.get_mut(&boat).map(|state| {
                     state.occupant = None;
-                    ToClient::Boat {
-                        id: boat,
-                        kind: state.kind,
-                        position: state.position,
-                        heading: state.heading,
-                        occupant: None,
-                    }
+                    state.told(boat)
                 })
             };
             if let Some(told) = told {
@@ -2080,7 +2059,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
 /// only half worth pacing — see the read loop, which is where the pacing is.
 fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
     let Some((token, at, afoot, surveyed)) = ({
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         players.get(&id).map(|player| {
             (
                 player.token,
@@ -2095,14 +2074,9 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
 
     // Somebody's already — theirs or another's, and either way the cairn that
     // stands there is the answer and no coastline needs walking to find it.
-    let held = shared
-        .claims
-        .lock()
-        .expect("no poisoned lock")
-        .get(&island)
-        .cloned();
+    let held = shared.claims.held().get(&island).cloned();
     if let Some(claim) = held {
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         tell_the_asker(&players, id, island, &claim);
         return false;
     }
@@ -2113,13 +2087,12 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
     }
 
     let stands_on = surveyed
-        .lock()
-        .expect("no poisoned lock")
+        .held()
         .island_under(at)
         .is_some_and(|found| found.id == island);
 
     let (told, granted) = {
-        let mut claims = shared.claims.lock().expect("no poisoned lock");
+        let mut claims = shared.claims.held();
         match claims.get(&island) {
             // Claimed while this ask was walking the shore, which is the only
             // way it gets here: the answer is that cairn, as it would have
@@ -2145,7 +2118,7 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
     };
 
     if let Some(claim) = told {
-        let mut players = shared.players.lock().expect("no poisoned lock");
+        let mut players = shared.players.held();
         if granted {
             (shared.report)(&format!("{id} claimed an island"));
             tell_the_cairn(&mut players, island, &claim, id);
@@ -2173,14 +2146,14 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
 /// anybody but the asker and so the half worth pacing — see the read loop.
 fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) -> bool {
     let Some(token) = ({
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         players.get(&id).map(|player| player.token)
     }) else {
         return false;
     };
 
     let (told, granted) = {
-        let mut claims = shared.claims.lock().expect("no poisoned lock");
+        let mut claims = shared.claims.held();
         let Some(claim) = claims.get_mut(&island) else {
             return false;
         };
@@ -2201,7 +2174,7 @@ fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) -> bool {
         }
     };
 
-    let mut players = shared.players.lock().expect("no poisoned lock");
+    let mut players = shared.players.held();
     if granted {
         tell_the_cairn(&mut players, island, &told, id);
     } else {
@@ -2234,65 +2207,80 @@ fn christen(shared: &Shared, id: PlayerId, island: IVec2, name: &str) -> bool {
 /// roster again to post.
 fn tell_the_cairns_about(shared: &Shared, id: PlayerId) {
     let Some((token, known)) = ({
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         players
             .get(&id)
             .map(|player| (player.token, player.known.clone()))
     }) else {
         return;
     };
-    let worth_telling: Vec<(IVec2, Claim, Knowing)> = {
-        let claims = shared.claims.lock().expect("no poisoned lock");
+    let worth_telling: Vec<(IVec2, Claim)> = {
+        let claims = shared.claims.held();
         claims
             .iter()
-            .filter_map(|(island, claim)| {
-                // Their own read as fully known however far off they stand,
-                // and whatever the file happens to say — see [`Player::known`],
-                // where that deliberate belt-and-braces is argued.
-                let knowing = if claim.by == token {
-                    Some(Knowing::Visited)
-                } else {
-                    known.get(island).copied()
-                };
-                knowing.map(|knowing| (*island, claim.clone(), knowing))
-            })
+            .filter(|(island, claim)| knows(&known, token, **island, claim).is_some())
+            .map(|(island, claim)| (*island, claim.clone()))
             .collect()
     };
     if worth_telling.is_empty() {
         return;
     }
-    let players = shared.players.lock().expect("no poisoned lock");
+    let players = shared.players.held();
     let Some(player) = players.get(&id) else {
         return;
     };
-    for (island, claim, knowing) in worth_telling {
-        post(player, cairn_told_to(player, island, &claim, Some(knowing)));
+    for (island, claim) in worth_telling {
+        post(player, cairn_told_to(player, island, &claim));
     }
 }
 
+/// What one player knows of one cairn as things stand: what they have been
+/// told of it, or the whole of it if the claim is their own.
+///
+/// The one place the claimant's rule is written. A player's own claims are
+/// deliberately not kept in [`Player::known`] — they are held by token in
+/// [`Shared::claims`] and are true whether or not that map says so, which is
+/// the belt-and-braces argued on [`Player::known`] — so every reader of that
+/// map has to lay the same rule over it, and every reader does it here.
+///
+/// Takes the map rather than the player because one caller has only a copy of
+/// it: the join reads a player's knowing under the roster's lock, lets the
+/// roster go, and asks this while holding the claims — the order
+/// [`Shared::claims`] sets.
+fn knows(
+    known: &HashMap<IVec2, Knowing>,
+    token: Token,
+    island: IVec2,
+    claim: &Claim,
+) -> Option<Knowing> {
+    if claim.by == token {
+        return Some(Knowing::Visited);
+    }
+    known.get(&island).copied()
+}
+
 /// Brings one player's knowledge of one cairn up to what being `near` metres
-/// from it earns, and says what they know of it now and whether that is any
-/// deeper than what they knew a moment ago.
+/// from it earns, and says whether that is any deeper than what they knew a
+/// moment ago.
 ///
 /// The merge is [`Knowing`]'s ordering and nothing else: the deeper of what
 /// they knew and what they have just earned, never the newer. Sailing away from
 /// a cairn does not unlearn it, so this only ever climbs.
 ///
-/// Saying whether it climbed is what spares the caller looking the entry up
-/// itself to find out. [`sight_the_cairns`] tells a player only when something
-/// is news, and it asks this of every claim in the world on every position
-/// report, so one lookup here rather than one here and one there is worth the
-/// second half of the answer.
+/// Whether it climbed is the whole of the answer, because what they know *now*
+/// is written where every reader already looks — see [`knows`], which is what
+/// [`cairn_told_to`] asks a moment later. Saying it here is what spares
+/// [`sight_the_cairns`] looking the entry up itself: it tells a player only
+/// when something is news, and it asks this of every claim in the world on
+/// every position report.
 ///
 /// A claimant knows their own outright wherever they stand, and it is not
-/// written down: it is held by token in [`Shared::claims`] and is true whether
-/// or not this map says so — see [`Player::known`]. Nothing was written, so
-/// nothing deepened, and that is the honest answer for it. Answering without
-/// recording is why [`sight_the_cairns`] passes over a player's own cairns
-/// rather than finding one perpetually newsworthy.
-fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> (Option<Knowing>, bool) {
+/// written down — see [`knows`]. Nothing is written, so nothing deepened, and
+/// that is the honest answer for it: it is why [`sight_the_cairns`] passes over
+/// a player's own cairns rather than finding one perpetually newsworthy.
+fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> bool {
     if claim.by == player.token {
-        return (Some(Knowing::Visited), false);
+        return false;
     }
     let earned = if near <= CAIRN_VISIT {
         Some(Knowing::Visited)
@@ -2306,13 +2294,13 @@ fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> (Opti
     // Written back only when it is deeper, so that the common case — a player
     // standing about beside a cairn they already know — is a lookup and no
     // write at all.
-    let deeper = now > held;
-    if deeper {
-        player
-            .known
-            .insert(island, now.expect("deeper than nothing is something"));
+    if now <= held {
+        return false;
     }
-    (now, deeper)
+    player
+        .known
+        .insert(island, now.expect("deeper than nothing is something"));
+    true
 }
 
 /// Takes down whatever cairns the way from `from` to `to` brought within reach,
@@ -2347,7 +2335,7 @@ fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> (Opti
 /// the telling goes.
 fn sight_the_cairns(shared: &Shared, id: PlayerId, from: Vec2, to: Vec2) {
     let within_reach: Vec<(IVec2, Claim, f32)> = {
-        let claims = shared.claims.lock().expect("no poisoned lock");
+        let claims = shared.claims.held();
         claims
             .iter()
             .map(|(island, claim)| (*island, claim, off_the_way(claim.at, from, to)))
@@ -2359,7 +2347,7 @@ fn sight_the_cairns(shared: &Shared, id: PlayerId, from: Vec2, to: Vec2) {
         return;
     }
 
-    let mut players = shared.players.lock().expect("no poisoned lock");
+    let mut players = shared.players.held();
     let Some(player) = players.get_mut(&id) else {
         return;
     };
@@ -2372,9 +2360,8 @@ fn sight_the_cairns(shared: &Shared, id: PlayerId, from: Vec2, to: Vec2) {
         if claim.by == theirs {
             continue;
         }
-        let (now, news) = learns(player, island, &claim, near);
-        if news {
-            post(player, cairn_told_to(player, island, &claim, now));
+        if learns(player, island, &claim, near) {
+            post(player, cairn_told_to(player, island, &claim));
         }
     }
 }
@@ -2448,12 +2435,7 @@ fn tell_the_asker(
 ) {
     if let Some(player) = players.get(&asker) {
         if player.position.distance(claim.at) <= CAIRN_SIGHT {
-            let knowing = if claim.by == player.token {
-                Some(Knowing::Visited)
-            } else {
-                player.known.get(&island).copied()
-            };
-            post(player, cairn_told_to(player, island, claim, knowing));
+            post(player, cairn_told_to(player, island, claim));
         }
     }
 }
@@ -2490,8 +2472,11 @@ fn tell_the_cairn(
         if near > CAIRN_SIGHT && *id != asker {
             continue;
         }
-        let (knowing, _) = learns(player, island, claim, near);
-        post(player, cairn_told_to(player, island, claim, knowing));
+        // Whether it was news is nothing to this: standing in reach of a cairn
+        // that has just changed is the telling, news or no news. What [`learns`]
+        // is here for is the writing down.
+        learns(player, island, claim, near);
+        post(player, cairn_told_to(player, island, claim));
     }
 }
 
@@ -2510,16 +2495,16 @@ fn tell_the_cairn(
 /// you may not read* from *there is no name here*. Both are a cairn with
 /// nothing written on it as far as they can see, which is the truth of standing
 /// a mile off.
-fn cairn_told_to(
-    player: &Player,
-    island: IVec2,
-    claim: &Claim,
-    known: Option<Knowing>,
-) -> ToClient {
+///
+/// The depth is read off the hearer rather than handed in, and every caller is
+/// the better for it. What anyone knows of a cairn is [`knows`]'s answer, and
+/// the callers that deepen it — [`sight_the_cairns`] and [`tell_the_cairn`] —
+/// have already written it down through [`learns`] by the time they get here.
+fn cairn_told_to(player: &Player, island: IVec2, claim: &Claim) -> ToClient {
     ToClient::Cairn {
         island,
         at: claim.at,
-        name: match known {
+        name: match knows(&player.known, player.token, island, claim) {
             Some(Knowing::Visited) => claim.name.clone(),
             _ => String::new(),
         },
@@ -2721,14 +2706,14 @@ fn survey_the_way(shared: &Shared, id: PlayerId, from: Vec2, to: Vec2) {
     let (least, most) = scanned_for_sight(from, to);
 
     let surveyed = {
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         let Some(player) = players.get(&id) else {
             return;
         };
         player.surveyed.clone()
     };
     let fresh: Vec<IVec2> = {
-        let known = surveyed.lock().expect("no poisoned lock");
+        let known = surveyed.held();
         (least.y..=most.y)
             .flat_map(|z| (least.x..=most.x).map(move |x| IVec2::new(x, z)))
             .filter(|chunk| {
@@ -2755,12 +2740,12 @@ fn survey_the_way(shared: &Shared, id: PlayerId, from: Vec2, to: Vec2) {
     {
         // Kept as well as sent: what closes a coastline is the world's own
         // answer, and a claim is settled off it — see [`Surveyed`].
-        let mut surveyed = surveyed.lock().expect("no poisoned lock");
+        let mut surveyed = surveyed.held();
         for (chunk, ink) in &found {
             surveyed.record(*chunk, ink.clone());
         }
     }
-    let players = shared.players.lock().expect("no poisoned lock");
+    let players = shared.players.held();
     post_the_survey(&players, id, found);
 }
 
@@ -2782,18 +2767,14 @@ fn survey_the_way(shared: &Shared, id: PlayerId, from: Vec2, to: Vec2) {
 /// lived in for a season would want the ink kept rather than re-earned.
 fn tell_the_survey_so_far(shared: &Arc<Shared>, id: PlayerId) {
     let surveyed = {
-        let players = shared.players.lock().expect("no poisoned lock");
+        let players = shared.players.held();
         let Some(player) = players.get(&id) else {
             return;
         };
         player.surveyed.clone()
     };
     let known: Vec<IVec2> = {
-        let mut known: Vec<IVec2> = surveyed
-            .lock()
-            .expect("no poisoned lock")
-            .charted()
-            .collect();
+        let mut known: Vec<IVec2> = surveyed.held().charted().collect();
         // Sorted so that two runs of one world hand the same chart back in
         // the same order — a hash set's order is nobody's business.
         known.sort_by_key(|chunk| (chunk.x, chunk.y));
@@ -2817,12 +2798,7 @@ fn tell_the_survey_so_far(shared: &Arc<Shared>, id: PlayerId) {
             if shared.stopping.load(Ordering::Relaxed) {
                 return;
             }
-            if !shared
-                .players
-                .lock()
-                .expect("no poisoned lock")
-                .contains_key(&id)
-            {
+            if !shared.players.held().contains_key(&id) {
                 return;
             }
             let found: Vec<(IVec2, Soundings)> = slab
@@ -2834,12 +2810,12 @@ fn tell_the_survey_so_far(shared: &Arc<Shared>, id: PlayerId) {
                 // this player was welcomed with. Until a slab lands here the
                 // world knows this player has been to those chunks but not
                 // what is on them, which is what a claim is settled by.
-                let mut surveyed = surveyed.lock().expect("no poisoned lock");
+                let mut surveyed = surveyed.held();
                 for (chunk, ink) in &found {
                     surveyed.record(*chunk, ink.clone());
                 }
             }
-            let players = shared.players.lock().expect("no poisoned lock");
+            let players = shared.players.held();
             post_the_survey(&players, id, found);
         }
     });

@@ -132,7 +132,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::input::ButtonState;
 use bevy::mesh::PrimitiveTopology;
-use bevy::platform::collections::HashMap;
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::text::{Font, FontSize, FontSource};
 use bevy::window::PrimaryWindow;
@@ -412,11 +412,6 @@ const NAME_FONT: &str = "fonts/IMFellEnglish-Italic.ttf";
 /// line weights are: lettering belongs to the engraver, not to the world, so
 /// it holds its size on the paper however far the sheet is zoomed.
 const NAME_SIZE: f32 = 17.0;
-
-/// The most letters a name may run to. A chart has room for a real name and
-/// not for a sentence, and the cap is what keeps one island's lettering from
-/// being laid across its neighbour's.
-const NAME_LENGTH: usize = 24;
 
 /// How far the mouse may wander between press and release and still mean a
 /// click rather than a small drag, in pixels. The same hand does both — the
@@ -1154,7 +1149,7 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
             (text, island.centre)
         })
         .collect();
-    let closed: Vec<IVec2> = islands.iter().map(|island| island.id).collect();
+    let closed: HashSet<IVec2> = islands.iter().map(|island| island.id).collect();
 
     // Half a line on top of the gap, `Text2d` hanging its lettering off the
     // middle of the line where the gap is measured to the foot of it. Without
@@ -1428,7 +1423,7 @@ fn write_the_name(
                     _ => continue,
                 };
                 for letter in typed.chars().filter(|c| !c.is_control()) {
-                    if naming.draft.chars().count() < NAME_LENGTH {
+                    if naming.draft.chars().count() < protocol::NAME_LETTERS {
                         naming.draft.push(letter);
                     }
                 }
@@ -2955,14 +2950,14 @@ mod tests {
             draft: String::new(),
         });
         // Far past the cap, so the surplus has something to be dropped from.
-        type_word(&mut app, &"a".repeat(NAME_LENGTH + 9));
+        type_word(&mut app, &"a".repeat(protocol::NAME_LETTERS + 9));
         type_key(&mut app, KeyCode::Backspace, "\u{8}");
 
         // Read off the draft rather than the sheet: what is typed is this
         // side's business, and what is *written* is the world's — see
         // [`a_typed_name_is_taken_up_and_enter_puts_the_pen_down`].
         let drafted = &app.world().resource::<Naming>().draft;
-        assert_eq!(drafted.chars().count(), NAME_LENGTH - 1);
+        assert_eq!(drafted.chars().count(), protocol::NAME_LETTERS - 1);
     }
 
     #[test]
