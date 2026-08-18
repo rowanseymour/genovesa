@@ -447,9 +447,18 @@ pub(crate) struct Player {
     /// another hoists it — one boat in the water each, see the `Lower` arm.
     /// Not ownership, which boats do not have: it is a fact about the
     /// player's own doing, and it says nothing about who may row the hull it
-    /// names. Session-local, like [`BoatState::virgin`], and dangling once
-    /// somebody's boarding has retired the hull — a name that no longer
-    /// answers retires nothing.
+    /// names. Dangling once somebody's boarding has retired the hull — a name
+    /// that no longer answers retires nothing.
+    ///
+    /// Session-local, which costs [`BoatState::virgin`] nothing and very
+    /// nearly cost this everything: a virgin flag forgotten at the door only
+    /// ever *widens* who may be handed a hull, where this field is the whole
+    /// of the bound — forgetting it would move the minting of permanent hulls
+    /// from one per message to one per handshake and bound nothing. Safe to
+    /// forget only because the tender is hoisted as its keeper leaves the
+    /// world *aboard something*; a keeper who walks out of the world on their
+    /// own feet keeps the dinghy they beached, that hull being their only way
+    /// back out to their ship. See the departure at the end of [`serve`].
     lowered: Option<BoatId>,
     /// When this player last asked for the night to be over, if they have —
     /// see [`ToServer::WantDawn`], which stands only for [`WAIT_LAPSE`].
@@ -1845,21 +1854,24 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                                 })
                                 .map(|(&found, _)| found);
                             let tender = alongside.unwrap_or_else(|| BoatId(keeper::mint()));
-                            let state = boats.entry(tender).or_insert(BoatState {
+                            // Written whole rather than settled field by
+                            // field, so the minted hull and the re-used one
+                            // leave here in the same shape by construction:
+                            // there is no reading of this that has to argue
+                            // which fields a re-use carries over. Never
+                            // virgin above all — a tender is somebody's doing
+                            // from the moment it touches the water, and must
+                            // never be dealt to an arrival as the boat their
+                            // story starts aboard.
+                            let state = BoatState {
                                 kind: BoatKind::Rowboat,
                                 position,
                                 heading,
-                                occupant: None,
-                                // Never virgin: a tender is somebody's doing
-                                // from the moment it touches the water, and
-                                // must never be dealt to an arrival as the
-                                // boat their story starts aboard.
+                                occupant: Some(id),
                                 virgin: false,
-                            });
-                            state.position = position;
-                            state.heading = heading;
-                            state.occupant = Some(id);
+                            };
                             let tender_told = state.told(tender);
+                            boats.insert(tender, state);
                             // And the other thing bounding it: one boat in
                             // the water each. The last one this player put
                             // over the side is hoisted out of the world as
@@ -1989,17 +2001,25 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // momentarily in both places is written once, where they are, while one
     // momentarily in neither would be a position lost. Nothing can move it
     // meanwhile: only this thread's read loop ever did, and it is over.
-    let last_seen = {
+    //
+    // The tender they had in the water comes out in the same breath, for the
+    // hoist below. It is read here and not filed: nothing about it outlives
+    // the session, see [`Player::lowered`].
+    let (last_seen, tender) = {
         let players = shared.players.held();
-        players.get(&id).map(|player| {
-            (
-                player.token,
-                player.position,
-                player.aboard,
-                player.surveyed.clone(),
-                filed(&player.known),
-            )
-        })
+        let player = players.get(&id);
+        (
+            player.map(|player| {
+                (
+                    player.token,
+                    player.position,
+                    player.aboard,
+                    player.surveyed.clone(),
+                    filed(&player.known),
+                )
+            }),
+            player.and_then(|player| player.lowered),
+        )
     };
     // The survey copied out with the roster let go, as the saves do it: a
     // departure that gathered thousands of chunks under that lock would be
@@ -2028,17 +2048,67 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         // return is a memory rather than a hold. Told under the same hold
         // as the departure, so nobody hears of a free boat before its
         // keeper has left.
-        if let Some(boat) = leaving.and_then(|(_, record)| record.aboard) {
-            let told = {
-                let mut boats = shared.boats.held();
-                boats.get_mut(&boat).map(|state| {
-                    state.occupant = None;
-                    state.told(boat)
-                })
-            };
-            if let Some(told) = told {
-                broadcast_all(&players, told);
+        let helm = leaving.and_then(|(_, record)| record.aboard);
+        let (told, hoisted) = {
+            let mut boats = shared.boats.held();
+            if let Some(state) = helm.and_then(|boat| boats.get_mut(&boat)) {
+                state.occupant = None;
             }
+            // And a ship's boat goes back aboard when its keeper leaves the
+            // world *aboard something*. This is the other half of the
+            // one-boat-in-the-water bound, and the half that survives a
+            // reconnect: without it a client loops lower, step out, board,
+            // hang up and leaves a permanent hull behind every handshake,
+            // remembered by nobody, written to the world file and posted to
+            // every future joiner.
+            //
+            // Aboard something, and not otherwise, because the alternative is
+            // worse than the leak it closes. A player who leaves on their own
+            // feet comes back on their own feet — the entry block deals a
+            // returner whose record says `aboard: None` no hull at all — and
+            // the ship they rowed in from lies anchored well offshore, past
+            // any depth a walker can wade. Hoist the dinghy they beached and
+            // they return to an island they can never leave: a strand nothing
+            // in the world can undo, where the leak was only a spare hull.
+            // Whoever comes to simplify this to hoisting unconditionally is
+            // re-creating that, so: don't.
+            //
+            // Excepting them closes nothing, because lowering another tender
+            // takes a *ship's* helm. The reconnect loop can only be re-entered
+            // by somebody who left at one, which is exactly the case still
+            // hoisted here; a player who left ashore has to row the dinghy
+            // they already have back out to their ship before they can lower
+            // anything at all, and that is re-use, not minting. Their one way
+            // out and the fleet's bound are the same fact told from two sides.
+            //
+            // After the helm above is freed, so the tender somebody hung up
+            // still sitting in goes too — they are aboard, and their ship is
+            // where they will be seated on return. Only while it lies free all
+            // the same: somebody else may have rowed off in it while its
+            // lowerer was still here, and that hull is theirs.
+            let hoisted = helm.and(tender).filter(|boat| {
+                boats
+                    .get(boat)
+                    .is_some_and(|state| state.occupant.is_none())
+            });
+            if let Some(boat) = hoisted {
+                boats.remove(&boat);
+            }
+            // Nothing worth saying about a hull lying free when the next word
+            // is that it is gone.
+            let told = helm
+                .filter(|boat| Some(*boat) != hoisted)
+                .and_then(|boat| boats.get(&boat).map(|state| state.told(boat)));
+            (told, hoisted)
+        };
+        if let Some(told) = told {
+            broadcast_all(&players, told);
+        }
+        // Last of all, on the rule the lowering's own hoist goes by: nobody
+        // hears of a boat vanishing before they have heard where its crew
+        // went.
+        if let Some(boat) = hoisted {
+            broadcast_all(&players, ToClient::BoatGone { id: boat });
         }
     }
     (shared.report)(&format!("{id} left"));

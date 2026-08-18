@@ -793,11 +793,13 @@ impl Fleet {
             // this is the defence for the word arriving out of that order:
             // believed, because the server is the authority on whose hands
             // are on a helm. Before the crew bookkeeping, which the telling's
-            // own word should have the last say on. Whether or not the scene
-            // can say where the hull stands: this telling moors it below on
-            // its own word, which is the better mooring of the two anyway.
-            let pose = poses.get(hull).ok().copied();
-            self.hand_back(commands, hull, pose.as_ref());
+            // own word should have the last say on. Handed back unmoored, and
+            // deliberately: this branch runs only when the telling is not
+            // about us, which is exactly when the bottom of this function
+            // moors the same hull on the telling's own word — a pose read off
+            // the scene here would be overwritten in the same command queue,
+            // the same frame, by the better of the two moorings.
+            self.hand_back(commands, hull, None);
         }
 
         match occupant {
