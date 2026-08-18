@@ -1028,8 +1028,8 @@ impl Plugin for BoatPlugin {
                     // cloth: the pennant and the sail are re-derived each
                     // frame and merely freeze, while the stroke is integrated
                     // and would otherwise outrun the boat. A hull nothing
-                    // moved covered no water, so the blades stand still
-                    // behind the chart on their own.
+                    // moved covered no water, so the stroke stands where it
+                    // stood behind the chart on its own.
                     //
                     // Conducted before rowed, so a scene that arrived this
                     // frame rows this frame.
@@ -1720,13 +1720,23 @@ fn row(
         // after the last pull still moves water past the blades, and oars
         // shipped mid-glide would be snatched in mid-stroke. Pulling against a
         // beach holds them out too, frozen where the way died, which is what
-        // leaning on stopped oars looks like. A hull with no [`Boat`] on it is
-        // asking for nothing, and rows only while something is moving it.
-        let pulling = boat.is_some_and(|it| it.sails_set);
-        let target = if pulling || covered > STIRRING {
-            1.0
-        } else {
-            0.0
+        // leaning on stopped oars looks like.
+        //
+        // This one asks the hull rather than the water, where there is a hull
+        // to ask, and that is the whole difference between the two decisions
+        // made here. The phase must be measured — a remembered way rows a
+        // boat the chart has stopped. But measurement cannot tell a hull that
+        // has *stopped* from one held still mid-glide, and the pose wants
+        // that distinction: judged on water covered, opening the chart during
+        // the seconds of glide after a furl ships the oars and closing it
+        // runs them straight back out, which is the same overlay animating a
+        // boat that has not changed. [`Boat::at_rest`] can tell, [`steer`]
+        // snapping the tail of every glide to exactly zero. Only a hull with
+        // no [`Boat`] at all — moored, walked across the water by [`moor`] —
+        // has nothing to ask, and falls back to the water it covered.
+        let target = match boat {
+            Some(boat) => f32::from(boat.sails_set || !boat.at_rest()),
+            None => f32::from(covered > STIRRING),
         };
         rower.out = settled(
             rower.out + (target - rower.out) * eased(SHIPPING, dt),
@@ -2678,6 +2688,34 @@ mod tests {
         assert!(
             pulling >= out,
             "the oars shipped themselves behind the chart: {out} to {pulling}"
+        );
+
+        // The harder half of the same rule: a boat furled but still gliding
+        // is *not* at rest, and the paper must not decide otherwise. Judged
+        // on the water covered rather than on the hull's own way, this
+        // shipped the oars completely — the glide is what would have carried
+        // them, and behind the chart there is no glide to read.
+        set_helm(&mut app, Helm::Sailing);
+        tap(&mut app, KeyCode::ArrowDown);
+        run_frames(&mut app, 2);
+        let gliding = way_on(&mut app);
+        assert!(
+            gliding.abs() > 0.5 && !sails_are_set(&mut app),
+            "the boat is not furled and gliding, so this proves nothing"
+        );
+        let (_, out, _) = oars_of(&mut app, rower);
+
+        set_helm(&mut app, Helm::Chart);
+        run_frames(&mut app, 60);
+        let (_, pulling, _) = oars_of(&mut app, rower);
+        assert_eq!(
+            way_on(&mut app),
+            gliding,
+            "the glide ran off behind the chart"
+        );
+        assert!(
+            pulling >= out,
+            "the oars were shipped on a boat still carrying way: {out} to {pulling}"
         );
     }
 
