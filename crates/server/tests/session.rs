@@ -1262,11 +1262,70 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
 }
 
 #[test]
+fn a_boat_somebody_here_has_taken_up_is_not_resumed_into_either() {
+    // The same memory, and a hull that never went anywhere — but somebody
+    // still in the world took it up while she was away and stepped off it
+    // again. A free helm says nothing about whose the hull is, and seating
+    // her back into it would take it out from under him.
+    let addr = host(1);
+    let (alice, a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
+    let a_boat = a_boat.expect("aboard");
+    let (bob, b, bobs_spawn, _t, _bobs) = Client::join_aboard(addr, None);
+
+    // Alice hangs up at the helm without ever sailing. Bob hearing her leave
+    // is what says the helm is free before he asks for it.
+    drop(alice);
+    assert!(matches!(bob.hear(), ToClient::Joined { id, .. } if id == a));
+    assert_eq!(bob.hear(), ToClient::Left { id: a });
+
+    // Bob takes her boat — on his own feet, a helm being granted only to
+    // somebody not already at one — and steps straight off it again, where it
+    // lies and while staying in the world.
+    bob.say(ToServer::Disembark {
+        position: bobs_spawn,
+    });
+    bob.say(ToServer::Move {
+        position: alices_spawn,
+    });
+    bob.say(ToServer::Board { boat: a_boat });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (told, _at, _h, occupant) = bob.hear_a_boat();
+        if told == a_boat && occupant == Some(b) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the take never took");
+    }
+    bob.say(ToServer::Disembark {
+        position: alices_spawn,
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (told, _at, _h, occupant) = bob.hear_a_boat();
+        if told == a_boat && occupant.is_none() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the step ashore was never told"
+        );
+    }
+
+    let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
+    assert_eq!(spawn, alices_spawn, "Alice did not return where she was");
+    assert_ne!(
+        aboard,
+        Some(a_boat),
+        "Alice was seated back into a hull Bob was standing beside"
+    );
+    assert!(aboard.is_some(), "Alice was left standing on open water");
+}
+
+#[test]
 fn a_hull_whose_keeper_has_left_the_world_is_handed_to_the_next_arrival() {
-    // What bounds the fleet against a client that joins and hangs up in a
-    // loop: the boat minted for somebody who has gone is the boat the next
-    // arrival is handed, rather than another being minted. Their having left
-    // the world aboard it is not a claim on it — see the loop below.
+    // The boat minted for somebody who has gone is the boat the next arrival
+    // is handed, rather than another being minted: their having left the
+    // world aboard it is not a claim on it.
     let addr = host(1);
     // A watcher, so the leaving can be *heard* to have been dealt with
     // before the next arrival knocks — a hull is only spare once its keeper
@@ -1327,13 +1386,60 @@ fn a_hull_somebody_stepped_off_is_not_handed_to_the_next_arrival() {
 }
 
 #[test]
+fn a_hull_handed_on_belongs_to_whoever_was_handed_it() {
+    // A hull an arrival is handed rather than minted is theirs on the same
+    // terms as one made for them: they can step ashore and leave it there
+    // without the arrival after them being handed it out from under them.
+    let addr = host(1);
+    // A watcher, so the leaving can be *heard* to have been dealt with before
+    // the next arrival knocks. Their own hull is occupied throughout, so it is
+    // never the one handed on.
+    let (watcher, _w, _spawn, _t, watchers) = Client::join_aboard(addr, None);
+    let watchers = watchers.expect("aboard");
+
+    let (alice, a, _spawn, _t, first) = Client::join_aboard(addr, None);
+    let first = first.expect("a newcomer's story starts aboard");
+    assert_ne!(first, watchers, "two players were dealt one hull");
+    drop(alice);
+    assert!(matches!(watcher.hear(), ToClient::Joined { id, .. } if id == a));
+    assert_eq!(watcher.hear(), ToClient::Left { id: a });
+
+    // Bob is handed Alice's, which is the whole premise: what follows is
+    // about a hull nobody minted for him.
+    let (bob, _b, bobs_spawn, _t, bobs) = Client::join_aboard(addr, None);
+    assert_eq!(
+        bobs,
+        Some(first),
+        "Bob was minted a hull rather than handed the free one"
+    );
+    bob.say(ToServer::Disembark {
+        position: bobs_spawn,
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (told, _at, _h, occupant) = bob.hear_a_boat();
+        if told == first && occupant.is_none() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the step ashore was never told"
+        );
+    }
+
+    let (_carol, _c, _spawn, _t, carols) = Client::join_aboard(addr, None);
+    assert_ne!(
+        carols,
+        Some(first),
+        "a hull was handed on twice, the second time from under somebody here"
+    );
+}
+
+#[test]
 fn joining_and_hanging_up_over_and_over_leaves_one_hull_behind() {
-    // The fleet against a client that joins and hangs up in a loop. Every
-    // arrival is put aboard something, so the bound cannot be on minting; it
-    // is that the hull the last one walked away from is the hull this one is
-    // handed. A world that answered each arrival with a new sloop would carry
-    // every one of them in its file and post every one of them to every future
-    // joiner, for a loop that costs the client a socket.
+    // The bound itself, counted in the file. Every arrival is put aboard
+    // something, so it cannot be on minting; it is that the hull the last one
+    // walked away from is the hull this one is handed.
     let path = scratch("hulls").join("one.world");
     let world = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
         .expect("bind")

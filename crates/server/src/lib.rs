@@ -542,14 +542,13 @@ pub(crate) struct BoatState {
     pub(crate) heading: f32,
     pub(crate) occupant: Option<PlayerId>,
     /// Whose hull this is: the last hands to hold its helm, or `None` for one
-    /// nobody has been aboard this session. Set wherever `occupant` is — minting,
-    /// being handed a spare, resuming a kept boat, boarding — and never
-    /// cleared afterwards, a hull somebody stepped out of still being theirs.
+    /// nobody has been aboard this session. Set wherever a helm is taken up —
+    /// minting, being handed a spare, resuming a kept boat, boarding — and
+    /// never cleared, a hull somebody stepped out of still being theirs.
     ///
     /// A free hull whose keeper is not in the world is what an arrival is
-    /// offered instead of a newly minted one, which is what bounds the fleet
-    /// against a client that joins and hangs up in a loop — see `fresh_hull`
-    /// in the join path.
+    /// offered instead of a newly minted one — see `fresh_hull` in the join
+    /// path for what that buys.
     ///
     /// Session-local, and deliberately: the whole of what it guards is a
     /// keeper who is *here*, so that a boat a live player parked on a beach
@@ -651,10 +650,7 @@ impl Server {
                                     // the door — see the welcome.
                                     occupant: None,
                                     // Nobody's until somebody here takes it
-                                    // up. Keeping is a thing only a player in
-                                    // the world does, so a hull outlives the
-                                    // session that last held it as one going
-                                    // spare — see [`BoatState::keeper`].
+                                    // up — see [`BoatState::keeper`].
                                     keeper: None,
                                 },
                             )
@@ -1428,9 +1424,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         // Where this player enters, and at whose helm — the boats being world
         // entities with keepers rather than owners. A newcomer's story starts
         // aboard, on a sloop the world mints them. A returner who left at a
-        // helm is seated back into that boat only if it still lies free where
-        // they left it; otherwise somebody has taken it up in the meantime,
-        // and a fresh hull where they stood is the interim answer until there
+        // helm is seated back into that boat only if it still lies where they
+        // left it and is nobody else's; otherwise somebody here has taken it
+        // up in the meantime, and stepping ashore again is not letting go of
+        // it. A fresh hull where they stood is the interim answer until there
         // is any other way to be on open water. A returner who left ashore
         // enters on their own feet.
         //
@@ -1501,7 +1498,8 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     Some(kept) => match boats.get_mut(&kept) {
                         Some(boat)
                             if boat.occupant.is_none()
-                                && boat.position.distance(record.position) <= KEPT_BERTH =>
+                                && boat.position.distance(record.position) <= KEPT_BERTH
+                                && boat.keeper.is_none_or(|keeper| !here.contains(&keeper)) =>
                         {
                             boat.occupant = Some(id);
                             boat.keeper = Some(token);
