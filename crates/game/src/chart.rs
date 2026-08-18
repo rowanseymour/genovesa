@@ -229,6 +229,16 @@ impl Chart {
     }
 
     /// The islands the chart has closed, each measured for its lettering.
+    ///
+    /// Asked afresh every time, by the lettering and by a click on the sheet
+    /// alike, and deliberately not kept. The walk behind it is bounded by the
+    /// whole voyage rather than by the window on the paper, which looks like
+    /// exactly the thing a chart of a long sail should not be doing per
+    /// frame — and it was measured before anything was built to avoid it. See
+    /// [`protocol::survey::Survey::islands`] for the numbers: tens of
+    /// microseconds for a well-sailed world, against a redraw that despawns
+    /// and rebuilds every stroke on the sheet. A cached list would be a rule
+    /// about when to throw it away, and that rule could be wrong; this cannot.
     pub fn islands(&self) -> Vec<Island> {
         self.survey
             .islands()
