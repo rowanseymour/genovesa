@@ -74,6 +74,35 @@ const PULL: f32 = 3.5;
 /// and is fine taken quickly, but nothing to be left standing halfway in.
 const SHIPPING: f32 = 8.0;
 
+/// Within this of fully out or fully in, the oars *are* — the tail-closing
+/// [`settled`] gives every ease here, in the blend's own unitless terms
+/// rather than [`HEEL_SETTLED`]'s degrees. A hundredth of the pose, far
+/// below noticing, and what lets a boat at rest hold one pose frame after
+/// frame instead of forever approaching it.
+const SHIPPED: f32 = 0.01;
+
+/// How far the hull has to move in a frame, in metres, before it is making
+/// way rather than lying still.
+///
+/// A hull under this client's helm stops dead — [`steer`] snaps the way to
+/// zero and then writes nothing — but a moored one is eased towards where it
+/// was last told, and an ease never quite arrives. Without a floor under it
+/// every dinghy at anchor would row gently forever.
+const STIRRING: f32 = 0.001;
+
+/// How far a hull can move in one frame, in metres, and still have rowed
+/// there. A hull's place is not always made good: taking the helm of a told
+/// hull puts it down where the server says outright, and without this the
+/// jump would read as water covered and spin the blades through a dozen
+/// strokes.
+///
+/// A distance rather than a speed, for the reason the figure's own teleport
+/// guard is one — judging it as a speed means dividing by the frame's clock,
+/// so a frame that ran long reads as a jump and a stutter blanks the stroke.
+/// Half a pull is far more water than any frame of rowing covers and far
+/// less than any jump worth the name.
+const TELEPORT: f32 = PULL / 2.0;
+
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —
 /// which means reordering the objects in Blender would silently swap the hull
@@ -706,8 +735,12 @@ struct Rower {
     /// pulls the cycle backwards.
     phase: f32,
     /// How much of the stroke shows against the stowed pose, eased between
-    /// 0 and 1 on [`SHIPPING`] and snapped at both ends.
+    /// 0 and 1 on [`SHIPPING`] and snapped at both ends by [`SHIPPED`].
     out: f32,
+    /// Where the hull was, being the only way to learn what it covered —
+    /// the oars ask nobody what is moving the boat, exactly as the figure's
+    /// legs ask nobody what is moving the walker.
+    last: Vec3,
 }
 
 /// What a hull is currently dressed as — the kind whose [`Fitting`]s are
@@ -972,10 +1005,10 @@ impl Plugin for BoatPlugin {
                 // not motion — it sets the hull to the height of the ground
                 // under it — so leaving it running means a chunk arriving
                 // under the pause menu is settled on before the player looks
-                // again. The pennant, the sail and the oars come after, and
-                // outside the pause for the same reason: all are drawn off
-                // what the hull's steering wrote, and reading it before this
-                // frame's steering wrote it leaves them a frame behind.
+                // again. The pennant and the sail come after, and outside the
+                // pause for the same reason: both are drawn off what the
+                // hull's steering wrote, and reading it before this frame's
+                // steering wrote it leaves the cloth a frame behind its mast.
                 (
                     // The dev boat switch first, so a frame that changes the
                     // kind sails and floats the hull it settled on.
@@ -984,13 +1017,24 @@ impl Plugin for BoatPlugin {
                     float,
                     fly_the_pennant,
                     trim_the_sails,
+                    // The hulls nobody here is steering, ridden after the
+                    // one that is: same water, same frame.
+                    moor,
+                    // The oars after every hull has been moved, ours and
+                    // the moored alike, because they are turned by the water
+                    // the hull *covered* — measured frame against frame
+                    // rather than read off anything. That is also what lets
+                    // them run outside the pause on different terms from the
+                    // cloth: the pennant and the sail are re-derived each
+                    // frame and merely freeze, while the stroke is integrated
+                    // and would otherwise outrun the boat. A hull nothing
+                    // moved covered no water, so the blades stand still
+                    // behind the chart on their own.
+                    //
                     // Conducted before rowed, so a scene that arrived this
                     // frame rows this frame.
                     conduct_the_oars,
                     row,
-                    // The hulls nobody here is steering, ridden after the
-                    // one that is: same water, same frame.
-                    moor,
                     // And the hole in the sea last, once every hull — sailed
                     // or moored — is where this frame leaves it.
                     cut_the_water,
@@ -1573,6 +1617,7 @@ fn conduct_the_oars(
     hierarchy: Query<&ChildOf>,
     oared: Query<(), With<Oared>>,
     hulls: Query<(), With<Vessel>>,
+    poses: Query<&Transform, With<Vessel>>,
     mut arrivals: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
 ) {
     for (entity, mut player) in &mut arrivals {
@@ -1581,9 +1626,14 @@ fn conduct_the_oars(
         if above(&hierarchy, &oared, entity).is_none() {
             continue;
         }
-        // And whose hull the oars pull, so the stroke is seeked by that
-        // hull's own way.
+        // And whose hull the oars pull, so the stroke is turned by that
+        // hull's own movement.
         let Some(hull) = above(&hierarchy, &hulls, entity) else {
+            continue;
+        };
+        // Starting from where the hull stands, so the first frame reads the
+        // water it covered and not the whole way from the origin.
+        let Ok(place) = poses.get(hull) else {
             continue;
         };
 
@@ -1593,6 +1643,7 @@ fn conduct_the_oars(
                 hull,
                 phase: 0.0,
                 out: 0.0,
+                last: place.translation,
             },
         ));
         player.play(rowing.stowed).repeat();
@@ -1600,15 +1651,32 @@ fn conduct_the_oars(
     }
 }
 
-/// Rows the oars by the way the hull is making: the stroke seeked to the
-/// point the hull's own advance has pulled it round to, and shown only while
-/// there is a pull asked for or way still on — at rest the oars lie stowed.
+/// Rows the oars by the water the hull covers: the stroke seeked to the point
+/// the hull's own movement has pulled it round to, and shown only while there
+/// is a pull asked for or the boat is still going — at rest the oars lie
+/// stowed.
 ///
-/// The same seek-by-ground-covered arrangement the walking figure uses, with
-/// [`Boat::way`] standing in for measuring the transform: [`steer`] advances
-/// the hull by exactly `way * dt` and zeroes the way it grounds on, so
-/// reading the way after it *is* reading the water covered this frame. The
-/// drive itself is still flat — see [`steer`] — so the hull glides evenly
+/// The walking figure's arrangement exactly, down to *measuring* the movement
+/// rather than being told it: the hull's own place, this frame against last.
+/// Reading [`Boat::way`] is shorter and was what this did — [`steer`] advances
+/// the hull by exactly `way * dt` and zeroes the way it grounds on, so the two
+/// numbers agree on every frame `steer` runs. They part on the frames it does
+/// not, and `steer` is the one system here the pause stops: with the chart or
+/// the menu up the way stands frozen at whatever it last was while the hull
+/// sits perfectly still, and a stroke integrating that number rows forever on
+/// a dead boat. Water covered cannot lie that way — a hull nothing moved
+/// covered none — which is the whole reason the figure measures too.
+///
+/// Measuring also buys the hulls this client never steers: a dinghy under
+/// somebody else's oars carries no [`Boat`] at all and is walked across the
+/// water by [`moor`], and it pulls the same stroke off the same arithmetic.
+/// One left at anchor covers nothing and lies with its oars in.
+///
+/// Height is thrown away, [`float`] setting the hull to the water's every
+/// frame and a swell being no part of a stroke; a jump is not a stroke either,
+/// which is [`TELEPORT`].
+///
+/// The drive itself is still flat — see [`steer`] — so the hull glides evenly
 /// while the blades circle; giving the surge to the stroke is the step not
 /// yet taken.
 ///
@@ -1618,7 +1686,7 @@ fn row(
     time: Res<Time>,
     rowing: Res<Rowing>,
     clips: Res<Assets<AnimationClip>>,
-    boats: Query<&Boat>,
+    hulls: Query<(&Transform, Option<&Boat>), With<Vessel>>,
     mut rowers: Query<(&mut Rower, &mut AnimationPlayer)>,
 ) {
     let Some(cycle) = clips.get(&rowing.cycle).map(AnimationClip::duration) else {
@@ -1627,22 +1695,43 @@ fn row(
     let dt = time.delta_secs();
 
     for (mut rower, mut player) in &mut rowers {
-        // A hull nobody is aboard has no sailing state at all: a moored
-        // dinghy lies with its oars in.
-        let (way, pulling) = boats
-            .get(rower.hull)
-            .map_or((0.0, false), |boat| (boat.way, boat.sails_set));
-        rower.phase = (rower.phase + way * dt / PULL).rem_euclid(1.0);
+        let Ok((place, boat)) = hulls.get(rower.hull) else {
+            continue;
+        };
+        let step = place.translation.xz() - rower.last.xz();
+        rower.last = place.translation;
 
-        // Out while a pull is asked for or the hull still carries way: the
-        // glide after the last pull still moves water past the blades, and
-        // oars shipped mid-glide would be snatched in mid-stroke. Pulling
-        // against a beach holds them out too, frozen where the way died,
-        // which is what leaning on stopped oars looks like.
-        let target = if pulling || way != 0.0 { 1.0 } else { 0.0 };
+        // A jump is not a stroke — see [`TELEPORT`]. The water a hull was set
+        // down across is water nobody rowed, so it reads as having covered
+        // none of it and the stroke is left exactly where it stood.
+        let moved = step.length();
+        let covered = if moved > TELEPORT { 0.0 } else { moved };
+        // Backwards through the same cycle when the water goes the other way
+        // past the blades, which is what backing water is and needs no second
+        // clip.
+        let going = if place.forward().xz().dot(step) < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        rower.phase = (rower.phase + going * covered / PULL).rem_euclid(1.0);
+
+        // Out while a pull is asked for or the boat is still going: the glide
+        // after the last pull still moves water past the blades, and oars
+        // shipped mid-glide would be snatched in mid-stroke. Pulling against a
+        // beach holds them out too, frozen where the way died, which is what
+        // leaning on stopped oars looks like. A hull with no [`Boat`] on it is
+        // asking for nothing, and rows only while something is moving it.
+        let pulling = boat.is_some_and(|it| it.sails_set);
+        let target = if pulling || covered > STIRRING {
+            1.0
+        } else {
+            0.0
+        };
         rower.out = settled(
             rower.out + (target - rower.out) * eased(SHIPPING, dt),
             target,
+            SHIPPED,
         );
 
         if let Some(stroke) = player.animation_mut(rowing.stroke) {
@@ -1731,8 +1820,16 @@ pub(crate) fn float(
             (0.0, 0.0)
         };
 
-        let pitch = settled(boat.pitch + (target_pitch - boat.pitch) * t, target_pitch);
-        let roll = settled(boat.roll + (target_roll - boat.roll) * t, target_roll);
+        let pitch = settled(
+            boat.pitch + (target_pitch - boat.pitch) * t,
+            target_pitch,
+            HEEL_SETTLED,
+        );
+        let roll = settled(
+            boat.roll + (target_roll - boat.roll) * t,
+            target_roll,
+            HEEL_SETTLED,
+        );
         if pitch == boat.pitch && roll == boat.roll {
             // Nothing to change — which is every frame for a boat with no
             // water under it, whose rotation must stay unwritten the way an
@@ -1749,12 +1846,16 @@ pub(crate) fn float(
     }
 }
 
-/// The tail-closing every eased angle here gets, in [`HEEL_SETTLED`]'s terms:
-/// within a third of a degree of its target the angle *is* the target, so a
-/// hull done settling holds one rotation frame after frame rather than
-/// creeping towards it forever.
-fn settled(eased: f32, target: f32) -> f32 {
-    if (target - eased).abs() < HEEL_SETTLED {
+/// The tail-closing every ease here gets: `within` of its target, the value
+/// *is* the target, so a hull done settling holds one rotation frame after
+/// frame rather than creeping towards it forever. [`eased`] only ever closes
+/// a fraction of what is left, so nothing arrives without this.
+///
+/// How close is the caller's, because the things eased are not measured in
+/// the same units: the hull's angles want [`HEEL_SETTLED`], a third of a
+/// degree, and the oars' blend wants [`SHIPPED`], a hundredth of a pose.
+fn settled(eased: f32, target: f32, within: f32) -> f32 {
+    if (target - eased).abs() < within {
         target
     } else {
         eased
@@ -1908,8 +2009,8 @@ fn steer(
         match hull.mast {
             Some(_) => hull.speed * sail_drive(transform.forward().xz(), conditions.wind()),
             // Rowed: the oars pull whatever the wind is doing. A flat
-            // drive still — [`row`] seeks the stroke to match the way made
-            // here, and giving the surge to the stroke is the step not yet
+            // drive still — [`row`] seeks the stroke to match the water this
+            // covers, and giving the surge to the stroke is the step not yet
             // taken.
             None => hull.speed,
         }
@@ -1954,7 +2055,11 @@ fn steer(
     let target_heel = heel_for(&hull, helm, boat.way);
     if boat.heel != target_heel {
         let heel_t = eased(1.0 / hull.heel_response, time.delta_secs());
-        let heel = settled(boat.heel + (target_heel - boat.heel) * heel_t, target_heel);
+        let heel = settled(
+            boat.heel + (target_heel - boat.heel) * heel_t,
+            target_heel,
+            HEEL_SETTLED,
+        );
         transform.rotation *= Quat::from_rotation_z(heel - boat.heel);
         boat.heel = heel;
     }
@@ -2518,18 +2623,61 @@ mod tests {
 
     #[test]
     fn backing_water_pulls_the_stroke_backwards() {
-        // Half a pull astern runs the same cycle the other way, without a
-        // second clip existing — the phase wraps below zero to the top of
-        // the turn.
+        // The same cycle run the other way, without a second clip existing —
+        // the phase wraps below zero and comes round from the top of the
+        // turn, so the seek is the forward test's reading subtracted from a
+        // whole one rather than merely being somewhere past the half.
         let (mut app, rower) = rowing_app();
+        let from = boat(&mut app).translation;
         hold(&mut app, KeyCode::ArrowDown);
         run_frames(&mut app, 30);
 
+        let backed = boat(&mut app).translation.xz().distance(from.xz());
+        assert!(backed > 0.1, "not enough water backed over to tell");
         let (seek, pulling, _) = oars_of(&mut app, rower);
         assert!(pulling > 0.0, "backing water never got the oars out");
+        let expected = (-backed / PULL).rem_euclid(1.0) * CYCLE;
         assert!(
-            seek > CYCLE * 0.5,
-            "the stroke ran forwards on a boat backing water: {seek}"
+            (seek - expected).abs() < 0.01,
+            "{backed:.2} m backed over left the stroke at {seek:.3} s, not {expected:.3}"
+        );
+    }
+
+    #[test]
+    fn a_boat_the_helm_has_left_turns_no_stroke() {
+        // The chart and the pause menu take the helm and leave the world
+        // running behind them — see [`Helm`] — so [`steer`] stops while the
+        // hull keeps its last way written on it. Measuring the water covered
+        // is what makes that harmless: the hull sits still, so the stroke
+        // does. Reading [`Boat::way`] instead rowed on for as long as the
+        // paper was up, which is what this is here to catch.
+        let (mut app, rower) = rowing_app();
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 30);
+        assert!(way_on(&mut app) > 0.5, "the boat never got under oars");
+
+        set_helm(&mut app, Helm::Chart);
+        let held = boat(&mut app).translation;
+        let (seek, out, _) = oars_of(&mut app, rower);
+        run_frames(&mut app, 60);
+
+        assert_eq!(
+            boat(&mut app).translation.xz(),
+            held.xz(),
+            "the hull sailed on behind the chart"
+        );
+        assert!(
+            way_on(&mut app) > 0.5,
+            "the boat lost its way, so this proves nothing"
+        );
+        let (still, pulling, _) = oars_of(&mut app, rower);
+        assert_eq!(still, seek, "the oars pulled a boat that covered no water");
+        // And are not snatched in either: the hull covers no water but the
+        // pull is still asked for, so the oars stay out — held mid-stroke
+        // like everything else behind the paper.
+        assert!(
+            pulling >= out,
+            "the oars shipped themselves behind the chart: {out} to {pulling}"
         );
     }
 

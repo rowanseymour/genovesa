@@ -66,7 +66,7 @@ drive is the shorter half of the cycle, the way a stroke is.
 
 **The stroke is seeked rather than played**, exactly as the figure's run is —
 by water covered, so the blades bite at whatever speed the boat is making and
-a boat backing water pulls the cycle backwards. The one number that needs and
+a boat backing water pulls the cycle backwards. The one number this needs and
 the file cannot carry — how far one stroke drives the boat, a little more than
 its own length — is `PULL` in `crates/game/src/boat.rs`, where `row` does the
 seeking and settles the oars stowed at rest.
