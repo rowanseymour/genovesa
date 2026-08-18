@@ -7,22 +7,17 @@
 //! thing that has to live on this side by definition, since a world that
 //! handed it back on request would be a world where anybody could be anybody.
 //!
-//! Everything else has gone the same way in turn: the berth, then the survey,
-//! and now the island names, which went when a name stopped being a private
-//! note and started riding with the claim it is written on. All of it is the
-//! world's, told over the wire like the players, the boats and the beasts.
-//! This module is what is left when a client is finally only a client, and it
-//! is not expected to shrink further.
+//! Everything else has gone the same way in turn — the berth, then the survey,
+//! then the island names — and is now the world's, told over the wire like the
+//! players, the boats and the beasts.
 //!
-//! Books are keyed by the [`WorldId`] the server names in its handshake —
-//! never by address, since a world moved to another host is meant to still
-//! be the same world. Like the server's world file, the format is plain
-//! versioned text, written whole beside the file and renamed over it, and a
-//! build refuses a file it only half-understands — except the keys a past
-//! format-1 build wrote and this one has outgrown, which are read past
-//! rather than refused: whatever else an old book holds, its token is still
-//! this player's name in that world, and losing it would make them a
-//! stranger where they have a history.
+//! Books are keyed by the [`WorldId`] the server names in its handshake, never
+//! by address, a world moved to another host being meant to still be the same
+//! world. Like the server's world file, the format is plain versioned text
+//! written whole beside the file and renamed over it, and a build refuses a
+//! file it only half-understands — except keys an older format wrote and this
+//! one has outgrown, which are read past: an old book's token is still this
+//! player's name in that world.
 
 use std::fmt::Write as _;
 use std::fs;

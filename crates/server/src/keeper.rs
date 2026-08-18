@@ -1,41 +1,33 @@
 //! Keeping a world: the file it survives in, and the lock that keeps it one
 //! world at a time.
 //!
-//! Nearly everything a session shows is not in the file, because nearly
-//! everything a session shows is not state: the terrain, the palms and the
-//! weather are functions of the seed and the world's age, and the beasts are
-//! raised around whoever is present. What is left — what cannot be re-derived
-//! and so is the whole of what a world *is* beyond its seed — is short: which
-//! world this is, how old it is, what it is called, where it last saw each
-//! player it has dealt papers to, which ground each of them has been near
-//! enough to survey, and which islands have been claimed and by whom. The seed
-//! is the geography; this file is the history.
+//! Nearly everything a session shows is not state: the terrain, the palms and
+//! the weather are functions of the seed and the world's age, and the beasts
+//! are raised around whoever is present. What is left — what cannot be
+//! re-derived — is short: which world this is, how old it is, what it is
+//! called, where it last saw each player it has dealt papers to, which ground
+//! each has surveyed, and which islands are claimed and by whom. The seed is
+//! the geography; this file is the history.
 //!
-//! A survey is the one part of it with any size to it — a voyage is thousands
-//! of chunks — and only the *coordinates* are written. What was found on them
-//! is ink, and ink is derived: the ground is a function of the seed, so the
-//! world can work the coastline out again in the time it takes to read the
-//! file. What no seed can say is where somebody went.
+//! A survey is the one part with any size to it, and only the *coordinates* are
+//! written: what was found on them is derived from the seed, and can be worked
+//! out again in the time it takes to read the file. What no seed can say is
+//! where somebody went.
 //!
-//! The format is plain text, one `key value` per line under a versioned
-//! header, written sorted so that two saves of one state are byte-identical.
-//! Text because the file is small — a well-sailed world is tens of kilobytes,
-//! against a single chunk of ground's sixteen — and will be looked at by
-//! people: moved between machines, backed up, read when something seems
-//! wrong. A format version rather than tolerant parsing, because a build that
-//! half-understands a file should refuse it whole, not quietly drop the half
-//! it never heard of.
+//! The format is plain text, one `key value` per line under a versioned header,
+//! written sorted so two saves of one state are byte-identical. Text because
+//! the file is small and will be looked at by people. A format version rather
+//! than tolerant parsing, because a build that half-understands a file should
+//! refuse it whole.
 //!
 //! Writes are atomic — composed beside the file and renamed over it — and the
-//! previous version survives as `.old`, which [`load`] falls back to: the
-//! failure being bought off is a machine losing power mid-write, which must
-//! never cost the world. The lock is the OS's own advisory file lock, held on
-//! a `.lock` sibling for the life of the [`Keeper`]: it dies with the process,
-//! so a crash cannot leave a world wrongly barred, and it is on a sibling
-//! rather than the file itself because the file is replaced at every save and
-//! a lock rides the file it was taken on, not the name. What it prevents is
-//! two processes hosting one world at once, each saving over the other —
-//! two histories written to one name, which is the quiet way to lose one.
+//! previous version survives as `.old`, which [`load`] falls back to, against a
+//! machine losing power mid-write. The lock is the OS's own advisory file lock,
+//! held on a `.lock` sibling for the life of the [`Keeper`]: it dies with the
+//! process, so a crash cannot leave a world wrongly barred, and it is on a
+//! sibling because the file is replaced at every save and a lock rides the file
+//! it was taken on, not the name. What it prevents is two processes hosting one
+//! world at once, each saving over the other.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;

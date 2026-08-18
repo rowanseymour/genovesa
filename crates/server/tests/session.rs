@@ -1742,13 +1742,11 @@ fn a_player_may_hang_up_while_their_survey_is_still_being_told_back() {
 /// above water — half the parcels near a spawn hold nothing but a shoal — and
 /// what a claim is about is the waterline.
 ///
-/// Bounded at both ends, and both bounds matter. Too small an island proves
-/// nothing: a coast a player can take in whole from the water off one side of
-/// it — which, at [`SIGHT_RADIUS`], is anything under a few hundred metres
-/// across — is one that closes without anybody going anywhere, so a test of
-/// having gone round it would pass without the going. Too big is a circuit a
-/// test spends minutes on. Between the two is a coast that has to be gone
-/// round and can be gone round in a coarse polygon.
+/// Bounded at both ends. Too small an island closes without anybody going
+/// anywhere — a coast taken in whole from the water off one side of it, which
+/// at [`SIGHT_RADIUS`] is anything under a few hundred metres across — so a
+/// test of having gone round would pass without the going. Too big is a circuit
+/// a test spends minutes on.
 fn an_island_to_sail_round(world: &Archipelago, near: Vec2) -> (Vec2, f32, Vec2) {
     let reach = Vec2::splat(2_048.0);
     let mut about: Vec<IslandSpec> = world.islands_within(near - reach, near + reach);
@@ -1810,16 +1808,13 @@ const LEGS: usize = 24;
 /// outside the shore inks the same band a circle would, and the test spends
 /// seconds rather than minutes.
 ///
-/// The waiting is the part worth understanding. The survey follows a way only
-/// as far as it believes somebody could have sailed since the last report —
-/// see [`server::PLAUSIBLE_SPEED`] — and both crossing to the island and going
-/// round it spend that allowance. Sailed with none in hand, the survey follows
-/// in a straight line towards each report instead of round the shore, which is
-/// a stripe of coast nobody inked and a ring that never closes. So every leg
-/// is paid for in real seconds at the rate the allowance fills, and each waits
-/// to be told its own ground before the next is sailed — which is also what
-/// keeps a voyage's worth of batches from piling up in an outbox nobody is
-/// draining.
+/// The waiting is the part worth understanding. The survey follows a way only as
+/// far as it believes somebody could have sailed since the last report — see
+/// [`server::PLAUSIBLE_SPEED`] — and sailed with no allowance in hand it
+/// follows a straight line towards each report instead of round the shore,
+/// which is a stripe of coast nobody inked and a ring that never closes. So
+/// every leg is paid for in real seconds at the rate the allowance fills, and
+/// each waits to be told its own ground before the next is sailed.
 fn sail_around(
     client: &Client,
     from: Vec2,

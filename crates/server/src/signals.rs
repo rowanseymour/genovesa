@@ -1,15 +1,11 @@
 //! Being asked to stop, as against being cut off in the middle of a sentence.
 //!
 //! A world is written down on the way out: the closing save happens inside the
-//! drop that ends the session, so a player leaving a world loses nothing of it.
-//! A process killed where it stands does none of that, and what it loses is
-//! everything since the last periodic save — see `KEEP_INTERVAL`, which is half
-//! a minute of somebody's afternoon. That is the ordinary way a dedicated
-//! server stops: an init system's `kill`, a `docker stop`, a Ctrl-C in the
-//! terminal it was started from. So the signals that mean *stop* are caught
-//! rather than left to the default action, and turned into the ordinary end of
-//! a session — the same drop, the same closing save, the same hanging up on
-//! everybody still in the world.
+//! drop that ends the session. A process killed where it stands does none of
+//! that and loses everything since the last periodic save — see
+//! `KEEP_INTERVAL`. That is the ordinary way a dedicated server stops, so the
+//! signals meaning *stop* are caught and turned into the ordinary end of a
+//! session: the same drop, the same closing save, the same hanging up.
 //!
 //! Caught here: `SIGINT`, what Ctrl-C sends; `SIGTERM`, what an init system
 //! and a bare `kill` send; and `SIGHUP`, the terminal that started it going

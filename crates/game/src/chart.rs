@@ -11,15 +11,11 @@
 //! module holds one [`Survey`], asks it questions, and puts ink on paper.
 //!
 //! **Nothing here surveys anything.** The survey belongs to the world: the
-//! server holds which chunks each player has been near enough to look at,
-//! works out what is on them, and says so — everything already surveyed when
-//! a player joins, and a batch more whenever sailing brings coast within
-//! sight (see [`protocol::ToClient::Surveyed`]). This module records what it
-//! is told and draws it, and has no rule of its own about what counts as
-//! seen. It could not honestly have one: a claim is judged against a coast
-//! the server has walked, and a client that decided for itself what it had
-//! seen would be a client whose chart and whose claims were about two
-//! different worlds.
+//! server says what has been seen and what is on it (see
+//! [`protocol::ToClient::Surveyed`]), and this module records and draws that.
+//! It could not honestly have a rule of its own — a claim is judged against a
+//! coast the server has walked, and a client that decided for itself what it
+//! had seen would have a chart and claims about two different worlds.
 //!
 //! # The one thing that accumulates
 //!
@@ -34,22 +30,15 @@
 //!
 //! What makes that affordable is throwing the ground away and keeping only the
 //! two lines worth drawing — where it meets the sea, and where the water over
-//! it reaches [`protocol::survey::SHOAL_DEPTH`]:
+//! it reaches [`protocol::survey::SHOAL_DEPTH`]. Sailed right around, a 1.5 km
+//! island is about a megabyte of height grid and a few kilobytes of those two
+//! lines; the arithmetic is [`protocol::survey`]'s.
 //!
-//! | held per chunk | a 1.5 km island, sailed right around |
-//! | --- | --- |
-//! | the height grid it arrived as | about a megabyte |
-//! | its coastline and its shoal line, simplified | a few kilobytes |
-//!
-//! What keeps the second column that small is [`protocol::survey`]'s doing,
-//! and its own docs are where the arithmetic of it is written down. What
-//! belongs to the *chart* is why the second line is kept at all: it is the one
-//! piece of **depth** on a sheet that is otherwise all outline, drawn stippled
-//! the way an engraved chart draws the limit of a bank, and it is the
-//! difference between a shore that plunges and a shore with a bank off it. It
-//! roughly doubles what a coastal chunk holds, and it earns that — but it is
-//! ink and nothing else. It rings nothing, names nothing and closes nothing,
-//! and every question about islands is asked of the waterline alone.
+//! What belongs to the *chart* is why the second line is kept at all: it is the
+//! one piece of **depth** on a sheet that is otherwise all outline, drawn
+//! stippled the way an engraved chart draws the limit of a bank. But it is ink
+//! and nothing else — it rings nothing, names nothing and closes nothing, and
+//! every question about islands is asked of the waterline alone.
 //!
 //! # Names
 //!
@@ -59,13 +48,11 @@
 //! open on anything else, an island nobody holds having nothing to write on
 //! and somebody else's having nothing this player may write.
 //!
-//! Nothing is lettered here. A name rides the claim it is written on, so what
-//! Enter does is offer it to the world; the world grants or refuses it, and
-//! the cairn comes back saying whatever it now says. Both the claim and the
-//! name are settled against the ring's identity
-//! ([`protocol::survey::Island::id`]), which is a fact about the coast and so
-//! the same on every machine — and the lettering a player reads is the
-//! lettering everybody else reads.
+//! Nothing is lettered here. A name rides the claim it is written on, so Enter
+//! offers it to the world and the cairn comes back saying whatever it now says.
+//! Both are settled against the ring's identity
+//! ([`protocol::survey::Island::id`]), a fact about the coast and so the same
+//! on every machine.
 //!
 //! # What the sheet knows, and how it came to
 //!
@@ -78,48 +65,42 @@
 //! | a cairn with a name beside it | having landed and read them |
 //! | a coastline, closed and lettered | having sailed the whole way round |
 //!
-//! Only the third is this sheet's own seeing, and only the third earns the
-//! right to claim. The first two arrive as [`Claimed`], which is somebody
-//! else's doing reported by the world, and neither of them puts a single stroke
-//! of coastline on the paper: a chart that let hearsay close a ring would be a
-//! chart a player could claim an island off having been *told* about it.
+//! Only the third is this sheet's own seeing, and only the third earns the right
+//! to claim. The first two arrive as [`Claimed`] and put no stroke of coastline
+//! on the paper: a chart that let hearsay close a ring would be one a player
+//! could claim an island off having been *told* about it.
 //!
-//! The rule about how near is near enough is the server's alone and is not
-//! written down twice — see `server`'s cairn distances. What matters here is
-//! that a cairn with no name on it is not a puzzle: it is either an island
-//! nobody has christened or one whose stones this player has not been up to,
-//! and from a mile offshore those are the same thing.
+//! How near is near enough is the server's alone and is not written down twice.
+//! What matters here is that a cairn with no name on it is not a puzzle — it is
+//! either an island nobody has christened or one whose stones this player has
+//! not been up to, and from a mile offshore those are the same thing.
 //!
 //! # Ink, not paper
 //!
 //! An old chart's character is easy to get from a paper texture and a wash of
 //! stains, and that is the one way it cannot be got here: this world is flat
-//! tones with no texture and no gradient anywhere in it, and a mottled sheet
-//! would be the only one of either. So the hand is in the line instead — a
-//! coast weighted heavier than the graticule under it, ticked on its landward
-//! side the way an engraved chart hatches its shores, stippled on its seaward
-//! side where the water is shallow, and laid on one flat
-//! tone of parchment. The furniture is lettered in the serif the menus are
-//! set in; the islands are named in an italic of the Fell types (see
-//! [`NAME_FONT`]), which is the nearest a flat sheet comes to an engraver's
-//! hand.
+//! tones with no texture or gradient anywhere in it, and a mottled sheet would
+//! be the only one of either. So the hand is in the line instead — a coast
+//! weighted heavier than the graticule under it, ticked on its landward side
+//! the way an engraved chart hatches its shores, stippled on its seaward side
+//! where the water is shallow, on one flat tone of parchment. The furniture is
+//! lettered in the menus' serif; the islands are named in an italic of the Fell
+//! types (see [`NAME_FONT`]).
 //!
 //! Outside all of it the sheet has an edge — a double rule just inside the
-//! window with the ruling's own graduations laid between the two lines, and the
+//! window with the ruling's graduations between the two lines, and the
 //! engraving covered over beyond it. A chart drawn to the window's own edge has
-//! no edge at all: the paper runs out wherever the player last dragged their
-//! mouse, which reads as a viewport rather than as a sheet.
+//! no edge at all, and reads as a viewport rather than as a sheet.
 //!
-//! Under all of it is the rhumb net: roses standing on the ruling's own
-//! crossings, each throwing the thirty-two points of the compass across the
-//! paper (see [`rhumbs`]). It is the sheet's whole character and none of its
-//! content, so it is ruled fainter than anything that runs over it, and its
-//! rays are graded — the principal winds ruled, the quarter winds dashed — so
-//! that a dozen roses' worth of rays reads as a net rather than as a haze. The
-//! roses themselves are drawn in two flat tones, each point of the star split
-//! down its own axis (see [`star`]): a hatched engraving is what that is
-//! imitating, and two tones meeting on an edge is the only way to draw a lit
-//! thing on a sheet with no gradients on it.
+//! Under all of it is the rhumb net: roses standing on the ruling's crossings,
+//! each throwing the thirty-two points of the compass across the paper (see
+//! [`rhumbs`]). It is the sheet's whole character and none of its content, so
+//! it is ruled fainter than anything over it, and its rays are graded — the
+//! principal winds ruled, the quarter winds dashed — so a dozen roses' worth
+//! reads as a net rather than a haze. The roses are drawn in two flat tones,
+//! each point of the star split down its own axis (see [`star`]), two tones
+//! meeting on an edge being the only way to draw a lit thing on a sheet with
+//! no gradients.
 //!
 //! A coast that has not been closed is not closed on the sheet either. Half an
 //! island is drawn as half an island, the line simply stopping where the survey
@@ -230,15 +211,13 @@ impl Chart {
 
     /// The islands the chart has closed, each measured for its lettering.
     ///
-    /// Asked afresh every time, by the lettering and by a click on the sheet
-    /// alike, and deliberately not kept. The walk behind it is bounded by the
-    /// whole voyage rather than by the window on the paper, which looks like
-    /// exactly the thing a chart of a long sail should not be doing per
-    /// frame — and it was measured before anything was built to avoid it. See
-    /// [`protocol::survey::Survey::islands`] for the numbers: tens of
-    /// microseconds for a well-sailed world, against a redraw that despawns
-    /// and rebuilds every stroke on the sheet. A cached list would be a rule
-    /// about when to throw it away, and that rule could be wrong; this cannot.
+    /// Asked afresh every time and deliberately not kept. The walk behind it is
+    /// bounded by the whole voyage rather than by the window on the paper,
+    /// which looks like exactly what a chart of a long sail should not do per
+    /// frame — and it was measured: tens of microseconds for a well-sailed
+    /// world, see [`protocol::survey::Survey::islands`], against a redraw that
+    /// rebuilds every stroke on the sheet. A cached list would be a rule about
+    /// when to throw it away, and that rule could be wrong.
     pub fn islands(&self) -> Vec<Island> {
         self.survey
             .islands()
@@ -279,12 +258,9 @@ impl Chart {
     /// Every cairn this sheet has been told of, to be drawn — see
     /// [`cairn_mark`].
     ///
-    /// Not windowed the way the coast is. A cairn is one mark where a chunk of
-    /// coast is a run of line, so there is nothing to be saved by asking which
-    /// of them are on the paper before working out where they fall — and a
-    /// player has at most as many of these as there are claimed islands they
-    /// have been near, which is a handful where the coast is thousands of
-    /// chunks.
+    /// Not windowed the way the coast is: a cairn is one mark where a chunk of
+    /// coast is a run of line, and a player has at most as many of these as
+    /// there are claimed islands they have been near.
     pub(crate) fn cairns(&self) -> impl Iterator<Item = (IVec2, &Claimed)> {
         self.claims.iter().map(|(island, claim)| (*island, claim))
     }
@@ -374,33 +350,24 @@ const SHOAL_SCATTER: f32 = 3.0;
 ///
 /// The silhouette of the thing itself — a heap of stones, a staff out of it and
 /// a banner on the staff — rather than the plain triangle a chart draws a
-/// beacon with. What is standing out there is unmistakable at a mile, and the
-/// mark for it should be unmistakable on the paper: a player who has seen one
-/// on a headland knows this without being told what it means.
+/// beacon with: a player who has seen one on a headland knows this without
+/// being told what it means.
 ///
 /// Drawn from the spot upward, so the *foot* of it is where the cairn stands.
-/// A symbol centred on its position would put the stones half a heap north of
-/// where they are, which on a chart is a lie about a landmark.
+/// Centred on its position it would put the stones half a heap north of where
+/// they are, which on a chart is a lie about a landmark.
 ///
-/// The proportions are the standing thing's own, and they have to be: a heap
-/// broader than it is tall, a staff several times its height, and a tall
-/// square-ended banner hanging down one side of the top. A steep little mound
-/// under a short pole with a tapering pennant on it is not a daymark, it is the
-/// flag on a golf green — which this world does not have and would rather not
-/// be reminded of.
+/// The proportions are the standing thing's own: a heap broader than it is
+/// tall, a staff several times its height, and a tall square-ended banner down
+/// one side of the top. A steep mound under a short pole with a tapering
+/// pennant on it is the flag on a golf green.
 ///
-/// Drawn hollow, and that is the part that took three tries to find. Filled, it
-/// is the only solid shape on a sheet that is otherwise all line — stroked
-/// coast, ticked shore, stippled shoal — so it reads as a marker dropped on a
-/// map rather than as something engraved on it, and every silhouette tried in
-/// that mode came out as some other solid object: a small tapering pennant on a
-/// short pole is a golf flag, and a heap tapering into a thin staff under a
-/// dark blob is a wine glass. In outline the same three shapes are a heap, a
-/// staff and a banner, because the eye is reading lines by then and not a
-/// blot.
-/// The banner hangs from the head of the staff and stops well short of the
-/// stones, as it does on the thing itself. Run down to meet them and the three
-/// shapes close up into one, which is where the wine glass came from.
+/// Drawn hollow, which took three tries to find. Filled, it is the only solid
+/// shape on a sheet that is otherwise all line, so it reads as a marker dropped
+/// on a map rather than as something engraved on it — and every silhouette
+/// tried that way came out as some other solid object. The banner hangs from
+/// the head of the staff and stops short of the stones, as it does on the thing
+/// itself; run down to meet them the three shapes close up into one.
 const CAIRN_HEAP: Vec2 = Vec2::new(12.0, 5.0);
 const CAIRN_STAFF: f32 = 15.0;
 const CAIRN_BANNER: Vec2 = Vec2::new(6.5, 8.0);
@@ -411,11 +378,9 @@ const CAIRN_WEIGHT: f32 = 1.4;
 const CAIRN_NAME_GAP: f32 = 7.0;
 
 /// The hand the islands are named in: an italic cut of the Fell types, the
-/// letterforms of the seventeenth-century press — the nearest a flat sheet
-/// comes to the lettering on an engraved chart. Not the menus' serif, which
-/// is the machine's own hand and does the furniture; a name written *on* the
-/// paper should look written on the paper. Where the file came from, and
-/// under what terms, is in `assets/CREDITS.md`.
+/// nearest a flat sheet comes to the lettering on an engraved chart. Not the
+/// menus' serif, which is the machine's own hand and does the furniture. Where
+/// the file came from is in `assets/CREDITS.md`.
 const NAME_FONT: &str = "fonts/IMFellEnglish-Italic.ttf";
 
 /// How large the names are lettered, in pixels — pixels for the reason the
@@ -470,16 +435,15 @@ const SCALE_BAR_LEAST: f32 = 110.0;
 
 /// How many graticule squares apart the roses that throw the rhumbs stand.
 ///
-/// A whole number of squares rather than a spacing of its own, so the roses
-/// keep step with the ruling however the zoom moves it — they are nudged off
-/// the crossings themselves (see [`rose_nudge`]), but by a fraction of a
-/// square, so the two lattices are still one lattice.
+/// A whole number of squares rather than a spacing of its own, so the roses keep
+/// step with the ruling however the zoom moves it — nudged off the crossings
+/// (see [`rose_nudge`]) by a fraction of a square, so the two lattices are
+/// still one lattice.
 ///
-/// Six, which is what keeps two or three roses in a window at every zoom. The
-/// count matters more than it sounds: a net thrown from one rose is a sunburst
-/// and reads as decoration, and it is rays from *different* roses crossing each
-/// other that make a sheet look navigated. Many more than three and the paper
-/// is a cobweb with a coast somewhere under it.
+/// Six, which keeps two or three roses in a window at every zoom. A net thrown
+/// from one rose is a sunburst and reads as decoration; it is rays from
+/// *different* roses crossing that make a sheet look navigated, and many more
+/// than three make the paper a cobweb.
 const RHUMB_SQUARES: f32 = 6.0;
 
 /// How many bearings each rose throws — the thirty-two points of the compass,
@@ -521,12 +485,10 @@ const CIRCLE_FACETS: usize = 64;
 /// runs, how wide the graduated band inside it is, and how heavily both rules
 /// are ruled.
 ///
-/// A neatline is the edge of the drawing, and a chart drawn to the window's
-/// own edge has none — the paper simply runs out wherever the player last
-/// dragged their mouse, which reads as a viewport rather than as a sheet. The
-/// band is what the engraving would carry a scale in; here it carries the
-/// ruling's own graduation, so the edge measures the same thing the paper is
-/// ruled by.
+/// A neatline is the edge of the drawing, and a chart drawn to the window's own
+/// edge has none. The band is what the engraving would carry a scale in; here
+/// it carries the ruling's own graduation, so the edge measures the same thing
+/// the paper is ruled by.
 const NEATLINE_INSET: f32 = 10.0;
 const NEATLINE_BAND: f32 = 7.0;
 const NEATLINE_WEIGHT: f32 = 1.2;
@@ -682,12 +644,10 @@ impl Plugin for ChartPlugin {
 /// been seen is a fact about *this* world, and carrying it into the next would
 /// draw one seed's islands on another's water.
 ///
-/// Blank even in a world this machine has been in before, and that is not a
-/// thing lost. Everything that was ever on the sheet is the world's to hand
-/// back — the ink as [`protocol::ToClient::Surveyed`], the lettering riding
-/// the cairns it is written on — and all of it arrives over the wire moments
-/// later. A name kept on this side would be a name only this player could
-/// read.
+/// Blank even in a world this machine has been in before, and nothing is lost
+/// by it: everything that was on the sheet is the world's to hand back, and
+/// arrives over the wire moments later. A name kept on this side would be a
+/// name only this player could read.
 fn start_a_chart(mut commands: Commands, mut view: ResMut<ChartView>) {
     commands.insert_resource(Chart::default());
     *view = ChartView::default();
@@ -730,17 +690,13 @@ fn no_sheet_yet(sheets: Query<(), With<ChartSheet>>) -> bool {
 /// Lays the sheet over the world.
 ///
 /// The sheet's camera draws after the world's and clears to parchment, which
-/// covers the view and every instrument standing over it in one stroke — so
-/// nothing in the world has to be told the chart is up. The world's camera is
-/// switched off behind it: there is nothing of it left to see, and a scene
-/// drawn to be painted over is a scene drawn for nobody.
+/// covers the view and every instrument over it in one stroke, so nothing in
+/// the world has to be told the chart is up. The world's camera is switched off
+/// behind it, a scene drawn to be painted over being a scene drawn for nobody.
 ///
 /// Run on the first frame the chart is up rather than as the state is entered,
-/// because it needs the world's camera to already exist and there is one moment
-/// when it does not: a run started with `--state chart` enters the state before
-/// `Startup` has spawned anything. Entering would have found no camera to take
-/// a target from, no camera to switch off, and drawn the chart into a window
-/// that a capturing run does not have.
+/// because it needs the world's camera to already exist: a run started with
+/// `--state chart` enters the state before `Startup` has spawned anything.
 fn unroll(
     mut commands: Commands,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -814,12 +770,11 @@ fn roll_up(mut commands: Commands, mut world_camera: Query<&mut Camera, With<Map
     }
     commands.remove_resource::<Inks>();
     commands.remove_resource::<Lettering>();
-    // A name still being written is left unwritten: the ways off the chart
-    // with the pen down all mean the player's attention went elsewhere, and
-    // half a name committed by a distraction would be worse than the draft
-    // lost. The engraving goes with the sheet too, so the next opening draws
-    // one for wherever the reader has got to rather than trusting a window
-    // from before.
+    // A name still being written is left unwritten: every way off the chart
+    // with the pen down means the player's attention went elsewhere, and half a
+    // name committed by a distraction is worse than the draft lost. The
+    // engraving goes too, so the next opening draws one for wherever the reader
+    // has got to.
     commands.remove_resource::<Naming>();
     commands.remove_resource::<Engraved>();
 }
@@ -842,9 +797,8 @@ fn centre_on(view: &mut ChartView, reader: Option<Vec2>) {
 /// The same, a frame or more later.
 ///
 /// A chart opened before there is anybody to centre it on — which is what
-/// `--state chart` does, the world's boat being launched on the frame after the
-/// state is entered — would otherwise open on the world's origin and stay
-/// there, the centring in [`unroll`] having already had its one chance.
+/// `--state chart` does — would otherwise open on the world's origin and stay
+/// there, [`unroll`]'s centring having had its one chance.
 fn find_the_reader(mut view: ResMut<ChartView>, place: PlayerPlace) {
     if view.opened {
         return;
@@ -1130,20 +1084,18 @@ fn engrave(
 ///
 /// Two kinds of lettering, and which one a name gets is the whole of what this
 /// decides. An island **this survey has closed** is lettered across its own
-/// middle, the way a chart letters an island: the player has been round it,
-/// there is a shape to write on, and the name belongs to the shape. An island
-/// that is only a cairn — somebody else's, landed on and read but never sailed
-/// round — is lettered against the mark instead, because that is the only thing
-/// on the paper the name is true of. Writing it across a middle the sheet has
-/// not drawn would be lettering a shape nobody has seen.
+/// middle, the way a chart letters an island. An island that is only a cairn is
+/// lettered against the mark instead, that being the only thing on the paper
+/// the name is true of — writing it across a middle the sheet has not drawn
+/// would be lettering a shape nobody has seen.
 ///
 /// A closed island is skipped in the second pass, or its name would be on the
-/// sheet twice. The island under the pen is the exception to everything: it
-/// shows the draft with its caret, because the lettering *is* the text field.
+/// sheet twice. The island under the pen shows the draft with its caret, the
+/// lettering *being* the text field.
 ///
 /// The walk is over the whole chart rather than a window of it — a chain can
-/// cross any number of chunks, so a ring cannot be closed from a window's worth
-/// — and the caller drops whatever falls off the paper.
+/// cross any number of chunks — and the caller drops whatever falls off the
+/// paper.
 fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> Vec<(String, Vec2)> {
     let islands = chart.islands();
     let mut written: Vec<(String, Vec2)> = islands
@@ -1211,12 +1163,10 @@ fn letter(engraver: &mut Engraver, text: String, at: Vec2, metres_per_pixel: f32
 /// on it. `scale` is metres to the pixel, the mark being measured in pixels of
 /// paper and drawn in metres of world.
 ///
-/// The banner hangs one way always, and hangs rather than flies. Which way the
-/// wind is over there is not something a chart knows or should pretend to: this
-/// is a symbol for a thing, and a symbol that changed with the weather would be
-/// a chart that had to be redrawn every time the wind backed. The banner in the
-/// world streams on the true wind; the one on the paper is only saying that
-/// there is one.
+/// The banner hangs one way always, and hangs rather than flies: a symbol that
+/// changed with the weather would be a chart redrawn every time the wind
+/// backed. The banner in the world streams on the true wind; the one on the
+/// paper only says there is one.
 fn cairn_mark(out: &mut Strokes, at: Vec2, scale: f32) {
     let paper = |pixels: f32| pixels * scale;
     let heap = paper(CAIRN_HEAP.y);
@@ -1268,13 +1218,12 @@ fn engraving(
 ///
 /// Its own entity rather than part of the engraving, because it moves every
 /// frame — a boat left drifting while the chart is open really is drifting —
-/// and the coast does not. Scaled by the zoom so that it stays the same size on
-/// the paper however much world the sheet is showing.
-/// A set rather than two parameters because both halves are transforms, and
-/// Bevy will not let one system hold `&Transform` and `&mut Transform` at once
-/// — the same wall `PlayerPlace` and `PlayerSweep` are two separate types for.
-/// Here the two halves are one job, so they are one system holding them in
-/// turn: read where the reader is, then write where their mark goes.
+/// and the coast does not. Scaled by the zoom so it stays the same size on the
+/// paper.
+///
+/// A `ParamSet` because both halves are transforms and Bevy will not let one
+/// system hold `&Transform` and `&mut Transform` at once: read where the reader
+/// is, then write where their mark goes.
 #[allow(clippy::type_complexity)]
 fn mark_the_reader(
     mut commands: Commands,
@@ -1346,11 +1295,9 @@ fn readers_mark() -> Mesh {
 /// A name being written on the sheet: the island under the pen, and the
 /// letters so far.
 ///
-/// While this exists the keyboard is the pen's: the chart key spells a
-/// letter, the driving keys spell letters, and Escape means put the pen down
-/// — so [`chart_key`] and [`pan`] stand down while it does, and
-/// [`escape_key`] hears Escape first. There is no dialog and no state for
-/// one, because a chart is written on, not filled in: the island's own
+/// While this exists the keyboard is the pen's — the chart key and the driving
+/// keys spell letters, and Escape puts the pen down — so [`chart_key`] and
+/// [`pan`] stand down while it does. There is no dialog: the island's own
 /// lettering shows the draft, with a caret on the end.
 #[derive(Resource)]
 pub struct Naming {
@@ -1383,18 +1330,13 @@ fn escape_key(
 /// back, and Enter offers the draft to the world — see [`write_through`],
 /// which is where it goes and what becomes of it.
 ///
-/// Emptying the field and pressing Enter is *not* an erasure. The world
-/// refuses a name it cannot carry rather than washing one off (see the
-/// server's own `christen`), so the cairn goes on saying what it said and the
-/// lettering does not change. That is the behaviour wanted here for now: a
-/// name is a thing you plant, and taking one down again is a different ask
-/// from "the wire will not carry this". There is no way to unname an island,
-/// and it is worth saying plainly rather than leaving the empty field looking
-/// like one.
+/// Emptying the field and pressing Enter is *not* an erasure: the world refuses
+/// a name it cannot carry rather than washing one off, so the cairn goes on
+/// saying what it said. There is no way to unname an island, which is worth
+/// saying plainly rather than leaving the empty field looking like one.
 ///
-/// Asks what the keyboard *typed* rather than which positions were pressed,
-/// the same way the console and the menus' two fields do, so a name can hold
-/// whatever a layout can produce.
+/// Asks what the keyboard *typed* rather than which positions were pressed, so
+/// a name can hold whatever a layout can produce.
 fn write_the_name(
     mut commands: Commands,
     online: Option<Res<crate::net::Online>>,
@@ -1509,11 +1451,10 @@ fn click_to_name(
             return;
         }
     }
-    // The pen only opens on an island this player holds. Naming is what a
-    // claim earns — a cairn is what a name is written on — so there is
-    // nothing to write on an island nobody has claimed, and nothing this
-    // player may write on somebody else's. The sheet says so by simply not
-    // taking the pen up, which is the quietest way to say it.
+    // The pen only opens on an island this player holds: naming is what a
+    // claim earns, so there is nothing to write on an island nobody has
+    // claimed and nothing this player may write on somebody else's. The sheet
+    // says so by not taking the pen up.
     if let Some(island) = hit.filter(|island| ours(&chart, island.id)) {
         commands.insert_resource(Naming {
             island: island.id,
@@ -1530,10 +1471,8 @@ fn ours(chart: &Chart, island: IVec2) -> bool {
 /// Sends a christening to the world, which is the only place a name lives.
 ///
 /// Nothing is written on the sheet here. The name goes up, the server judges
-/// it — it holds the claim, and refuses a name rather than repairing one —
-/// and the cairn is told back with whatever it now says. So the lettering a
-/// player sees is always the lettering everybody else sees, and a name the
-/// world would not carry never appears on the paper at all.
+/// it, and the cairn is told back with whatever it now says — so the lettering
+/// a player sees is always the lettering everybody else sees.
 fn write_through(online: &Option<Res<crate::net::Online>>, island: IVec2, draft: &str) {
     if let Some(online) = online {
         online.connection.christen(island, draft);
@@ -1704,8 +1643,8 @@ fn ticks(out: &mut Strokes, points: &[Vec2], closed: bool, spacing: f32, length:
 /// Dots rather than a line, scattered across the line rather than laid on it —
 /// see [`SHOAL_SCATTER`] for why a shoal is not entitled to a ruled edge. The
 /// scatter is a hash of the dot's number and the run it belongs to, so a
-/// stretch of bank is stippled the same way every time the sheet is rebuilt;
-/// a stipple that reshuffled on a pan would read as the paper crawling.
+/// stretch of bank is stippled the same way on every rebuild — a stipple that
+/// reshuffled on a pan would read as the paper crawling.
 fn stipple(
     out: &mut Strokes,
     points: &[Vec2],
@@ -1735,13 +1674,11 @@ fn scramble(of: u32) -> u32 {
 /// The ruled grid under everything, at whichever round spacing falls far enough
 /// apart to be read.
 ///
-/// `covered` arrives in world metres, like everything the engraving is asked
-/// for, and the flip onto the sheet happens *here* — the one drawing on the
-/// chart whose points do not each pass through [`on_the_sheet`], because it is
-/// generated rather than surveyed. It used to be ruled in world coordinates
-/// directly, which mirrored it about the equator: indistinguishable near the
-/// origin, where every test shot happened to be taken, and gone from the top
-/// of the paper anywhere north of it.
+/// `covered` arrives in world metres and the flip onto the sheet happens
+/// *here* — the one drawing whose points do not each pass through
+/// [`on_the_sheet`], being generated rather than surveyed. Ruled in world
+/// coordinates directly it was mirrored about the equator: indistinguishable
+/// near the origin, and gone from the top of the paper north of it.
 fn graticule(out: &mut Strokes, covered: Rect, metres_per_pixel: f32, width: f32) {
     let sheet = Rect::from_corners(on_the_sheet(covered.min), on_the_sheet(covered.max));
     let spacing = round_distance(GRATICULE_GAP * metres_per_pixel);
@@ -1789,18 +1726,13 @@ const POINT_ORDERS: [(f32, f32, f32, f32); 3] = [
 /// The star of a rose: sixteen kite points, each split down its own axis so one
 /// half goes to `dark` and the other to `light`.
 ///
-/// That split is the whole trick, and it is why a rose is drawn rather than
-/// ruled. An engraved rose looks lit from one side, and on real paper that is
-/// done with hatching — which this sheet cannot have, being flat tones with no
-/// texture anywhere in it. Two flat tones meeting on each point's axis gives
-/// the same reading with nothing shaded: every point turns its dark half the
-/// same way round the card, so the star reads as a solid thing catching light
-/// rather than as sixteen flat triangles.
+/// That split is the whole trick. An engraved rose looks lit from one side,
+/// which on real paper is done with hatching — which this sheet cannot have.
+/// Two flat tones meeting on each point's axis gives the same reading with
+/// nothing shaded: every point turns its dark half the same way round the card.
 ///
 /// Two sinks rather than one because a tone is a material and a material is a
-/// mesh — so the caller draws every rose's dark halves into one and every
-/// rose's light halves into the other, and the sheet costs two meshes however
-/// many roses stand on it.
+/// mesh, so the sheet costs two meshes however many roses stand on it.
 fn star(dark: &mut Strokes, light: &mut Strokes, centre: Vec2, radius: f32) {
     for (first, step, reach, width) in POINT_ORDERS {
         let mut turns = first;
@@ -1878,17 +1810,15 @@ fn rhumb_roses(on_paper: Rect, spacing: f32) -> Vec<Vec2> {
 
 /// How far a rose stands off its square's crossing, in squares.
 ///
-/// A chart drawn from an exact lattice does not look like a chart. On a perfect
-/// grid every rose's diagonal runs straight into its neighbour's and its
-/// east–west line into the ruling, so thirty-two bearings from a dozen roses
-/// collapse into one X repeated across the paper — regular in a way no net
-/// thrown by hand ever was, and the same everywhere the player goes.
+/// A chart drawn from an exact lattice does not look like a chart: on a perfect
+/// grid every rose's diagonal runs into its neighbour's and its east–west line
+/// into the ruling, so thirty-two bearings from a dozen roses collapse into one
+/// X repeated across the paper.
 ///
-/// The nudge is a hash of the square and not a random number, which is the
+/// The nudge is a hash of the square rather than a random number, which is the
 /// whole reason it can exist: the sheet is rebuilt every time the view leaves
-/// its window, and a rose that stood somewhere else after a pan would be far
-/// worse than a lattice. This way a rose belongs to its patch of sea, and a
-/// stretch of water can be recognised by the net over it.
+/// its window, and a rose that stood somewhere else after a pan would be worse
+/// than a lattice. This way a rose belongs to its patch of sea.
 fn rose_nudge(square: IVec2) -> Vec2 {
     let hash =
         scramble((square.x as u32).wrapping_add((square.y as u32).wrapping_mul(0x85EB_CA6B)));
@@ -1898,17 +1828,14 @@ fn rose_nudge(square: IVec2) -> Vec2 {
 
 /// The bearings one rose throws across the paper.
 ///
-/// Thirty-two of them, and not all alike: the eight principal winds are ruled
-/// at full weight, the eight half winds lighter, and the sixteen quarter winds
-/// dashed. That grain is the difference between a net and a wash — thirty-two
-/// identical rays from a dozen roses is a grey haze over the sheet, while a net
+/// Thirty-two of them, and not all alike: the eight principal winds ruled at
+/// full weight, the eight half winds lighter, the sixteen quarter winds dashed.
+/// Thirty-two identical rays from a dozen roses is a grey haze, while a net
 /// that gets fainter as it gets finer can be followed by eye from any rose to
 /// any other.
 ///
 /// Each ray is clipped to the paper being drawn and starts clear of the rose's
-/// own star, so what gets built is bounded by the sheet rather than by the
-/// world — the net is infinite in the same sense the chart is, which is to say
-/// it is drawn as far as there is paper and no further.
+/// own star, so what gets built is bounded by the sheet rather than the world.
 fn rhumbs(out: &mut Strokes, on_paper: Rect, centre: Vec2, hub: f32, width: f32, dash: (f32, f32)) {
     for point in 0..RHUMB_BEARINGS {
         let along = wind(point as f32 / RHUMB_BEARINGS as f32);
@@ -1954,10 +1881,9 @@ fn ray_across(rect: Rect, from: Vec2, along: Vec2) -> Option<(f32, f32)> {
 /// A dashed stretch of a ray.
 ///
 /// The dashes are counted from the rose rather than from wherever the paper's
-/// edge happened to cut the ray, so that neighbouring bearings break at the
-/// same distances out and the net's dashes fall into rings. Counted the other
-/// way they would land anywhere, and sixteen rays of unrelated dashes read as
-/// dirt on the sheet.
+/// edge cut the ray, so neighbouring bearings break at the same distances out
+/// and the dashes fall into rings. Counted the other way, sixteen rays of
+/// unrelated dashes read as dirt on the sheet.
 fn dashes(
     out: &mut Strokes,
     from: Vec2,
@@ -2022,13 +1948,10 @@ pub(crate) struct EngravedPaper {
 /// over a stretch of paper `square` pixels to the square.
 ///
 /// The chart never asks for this — its own ruling is spaced in *round
-/// distances*, because a chart is read off round numbers, and it always has a
-/// zoom to work that out from. What asks for it is a screen that is made of
-/// the sheet without being a chart of anywhere, where a pixel is a pixel and
-/// there is no world under the paper at all.
-///
-/// Lending the drawing out rather than letting the other screen copy it is
-/// the whole point: there is one sheet in this game, and two would drift.
+/// distances*. What asks for it is a screen made of the sheet without being a
+/// chart of anywhere, where a pixel is a pixel and there is no world under the
+/// paper. Lent out rather than copied because there is one sheet in this game,
+/// and two would drift.
 pub(crate) fn engraved_paper(on_paper: Rect, square: f32) -> EngravedPaper {
     let mut ruling = Strokes::default();
     let mut net = Strokes::default();
@@ -2192,19 +2115,15 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
 /// The rose in the corner: a sixteen-point star in its graduated band, lettered
 /// at the four cardinals.
 ///
-/// Flat, unlike the world's compass, which lies foreshortened on the sea
-/// because a bearing read off it is meant to be carried out into the picture.
-/// Nothing is foreshortened on a chart and nothing on this one turns: it is
-/// here to say that north is up and stays up, so it is drawn once, at the size
-/// it will always be, and only its transform is touched again.
+/// Flat, unlike the world's compass, which lies foreshortened on the sea because
+/// a bearing read off it is carried out into the picture. Nothing on a chart is
+/// foreshortened and nothing on this one turns: it says north is up and stays
+/// up, so it is drawn once at the size it will always be.
 ///
-/// Engraved rather than built from boxes the way the world's compass is. That
-/// is not a preference: a kite point is a triangle and the UI layer has only
-/// rectangles, so a star drawn there would have to be a spike rose, which is a
-/// different and poorer thing. Being a mesh means it lives in the sheet's own
-/// space rather than the window's, and [`pin_the_rose`] does the job the UI
-/// layer would have done — which is the whole cost of the change, and it is one
-/// short system.
+/// Engraved rather than built from boxes: a kite point is a triangle and the UI
+/// layer has only rectangles, so a star drawn there would be a spike rose.
+/// Being a mesh it lives in the sheet's space rather than the window's, and
+/// [`pin_the_rose`] does the job the UI layer would have done.
 fn corner_rose(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) {
     let (inked, dimmed) = drawn_rose();
 
@@ -2252,13 +2171,11 @@ fn corner_rose(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) 
 
 /// Keeps the rose in the corner of the window.
 ///
-/// It is furniture, pinned like the scale bar — but it is drawn in the sheet's
-/// space rather than the window's (see [`corner_rose`]), so where the window's
-/// corner has got to has to be worked out rather than declared. The sheet's
-/// middle is the view's centre and a pixel is [`ChartView::metres_per_pixel`]
-/// metres of paper, which is the whole of the arithmetic; the same scale on the
-/// transform is what holds the rose at its drawn size through a zoom, exactly
-/// as the reader's own mark is held.
+/// Furniture, pinned like the scale bar — but drawn in the sheet's space rather
+/// than the window's (see [`corner_rose`]), so where the window's corner has
+/// got to has to be worked out. The sheet's middle is the view's centre and a
+/// pixel is [`ChartView::metres_per_pixel`] metres of paper; the scale on the
+/// transform holds the rose at its drawn size through a zoom.
 fn pin_the_rose(
     view: Res<ChartView>,
     sheet: Query<&Camera, With<ChartSheet>>,
@@ -2299,13 +2216,11 @@ struct SheetMask;
 /// graduations laid between the two lines, and the engraving outside it covered
 /// over.
 ///
-/// Both are one entity apiece with their mesh written over in place, because
-/// this is the one drawing on the sheet that changes every time the view moves
-/// at all. The engraving can be built for a window and panned about inside it —
-/// that is what makes dragging free — but the edge is *at* the window, so it
-/// has to be re-ruled whenever the paper slides under it. It is a hundred-odd
-/// triangles; respawning an entity and leaking a mesh asset per frame of a
-/// drag is what writing in place avoids.
+/// Both are one entity apiece with their mesh written over in place, this being
+/// the one drawing on the sheet that changes every time the view moves at all:
+/// the engraving is built for a window and panned inside it, but the edge is
+/// *at* the window. Writing in place is what avoids leaking a mesh asset per
+/// frame of a drag.
 fn sheet_edge(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) {
     let layer = |name: &'static str, ink: Handle<ColorMaterial>, z: f32, mesh: Handle<Mesh>| {
         (
@@ -2334,8 +2249,7 @@ fn sheet_edge(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) {
 /// `window` arrives already on the paper. The mask goes on first and covers
 /// everything outside the inner rule — the engraving is built half a window
 /// wider than the view (see [`SHEET_MARGIN`]), so without it a coast would run
-/// out past the neatline and the sheet would have no edge at all, only a line
-/// drawn across it.
+/// out past the neatline and the sheet would have only a line drawn across it.
 fn neatline(edge: &mut Strokes, mask: &mut Strokes, window: Rect, cell: f32, on_paper: f32) {
     let outer = window.inflate(-NEATLINE_INSET * on_paper);
     let inner = outer.inflate(-NEATLINE_BAND * on_paper);
@@ -2412,9 +2326,8 @@ fn rule_the_edge(
         return;
     };
     // Nothing to write into yet, or nothing left: forgetting what was ruled is
-    // what makes the sheet's *next* opening draw its edge. The meshes are new
-    // and blank each time the chart is unrolled, and the view need not have
-    // changed since it was last put down.
+    // what makes the sheet's *next* opening draw its edge, the meshes being
+    // new and blank each time the chart is unrolled.
     let (Ok(rules), Ok(cover)) = (edges.single(), masks.single()) else {
         *ruled = None;
         return;
@@ -2497,14 +2410,10 @@ mod tests {
 
     #[test]
     fn the_sight_radius_stays_inside_what_the_client_holds() {
-        // The survey is the world's now, but the reach it works to still has
-        // to sit inside what streaming brings in. A chunk the server has
-        // surveyed for this player is one they are meant to be looking at, and
-        // two things here read the survey against the ground in hand: the
-        // compass rim, which marks charted land it can also see, and the haze,
-        // drawn to this same distance so that ink stops where the world does.
-        // Were this the longer of the two, both would be about ground the
-        // client had never been sent.
+        // The reach the survey works to has to sit inside what streaming
+        // brings in. Two things here read the survey against the ground in
+        // hand — the compass rim and the haze — and were this the longer of
+        // the two, both would be about ground the client had never been sent.
         const { assert!(SIGHT_RADIUS < crate::terrain::STREAM_RADIUS) };
     }
 

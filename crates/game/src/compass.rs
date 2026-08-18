@@ -13,50 +13,37 @@
 //! with the picture through a turn instead of arriving ahead of it.
 //!
 //! The card is drawn *lying on the sea* rather than flat on the glass: a
-//! bearing on it is meant to be carried out into the picture, and against
-//! ground drawn at the camera's pitch an unforeshortened dial reads as a
-//! sticker on the screen instead of a direction in the world. The tilt is the
-//! projection itself — a flat card on the ground plane, seen from
-//! [`PITCH`][crate::camera::PITCH] above horizontal, is its upright drawing
-//! squashed vertically by `sin(PITCH)`, applied *after* the card's own spin
-//! so the letters shear the way paint on a deck would. Real 3D geometry
-//! parented to the camera was rejected: over a dial this size it differs from
-//! the squash only by a keystone too small to see, and it would need letters
-//! as meshes and an exemption from the fog, the lighting and the terrain's
-//! occlusion to survive drawing at all.
+//! bearing on it is carried out into the picture, and against ground drawn at
+//! the camera's pitch an unforeshortened dial reads as a sticker on the screen.
+//! The tilt is the projection itself — a flat card on the ground plane, seen
+//! from [`PITCH`][crate::camera::PITCH] above horizontal, is its upright
+//! drawing squashed vertically by `sin(PITCH)`, applied *after* the card's own
+//! spin so the letters shear the way paint on a deck would. Real 3D geometry
+//! parented to the camera differs only by a keystone too small to see, and
+//! would need letters as meshes and an exemption from the fog, the lighting and
+//! the terrain's occlusion.
 //!
-//! The card carries a second reading: an arrow lying along the wind. It is
-//! here rather than in a panel of its own because a wind is only ever wanted
-//! *against* something — the way home, the way the boat is pointed — and both
-//! of those are bearings. One card holding north and the wind together
-//! answers "the wind is off my starboard bow" in a glance, where two
-//! instruments would leave the player doing the subtraction. That it costs
-//! nothing to draw is the smaller half of the argument.
+//! The card carries a second reading: an arrow lying along the wind. A wind is
+//! only ever wanted *against* something — the way home, the way the boat is
+//! pointed — and both are bearings, so one card holding north and the wind
+//! together answers "the wind is off my starboard bow" in a glance.
 //!
-//! And a third: a ring of marks round the rim, one arc for every stretch of
-//! coast within sight. This camera looks *down*, so land a few hundred metres
-//! off can be outside the picture entirely while the player is close enough to
-//! walk up its beach — which makes finding the next island a matter of sailing
-//! at random until one turns up. The ring answers the question the picture
-//! cannot: something is over there, and it is that way.
+//! And a third: a ring of marks round the rim, one arc per stretch of coast
+//! within sight. This camera looks *down*, so land a few hundred metres off can
+//! be outside the picture entirely while the player is close enough to walk up
+//! its beach. The ring answers what the picture cannot: something is over
+//! there, and it is that way.
 //!
-//! It marks what has not been charted louder than what has, because the
-//! problem is finding *new* islands and a bearing to somewhere already
-//! surveyed is worth having without competing. And it reaches exactly as far
-//! as the haze does — see [`SIGHT`]. The card is an instrument, not a second
-//! sight: it says what the player could have noticed and did not, and nothing
-//! about what is over the horizon.
+//! It marks what has not been charted louder than what has, the problem being
+//! finding *new* islands, and it reaches exactly as far as the haze does — see
+//! [`SIGHT`]. The card says what the player could have noticed and did not, and
+//! nothing about what is over the horizon.
 //!
-//! Which makes it a sailing instrument, and it is drawn as one: ashore the
-//! ring goes out altogether. Everything it could mark from a beach is either
-//! the island underfoot or in plain view across it, and a rim of arcs saying
-//! *land, that way* to somebody standing on land is the instrument talking
-//! over the picture instead of filling it in.
+//! Ashore the ring goes out altogether: everything it could mark from a beach
+//! is either the island underfoot or in plain view across it.
 //!
-//! Nothing about it crosses the wire. The sweep reads the chunks this machine
-//! was already sent, so a client written against the protocol alone would
-//! carry the same ring for the same nothing — which is the arrangement the
-//! chart is built on too.
+//! Nothing about it crosses the wire — the sweep reads the chunks this machine
+//! was already sent, the arrangement the chart is built on too.
 
 use std::f32::consts::TAU;
 

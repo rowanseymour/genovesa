@@ -26,30 +26,21 @@ use crate::noise::{smoothstep, Noise};
 
 /// `x` to the power `y`, the same way on every machine.
 ///
-/// Not `f32::powf`, and that is the whole point of this function existing. Add,
-/// multiply and square root are pinned by IEEE 754 — every conforming machine
-/// returns the same bits — but powers are not, and `f32::powf` is whatever
-/// libm the platform happened to link: Apple's, glibc's, Microsoft's. Those
-/// three do not agree to the last bit, and this crate's promise is that a seed
-/// is a world *whoever generates it*.
+/// Not `f32::powf`, which is the whole point of this function existing. Add,
+/// multiply and square root are pinned by IEEE 754, but powers are not:
+/// `f32::powf` is whatever libm the platform linked, and Apple's, glibc's and
+/// Microsoft's do not agree to the last bit. A seed is written down, shared,
+/// and handed to another machine to host, so if `powf` decided what the ground
+/// was, one seed served from a Mac and from a Linux box would be two different
+/// oceans wearing one name.
 ///
-/// Only servers generate now, which narrows what is at stake without removing
-/// it: a seed is written down, shared, saved with a position, and handed to
-/// another machine to host. If `powf` decided what the ground was, the same
-/// seed served from a Mac and from a Linux box would be two different oceans
-/// wearing one name.
-///
-/// That was not a theory. The first CI run to put these tests on three
-/// operating systems came back with three different maps for seed 20040112,
-/// and two different islands; the one digest that survived was the layout,
-/// whose [`crate::archipelago::skewed_small`] had already been written as a
-/// polynomial for exactly this reason.
+/// That was not a theory: the first CI run across three operating systems came
+/// back with three different maps for seed 20040112.
 ///
 /// The implementation is MUSL's, ported to plain Rust — no platform dispatch
-/// and no hardware instruction to disagree about, so it is the same arithmetic
-/// wherever it is compiled. Bit-for-bit stability across *versions* of it is
-/// not promised either, which is what `--locked` and the digest tests are for:
-/// a bump that moved a result would fail them rather than pass unnoticed.
+/// and no hardware instruction to disagree about. Bit-for-bit stability across
+/// *versions* of it is not promised either, which is what `--locked` and the
+/// digest tests are for.
 pub(crate) fn pow(x: f32, y: f32) -> f32 {
     libm::powf(x, y)
 }
@@ -61,11 +52,9 @@ pub const TILE_SIZE: f32 = 1.0;
 /// Tiles (so, metres) along the edge of one terrain chunk — a sensible unit of
 /// both culling and rebuilding, and the unit ground is asked for in.
 ///
-/// Read from the protocol rather than declared here, because the chunk is the
+/// Read from the protocol rather than declared here, the chunk being the
 /// *client's* unit before it is the generator's: a client asks for ground by
-/// chunk coordinate and is told nothing else about how the world is put
-/// together, so how big a chunk is belongs with the words for asking. A tile is
-/// a metre, so this is that number in this module's vocabulary.
+/// chunk coordinate, so how big one is belongs with the words for asking.
 pub const CHUNK_TILES: u32 = (CHUNK_METRES / TILE_SIZE) as u32;
 
 // --- What every map is aiming for ---------------------------------------
@@ -123,18 +112,15 @@ fn mean_extent(extent: Vec2) -> f32 {
 /// shallow side as the map shrinks: 0 leaves the [`Calibration`] knee on the
 /// median, 1 moves it to the shallowest sixth or so of the sea.
 ///
-/// The smallest maps need it moved, because their sorted field is nearly
-/// radial order: over half of any map is falloff ring, and with no noise to
-/// interleave the two, every quantile from the median down lands *in* the
-/// ring. Anchored there, the whole visible lagoon maps to centimetres of
-/// water, and the map paints as an islet in the middle of one huge pale
-/// bank — the bullseye that made every small map read as a circle. Anchoring
-/// on the shallow side puts the knee among the cells the player actually
-/// sees, and the lagoon gets a real gradient down to dark water. On maps
-/// with wavelengths to spare the noise interleaves ring and interior and the
-/// median anchor is both safe and better — a shallow-side anchor there was
-/// tried once, bent healthy seeds and starved their beaches — so it fades
-/// out entirely before the preset sizes.
+/// The smallest maps need it moved, their sorted field being nearly radial
+/// order: over half of any map is falloff ring, and with no noise to interleave
+/// the two, every quantile from the median down lands *in* the ring. Anchored
+/// there, the whole visible lagoon maps to centimetres of water — the bullseye
+/// that made every small map read as a circle. Anchoring on the shallow side
+/// puts the knee among the cells the player actually sees. On maps with
+/// wavelengths to spare the median anchor is both safe and better (a
+/// shallow-side anchor there bent healthy seeds and starved their beaches), so
+/// it fades out entirely before the preset sizes.
 fn shoal_shift(extent: Vec2) -> f32 {
     let cycles = mean_extent(extent) / CONTINENT_SCALE;
     1.0 - smoothstep(0.35, 1.0, cycles)
@@ -146,10 +132,9 @@ fn shoal_shift(extent: Vec2) -> f32 {
 ///
 /// What this is for is [`land_fraction`]'s tiny-map swing: two islands the
 /// same handful of chunks across should not be the same amount of island. A
-/// spatial noise field cannot supply that on its own — at one chunk across
-/// every field here is close enough to its own lowest octave that "how much
-/// of the map is land" barely varies seed to seed, only *where* the cut
-/// falls — so the swing is drawn independently of them.
+/// spatial noise field cannot supply that — at one chunk across every field
+/// here is near its own lowest octave, so the land share barely varies seed to
+/// seed and only *where* the cut falls does.
 fn seed_draw(seed: u32, salt: u32) -> f32 {
     let mut z = (seed as u64) ^ ((salt as u64) << 32);
     z = z.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -166,16 +151,12 @@ const LAND_LUCK_SALT: u32 = 0x6C61_6E64; // "land" in ASCII, no meaning beyond b
 /// How far [`land_fraction`]'s swing may multiply the tiny-map target down
 /// or up, at its strongest.
 ///
-/// Asymmetric on purpose: pulled down to a third of the target a one-chunk
-/// island is mostly bare sand and standing water, which is the "almost
-/// entirely a sand bar" a fixed target could never give a single seed —
-/// every seed landed on the same share, so an islet either had a beach or it
-/// did not, never the shifting balance real skerries show. Pushed up it only
-/// reaches back towards [`LAND_FRACTION_SMALL`], not past it, because the
-/// tiny share exists for [`LAND_FRACTION_TINY`]'s own reason — the falloff
-/// ring, not variety — and a swing that overshot it would print the ring's
-/// own outline on the lucky seeds exactly as raising the fixed target once
-/// did.
+/// Asymmetric on purpose. Pulled down to a third of the target, a one-chunk
+/// island is mostly bare sand and standing water — the shifting balance real
+/// skerries show, which a fixed target could never give. Pushed up it only
+/// reaches back towards [`LAND_FRACTION_SMALL`] and no further: the tiny share
+/// exists for the falloff ring rather than for variety, and a swing that
+/// overshot would print the ring's own outline on the lucky seeds.
 const LAND_SWING_LOW: f32 = 0.34;
 const LAND_SWING_HIGH: f32 = 1.35;
 
@@ -191,11 +172,9 @@ const LAND_SWING_HIGH: f32 = 1.35;
 /// Below one repeat the target is also swung per seed between
 /// [`LAND_SWING_LOW`] and [`LAND_SWING_HIGH`] of itself — see [`seed_draw`] —
 /// fading out over the same stretch [`LAND_FRACTION_TINY`] does, so a healthy
-/// map's fixed, tuned share is never touched. Without it every seed at one
-/// size came out the same amount of island, and since that size is also too
-/// small for the noise to vary the *shape* much either (see
-/// [`feature_zoom`]), the two together were what made every small map read
-/// as the same lozenge of grass with the serial numbers filed off.
+/// map's tuned share is never touched. Without it every seed at one size came
+/// out the same amount of island, which with the shape barely varying either
+/// (see [`feature_zoom`]) made every small map the same lozenge of grass.
 fn land_fraction(extent: Vec2, seed: u32) -> f32 {
     let cycles = mean_extent(extent) / CONTINENT_SCALE;
     let target = LAND_FRACTION_TINY
@@ -288,15 +267,12 @@ impl Targets {
 const DEEP_FRACTION: f32 = 0.18;
 
 /// Depth the middle of the sea is guaranteed to reach, in metres — the mirror
-/// of [`LOWLAND_FLOOR`], on the other side of the waterline. A minority of
-/// seeds run flat just *below* where the sea lands in the field, and the deep
-/// anchor cannot save them: it pins one point far down while the whole middle
-/// of the distribution sits centimetres under the surface, so the map comes
-/// out one endless bright shelf speckled with sand, with the falloff's rim
-/// embossed round the edge of it. Set well past the last of the shallow-water
-/// colours, not merely at their edge — a median pinned exactly on the colour
-/// threshold leaves half the sea painted as shallows — so the middle of the
-/// sea always reads as open water.
+/// of [`LOWLAND_FLOOR`]. A minority of seeds run flat just *below* where the
+/// sea lands in the field, which the deep anchor cannot save: it pins one point
+/// far down while the whole middle of the distribution sits centimetres under
+/// the surface, and the map comes out one endless bright shelf. Set well past
+/// the last of the shallow-water colours rather than at their edge, a median
+/// pinned on the threshold leaving half the sea painted as shallows.
 const SHALLOWS_FLOOR: f32 = 6.5;
 
 /// Height the middle of the land is guaranteed to reach, in metres. A minority
@@ -329,35 +305,30 @@ const LOWLAND_FLOOR: f32 = 10.0;
 // under it has not climbed from anywhere.
 //
 // Two things this deliberately is not. It is not a term added to the height,
-// which would raise the interior rather than lower the coast, and would drain
-// every inland lagoon on the map. And it is not applied to the massif before
-// the height fit: that fit exists to guarantee a summit, so it simply answers
-// any suppression by winding the range term up until the least coastal cell on
-// the map spikes — which on a ring-shaped island put the full hundred and
-// twenty metres of rock fifty metres from the water, worse than the coastal
-// ranges this set out to remove. The ceiling has to be the last word, applied
-// to metres, after everything else has had its say.
+// which would raise the interior rather than lower the coast and drain every
+// inland lagoon. And it is not applied to the massif before the height fit:
+// that fit exists to guarantee a summit, so it answers any suppression by
+// winding the range term up until the least coastal cell spikes — which on a
+// ring-shaped island put the full height of rock fifty metres from the water.
+// The ceiling has to be the last word, applied to metres, after everything
+// else has had its say.
 
 /// How far inland ground has to be, in metres, before it may stand at the full
 /// [`HEIGHT_SCALE`]. Absolute rather than a share of the map, for the same
 /// reason [`FEATURE_SCALE`] is: a bigger map should mean more landscape, not a
 /// stretched copy of the same one.
 ///
-/// This is the dial worth turning. It fixes [`PEAK_GRADE`], and with it how
-/// tall a given map's mountains come out. A kilometre-square map's interior
-/// stands a hundred and fifty to two hundred and forty metres from open water,
-/// depending on the seed, and its summits come out between about fifty-five
-/// and ninety metres rather than the full height — a little over seventy on
-/// average. They fall short of the reach because a summit sits where the mask
-/// put the massif, which is rarely the one most interior point. Shortening
-/// this gives every size taller mountains and steeper country.
+/// This is the dial worth turning: it fixes [`PEAK_GRADE`], and with it how
+/// tall a given map's mountains come out. A kilometre-square map's summits land
+/// between about fifty-five and ninety metres rather than the full height,
+/// falling short of the reach because a summit sits where the mask put the
+/// massif and that is rarely the most interior point. Shortening this gives
+/// every size taller mountains and steeper country.
 ///
-/// It is also a frankly generous number. A summit at [`HEIGHT_SCALE`] this far
-/// from the sea is a climb of about thirty degrees held for the whole way,
-/// where the steepest real islands manage a seventh of that. That is the price
-/// of a map a kilometre across having mountains on it at all, and the useful
-/// part is not the absolute figure but that height now has to be paid for in
-/// ground.
+/// It is a frankly generous number — a climb of about thirty degrees held the
+/// whole way, where the steepest real islands manage a seventh of that. That is
+/// the price of a map a kilometre across having mountains at all, and the
+/// useful part is that height has to be paid for in ground.
 const INLAND_REACH: f32 = 220.0;
 
 /// How far out [`water_fraction`] looks when deciding whether a stretch of
@@ -451,12 +422,10 @@ const MASSIF_WINDOW: f32 = 400.0;
 /// existed, seed after seed.
 ///
 /// Zooming in on the same field buys back cycles the fixed wavelength cannot
-/// supply this small, so the outline gets bays and lobes to be drawn with
-/// instead of one chord. It is not the same fix as making the map bigger —
-/// the wavelength a bigger map earns is *more* landscape, spread further
-/// apart; a small map zoomed in gets the *existing* landscape's texture
-/// packed tighter, which is the only kind of variety a fixed frame this size
-/// can hold at all.
+/// supply this small, so the outline gets bays and lobes instead of one chord.
+/// Not the same fix as a bigger map: that earns *more* landscape spread
+/// further apart, where this packs the existing texture tighter, which is the
+/// only variety a frame this size can hold.
 const FEATURE_ZOOM_MAX: f32 = 3.0;
 
 /// The zoom [`TerrainGenerator::continent_at`] samples the landmass field
@@ -468,18 +437,14 @@ const FEATURE_ZOOM_MAX: f32 = 3.0;
 /// couple of per cent of extra coastline cycle.
 ///
 /// Left off the hills, the massif and the warp's own drift and bend
-/// deliberately. The warp's guards are already tapered for small maps by
-/// `bend_gain` and `reach_max`, tuned against the wavelength as fixed, and
-/// zooming what they read would detune both without buying anything — the
-/// drift only ever needs to hold the ring on the frame, not to draw its
-/// texture. Zooming the hills as well was tried and cost more than it
-/// bought: hills already sums five octaves down to a wavelength short enough
-/// to pit a small map with hollows of its own, and zoomed it pits more of
-/// them, a few [`COAST_GRID`] cells wide — which the lake flood then floods,
-/// and a lake that small is drawn off a grid that coarse as a square-edged
-/// pond. Nine seeds at 256 m grew a scatter of them. The landmass field's
-/// coarser octaves put nothing at that scale, and it is the field a
-/// coastline actually is, so it is the one worth zooming on its own.
+/// deliberately. The warp's guards are tapered for small maps against the
+/// wavelength as fixed, and zooming what they read would detune both for
+/// nothing. Zooming the hills was tried and cost more than it bought: hills
+/// already sums down to a wavelength short enough to pit a small map with
+/// hollows, and zoomed it pits more of them a few [`COAST_GRID`] cells wide —
+/// which the lake flood then floods, and a lake that small comes out a
+/// square-edged pond. The landmass field puts nothing at that scale and is the
+/// field a coastline actually is, so it is the one worth zooming alone.
 fn feature_zoom(extent: Vec2) -> f32 {
     let cycles = mean_extent(extent) / CONTINENT_SCALE;
     1.0 + (FEATURE_ZOOM_MAX - 1.0) * (1.0 - smoothstep(0.15, 0.8, cycles))
@@ -571,12 +536,10 @@ const BEACH_RISE: f32 = 0.075;
 ///
 /// Without it the lift holds the clifftop at full height as far as the coast
 /// reaches, and wherever that terrace meets ground the other regime is holding
-/// *down* — a beach across a low neck of land, or the far side of a character
-/// change — the difference stands as a scarp running dead straight down the
-/// middle of the neck, conspicuously along the crest of the distance field.
-/// Letting the top shelve off means the lift has already returned the ground
-/// to itself before it can collide with anything: a cliff is a face, a solid
-/// shoulder of clifftop behind it, and then hillside.
+/// *down* — a beach across a low neck of land — the difference stands as a
+/// scarp running dead straight along the crest of the distance field. Letting
+/// the top shelve off returns the ground to itself before it can collide with
+/// anything: a face, a shoulder of clifftop, then hillside.
 const CLIFF_BACK_PITCH: f32 = 0.25;
 
 /// Distance from the water, in metres, at which a beach's apron has doubled its
@@ -640,23 +603,18 @@ const SHORE_TOP: f32 = 0.6;
 /// sides of it — so the fringe is [`LAKE_MARGIN`] of wet ground and the same
 /// again of weed standing in the water.
 ///
-/// A sea coast has a shore because the sea *works* one: the tide and the surf
-/// keep a band of ground bare, and it is broad because they reach that far up
-/// it. Fresh water does none of that, so grass grows to the edge of a pond and
-/// what is left bare is only the strip that is actually wet. Given the sea's
-/// own [`SHORE_TOP`] a lake wore a huge flat apron of it, which read as a
-/// drained reservoir whatever colour it was painted.
+/// A sea coast has a shore because the sea *works* one, and it is broad because
+/// the surf reaches that far up it. Fresh water does none of that, so grass
+/// grows to the edge of a pond. Given the sea's own [`SHORE_TOP`] a lake wore a
+/// huge flat apron that read as a drained reservoir.
 ///
-/// A height above the water was the first answer to that and is the wrong
-/// shape of answer. What a lake's bank does with a height is whatever its
-/// slope says: the tenth of a metre it was cut to bought tens of metres of
-/// margin on the flat ground a basin usually ends in, and a metre or less of
-/// it — *under one facet* — everywhere the bank had any pitch at all. A
-/// margin thinner than the grid it is drawn on cannot be drawn: the facets
-/// that catch it are a broken chain of triangles, and that chain against the
-/// smooth waterline under it is the sawtooth a lake used to wear. Written as a
-/// reach along the ground it is the same fringe on every bank, and always
-/// several facets of it.
+/// A height above the water was the first answer and is the wrong shape of
+/// answer: what a bank does with a height is whatever its slope says, so the
+/// same cut bought tens of metres of margin on flat ground and under one facet
+/// wherever the bank had pitch. A margin thinner than the grid cannot be drawn,
+/// and the broken chain of triangles against the smooth waterline under it is
+/// the sawtooth a lake used to wear. Written as a reach along the ground it is
+/// the same fringe on every bank.
 const LAKE_MARGIN: f32 = 5.0;
 
 /// How far past its own edge a lake's surface is still an answer, in metres
@@ -664,32 +622,26 @@ const LAKE_MARGIN: f32 = 5.0;
 ///
 /// The level has to reach past the water — a client draws the waterline itself,
 /// by asking where the ground and the surface cross, and cannot find a crossing
-/// it was only told one side of. How far past is the question this answers, and
-/// the reach it replaces was a height: everything within [`LAKE_RELIEF`] of the
-/// surface, which on the flat ground a basin usually ends in is a long way, and
-/// which ends on the fitting grid's own square cells.
+/// it was only told one side of. The reach this replaces was a height, which on
+/// the flat ground a basin usually ends in is a long way and which ends on the
+/// fitting grid's own square cells.
 ///
-/// That mattered because the two waterlines do not quite agree. The flood ran
-/// on the landform and the drawn ground is shaped again afterwards — the
-/// coastal reshaping most of all, which answers to the sea and will cut a
-/// lake's bank out from under it near a shore. Where that leaves ground below a
-/// surface the flood never flooded, the client dutifully draws water on it, out
-/// to wherever the level stopped being an answer — so the spill took the shape
-/// of the field's edge, and what it drew was a rectangle of water lying on the
-/// grass. Bounded by a distance instead, a spill is a few metres of apron with
-/// the shape of the shore it came off.
+/// That mattered because the two waterlines do not quite agree: the flood ran
+/// on the landform, and the coastal reshaping afterwards will cut a lake's bank
+/// out from under it near a shore. Where that leaves ground below a surface the
+/// flood never flooded, the client draws water out to wherever the level
+/// stopped being an answer — a rectangle of water lying on the grass. Bounded
+/// by a distance instead, a spill is a few metres of apron with the shape of
+/// the shore it came off.
 const LAKE_APRON: f32 = 8.0;
 
 /// How far the weed reaches out from a lake's margin before the bed is bare
 /// silt, in metres along the ground.
 ///
-/// Out from the shore rather than down from the surface for the same reason
-/// the margin is, and the reason bites harder here: a bed shelves more gently
-/// than a bank climbs, so a depth line falls where the ground has barely any
-/// gradient to place it, and what it drew was not a boundary but a fractal —
-/// fingers of one tone through the other for tens of metres, which the facets
-/// then broke into a starburst. Distance from the shore is what "shallows"
-/// means anyway.
+/// Out from the shore rather than down from the surface for the reason the
+/// margin is, and it bites harder here: a bed shelves more gently than a bank
+/// climbs, so a depth line falls where the ground has barely any gradient to
+/// place it and drew fingers of one tone through the other for tens of metres.
 const LAKE_SHALLOWS: f32 = 22.0;
 
 /// Depths, in metres below sea level, at which the sea bed turns from shore
@@ -736,17 +688,16 @@ const BAND_WANDER: f32 = 9.0;
 /// What each parcel of the patchwork is drawn as, at each height it can reach.
 ///
 /// One row per band and one column per parcel, indexed by the *same* bucket of
-/// the *same* noise field however high the ground is. That is what carries the
-/// blend: a wood running up a hillside keeps its outline as it crosses the
-/// treeline and comes out the other side as heather, so the two bands share
-/// their shapes instead of meeting along a seam of their own.
+/// the *same* noise field however high the ground is. That carries the blend: a
+/// wood running up a hillside keeps its outline as it crosses the treeline and
+/// comes out the other side as heather.
 ///
-/// The rows get flatter towards the top — five distinct greens, three shades of
-/// moor, two of rock — so the patchwork thins out with the vegetation without
-/// ever stopping dead. By the summits it is nearly gone, which is the point:
-/// bare rock has nothing growing on it to make parcels out of, and the relief
-/// up there is drawn by the slope tests above instead. [`Tone::RockDark`] is
-/// left to them, so that a dark facet on a mountain always means a crag.
+/// The rows get flatter towards the top — five greens, three shades of moor,
+/// two of rock — so the patchwork thins out with the vegetation without
+/// stopping dead. Bare rock has nothing growing on it to make parcels of, and
+/// the relief up there is drawn by the slope tests instead;
+/// [`Tone::RockDark`] is left to them, so a dark facet on a mountain always
+/// means a crag.
 const LOWLAND_PARCELS: [Tone; 5] = [
     Tone::Forest,
     Tone::GrassDark,
@@ -857,17 +808,14 @@ pub struct TerrainGenerator {
     calibration: Calibration,
     coast: CoastDistance,
     /// The waterline the mountains are held back from. Empty until the fit in
-    /// [`TerrainGenerator::new`] has found a coastline to measure; nothing
-    /// asks for a height before then, and an empty field reads infinity
-    /// everywhere in any case, which is the ceiling declining to bind rather
-    /// than binding on a measurement it has not made.
+    /// [`TerrainGenerator::new`] has found a coastline to measure, which reads
+    /// infinity everywhere — the ceiling declining to bind rather than binding
+    /// on a measurement it has not made.
     ///
-    /// Deliberately *not* [`TerrainGenerator::coast`], even though the two are
-    /// measured from the same grid a moment apart. They differ in what counts
-    /// as water: this one counts only water broad enough to stand in for the
-    /// sea, so the ponds and narrow sounds that fill the interior of these maps
-    /// are ground rather than a coast a range has to climb from. See
-    /// [`CoastDistance::from_open_water`].
+    /// Deliberately *not* [`TerrainGenerator::coast`]: this one counts only
+    /// water broad enough to stand in for the sea, so the ponds and narrow
+    /// sounds inland are ground rather than a coast a range has to climb from.
+    /// See [`CoastDistance::from_open_water`].
     inland: CoastDistance,
     /// Standing water above sea level — the basins the landform encloses,
     /// flooded once there is a finished landform to flood. Empty until then,
@@ -902,28 +850,22 @@ const CEILING_KNEE: f32 = 6.0;
 
 /// `h` brought under `ceiling`, leaving the ground still rising.
 ///
-/// A plain `min` is what this must not be. Clipped flat, every headland with a
-/// strong massif on it becomes a mesa — and a mesa has no summit, so its
-/// highest ground is barely above its own shoulders and there is nothing for a
-/// peak to be made of. It would also print the shape of the distance field on
-/// the ground wherever it bound, creases and all, which is the one thing every
-/// other reader of that field takes trouble to avoid.
+/// A plain `min` is what this must not be: clipped flat, every headland with a
+/// strong massif becomes a mesa, which has no summit for a peak to be made of,
+/// and it would print the shape of the distance field on the ground wherever
+/// it bound.
 ///
 /// A smooth minimum instead: all but exactly `h` while `h` is well under the
-/// ceiling, bending over as it approaches, and closing on the ceiling from
-/// below without ever sitting on it. Ground under a binding ceiling still
-/// climbs, just far more slowly than the noise wanted it to — which is what a
-/// worn-down headland looks like.
+/// ceiling, bending over as it approaches and closing on it from below without
+/// ever sitting on it. Ground under a binding ceiling still climbs, just far
+/// more slowly than the noise wanted — which is what a worn-down headland
+/// looks like.
 fn under_ceiling(h: f32, ceiling: f32) -> f32 {
     // Nothing to do below the waterline — the ceiling is about how high land
-    // may stand, and depth is the calibration's business.
-    //
-    // The second half of that is belt and braces rather than arithmetic. An
-    // infinite ceiling already falls out of the formula as `h` untouched, and
-    // it should not arise anyway: [`TerrainGenerator::inland`] only reads
-    // infinite before it has a field to measure, and by the time anything asks
-    // for a height it has one. What the check is really for is the not-a-
-    // number a distance field with no sea in it at all would blur its way to.
+    // may stand, and depth is the calibration's business. The second half is
+    // belt and braces: an infinite ceiling already falls out of the formula as
+    // `h` untouched, and what the check is really for is the not-a-number a
+    // distance field with no sea in it at all would blur its way to.
     if h <= 0.0 || !ceiling.is_finite() {
         return h;
     }
@@ -1013,29 +955,20 @@ impl TerrainGenerator {
 
         // One round of fitting, and the ceiling laid over what it produced.
         //
-        // It is worth saying why this is not a loop, because it looks like it
-        // ought to be one: the ceiling changes the landform, the landform
-        // decides where the water is, and the water is what the ceiling is
-        // measured from. But nothing inside [`TerrainGenerator::fit`] reads
-        // the ceiling — it is applied in [`TerrainGenerator::landform`],
-        // strictly downstream of everything fitted here, and deliberately so;
-        // see the note in [`TerrainGenerator::fit_range_height`]. So the
-        // coastline this measures is the one the fit produced, and fitting
-        // again against it would return the same numbers to the bit. A second
-        // round was tried and did exactly that, for twice the noise sampling.
-        //
-        // Nor is there a coastline to converge on even in principle. The
-        // ceiling scales a height rather than subtracting from it, and a
-        // positive height stays positive however hard it binds — so it moves
-        // every contour on the map except the one at zero, which is the only
-        // one any of this is measured from. Whatever it does to the mountains,
-        // the waterline it leaves is the waterline it was handed.
+        // Not a loop, though it looks like it ought to be one. Nothing inside
+        // [`TerrainGenerator::fit`] reads the ceiling — it is applied in
+        // [`TerrainGenerator::landform`], strictly downstream — so fitting
+        // again against the coastline this measures returns the same numbers
+        // to the bit, which a second round was tried and did. Nor is there a
+        // coastline to converge on in principle: the ceiling scales a height
+        // rather than subtracting from it, so it moves every contour on the
+        // map except the one at zero, which is the only one any of this is
+        // measured from.
         //
         // The order below is load-bearing all the same. `inland` is the one
-        // thing [`TerrainGenerator::ceiling`] reads, and the coast-band fit is
-        // the one step here that asks for a finished height — it walks the
-        // waterline reading [`TerrainGenerator::normal`] — so it has to run
-        // against the ceiling rather than before it exists.
+        // thing [`TerrainGenerator::ceiling`] reads, and the coast-band fit
+        // asks for a finished height, so it has to run against the ceiling
+        // rather than before it exists.
         let raw = generator.fit(config, &targets);
         generator.inland = CoastDistance::from_open_water(&raw, &generator.calibration);
         // The flood reads the ceiling, and the ceiling reads `inland`, so the
@@ -1099,25 +1032,19 @@ impl TerrainGenerator {
     /// headland it binds hard, and the ground there is low because there is
     /// nowhere for it to have climbed from.
     ///
-    /// Offset by [`CLIFF_HEIGHT`], because ground at the waterline is not
-    /// obliged to be at the waterline: a coast may stand a cliff tall without
-    /// having climbed from anywhere, which is exactly what the coastal shaping
+    /// Offset by [`CLIFF_HEIGHT`], because a coast may stand a cliff tall
+    /// without having climbed from anywhere — which is what the coastal shaping
     /// spends its time building. Without the offset the ceiling bears down on
-    /// the ordinary low country too — most of any map here is within a few
-    /// tens of metres of water — and it takes enough off the middle of the
-    /// land to undo [`LOWLAND_FLOOR`] and leave the map the drowned sandflat
-    /// the calibration went to trouble to rule out.
+    /// the ordinary low country too, undoing [`LOWLAND_FLOOR`] and leaving the
+    /// drowned sandflat the calibration went to trouble to rule out.
     ///
-    /// Biasing the massif *towards* the interior instead was tried first, and
-    /// dropped. A soft preference does not stop anything: a massif the mask
-    /// made strong still beats a weaker one with far more room behind it —
-    /// being held back near the water costs it less than being feeble costs
-    /// the other — and the height fit, which has to put a summit somewhere,
-    /// then puts it exactly where the preference was trying to avoid. Measured
-    /// on the finished maps that was the common case rather than the rare one:
-    /// summits standing at one and a half to two metres of height per metre of
-    /// ground back from the sea, against the half-metre the rest of this is
-    /// written around. A limit does what a preference could not.
+    /// Biasing the massif *towards* the interior instead was tried and dropped.
+    /// A soft preference does not stop anything: a massif the mask made strong
+    /// still beats a weaker one with far more room behind it, and the height
+    /// fit then puts the summit exactly where the preference was avoiding.
+    /// Measured on finished maps that was the common case — summits at one and
+    /// a half to two metres of height per metre back from the sea, against the
+    /// half-metre the rest of this is written around.
     fn ceiling(&self, wx: f32, wz: f32) -> f32 {
         CLIFF_HEIGHT + PEAK_GRADE * self.inland.metres(wx, wz)
     }
@@ -1126,15 +1053,12 @@ impl TerrainGenerator {
     /// and returns the grid it worked that out on for
     /// [`TerrainGenerator::fit_range_height`] to scale them on.
     ///
-    /// Left to the noise, both are luck. Whether a seed is mountainous comes
-    /// down to how much of its mask field happens to clear a fixed threshold
-    /// and whether its ridge lines happen to fall under it — and on the same
-    /// settings that gives one map a five-hundred-metre alp and the next a
-    /// seventy-metre hill. Two passes over a coarse grid settle it: the first
-    /// finds where to start counting the massif so it covers
-    /// [`RANGE_FOOTPRINT`] of the map and reaches its full height only at its
-    /// highest point, the second builds the field either side of the one term
-    /// that is still free.
+    /// Left to the noise, both are luck: the same settings give one map a
+    /// five-hundred-metre alp and the next a seventy-metre hill. Two passes
+    /// over a coarse grid settle it — the first finds where to start counting
+    /// the massif so it covers [`RANGE_FOOTPRINT`] of the map and reaches full
+    /// height only at its highest point, the second builds the field either
+    /// side of the one term that is still free.
     fn fit_ranges(&mut self, tiles: UVec2, targets: &Targets) -> Vec<Sample> {
         let (nx, nz) = grid_dims(tiles);
         let origin = -tiles.as_vec2() * 0.5;
@@ -1216,36 +1140,26 @@ impl TerrainGenerator {
     /// Scales the massif until the highest ground on the map stands at
     /// [`peak_height`] — [`HEIGHT_SCALE`], on any map big enough to hold it.
     ///
-    /// Fitting the footprint is not enough on its own. How far a summit gets
-    /// above the line where the mountains start is set by how sharply this
-    /// seed's massif happens to come to a point, and on the same settings that
-    /// ranges from a hundred metres to nearly three — so half the seeds have
-    /// nothing that reads as a mountain and the other half have a spike.
+    /// Fitting the footprint is not enough on its own: how far a summit gets
+    /// above the mountain line depends on how sharply this seed's massif comes
+    /// to a point, which on the same settings ranges from a hundred metres to
+    /// nearly three.
     ///
     /// What is *not* the way to fix it is bending the mapping in
-    /// [`Calibration`]; see the note there. This scales the massif term instead,
-    /// which changes how high a range stands without touching how sharp it is,
-    /// and leaves the mapping the straight line it needs to be.
-    ///
-    /// The catch is that the scale and the mapping decide each other — pushing
-    /// the range up moves the mountain line the peak is measured against — so
-    /// it is solved for rather than calculated. Cheaply, though: the noise is
-    /// already sampled, and every step from here is a multiply and a sort.
+    /// [`Calibration`]; see the note there. This scales the massif term
+    /// instead, changing how high a range stands without touching how sharp it
+    /// is. The scale and the mapping decide each other, so it is solved for
+    /// rather than calculated — cheaply, the noise being sampled already.
     fn fit_range_height(&mut self, samples: &[Sample], targets: &Targets) {
         // What the map's highest ground comes out at, in metres, for a given
         // scale on the massif.
         //
         // Fitted against the field *before* [`TerrainGenerator::ceiling`] gets
-        // to it, and deliberately so. The ceiling is what decides how tall a
-        // map's mountains actually come out, and it does that from geometry —
-        // so the fit has no business chasing it. Made to chase it, the fit
-        // pushes the range term as far as it takes to get a summit up to a
-        // target the ceiling will not allow, which is a long way: the massif
-        // ends up many times the share of the field it should be, and since
-        // the room a map has depends on the map, the same seed came out a
-        // different landscape at two sizes. Left aiming at a fixed height, the
-        // range term keeps the size-independent value it always had, and the
-        // ceiling clips whatever stands taller than its ground has earned.
+        // to it, deliberately. Made to chase the ceiling, the fit pushes the
+        // range term as far as it takes to reach a target the ceiling will not
+        // allow — the massif ends up many times the share of the field it
+        // should be, and since the room a map has depends on the map, the same
+        // seed came out a different landscape at two sizes.
         let peak_at = |gain: f32| {
             let mut raw: Vec<f32> = samples.iter().map(|s| s.raw(gain)).collect();
             // Sorts in place, so the last entry is the summit afterwards.
@@ -1255,32 +1169,24 @@ impl TerrainGenerator {
 
         let target = HEIGHT_SCALE * targets.relief;
 
-        // Two brackets to start from. The lower is well under anything that
-        // produces mountains; the upper is a limit as much as a bracket, and
-        // that wants explaining.
+        // Two brackets. The lower is well under anything that produces
+        // mountains; the upper is a limit as much as a bracket.
         //
-        // From a kilometre up this is a genuine solve and the answer is small:
-        // under 4 on every seed measured, and under 1 by two kilometres. Below
-        // that the curve stops being one a solve can follow. The calibration
-        // refits the mapping at every trial, so past a point pushing the massif
-        // harder stops raising the summit in metres at all — on one 512-metre
-        // seed the summit read 54.1 m at every scale from 1 to 200 — and far
-        // enough past it the massif swamps the quantiles the mapping is
-        // anchored on and the whole thing breaks upward, the same seed reading
-        // 1285 m at a scale of ten thousand. Others turn over instead, rising
-        // to a maximum part way and falling back. On any of them no scale
-        // reaches the target and the bisection runs to whatever ceiling it was
-        // given, so what that ceiling is chooses the answer outright.
+        // From a kilometre up this is a genuine solve and the answer is small,
+        // under 4 on every seed measured. Below that the curve stops being one
+        // a solve can follow: the calibration refits the mapping at every
+        // trial, so past a point pushing the massif harder stops raising the
+        // summit at all — one 512-metre seed read 54.1 m at every scale from 1
+        // to 200 — and far enough past it the massif swamps the quantiles the
+        // mapping is anchored on and the whole thing breaks upward. On any of
+        // those no scale reaches the target, and the bisection runs to whatever
+        // ceiling it was given.
         //
-        // Which is the case for keeping it low, and it costs nothing to. The
-        // maps either ceiling produces are indistinguishable — the calibration
-        // absorbing the scale is the same thing that made the curve go flat —
-        // so the only difference is the number a degenerate seed comes away
-        // with. At 200 that number lands two orders of magnitude off its
-        // neighbours': one seed solved to 1.9 at 640 m, 200 at 768 m and 1.4 at
-        // a kilometre. Since map size is a dial the player turns, a fitted
-        // number that jumps like that between neighbouring sizes is worth not
-        // having, even where the picture survives it.
+        // Which is the case for keeping it low, and it costs nothing to: the
+        // maps either ceiling produces are indistinguishable, so the only
+        // difference is the number a degenerate seed comes away with. At 200
+        // one seed solved to 1.9 at 640 m, 200 at 768 m and 1.4 at a kilometre,
+        // and map size is a dial the player turns.
         let (mut lo, mut hi) = (0.05f32, 12.0f32);
         // Bisection rather than a secant: as above the curve is not reliably
         // monotone, and a run of halvings costs almost nothing here and cannot
@@ -1320,18 +1226,14 @@ impl TerrainGenerator {
     /// its beaches to come out as beaches.
     ///
     /// The band is written in metres, and metres are fitted per seed — so on a
-    /// seed whose terrain comes out steeper, the ground climbs past
-    /// [`CLIFF_HEIGHT`] within a few metres of the water, the reshaping runs
-    /// out of room, and the beaches collapse into sand ribbons with a grey
-    /// slope-rule line along the waterline.
+    /// steeper seed the ground climbs past [`CLIFF_HEIGHT`] within a few metres
+    /// of the water, the reshaping runs out of room, and the beaches collapse
+    /// into sand ribbons with a grey slope-rule line along the waterline.
     ///
-    /// No single measurement of the landform predicts that well — seeds with
-    /// the same near-shore heights come out with very different beaches — so
-    /// like everything else here it is solved for instead: walk the beach
-    /// stretches of the waterline, measure what share of them the slope rule
-    /// would paint grey, and take the smallest band that gets that share under
-    /// [`BEACH_STEEP_TARGET`]. Gentle seeds pass at 1.0 and keep the tuned
-    /// look untouched.
+    /// No single measurement of the landform predicts that well, so it is
+    /// solved for: walk the beach stretches of the waterline, measure what
+    /// share the slope rule would paint grey, and take the smallest band that
+    /// gets it under [`BEACH_STEEP_TARGET`]. Gentle seeds pass at 1.0.
     fn fit_coast_scale(&mut self, raw: &GridField) {
         let (nx, nz) = raw.dims;
         let cells = &raw.cells;
@@ -1423,12 +1325,11 @@ impl TerrainGenerator {
     /// Where this map's mountains want to sit: its own mask field, plus a good
     /// share of the landmass field.
     ///
-    /// Tying the two together does two jobs. Ranges end up on the high ground
-    /// rather than wherever the mask happens to fall, which is both how real
-    /// ones sit and what stops a seed putting its only massif out at sea and
-    /// coming back with a map of hills. And a range that runs down a peninsula
-    /// still gets a range's height, because the landmass field is high there
-    /// too.
+    /// Tying the two together puts ranges on the high ground rather than
+    /// wherever the mask happens to fall — which is how real ones sit, and what
+    /// stops a seed putting its only massif out at sea. A range running down a
+    /// peninsula still gets a range's height, the landmass field being high
+    /// there too.
     fn range_seat(&self, n: Vec2, continent: f32) -> f32 {
         self.mountain_mask
             .fbm(n.x * MASSIF_FREQ, n.y * MASSIF_FREQ, 3)
@@ -1454,47 +1355,35 @@ impl TerrainGenerator {
         // Both ends of it are fitted per seed, and both matter.
         //
         // It has to stay a *dome*. Clipped flat — which a smoothstep does the
-        // moment the noise passes its upper edge — it becomes a mesa, and a
-        // mesa has no summit: its highest ground is barely above its own
-        // shoulders, so there is nothing for peaks to be made of.
+        // moment the noise passes its upper edge — it becomes a mesa, whose
+        // highest ground is barely above its own shoulders.
         //
-        // And its footprint has to be about the share of the map that is meant
-        // to end up mountainous. Spread over half of it, the ninetieth
-        // percentile of the land sits partway up the dome rather than at its
-        // foot, and then raising the range lifts the mountain line along with
-        // it and the summits never get any further above their own shoulders
-        // however hard they are pushed. Left to the noise, that footprint is
-        // pure luck of the seed, and the same settings give one map a
-        // five-hundred-metre alp and the next a seventy-metre hill.
-        // Measured partly against the map's whole span and partly against the
-        // local ceiling — the tallest seat within [`MASSIF_WINDOW`] — so that
-        // every range has a summit that approaches full height, not just the
-        // one that happens to hold the map's highest seat. See
-        // [`MASSIF_EQUALITY`].
+        // And its footprint has to be about the share of the map meant to end
+        // up mountainous. Spread over half of it, the ninetieth percentile of
+        // the land sits partway up the dome, and raising the range lifts the
+        // mountain line with it so the summits never get any further above
+        // their own shoulders. Measured partly against the map's whole span
+        // and partly against the local ceiling, so every range has a summit
+        // that approaches full height — see [`MASSIF_EQUALITY`].
         let local = (self.range_ceiling.at(wx, wz) - self.range_floor).max(1e-3);
         let span = self.range_span + MASSIF_EQUALITY * (local - self.range_span);
         let massif = ((self.range_seat(n, continent) - self.range_floor) / span).clamp(0.0, 1.0);
 
-        // The ridges on top of it. A ridged field is all cusp — its maximum is
-        // a crease, not a summit — so left to shape the range on its own, with
-        // the height curve cubing its top end, it gives a row of knife blades
-        // standing on end. Riding on the massif at less than half strength it
-        // does what it is good at, which is putting crests and gullies on a
-        // mountain whose shape has already been decided.
-        // Ramped over most of the ridged field's range rather than its top
-        // slice, so a crest is a broad shoulder rather than a wall: taken
-        // narrow, the term is a razor line a couple of facets wide, and scaled
-        // up to mountain height it reads as masonry running across the country.
+        // The ridges on top of it. A ridged field is all cusp, so left to shape
+        // the range on its own it gives a row of knife blades standing on end;
+        // riding on the massif at less than half strength it puts crests and
+        // gullies on a mountain whose shape is already decided. Ramped over
+        // most of the field's range rather than its top slice, so a crest is a
+        // broad shoulder — taken narrow it is a razor line a couple of facets
+        // wide, which at mountain height reads as masonry.
         let crest = smoothstep(0.25, 0.98, self.ridges.ridged(n.x * 0.5, n.y * 0.5, 3));
 
-        // Squared, which is what puts a summit on the dome. Left linear it is
-        // too even-sided: the contour enclosing the top few per cent of the map
-        // sits nearly half way up it, so the peak is only twice the height of
-        // the mountain line no matter how hard the range is pushed. Squaring
-        // drops that contour down the flank and leaves room above it. It is
-        // safe to do here and nowhere else, because the massif is a smooth
-        // swell — the same trick on the ridged field sharpens its creases into
-        // blades.
+        // Squared, which is what puts a summit on the dome. Left linear the
+        // contour enclosing the top few per cent sits nearly half way up it,
+        // so the peak is only twice the mountain line's height however hard
+        // the range is pushed. Safe here and nowhere else: the massif is a
+        // smooth swell, and the same trick on the ridged field sharpens its
+        // creases into blades.
         massif * massif * (0.55 + 0.45 * crest)
     }
 
@@ -1533,47 +1422,32 @@ impl TerrainGenerator {
     /// over on the way out and the coast comes apart into a speckle of islets;
     /// taking the amplitude down first gives one clean shoreline.
     fn falloff(&self, wx: f32, wz: f32, n: Vec2, drift: Vec2) -> (f32, f32) {
-        // Measured in the warped frame, and against a radius that wanders with
-        // its own slow field, so the little of the outline it does decide is
-        // not a circle either.
-        // The radius wanders at a wavelength short enough to vary *around* the
-        // island — a slower field than this is near enough constant across a
-        // kilometre of map, so instead of lobing the outline it just scales the
-        // whole island, and seeds come out either filling their map or lost in
-        // the middle of it. It matters most on the smallest maps, where the
-        // land usually does reach the falloff: at 0.55 the field put barely a
-        // lobe on a 768 m island's outline, and every small map read as the
-        // same rounded square.
-        // Only how the drift *varies* around the ring draws lobes on it;
-        // whatever the whole map's drift has in common is a displacement of
-        // the entire ring — and the ring has very little room to be
-        // displaced, since land survives to nearly the top of the ramp and
-        // the ramp ends barely past the frame. The warp's dominant component
-        // is over a kilometre long, so on maps up to that order the shared
-        // part is most of the drift: taken raw, it slid the ring off the edge
-        // of the map, and the coast on that side was drawn by the rim in a
-        // dead straight line along the frame. Two guards keep the ring on the
-        // map, each for the scale the other cannot cover.
+        // Measured in the warped frame, against a radius that wanders with its
+        // own slow field, so the little of the outline it does decide is not a
+        // circle either. The wavelength is short enough to vary *around* the
+        // island: a slower field is near enough constant across a kilometre of
+        // map, so instead of lobing the outline it scales the whole island.
         //
-        // `drift_excess` is the shared part — read at the map centre — beyond
-        // a tolerance of a tenth of each half extent, subtracted everywhere.
-        // A seed whose drift is centred keeps its shape untouched; a seed
-        // blown off the map is slid back onto it, with every lobe intact,
-        // because a constant subtraction changes nothing about how the drift
-        // varies. Full recentring is deliberately *not* done: past the warp's
-        // wavelength the centre stops predicting the drift at the ring, and
-        // anchoring the ring to it there pushes maps off their frames instead
-        // of back onto them.
+        // Only how the drift *varies* around the ring draws lobes on it;
+        // whatever the whole map's drift has in common displaces the entire
+        // ring, which has very little room to be displaced. The warp's dominant
+        // component is over a kilometre long, so on maps of that order the
+        // shared part is most of the drift: taken raw it slid the ring off the
+        // edge of the map, and the coast on that side was drawn by the rim in a
+        // dead straight line. Two guards keep the ring on the map, each for the
+        // scale the other cannot cover.
+        //
+        // `drift_excess` is the shared part — read at the map centre — beyond a
+        // tolerance of a tenth of each half extent, subtracted everywhere. A
+        // constant subtraction changes nothing about how the drift varies, so
+        // every lobe survives. Full recentring is deliberately *not* done: past
+        // the warp's wavelength the centre stops predicting the drift at the
+        // ring, and anchoring to it there pushes maps off their frames.
         //
         // And `bend_gain` damps the whole bend on maps the landmass field
-        // cannot break up — the same regime the land share tapers in, judged
-        // on the tighter axis — because down there even the drift's local
-        // variation outruns the few metres of margin the ring has, and what
-        // the subtraction leaves still cuts the coast off at the frame. On
-        // larger maps the same variation is a lobe, and is most of what
-        // un-squircles them, so it comes back in full as soon as the map can
-        // afford it. Both numbers are per-map, worked out once at
-        // construction.
+        // cannot break up, where even the drift's local variation outruns the
+        // few metres of margin the ring has. On larger maps that variation is a
+        // lobe and most of what un-squircles them, so it comes back in full.
         let bend = (drift * FEATURE_SCALE * 0.7 - self.drift_excess) * self.bend_gain;
         let reach = 1.0 + 0.7 * self.continent.fbm(n.x * 0.85 - 12.4, n.y * 0.85 + 9.8, 2);
         // The clamp is asymmetric: the radius may pull well in, carving deep
@@ -1585,28 +1459,23 @@ impl TerrainGenerator {
             self.squircle(wx + bend.x, wz + bend.y, 2.2) / reach.clamp(0.72, self.reach_max);
 
         // Spread over a wide ramp and pushed down gently. A short, hard falloff
-        // drops the ground into the sea too fast, and the slope rule then paints
-        // a grey cliff right the way round every island — which is no more the
-        // point than a beach right the way round was. Starting the ramp much
+        // drops the ground into the sea too fast, and the slope rule then
+        // paints a grey cliff right round every island. Starting the ramp much
         // further out has been tried twice and is worse both times: the land
         // reaches the rim and is cut off dead straight, or the sea floods the
         // interior into fragments.
-        // A last, unwarped guard on the outcome, because the two guards above
-        // both act on the bend's *inputs* and the warp has one more trick: a
-        // drift that diverges across the map — pulling outward on both ends
-        // of an axis at once — inflates the ring past both frame edges
-        // without any net translation for the subtraction to catch or, on a
-        // large map, any taper to damp. Whatever the warp does, the edge is
-        // forced closed by the last few per cent of the frame, so every map
-        // keeps a sea margin; where it binds the coast follows the unwarped
-        // contour for a stretch, which is an arc, and an arc is the ring
-        // showing — far better than the frame showing. It starts well outside
-        // the ring's usual reach, so the healthy majority of coasts never
-        // touch it.
+        //
+        // A last, unwarped guard on the outcome, the two guards above acting
+        // on the bend's *inputs*: a drift that diverges across the map inflates
+        // the ring past both frame edges with no net translation to catch and,
+        // on a large map, no taper to damp. Where this binds the coast follows
+        // an arc, which is the ring showing — far better than the frame
+        // showing — and it starts well outside the ring's usual reach.
+        //
         // Skipped over the interior, where it is identically zero: a squircle
-        // is at most 2^(1/power) times the larger axis fraction, so inside
-        // two thirds of either half extent it cannot reach the guard's ramp —
-        // and its `powf`s are most of this function's arithmetic.
+        // is at most 2^(1/power) times the larger axis fraction, so inside two
+        // thirds of either half extent it cannot reach the guard's ramp, and
+        // its `pow`s are most of this function's arithmetic.
         let frame = (wx / self.half_extent.x)
             .abs()
             .max((wz / self.half_extent.y).abs());
@@ -1677,21 +1546,14 @@ impl TerrainGenerator {
         }
 
         // The same rule, for the water that does not stand at one height the
-        // world over. A lake's surface was found on the landform, before any
-        // of the detail above existed, so near one the landform is what the
-        // ground has to be: the detail fades out as the bare bowl approaches
-        // the water and back in over [`LAKE_RELIEF`] of height either side of
-        // it. The drawn waterline is then the landform's own contour at that
-        // level, which is the line the flood found and the only one the rest
-        // of the map is consistent with.
-        //
-        // Giving way is what keeps a lake water rather than a rule about
-        // water: the detail is free to shape the bed and to shape the banks,
-        // and loses only its freedom to carry either across the surface.
-        //
-        // The lakes are empty through every fitting pass — they cannot be
-        // found until the landform is finished — so this costs the calibration
-        // nothing and the fitting never sees a height it will not get back.
+        // world over. A lake's surface was found on the landform, before any of
+        // the detail above existed, so near one the landform is what the ground
+        // has to be: the detail fades out as the bare bowl approaches the water
+        // and back in over [`LAKE_RELIEF`] of height either side. The drawn
+        // waterline is then the landform's own contour at that level, which is
+        // the line the flood found. The detail keeps its freedom to shape the
+        // bed and the banks, and loses only its freedom to carry either across
+        // the surface.
         h = base + (h - base) * self.lakes.ground_weight(wx, wz);
 
         // Everything above is the same landscape whatever the coast does with
@@ -1716,10 +1578,7 @@ impl TerrainGenerator {
     /// from the water, and up the bank within that until the ground is
     /// [`LAKE_RELIEF`] clear of the surface. So a caller with a height in hand
     /// draws the waterline itself — water stands wherever `height < level` —
-    /// and finds it well inside the field rather than at its edge. There is no
-    /// need to stop drawing before the answer runs out, and nothing to be
-    /// gained by it: a waterline is where two surfaces cross, not where a
-    /// field ends.
+    /// and finds it well inside the field rather than at its edge.
     pub fn lake_level(&self, wx: f32, wz: f32) -> Option<f32> {
         self.lakes.level(wx, wz)
     }
@@ -1728,27 +1587,21 @@ impl TerrainGenerator {
     /// ground that shelves gently away into sand, `+1.0` for ground that stands
     /// straight up out of the water, and the rocky shores in between.
     ///
-    /// Read at the nearest point on the shoreline rather than underfoot, so
-    /// that it is a property of a stretch of coast and not of a spot on the
-    /// map. It is a two-dimensional field and it wanders across a coast as
-    /// readily as along one: sampled where it is used, a single stretch can be
-    /// a beach at the water and a cliff a hundred metres inland, and it builds
-    /// both — a wall of rock standing behind a sand beach, which is a thing no
+    /// Read at the nearest point on the shoreline rather than underfoot, so that
+    /// it is a property of a stretch of coast and not of a spot on the map. The
+    /// field wanders across a coast as readily as along one, so sampled where
+    /// it is used a single stretch can be a beach at the water and a cliff a
+    /// hundred metres inland — and it builds both, which is a thing no
     /// coastline does.
     ///
     /// Which way the shore lies comes from the gradient of the distance field,
-    /// pointing down the slope of it towards the water.
-    ///
-    /// Except along the crest of that field — the line equidistant between two
-    /// shores — where the gradient flips a whole half turn and the nearest
-    /// waterline point teleports from one coast to the other. Read naively,
-    /// the character jumps with it, and the height field cracks along the
-    /// crest: a dead-straight hairline scarp running down the middle of every
-    /// neck and every strait, plainly visible in plan. A distance field's
-    /// slope is 1 everywhere except approaching that crest, where opposing
-    /// wavefronts meet and it collapses — so the collapse *is* the detector,
-    /// and the displacement is faded out on it. The two sides then agree on
-    /// the character underfoot by the time they meet.
+    /// except along its crest — the line equidistant between two shores — where
+    /// the gradient flips a half turn and the nearest waterline point teleports
+    /// from one coast to the other. Read naively the character jumps with it,
+    /// cracking the height field along a dead-straight hairline scarp down the
+    /// middle of every neck and strait. A distance field's slope is 1
+    /// everywhere except approaching that crest, where it collapses — so the
+    /// collapse *is* the detector, and the displacement is faded out on it.
     fn shore_character(&self, wx: f32, wz: f32) -> f32 {
         let distance = self.coast.metres(wx, wz);
         let step = COAST_GRID;
@@ -1831,25 +1684,20 @@ impl TerrainGenerator {
         // lake darkens instead: silt, then weed, then a reed margin where the
         // sea would have sand.
         //
-        // The three are measured *out from the lake's own edge*, and not down
-        // from its surface the way the sea's are from zero — see
-        // [`LAKE_MARGIN`] and [`Lakes::shore`] for why a lake cannot afford
-        // that. A ring of a fixed reach is also the truer picture of one:
-        // reeds stand as far out as they can root, not as far up as the water
+        // The three are measured *out from the lake's own edge* rather than
+        // down from its surface — see [`LAKE_MARGIN`] and [`Lakes::shore`].
+        // Reeds stand as far out as they can root, not as far up as the water
         // once came.
         //
-        // The shore character field takes no part. That is a property of
-        // stretches of *sea* coast, sampled at the nearest sea waterline, and
-        // means nothing on a shore halfway up a hillside — so a lake's margin
-        // is marsh where it lies flat and bare rock where it stands steep,
-        // which is what tarns and lowland pools do. Past its own little fringe
-        // the lake has no say, and the hillside is painted as the height says.
+        // The shore character field takes no part, being a property of
+        // stretches of *sea* coast: a lake's margin is marsh where it lies flat
+        // and bare rock where it stands steep, which is what tarns and lowland
+        // pools do.
         //
         // Ground actually under the water joins them whatever the distance
-        // says, and that is not a belt-and-braces test: the field is measured
-        // on the fitting grid and smoothed, so a pool narrower than the
-        // smoothing reads as barely water at all, and its bed would fall
-        // through to the sea's palette — a tarn painted with a sand bottom.
+        // says, which is not belt and braces: the field is measured on the
+        // fitting grid and smoothed, so a pool narrower than the smoothing
+        // would have its bed fall through to the sea's palette.
         let shore = self.lakes.shore(wx, wz);
         let drowned = self.lakes.level(wx, wz).is_some_and(|level| height < level);
         if shore < LAKE_MARGIN || drowned {
@@ -1965,11 +1813,9 @@ impl TerrainGenerator {
 /// [`FACET_VERTS`]-square grid, row-major, sampled from `base` outwards at
 /// [`FACET_METRES`] spacing.
 ///
-/// The loop order is the format — a payload's heights are in exactly this
-/// order — so a caller may also *look* at the grid before deciding whether the
-/// chunk is worth sending at all: the open world skips chunks whose every
-/// corner sits on the ocean floor, since a client's backdrop plane already
-/// draws that.
+/// The loop order is the format, so a caller may also *look* at the grid before
+/// deciding whether the chunk is worth sending at all — the open world skips
+/// chunks whose every corner sits on the ocean floor.
 pub(crate) fn facet_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec<f32> {
     let mut heights = vec![0.0f32; FACET_VERTS * FACET_VERTS];
     for iz in 0..FACET_VERTS {
@@ -1991,14 +1837,11 @@ pub(crate) fn facet_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec
 /// saddle that may be nowhere near the chunk. A corner the lakes have no
 /// answer for stores [`protocol::ground::NO_WATER`].
 ///
-/// The grid is kept only where some corner is actually *under* its level, and
-/// that is the difference between a lake's water and a lake's mere presence.
-/// [`TerrainGenerator::lake_level`] answers out past a lake's edge, so that a
-/// chunk holding a shoreline carries a level on the dry side of it too and a
-/// client can put the waterline where the two fields cross. But a chunk
-/// that catches *only* bank — a lake in the next chunk along, whose shore
-/// climbs over the boundary — has no water in it to draw, and would otherwise
-/// pay a full grid to say so.
+/// The grid is kept only where some corner is actually *under* its level, which
+/// is the difference between a lake's water and a lake's mere presence:
+/// [`TerrainGenerator::lake_level`] answers out past a lake's edge, so a chunk
+/// catching only bank has no water to draw and would otherwise pay a full grid
+/// to say so.
 pub(crate) fn facet_water(
     base: Vec2,
     heights: &[f32],
@@ -2028,11 +1871,9 @@ pub(crate) fn facet_water(
 /// carries them in, and the order a renderer builds its triangles in, so
 /// neither end has to be told twice.
 ///
-/// `heights` is what [`facet_heights`] returned for the same `base`. The
-/// ground is flat shaded, so one sample at a triangle's centre decides the
-/// whole of it: there is nothing to interpolate between its corners, and the
-/// normal it is lit and classified by is the triangle's own rather than the
-/// field's.
+/// `heights` is what [`facet_heights`] returned for the same `base`. The ground
+/// is flat shaded, so one sample at a triangle's centre decides the whole of
+/// it, and the normal it is lit and classified by is the triangle's own.
 pub(crate) fn facet_surfaces(
     base: Vec2,
     heights: &[f32],
@@ -2074,42 +1915,29 @@ fn grid_dims(tiles: UVec2) -> (usize, usize) {
 /// Turns the raw landform field into metres, fitted to the map it was sampled
 /// from so that every seed comes out with the same *amount* of landscape.
 ///
-/// Noise gives shape, never proportion. A seed whose field happens to run low
-/// makes a drowned map and one that runs high makes a plateau, and a sea level
-/// or a mountain threshold hard-coded to suit one is wrong for the other — the
-/// reason the ranges never appeared before was a mask cut at 0.55 on a field
-/// whose 99th percentile is 0.38. Reading the field's own distribution and
-/// solving for the numbers that hit [`LAND_FRACTION`] and [`MOUNTAIN_FRACTION`]
-/// makes the targets true by construction, on every seed.
+/// Noise gives shape, never proportion. A seed whose field runs low makes a
+/// drowned map and one that runs high makes a plateau, and a threshold
+/// hard-coded to suit one is wrong for the other — the reason the ranges never
+/// appeared once was a mask cut at 0.55 on a field whose 99th percentile is
+/// 0.38. Reading the field's own distribution and solving for the numbers that
+/// hit [`LAND_FRACTION`] and [`MOUNTAIN_FRACTION`] makes the targets true by
+/// construction.
 ///
 /// Above the waterline the mapping is a straight line — bent, on the drowned
-/// seeds only, at one place and in one direction. The mountains are built into
-/// the field rather than curved into it here.
-///
-/// A curve that steepens towards the top is the obvious way to raise peaks out
-/// of a gentle field, and it is a trap. To lift the top of the field it has to
-/// magnify whatever is up there, and what is up there is a ridged noise field
-/// whose maximum is a crease — so the peaks come out as vertical knife blades.
-/// Worse, it only works at all on seeds whose field happens to have a sharp
-/// top: on the rest the fit has nothing to bite on and gives up, and the same
-/// settings produce a two-hundred-metre range on one map and an eighty-metre
-/// hummock on the next.
-///
-/// Keeping it linear means the mountains have exactly the shape the massif
-/// gives them, and getting them to a consistent height is
-/// [`TerrainGenerator::fit_range_height`]'s job instead — which is a scale on
-/// one term, so it changes how high a range stands without touching how sharp
-/// it is.
+/// seeds only, at one place and in one direction. A curve that steepens towards
+/// the top is the obvious way to raise peaks out of a gentle field, and it is a
+/// trap: what is up there is a ridged field whose maximum is a crease, so the
+/// peaks come out as vertical knife blades, and on seeds with no sharp top the
+/// fit has nothing to bite on at all. Keeping it linear leaves the mountains
+/// the shape the massif gives them, and their height to
+/// [`TerrainGenerator::fit_range_height`].
 ///
 /// The one exception is the [`LOWLAND_FLOOR`]: a seed whose land median would
 /// come out under it gets the segment *below* the median steepened until the
-/// median lands on the floor. That is the opposite move from the trap above —
-/// it magnifies the bottom of the field, never the ridged top — and it is
-/// anchored on the land median, not on the mountain quantile that
-/// [`TerrainGenerator::fit_range_height`] steers by. An earlier attempt hung a
-/// fitted exponent on that same quantile and the two fits chased each other;
-/// with separate anchors, raising the massif barely moves the median and the
-/// two settle independently.
+/// median lands on the floor. That magnifies the bottom of the field rather
+/// than the ridged top, and it is anchored on the land median rather than on
+/// the mountain quantile the range fit steers by — an earlier attempt hung a
+/// fitted exponent on that same quantile and the two fits chased each other.
 #[derive(Default)]
 struct Calibration {
     /// Raw value that sea level sits at.
@@ -2252,16 +2080,13 @@ impl Calibration {
 ///
 /// The coast has to know this, and no local measurement can stand in for it:
 /// the slope at a point says how fast the ground is falling, never whether that
-/// fall ever reaches the sea, so every gentle rise inland reads as a shore and
-/// gets built into one. A distance transform over the whole map answers the
-/// question properly, and costs almost nothing — one pass over a grid of
-/// [`COAST_GRID`]-metre samples per map, then an O(1) lookup per vertex.
+/// fall ever reaches the sea. A distance transform over the whole map answers
+/// it properly and costs almost nothing — one pass over a [`COAST_GRID`] grid
+/// per map, then an O(1) lookup per vertex.
 ///
 /// Where the water is comes from the landform alone, before any of the detail
-/// layers. That keeps the field smooth, and keeps it from depending on the very
-/// coastline it is about to shape. The visible waterline then wanders either
-/// side of the one measured here, which is what leaves the odd cliff standing
-/// back off a low rock platform — no bad thing.
+/// layers, which keeps the field smooth and keeps it from depending on the very
+/// coastline it is about to shape.
 #[derive(Default)]
 struct CoastDistance {
     /// Distance in cells. Metres come from multiplying by [`COAST_GRID`].
@@ -2291,43 +2116,28 @@ impl CoastDistance {
     /// nothing and distance climbs straight across it.
     ///
     /// Which is what the mountains have to be held back from. These maps are
-    /// riddled with inland water: a third of the map is land, sea level is
-    /// fitted high enough that hollows flood, and the result is sounds and
-    /// lagoons all over the interior. Measured from all of it, a range is
-    /// forbidden its height for having a pond beside it, which is neither what
-    /// erosion says nor anything a landscape does — the pond is a feature *of*
-    /// the upland, not a coast it has to climb from. On a two-kilometre map
-    /// that was the difference between one range and several: the interior
-    /// massifs each had inland water within a hundred metres and were held
-    /// down as if they stood on a beach.
+    /// riddled with inland water, and measured from all of it a range is
+    /// forbidden its height for having a pond beside it — the pond is a feature
+    /// *of* the upland, not a coast it has to climb from. On a two-kilometre
+    /// map that was the difference between one range and several.
     ///
     /// What separates the two is **size**, and deliberately not whether the
-    /// water joins the sea. Reaching the frame was the first thing tried and
-    /// it is a property of the map's topology, which is a yes or no — so it
-    /// changed the map in steps. A lagoon joined to the sea by a single cell
-    /// of strait counted wholly as sea; a map grown by one notch silted the
-    /// strait up and the same lagoon counted wholly as ground, handing every
-    /// point behind it the whole width of the lagoon in distance at once.
-    /// Measured over 128-metre steps of size, the largest distance on one seed
-    /// went 101, 131, 288, 320, 340 m — a 157-metre jump for a 128-metre step,
-    /// which took the ceiling over that region from about 85 m to about 175 m
-    /// and turned a headland into a range. Nothing about a strait one cell
-    /// wide should decide how tall a mountain half a kilometre away may be.
+    /// water joins the sea. Reaching the frame was tried first and is a
+    /// property of the map's topology, so it changed the map in steps: a lagoon
+    /// joined by a single cell of strait counted wholly as sea, and a map grown
+    /// one notch silted the strait up and made it wholly ground. Over
+    /// 128-metre steps of size, one seed's largest distance went 101, 131, 288,
+    /// 320, 340 m — a 157-metre jump that turned a headland into a range.
     ///
-    /// Size has no such cliff: a pool grows and shrinks by a cell at a time as
-    /// the map moves under it, so the field moves with it. It is also the
-    /// better rule on its own merits. Every drop of water on these maps sits
-    /// at the one fitted sea level, so a big enclosed lagoon *is* at base
-    /// level whether or not a spit of land closes it off, and ground behind it
-    /// really has only climbed from its shore.
+    /// Size has no such cliff: a pool grows and shrinks by a cell at a time, so
+    /// the field moves with it. It is also the better rule on its merits —
+    /// every drop of water here sits at the one fitted sea level, so a big
+    /// enclosed lagoon *is* at base level whether or not a spit closes it off.
     ///
-    /// A pool's say is graded rather than granted: full sea seeds the
-    /// transform at zero, a pond seeds it [`INLAND_REACH`] out — far enough
-    /// that the ceiling it implies is above anything the landform reaches, so
-    /// it binds nothing — and the sizes between seed proportionally. The
-    /// chamfer then relaxes each seed against every better one, so a pool a
-    /// short way off a real coast is measured from that coast rather than from
-    /// its own reading.
+    /// A pool's say is graded rather than granted: full sea seeds the transform
+    /// at zero, a pond seeds it [`INLAND_REACH`] out — far enough to bind
+    /// nothing — and the sizes between seed proportionally. The chamfer then
+    /// relaxes each seed against every better one.
     fn from_open_water(raw: &GridField, calibration: &Calibration) -> Self {
         let wet: Vec<f32> = raw
             .cells
@@ -2363,16 +2173,12 @@ impl CoastDistance {
 
         field.chamfer();
         // The transform is exact, and exact is the problem: everywhere two
-        // wavefronts meet — down the middle of every neck and strait, and in
-        // a fan of branches behind every scalloped stretch of coast — the
-        // field folds in a sharp crease. Everything built *from* the field
-        // (cliff faces most of all, being the field times a steep pitch)
-        // prints those creases into the ground as dead-straight hairline
-        // ridges. A little smoothing rounds the creases off while leaving the
-        // field, which is read at coastline scale, effectively unchanged.
-        // Four passes approximate a Gaussian a couple of cells wide — enough
-        // that the shore-character displacement sweeps across a crease instead
-        // of leaping it.
+        // wavefronts meet the field folds in a sharp crease, and everything
+        // built from it — cliff faces most of all, being the field times a
+        // steep pitch — prints those creases into the ground as dead-straight
+        // hairline ridges. Four passes approximate a Gaussian a couple of
+        // cells wide, which rounds them off while leaving a field read at
+        // coastline scale unchanged.
         for _ in 0..4 {
             field.blur();
         }
@@ -2417,41 +2223,30 @@ impl CoastDistance {
 // lay metres of texture over it, and flooding the drawn field would find a
 // thousand puddle-sized dimples rather than the basins the landform encloses.
 //
-// Which leaves the two fields having to be reconciled, and letting the drawn
-// ground simply wander around the answer — the way it is allowed to wander
-// around sea level — does not work, because the two waterlines are not alike.
-// Sea level is one number over the whole world, so wandering across it only
-// moves a coast. A lake's level holds over its own basin and nowhere else, so
-// ground wandering across it *outside* the basin is water where the flood
-// found none, and the only thing that ever stopped it being drawn was the
-// level field running out — a straight grid-aligned edge with no shore, on any
-// lake whose banks the detail dug into. Inside, the same wander in the other
-// direction beached the bed of any basin shallower than the texture over it:
-// on the seeds surveyed, a quarter of the flooded area was drawn as dry
-// ground, which is a swamp rather than the islets it was hoped for.
+// Which leaves the two fields to be reconciled, and letting the drawn ground
+// wander around the answer — the way it wanders around sea level — does not
+// work, the two waterlines being unalike. Sea level is one number over the
+// whole world, so wandering across it only moves a coast; a lake's level holds
+// over its own basin, so ground wandering across it *outside* the basin is
+// water where the flood found none, stopped only by the level field running
+// out — a straight grid-aligned edge with no shore. Inside, the same wander
+// beached the bed of any basin shallower than the texture over it: a quarter of
+// the flooded area on the seeds surveyed was drawn as dry ground.
 //
 // So the ground gives way to the water instead. The detail fades out as the
 // landform approaches a lake's surface and back in over [`LAKE_RELIEF`] of
 // height either side, so the drawn waterline is the landform's own contour at
-// that level. Only the detail: the coastal reshaping runs after this and
-// answers to the sea, and fading that out too took the flat out of any beach
-// standing near a lake, which the fitted slope survey noticed before anything
-// else did. A lake still gets islands, and they are still where the
-// texture is proud: the flood reads them off the landform and leaves them dry,
-// with the ground around them holding its bank. What it no longer gets is
-// texture *finer than the fitting grid* punching through, which was never an
-// islet — it was the bed showing.
+// that level. Only the detail: fading the coastal reshaping out as well took
+// the flat out of any beach standing near a lake. A lake still gets islands
+// where the texture is proud; what it no longer gets is texture finer than the
+// fitting grid punching through, which was never an islet but the bed showing.
 //
-// That settles where a lake's water is. Where its *colours* are is a separate
-// question and is not answered by a height at all. Silt, weed and reed margin
-// used to be depths and a height above the surface, and a lake is the worst
-// place on the map to put a threshold on height: the fade leaves its banks
-// smooth and its bed shelves gently, so those lines fell on ground with barely
-// any gradient to place them. The margin came out under a facet wide and the
-// weed's edge came out fractal, and a facet grid draws either as a sawtooth.
-// So they are measured out from the water's edge instead — see
-// [`Lakes::shore`] — which is a distance, is the same width on every bank, and
-// is what the words mean anyway.
+// Where a lake's *colours* are is a separate question, and not answered by a
+// height at all. Silt, weed and reed margin used to be depths and a height
+// above the surface, and a lake is the worst place on the map for a height
+// threshold: the fade leaves its banks smooth and its bed shelves gently, so
+// the margin came out under a facet wide and the weed's edge came out fractal.
+// They are measured out from the water's edge instead — see [`Lakes::shore`].
 
 /// Metres a lake's surface stands below the saddle it would otherwise spill
 /// over.
@@ -2478,22 +2273,17 @@ const LAKE_FREEBOARD: f32 = 0.5;
 /// The size of it is not a taste: it is what makes the fade a *guarantee* that
 /// the ground stays on the side of the surface the flood put it. The weight is
 /// [`smoothstep`], so the ground is displaced by at most `relief * t²(3-2t)`
-/// where the surface is `relief * t` away, and `t(3-2t)` peaks at 1.125 — so
+/// where the surface is `relief * t` away, and `t(3-2t)` peaks at 1.125 —
 /// anything past 1.125 times the displacement's own reach cannot carry ground
-/// across the water however the noise falls. Hence a lake never leaks along a
-/// dip in its bank, and a bed never breaks its own surface, and a reader of a
-/// level — the wire, and the client's sheet of water behind it — can just
-/// compare a height against it.
+/// across the water however the noise falls. So a lake never leaks along a dip
+/// in its bank, a bed never breaks its own surface, and a reader of a level can
+/// just compare a height against it.
 ///
-/// The displacement it is sized against is the detail, and only the detail.
-/// The coastal reshaping happens downstream of the fade and answers to the
-/// sea, so a lake sitting within [`SHORE_REACH`] of the sea's own waterline
-/// can still have its bank bent out from under this — a lake near the coast is
-/// on the same footing as everything else that far out, where the landform is
-/// being rebuilt around a different waterline entirely. That is what
-/// [`LAKE_APRON`] is for: the guarantee holds where it holds, and where it does
-/// not, what leaks is a few metres of apron rather than everything the level
-/// was ever handed to.
+/// Sized against the detail and only the detail. The coastal reshaping happens
+/// downstream and answers to the sea, so a lake within [`SHORE_REACH`] of the
+/// sea's waterline can still have its bank bent out from under this — which is
+/// what [`LAKE_APRON`] is for: where the guarantee does not hold, what leaks is
+/// a few metres of apron.
 const LAKE_RELIEF: f32 = (DETAIL_RELIEF + MICRO_RELIEF) * 1.125;
 
 /// Standing water above sea level: how high a lake stands over the ground
@@ -2522,14 +2312,13 @@ struct Lakes {
 /// `Climbing` never drops back towards the water, so it stops on the crest and
 /// the answer is *this lake's own basin* — which is what the water wants, a
 /// level handed out past a rim being water offered to a hillside that drains
-/// somewhere else entirely.
+/// elsewhere.
 ///
-/// The ground has to be held over a wider set than that, because the landform
-/// on a four-metre grid does not climb monotonically: a bank that dips a
-/// handful of centimetres on its way up stops a climbing spread dead, and the
-/// cells past the stall keep full detail hard against water they stand level
-/// with. That was two metres of ground dug out below a lake's surface a stride
-/// from its shore. `Anywhere` has no such holes to fall into.
+/// The ground has to be held over a wider set, the landform on a four-metre
+/// grid not climbing monotonically: a bank that dips a few centimetres on its
+/// way up stops a climbing spread dead, and the cells past the stall keep full
+/// detail hard against water they stand level with — two metres of ground dug
+/// out below a lake's surface a stride from its shore.
 #[derive(Clone, Copy)]
 enum Bank {
     Climbing,
@@ -2581,15 +2370,11 @@ impl Lakes {
     /// that half back is what puts the zero on the waterline instead of half a
     /// stride behind it, on both sides at once.
     ///
-    /// Blurred once, for the reason [`CoastDistance::measure`] blurs: the
-    /// transform is exact, and folds in a crease wherever two wavefronts meet
-    /// — down the middle of every arm of every lake — which a tone boundary
-    /// prints as a dead straight seam. Once and no more, unlike the coast's
-    /// four: this field is read at the scale of a few metres rather than of a
-    /// coastline, and smoothing that reaches further than the band it places
-    /// walks the band's edges off the water they belong to — worst on the
-    /// small lakes, where enough of it drags the whole zero inside the pool
-    /// and leaves the grass growing to the waterline.
+    /// Blurred once, for the reason [`CoastDistance::measure`] blurs. Once and
+    /// no more, unlike the coast's four: this field is read at the scale of a
+    /// few metres, and smoothing that reaches further than the band it places
+    /// walks the band's edges off the water — worst on small lakes, where
+    /// enough of it drags the zero inside the pool.
     ///
     /// Capped at a reach nothing reads past, so that a map's far corner holds
     /// a number rather than an infinity for the blur to spread.
@@ -2628,13 +2413,10 @@ impl Lakes {
     /// [`LAKE_RELIEF`] of it, taking the higher where two lakes' banks meet —
     /// which matches the surface a client would draw across the join.
     ///
-    /// The reach is what lets a caller draw the waterline itself. A lake's
-    /// level used to be answered for one cell past the water and no further,
-    /// on the grounds that the ground beyond stands above it anyway — which is
-    /// true of the landform the flood ran on and not of the ground drawn over
-    /// it, so any lake whose banks the detail had dug into stopped dead on a
-    /// straight grid-aligned edge, with no shore, wherever the field ran out
-    /// before the water did.
+    /// The reach is what lets a caller draw the waterline itself. Answered for
+    /// one cell past the water and no further — true of the landform the flood
+    /// ran on, and not of the ground drawn over it — any lake whose banks the
+    /// detail had dug into stopped dead on a straight grid-aligned edge.
     fn spread(ground: &GridField, levels: &mut [f32], bank: Bank) {
         let (nx, nz) = ground.dims;
         if nx == 0 || nz == 0 {
@@ -2672,12 +2454,10 @@ impl Lakes {
     /// it everywhere no lake has a say.
     ///
     /// Taken down to the lowest of each cell's own neighbourhood before it is
-    /// read back blended, which is what makes the smooth field safe to use as
-    /// a guarantee. Blending alone would let a cell's neighbour lend it weight
-    /// the ground there has no room for — worst of all on a lake pinched into
-    /// a single cell, where the bank one cell away would carry the water's own
-    /// cell halfway back to full detail and put the bed through its surface.
-    /// Erring low costs only a slightly wider apron of smoothed ground.
+    /// read back blended, which is what makes the smooth field safe as a
+    /// guarantee: blending alone would let a neighbour lend a cell weight the
+    /// ground there has no room for, worst on a lake pinched into a single
+    /// cell. Erring low costs only a slightly wider apron of smoothed ground.
     fn weights(ground: &GridField, levels: &[f32]) -> Vec<f32> {
         let (nx, nz) = ground.dims;
         let raw: Vec<f32> = ground
@@ -2714,11 +2494,10 @@ impl Lakes {
     /// so there is nothing to interpolate, and blending across the shore would
     /// tilt the rim of every lake down into its own banks.
     ///
-    /// Where the answer *stops* is a different matter, and is
-    /// [`LAKE_APRON`] out from the water rather than wherever the spread
-    /// happened to stall. A step in a step function costs nothing when it falls
-    /// on ground that is clear of the water anyway; it costs a rectangle of
-    /// water lying on the grass when it does not.
+    /// Where the answer *stops* is [`LAKE_APRON`] out from the water rather
+    /// than wherever the spread happened to stall — a step costs nothing on
+    /// ground clear of the water, and a rectangle of water on the grass where
+    /// it is not.
     fn level(&self, wx: f32, wz: f32) -> Option<f32> {
         let (nx, nz) = self.field.dims;
         if nx == 0 {
@@ -2758,22 +2537,19 @@ impl Lakes {
 /// its basin's lowest rim saddle where it does not.
 ///
 /// Every cell at or below sea level seeds the frontier, not just the map's
-/// border — a deliberate answer about the lagoons. A hollow the calibration
-/// already flooded is the sea's, however landlocked: its water stands at zero
-/// with the rest of the world's, so it is an outlet here, and no lake is ever
-/// raised over it. (The border alone would have turned every enclosed lagoon
-/// into a lake at its saddle's height, redrawing coasts the whole coastal
-/// machinery — beaches, distance fields, painting — had already been fitted
-/// to.)
+/// border: a hollow the calibration already flooded is the sea's however
+/// landlocked, so it is an outlet here and no lake is raised over it. The
+/// border alone would have turned every enclosed lagoon into a lake at its
+/// saddle's height, redrawing coasts the whole coastal machinery had been
+/// fitted to.
 ///
-/// Neighbours are the four edge-adjacent cells: water leaves a cell across an
-/// edge, and letting it slip diagonally between two corner-touching cells
-/// would drain any lake with a pinch in it.
+/// Neighbours are the four edge-adjacent cells: letting water slip diagonally
+/// between two corner-touching cells would drain any lake with a pinch in it.
 ///
 /// The result is exact whatever order ties are popped in — every value is a
 /// max of ground heights along a route, never an accumulation — so the
-/// deterministic tie-break on the cell index is belt and braces for the walk
-/// itself, not a thing the digests depend on.
+/// tie-break on the cell index is belt and braces rather than something the
+/// digests depend on.
 fn priority_flood(ground: &GridField) -> Vec<f32> {
     /// A frontier cell, ordered so the heap surfaces the *lowest* level
     /// first, ties broken by cell index.
@@ -2840,10 +2616,9 @@ fn priority_flood(ground: &GridField) -> Vec<f32> {
 /// A grid of values over the map at [`COAST_GRID`] spacing, read back with
 /// bilinear interpolation, clamped to its edges outside it.
 ///
-/// The shaping passes below are methods rather than free functions over a
-/// slice and a `(width, height)` pair: every one of them is an operation on
-/// exactly this — cells plus the dimensions to read them by — and threading
-/// the two separately only gave them a chance to disagree.
+/// The shaping passes below are methods rather than free functions over a slice
+/// and a `(width, height)` pair, threading the two separately only giving them
+/// a chance to disagree.
 #[derive(Default)]
 struct GridField {
     cells: Vec<f32>,
@@ -3008,10 +2783,9 @@ impl GridField {
 /// 0-or-1 mask of it — a separable box blur, done with a running sum so the
 /// radius costs nothing.
 ///
-/// Everything off the edge of the grid counts as water. The map ends in open
-/// sea on every seed, so a window hanging over the frame really is looking at
-/// sea; and counting it that way is what keeps a coast near the frame reading
-/// the same whatever size map is drawn around it.
+/// Everything off the edge of the grid counts as water: the map ends in open
+/// sea on every seed, and counting it that way keeps a coast near the frame
+/// reading the same whatever size map is drawn around it.
 fn water_fraction(wet: &[f32], dims: (usize, usize), radius: usize) -> Vec<f32> {
     let (nx, nz) = dims;
     let window = (2 * radius + 1) as f32;
@@ -3089,25 +2863,22 @@ impl Shore {
 /// up out of the water, and at `0.0` the height field comes back untouched.
 /// `distance` is how far the point is from the waterline, in metres.
 ///
-/// A beach and a cliff are not made the same way, because they are not the same
-/// kind of claim about the ground.
+/// A beach and a cliff are not made the same way, not being the same kind of
+/// claim about the ground.
 ///
 /// A beach is a claim about how *gently* the land shelves, so it is a remap of
-/// height onto height: a power curve across the coastal band, deferring the
-/// climb and spreading it out. Being a power curve on the band, it agrees with
-/// the untouched field at both ends of it, so nothing discontinuous happens
-/// where the reshaping stops.
+/// height onto height: a power curve across the coastal band, which agrees with
+/// the untouched field at both ends of it.
 ///
 /// A cliff is a claim about the *angle of a face*, and no remap of height can
-/// make one. Where the natural ground gains half a metre in ten there is simply
-/// no height to redistribute into a wall — squeeze it and all that comes out is
-/// a step one facet wide, which from a camera pitched well down is a dark line. So a
-/// cliff is built outwards from the water instead: the ground is lifted to meet
-/// a fixed rise per metre of distance from it, up to [`CLIFF_HEIGHT`], and left
-/// alone again wherever the real landscape is already higher than that.
+/// make one — where the natural ground gains half a metre in ten there is no
+/// height to redistribute into a wall, and squeezing it yields a step one facet
+/// wide. So a cliff is built outwards from the water: the ground is lifted to
+/// meet a fixed rise per metre of distance from it, up to [`CLIFF_HEIGHT`], and
+/// left alone wherever the real landscape is already higher.
 ///
-/// Below the waterline both are power curves, because down there the only
-/// question is how quickly the bed falls away, and height alone answers it.
+/// Below the waterline both are power curves, the only question down there
+/// being how quickly the bed falls away.
 ///
 /// `scale` grows the whole band — how tall a cliff stands, how much a beach
 /// may cut — on seeds whose terrain is steeper than the constants were tuned
@@ -3137,34 +2908,25 @@ fn shape_coast(height: f32, distance: f32, character: f32, scale: f32) -> f32 {
     // A beach is the same idea as a cliff with the sign turned round: instead
     // of lifting the ground to a steep face, hold it down to a shallow one.
     // Built from distance for the same reason — a remap of height onto height
-    // gives a beach whose width depends on how steep the hill behind it
-    // happens to be, so the taller the island the thinner its beaches, until on
-    // a mountainous map there are none left and the slope rule paints grey
-    // rock along every shore.
+    // gives a beach whose width depends on how steep the hill behind it is, so
+    // the taller the island the thinner its beaches.
     if character < 0.0 {
-        // Steepening with distance rather than a straight ramp. A straight one
-        // holds the ground flat right out to the edge of the coast's reach and
-        // then lets go of it all at once, which leaves a scarp running along
-        // the back of every beach — a flat green shelf, then a wall. Curving it
-        // up means the apron has already climbed to meet the hillside by the
-        // time it stops applying, and the two join without a seam.
-        // And released well before the coast's full reach. The apron *cuts the
-        // ground down*, so wherever it stops cutting it leaves what it did not
-        // cut standing: carried too far inland it shaves the land either side
-        // of the ridge line midway between two coasts and leaves that ridge
-        // behind as a wall running inland, which is the one landform no beach
-        // has ever produced.
+        // Steepening with distance rather than a straight ramp: a straight one
+        // holds the ground flat out to the edge of the coast's reach and lets
+        // go all at once, leaving a scarp along the back of every beach.
+        //
+        // And released well before that full reach. The apron *cuts the ground
+        // down*, so wherever it stops cutting it leaves what it did not cut
+        // standing — carried too far inland it shaves the land either side of
+        // the ridge midway between two coasts and leaves the ridge as a wall.
         let apron = BEACH_RISE * distance * (1.0 + distance / APRON_KNEE);
         let within = 1.0 - smoothstep(BEACH_REACH * 0.45, BEACH_REACH, distance);
 
         // How much the apron is allowed to take off, tapering to nothing as the
-        // ground approaches the height at which the test above stops touching
-        // it at all. Without the taper the two meet as a step: land a
-        // centimetre under the cliff height is cut down to the apron and land a
-        // centimetre over is left alone, which lays a six-metre wall along the
-        // eleven-metre contour and runs it inland from every beach. Since the
-        // shore itself is only a metre or two up, capping the cut costs the
-        // beach nothing where a beach actually is.
+        // ground approaches the height the test above stops touching. Without
+        // it the two meet as a step — land a centimetre under the cliff height
+        // cut to the apron, land a centimetre over left alone — which lays a
+        // six-metre wall along the eleven-metre contour.
         let allowance = BEACH_CUT * scale * (1.0 - smoothstep(band * 0.45, band, height));
         let apron = apron.max(height - allowance);
 
@@ -3214,10 +2976,8 @@ fn beachiness(character: f32) -> f32 {
 
 /// Heightfield normal at a world point, from central differences one tile out.
 ///
-/// Takes the field rather than four sampled heights because all three things
-/// that own a height field — a lone map, an island, the world the islands sit
-/// in — want exactly this and would otherwise each spell the four samples out.
-/// The spacing is part of the answer, so it belongs with the arithmetic.
+/// Takes the field rather than four sampled heights because every owner of a
+/// height field wants exactly this, and the spacing is part of the answer.
 pub(crate) fn normal_at(wx: f32, wz: f32, height: impl Fn(f32, f32) -> f32) -> Vec3 {
     Vec3::new(
         height(wx - TILE_SIZE, wz) - height(wx + TILE_SIZE, wz),
@@ -3243,22 +3003,15 @@ mod tests {
 
     #[test]
     fn every_seed_pays_for_its_summit_in_ground() {
-        // The massif fit still puts every seed's raw summit on the same
-        // number — that is what stopped one map feeling tame and the next
-        // absurd, when the height a seed reached was the widest-spread number
-        // on the map. What has changed is that reaching it is no longer a
-        // seed's to decide: [`TerrainGenerator::ceiling`] holds every point
-        // under what its distance from the open sea has earned, so a seed
-        // whose land is broad keeps most of the fitted height and one whose
-        // land is all coast keeps less.
+        // The massif fit puts every seed's raw summit on the same number, but
+        // reaching it is not a seed's to decide: the ceiling holds every point
+        // under what its distance from the open sea has earned.
         //
-        // So there is no constant across seeds any more — not the summit, and
-        // not the grade either, which runs over a fair spread depending on how
-        // close a seed's massif happens to fall to its best ground. What holds
-        // is weaker and worth more: a summit stands within reach of what its
-        // own ground has earned, both ways. That is the property the old
-        // fixed-height test could not express — it passed happily on a seed
-        // with a hundred and twenty metres of rock fifty metres from the sea.
+        // So there is no constant across seeds — not the summit, and not the
+        // grade either. What holds is weaker and worth more: a summit stands
+        // within reach of what its own ground has earned, both ways. The old
+        // fixed-height test passed happily on a seed with a hundred and twenty
+        // metres of rock fifty metres from the sea.
         for seed in [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337] {
             let (config, gen) = generator(8, 8, seed);
             let half = config.half_extent();
@@ -3343,32 +3096,21 @@ mod tests {
     #[test]
     fn a_big_map_gets_several_real_mountains() {
         // The massif fit used to anchor everything on the map's single highest
-        // point: one summit reached [`HEIGHT_SCALE`] and the rest sat lower by
-        // pure luck of the mask field, so a large map came out as many grey
-        // lumps under one white cap. The local ceiling — [`MASSIF_EQUALITY`] —
-        // is what entitles every range to a summit of its own.
+        // point, so a large map came out as many grey lumps under one white
+        // cap. The local ceiling — [`MASSIF_EQUALITY`] — is what entitles every
+        // range to a summit of its own.
         //
-        // Read against [`MOUNTAIN_HEIGHT`], the height the palette starts
-        // drawing ground as mountain, and not against a share of
-        // [`HEIGHT_SCALE`]. Parity was the whole story when a massif could
-        // reach full height wherever the mask happened to put it. It is not
-        // now: [`TerrainGenerator::inland`] rations height by how much room a
-        // range has behind it, so the pecking order runs on how far each
-        // massif sits from the sea. That is a difference the map is *meant*
-        // to show — this seed's third range was 101 m of rock standing 81 m
-        // from the water, which is a fifty-degree climb from sea to summit and
-        // nothing any coast does — so what is worth guarding is that several
-        // ranges are real mountains, not that they are all nearly as tall as
-        // each other.
-        // Counted over the whole seed list and not seed by seed, which is what
-        // buys back the strength given up by reading against the lower line.
-        // A per-seed floor of three has no margin left in it: measured, the
-        // eight seeds get 3, 3, 4, 4, 3, 7, 3, 5 summits, so three of them sit
-        // exactly on such a bar and any tuning that costs one seed one summit
-        // fails the test without the maps having got worse. The total has room
-        // to move — thirty-two against a bar of twenty-four — while still
-        // catching the thing this is really about, which is a big map coming
-        // out as one mountain and a lot of lumps.
+        // Read against [`MOUNTAIN_HEIGHT`] rather than a share of
+        // [`HEIGHT_SCALE`]: [`TerrainGenerator::inland`] rations height by how
+        // much room a range has behind it, so a pecking order is a difference
+        // the map is *meant* to show. What is worth guarding is that several
+        // ranges are real mountains, not that they are all nearly as tall.
+        //
+        // Counted over the whole seed list rather than seed by seed, which
+        // buys back the strength given up by reading against the lower line:
+        // the eight seeds get 3, 3, 4, 4, 3, 7, 3, 5 summits, so a per-seed
+        // floor of three would fail on any tuning that cost one seed one
+        // summit without the maps having got worse.
         let seeds = [20_040_112u32, 1, 7, 99, 12_345, 808, 2_024, 31_337];
         let mut total = 0;
         for seed in seeds {
@@ -3537,23 +3279,18 @@ mod tests {
         // after. It is what makes "a seed is a map" a tested property rather
         // than a habit.
         //
-        // Maps are no longer regenerated by everyone — a server generates and
-        // sends, so no client is betting on its own arithmetic. What is still
-        // being bet is that a *world* survives being re-hosted: a seed handed
-        // to a machine with a different libm has to raise the same islands, or
-        // a saved position, a shared seed and a server moved between hosts all
+        // What is being bet is that a *world* survives being re-hosted: a seed
+        // handed to a machine with a different libm has to raise the same
+        // islands, or a saved position and a server moved between hosts
         // quietly mean somewhere else.
         //
         // When this fails because the generator was *meant* to change,
-        // re-record the digests (run with `--nocapture` and they are printed)
-        // — whether the change was good is mapgen's question, not this
-        // test's. When it fails anywhere else — a new platform, a toolchain
-        // upgrade, a different target — that is the bet being lost, and the
-        // first place to look is still the powers, the only maths here the
-        // hardware does not pin down. They go through [`pow`] now rather than
-        // `f32::powf`, which is what makes this test able to pass on more than
-        // the machine that recorded it; a bumped `libm` would show up here the
-        // same way a new platform would.
+        // re-record the digests — run with `--nocapture` and they are printed.
+        // When it fails anywhere else, that is the bet being lost, and the
+        // first place to look is the powers, the only maths here the hardware
+        // does not pin down. They go through [`pow`] rather than `f32::powf`,
+        // which is what lets this pass on more than the machine that recorded
+        // it.
         let cases = [
             (20_040_112u32, UVec2::new(4, 4), 0xD953_0EBA_7C15_F0BCu64),
             (99, UVec2::new(3, 2), 0x87AF_C159_4DAB_4155u64),
@@ -3571,10 +3308,8 @@ mod tests {
             // water over it, quantised the way the wire quantises it.
             //
             // The water is pinned on its own rather than left to the colours
-            // it produces. A lake moving a few centimetres repaints almost
-            // nothing — the bands it is painted in are metres apart — but it
-            // is a different surface for a client to float a boat on, and the
-            // level is what crosses the wire.
+            // it produces: a lake moving a few centimetres repaints almost
+            // nothing, but it is a different surface to float a boat on.
             let mut values = Vec::new();
             let mut painted = Vec::new();
             for iz in (0..=config.tiles().y).step_by(4) {
@@ -3792,17 +3527,14 @@ mod tests {
         // smoothly as it sweeps. This one decides the ceiling, so a step in it
         // is a step in how tall a whole region of the map may be.
         //
-        // Measured against the all-water field rather than against a number of
-        // metres, because some movement is honest: sea level is refitted per
-        // map and the falloff is relative to the frame, so growing a map does
-        // genuinely redraw its coast a little, and both fields inherit that.
-        // What must not happen is this field adding a step the other does not
-        // have — which is what telling sea from pond by whether the water
-        // reaches the frame used to do, that being a fact about the map's
-        // topology and so a yes or no. One cell of strait silting up moved the
-        // deepest point on one seed from 131 m to 288 m across a single
-        // 128-metre notch, against 126 m to 179 m for the all-water field
-        // beside it.
+        // Measured against the all-water field rather than a number of metres,
+        // because some movement is honest: sea level is refitted per map, so
+        // growing one does redraw its coast a little and both fields inherit
+        // that. What must not happen is this field adding a step the other
+        // does not have — which telling sea from pond by whether the water
+        // reaches the frame used to do, moving one seed's deepest point from
+        // 131 m to 288 m across a single 128-metre notch against 126 m to
+        // 179 m for the all-water field beside it.
         for seed in [20_040_112u32, 808] {
             let (mut open_step, mut all_step) = (0.0f32, 0.0f32);
             let (mut open_last, mut all_last): (Option<f32>, Option<f32>) = (None, None);

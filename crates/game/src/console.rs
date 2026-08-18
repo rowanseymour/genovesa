@@ -11,13 +11,12 @@
 //! `time 18:00` moves the sun for everyone in the session — and the prompt
 //! itself teaches the difference.
 //!
-//! The console is part of every build, unlike the readout it switches on:
-//! it is *how* debug states are reached now, and a player who stumbles into
-//! it can type `help` at a server that will answer. It opens only at the
-//! helm — the menus have text fields of their own, and a backquote typed
-//! into an address must not summon anything — and while it is up the
-//! keyboard is its alone, [`Helm::Console`] being a state exactly so that
-//! every system reading the player's hands sits out.
+//! The console is part of every build, unlike the readout it switches on: it is
+//! *how* debug states are reached, and a player who stumbles into it can type
+//! `help` at a server that will answer. It opens only at the helm — the menus
+//! have text fields of their own — and while it is up the keyboard is its
+//! alone, [`Helm::Console`] being a state exactly so every system reading the
+//! player's hands sits out.
 //!
 //! The key is hard-wired as [`KeyCode::Backquote`] — a *position*, the key
 //! left of 1, whatever a layout prints on it — and reserved from rebinding,

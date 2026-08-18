@@ -1,24 +1,19 @@
 //! Cloud shadows: the only part of the weather a camera pointed at the ground
 //! can see.
 //!
-//! There are no clouds in this world, and there is no room for any. The eye
-//! looks down at the ground from somewhere between thirty metres and three
-//! hundred, wherever the wheel has left it, and anything hung in the air
-//! between the two would spend its life covering the picture rather than
-//! decorating it. What a player would see of a real sky from up there is its
-//! *shadow* — patches of shade wandering across the sea and up the hillsides
-//! — so that is the whole of what is drawn, and the clouds themselves are
-//! never modelled at all.
+//! There are no clouds in this world and no room for any: the eye looks down
+//! from between thirty metres and three hundred, and anything hung in the air
+//! between would spend its life covering the picture. What a player would see
+//! of a real sky from up there is its *shadow*, so that is the whole of what is
+//! drawn.
 //!
-//! Which means this is not a thing in the world so much as a thing done to the
-//! light. Bevy will mask a directional light with a texture — the trick a film
-//! lamp does with a gobo — and a masked light carries the pattern onto every
-//! surface it touches, in one pass, for nothing: the ground, the water, the
-//! hull, the palms and whatever is walking about are all shaded by the same
-//! sun and so all fall under the same cloud, without a line of this file
-//! knowing that any of them exist. Doing it in the materials instead would
-//! have meant the same function written into the terrain's shader, the sea's
-//! and every model's, and three of them would have gone out of step.
+//! Which makes this a thing done to the light rather than a thing in the world.
+//! Bevy will mask a directional light with a texture — a film lamp's gobo — and
+//! a masked light carries the pattern onto every surface it touches in one
+//! pass, so everything under the same sun falls under the same cloud without a
+//! line of this file knowing any of them exist. In the materials instead it
+//! would be the same function written into three shaders, and three of them
+//! would have gone out of step.
 //!
 //! The mask lies in the plane facing the sun, and is projected down the light
 //! like everything else the light does. Three consequences, and each is a

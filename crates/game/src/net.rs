@@ -344,16 +344,14 @@ impl Session {
 
     /// Opens a world on this machine and joins it, blocking likewise.
     ///
-    /// Every world started here goes through this, whether anyone else is
-    /// invited or not: the ground comes from a server, so playing alone means
-    /// running one and talking to it over the loopback. [`Reach`] is the only
-    /// difference between the two, and it is a question about the network
-    /// rather than about the session — a world of one's own is served exactly
-    /// as a shared one is, and the player is a client in it exactly as a guest
-    /// would be.
+    /// Every world started here goes through this, invited guests or not: the
+    /// ground comes from a server, so playing alone means running one and
+    /// talking to it over the loopback. [`Reach`] is the only difference
+    /// between the two, and it is a question about the network rather than
+    /// about the session.
     ///
     /// Joined over the loopback whatever it is bound to: whoever opened the
-    /// world is a player in it and gets there the short way.
+    /// world gets there the short way.
     ///
     /// `opening` is the hour of its day the world starts at, as a phase —
     /// [`server::OPENING`] for a world nobody asked anything particular of.

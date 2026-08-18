@@ -10,14 +10,12 @@
 //! weather starts from the beginning, which for weather — unlike ground —
 //! reads as weather.
 //!
-//! The wind is a point wandering a 2D noise field, read off as a velocity:
-//! its bearing is the point's bearing from the origin and its strength grows
-//! from the point's distance out. That one construction buys the behaviour
-//! wanted for its own sake — the wind veers smoothly, and every so often the
-//! walk passes near the origin, where the strength dies and the bearing
-//! swings freely: a calm, out of which the wind returns from somewhere new.
-//! Nothing here decides "now a storm"; storms are the far excursions of the
-//! same walk.
+//! The wind is a point wandering a 2D noise field, read off as a velocity: its
+//! bearing is the point's bearing from the origin, its strength the point's
+//! distance out. So the wind veers smoothly, and every so often the walk passes
+//! near the origin where the strength dies and the bearing swings freely — a
+//! calm, out of which the wind returns from somewhere new. Nothing here decides
+//! "now a storm"; storms are the far excursions of the same walk.
 //!
 //! No trigonometry anywhere, and that is a constraint rather than a style:
 //! `sin` and `cos` are not correctly-rounded and drift between platforms,

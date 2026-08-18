@@ -2,13 +2,10 @@
 //!
 //! A wake is foam, and the sea already knows how to paint foam — so nothing
 //! here draws anything. This module keeps a short history of where the boat's
-//! bow has been and hands it to the sea's own shader, which lays the same
-//! white it lays surf and whitecaps in, on the same surface, riding the same
-//! swell. That is the whole reason for doing it this way rather than as a
-//! ribbon of geometry towed behind the hull: a mesh laid on the water would
-//! have to be told about the waves under it and agree with them exactly, and
-//! anywhere it did not it would either float over a crest or sink into it.
-//! Painted by the surface itself, the wake is *on* the water by construction.
+//! bow has been and hands it to the sea's own shader, which lays the same white
+//! it lays surf and whitecaps in. A ribbon of geometry towed behind the hull
+//! would have to be told about the waves under it and agree with them exactly;
+//! painted by the surface itself, the wake is *on* the water by construction.
 //!
 //! What the shader gets is a [`Track`]: a polyline of points the bow has
 //! lately laid — a shoulder's radius abaft the stem; [`lay_the_wake`] says

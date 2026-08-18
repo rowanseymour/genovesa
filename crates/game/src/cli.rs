@@ -110,20 +110,16 @@ impl Args {
     /// it put this player down, and the land it said to look at.
     ///
     /// A run that said nothing about where to look opens where the world is
-    /// entered — the spawn point just off the first island, facing it — and
-    /// that goes for capture runs too. Shots used to centre on the island's
-    /// middle instead, on the theory that a shot means a shot of terrain; but
-    /// the camera is pinned to the player, so that dragged their boat ashore and
-    /// beached it dead-centre in every picture — the one default shot of a
-    /// world showed an entry the game never makes. The spawn stands
-    /// `SPAWN_OFFSHORE` metres off the coast precisely so that land fills the
-    /// opening screen, so a shot from the entry is a shot of terrain anyway,
-    /// and an island's portrait is `--focus`'s job (or `mapgen`'s).
+    /// entered, capture runs included. Shots used to centre on the island's
+    /// middle instead, on the theory that a shot means a shot of terrain — but
+    /// the camera is pinned to the player, so that beached their boat
+    /// dead-centre in every picture. The spawn stands `SPAWN_OFFSHORE` metres
+    /// off the coast precisely so land fills the opening screen, and an
+    /// island's portrait is `--focus`'s job.
     ///
-    /// Once, and for the whole command line, rather than per shot: the shots
-    /// are a sweep over one world, and moving each of them somewhere of its
-    /// own would break a sequence that says "here, then a bit further" into an
-    /// unrelated set of pictures.
+    /// Once for the whole command line rather than per shot: the shots are a
+    /// sweep over one world, and moving each somewhere of its own would break
+    /// a sequence into an unrelated set of pictures.
     ///
     /// Each half yields to the command line: a `--focus` keeps the whole view
     /// where it was put, and a `--yaw` keeps its own bearing.

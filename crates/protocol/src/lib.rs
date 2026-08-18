@@ -9,17 +9,15 @@
 //! corner heights on a fixed grid, one palette entry per triangle, and — on
 //! the minority of chunks that hold a lake — the level its water stands at.
 //!
-//! That is a deliberate inversion of how this started. A seed used to be a
-//! world — every machine regenerated the same ocean, bit for bit, and terrain
-//! never travelled — which made the client the second half of the generator
-//! and made porting it to another language a promise to reproduce every noise
-//! octave and every rounding. Sending the ground instead costs bandwidth and
-//! buys a client that can be written by anyone who can read this file.
+//! A deliberate inversion of how this started. A seed used to be a world —
+//! every machine regenerating the same ocean bit for bit — which made the
+//! client the second half of the generator, and porting it to another language
+//! a promise to reproduce every noise octave. Sending the ground instead costs
+//! bandwidth and buys a client anyone who can read this file could write.
 //!
 //! Determinism did not stop mattering, it moved: a seed must still mean the
-//! same world wherever it is *hosted*, or re-hosting one would land everybody
-//! somewhere else. That promise now lives entirely in the `world` crate and
-//! its digests, on one machine at a time.
+//! same world wherever it is *hosted*, which now lives entirely in the `world`
+//! crate and its digests.
 //!
 //! Like the world's layout, the wire is a *format*: the bytes each message
 //! encodes to are pinned by tests, so that changing what a client receives is

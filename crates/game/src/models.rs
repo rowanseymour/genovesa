@@ -8,19 +8,14 @@
 //! come along with it, and the dressing has to happen afterwards, as the
 //! meshes turn up.
 //!
-//! There used to be a palette here — a table of mesh names and what each was
-//! painted — but every model now carries its own colours on its vertices, so
-//! there is nothing left to choose: whatever arrives is repainted with the
-//! one white matte that lets those colours through. A model that lost its
-//! colour attribute would arrive white, which is why each one's tests hold
-//! `COLOR_0` to being there.
+//! Every model carries its own colours on its vertices, so there is nothing to
+//! choose: whatever arrives is repainted with the one white matte that lets
+//! those colours through. A model that lost its colour attribute would arrive
+//! white, which is why each one's tests hold `COLOR_0` to being there.
 //!
 //! The material is made once and shared. Painting mesh by mesh as it arrived
-//! minted a fresh `StandardMaterial` per animal, so every shark that swam
-//! past was its own bind group and its own batch break, and the assets piled
-//! up for as long as the sharks lived. The rigid kinds already knew better —
-//! a whole pod of dolphins draws off one handle — and this is that
-//! arrangement extended to the ones that arrive as scenes.
+//! minted a fresh `StandardMaterial` per animal — a bind group and a batch
+//! break each, piling up for as long as the sharks lived.
 
 use bevy::gltf::GltfMeshName;
 use bevy::prelude::*;

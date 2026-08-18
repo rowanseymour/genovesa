@@ -519,30 +519,23 @@ fn triangles_in(mesh: &Mesh) -> usize {
 /// frames, before the diagnostic has anything to average.
 ///
 /// One line per subject, slash-separated within it, so the block stays four
-/// lines however much it has to say: what the frame cost, what the sun added
-/// to it, what the streamer holds, and where this is. Every number carries its
-/// own noun — nothing is positional — because the lines come and go with what
-/// exists to count, and a reader should not have to know which line is missing
-/// to know what they are looking at.
+/// lines however much it has to say. Every number carries its own noun —
+/// nothing is positional — because the lines come and go with what exists to
+/// count.
 ///
 /// The chunk line is three numbers about two different things:
 ///
-/// - the **total** is every chunk this machine has an answer about, ground and
-///   water together, of which **ocean** is the share that was answered with
-///   nothing — sea costs nothing to hold, so the rest is where the memory
-///   went;
-/// - **requested** is ground asked for and not answered. It is deliberately
-///   outside the total, nothing being known about it yet, and it is the only
-///   number here about the *server* rather than about this machine.
+/// - the **total** is every chunk this machine has an answer about, of which
+///   **ocean** is the share answered with nothing — sea costs nothing to hold,
+///   so the rest is where the memory went;
+/// - **requested** is ground asked for and not answered, deliberately outside
+///   the total and the only number here about the *server*.
 ///
 /// There is no count of meshes still being assembled, though there is a stage
-/// for it. Before the world crossed the wire that number was the whole of the
-/// streaming backlog, because building a chunk was generating it; now it is
-/// the moment between a payload landing and its vertex buffers being filled,
-/// which an arrival's worth of chunks passes through in about six frames. A
-/// number that reads zero but for a tenth of a second, once, is not worth the
-/// line — and the failure it would have caught, meshes not landing, shows up
-/// as the count above this one standing still while the chunks climb.
+/// for it: it is the moment between a payload landing and its vertex buffers
+/// being filled, which an arrival's worth of chunks passes through in about six
+/// frames. The failure it would have caught shows up as the count above this
+/// one standing still while the chunks climb.
 fn overlay_text(
     fps: Option<f64>,
     counts: &Counts,

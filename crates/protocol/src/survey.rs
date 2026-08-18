@@ -6,18 +6,15 @@
 //!
 //! # Why it lives on the wire's own crate
 //!
-//! Because two machines have to reach the same answer about it, for a reason
-//! stronger than tidiness. A player claims an island by having surveyed the
-//! whole of its coast, and a claim is the server's to grant: the server holds
-//! the same chunks the client does, so it can walk the same coast and settle
-//! the claim without believing a word the client says about it. That only
-//! works while both ends are running *this* code. Split it in two and a claim
-//! becomes a negotiation between two nearly-identical implementations, which
-//! is the kind of thing that works until the day it silently does not.
+//! Because two machines have to reach the same answer about it. A player claims
+//! an island by having surveyed the whole of its coast, and a claim is the
+//! server's to grant: it holds the same chunks the client does, so it can walk
+//! the same coast without believing a word the client says. That only works
+//! while both ends run *this* code — split in two, a claim becomes a
+//! negotiation between two nearly-identical implementations.
 //!
 //! So: no drawing here, and no notion of a sheet or a screen. A chart is a
-//! client's rendering of a survey and lives in the client. What a survey *is*
-//! lives here.
+//! client's rendering of a survey and lives in the client.
 //!
 //! # What counts as surveyed
 //!
@@ -35,18 +32,13 @@
 //! fall down the gap. See [`in_sight_along`], which is the rule, and
 //! [`in_sight`], which is the corner of it where nobody has moved.
 //!
-//! Deciding all this is the server's — it holds the chunks each player has
-//! surveyed and tells them what is on them (see
-//! [`crate::ToClient::Surveyed`]). A client draws what it is told. It could
-//! not honestly do otherwise: a claim is settled against a coast the server
-//! has walked, and a client with a rule of its own about what it had seen
-//! would be a client whose chart and whose claims were about two different
-//! worlds.
+//! Deciding all this is the server's (see [`crate::ToClient::Surveyed`]); a
+//! client draws what it is told.
 //!
-//! Not a test against any camera: a survey that filled in and stopped filling
-//! in as a view was spun would record where a player had *looked* rather than
-//! where they had been, and the server — which has no camera at all — could
-//! not agree with it. Nor is there any test for what a headland hides.
+//! Not a test against any camera: a survey that filled in as a view was spun
+//! would record where a player had *looked* rather than where they had been,
+//! and the server has no camera to agree with. Nor is there any test for what
+//! a headland hides.
 //!
 //! # Closing a coastline, and what an island is
 //!
@@ -63,13 +55,10 @@
 //! the two apart for free.
 //!
 //! An island is defined here, on the coastline, rather than by asking the
-//! generator what it planned. The generator plans an island to grow ground
-//! from, but what it grows may meet the sea in more pieces than one: a planned
-//! island can surface as a main shore and a scatter of skerries, or as two
-//! hills with a drowned middle. Each piece big enough is its own island, each
-//! rock awash is surveyed without being anybody's island, and none of it asks
-//! the plan — which keeps generation what it ought to be, a machine that
-//! produces chunks and owes nothing downstream an explanation.
+//! generator what it planned — what it grows may meet the sea in more pieces
+//! than one, as a main shore and a scatter of skerries, or as two hills with a
+//! drowned middle. Each piece big enough is its own island, and none of it asks
+//! the plan.
 
 use std::collections::{HashMap, HashSet};
 

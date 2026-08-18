@@ -1,29 +1,23 @@
 //! What the player is drawn as: a person, modelled and rigged like anything
 //! else the game draws, and walked by a clip out of the same file.
 //!
-//! This is the first model that *moves under its own power*, and it is the
-//! reason the export carries skins and actions at all. A hull or a palm is one
-//! rigid shape put somewhere; a person is a shape with a skeleton inside it and
-//! a run cycle drawn on a dope sheet. Both halves belong in the master, where
-//! they can be looked at: a walk is even more a thing to be watched while it is
-//! moved than a hull is, and a gait built out of constants in Rust can only be
-//! judged by rebuilding the game.
+//! The first model that *moves under its own power*, and the reason the export
+//! carries skins and actions at all.
 //!
-//! So the division is: **the master owns the pose, this module owns the
-//! clock.** Blender says what a running person looks like at any point in the
-//! cycle. Nothing here knows the length of a leg, how far it swings, or that
-//! the body dips when the legs are spread — remodel the figure with longer legs
-//! and a rolling gait and no line below changes.
+//! The division is: **the master owns the pose, this module owns the clock.**
+//! Blender says what a running person looks like at any point in the cycle.
+//! Nothing here knows the length of a leg, how far it swings, or that the body
+//! dips when the legs are spread — remodel the figure with longer legs and a
+//! rolling gait and no line below changes.
 //!
-//! What this module does own is *where in the cycle the figure is*, and it
-//! drives that by **ground covered** rather than by the clock: the run clip is
-//! paused, and [`animate`] seeks it to the point the player's own stride has
-//! reached. A clip left running at its own speed would slide the feet whenever
-//! the walk was anything other than the speed it was drawn at, and would keep
-//! walking on the spot when the player stopped. Seeking it means the feet keep
-//! up by construction, a player backing up runs the cycle backwards, and a
-//! future rowboat or current that moves the player moves the legs with no
-//! second animation and nothing here being told.
+//! What this module owns is *where in the cycle the figure is*, and it drives
+//! that by **ground covered** rather than by the clock: the run clip is paused,
+//! and [`animate`] seeks it to the point the player's own stride has reached. A
+//! clip left running at its own speed would slide the feet at any other pace,
+//! and would keep walking on the spot when the player stopped. Seeking it means
+//! the feet keep up by construction, a player backing up runs the cycle
+//! backwards, and anything else that moves the player moves the legs with no
+//! second animation.
 //!
 //! Standing is the other clip. `idle` and `run` hang off one blend node and the
 //! gait's own [`Stride::amount`] crossfades them, so a figure that stops

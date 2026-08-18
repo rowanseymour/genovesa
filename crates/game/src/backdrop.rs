@@ -7,19 +7,16 @@
 //! the title in; see [`crate::menu`], which inks it.
 //!
 //! The menu used to stand on nothing — the world's clear colour with a dark
-//! wash over it, which is a flat slab of blue-grey and the one surface in the
-//! game with no facets, no light on it and nowhere in particular. The choice
-//! was between the two places the game already has, the water and the paper.
-//! Open water lost: there is no ground under it until a world has been chosen,
-//! and this world's ocean between islands is honestly two flat tones and a
-//! horizon, which is nothing to put on the front of anything.
+//! wash over it, the one surface in the game with no facets and no light on it.
+//! The choice was between the two places the game already has, the water and
+//! the paper; open water lost, there being no ground under it until a world has
+//! been chosen.
 //!
-//! Paper wins for a reason beyond looking better. A chart is what the player
-//! spends the game making — see [`crate::chart`] — so the front of the game is
-//! the first sheet of it, blank because nothing has been sailed yet. That is
-//! also why none of the drawing here is this module's own: the ruling, the net
-//! and the roses are [`crate::chart`]'s, lent out (see
-//! [`chart::engraved_paper`]). There is one sheet in this game, and two would
+//! Paper wins for a reason beyond looking better: a chart is what the player
+//! spends the game making, so the front of the game is the first sheet of it,
+//! blank because nothing has been sailed yet. Which is also why none of the
+//! drawing here is this module's own — the ruling, the net and the roses are
+//! [`crate::chart`]'s, lent out. There is one sheet in this game, and two would
 //! drift.
 //!
 //! Nothing here generates anything, opens a session or knows a seed. The paper

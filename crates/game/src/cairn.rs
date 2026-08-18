@@ -10,26 +10,21 @@
 //!
 //! # Why it is a thing and not a widget
 //!
-//! The obvious way to show an island is spoken for is a label floating over
-//! it, and it is the wrong way. A player arriving at an island has their eyes
-//! on the island; a marker drawn in screen space says *the game* is telling
-//! you something, where a stone and a flag on a headland says *somebody was
-//! here*, which is the whole of what a claim means. It also has to survive
-//! being looked at from off the coast, at sea level, from a boat that is
-//! moving — so it is built as a real daymark is built: a cairn of stone for
-//! the mass, a staff for the height, and a banner for the movement, because at
-//! any distance the eye finds the thing that *moves* long before it finds the
-//! thing that is merely tall. How far it actually carries is [`STAFF`]'s
-//! business, and less far than the first draft of this paragraph claimed.
+//! The obvious way to show an island is spoken for is a label floating over it,
+//! and it is the wrong way: a marker drawn in screen space says *the game* is
+//! telling you something, where a stone and a flag on a headland says *somebody
+//! was here*. It also has to survive being looked at from off the coast, at sea
+//! level, from a moving boat — so it is built as a real daymark is: a cairn of
+//! stone for the mass, a staff for the height, and a banner for the movement,
+//! the eye finding what *moves* long before what is merely tall. How far it
+//! actually carries is [`STAFF`]'s business.
 //!
-//! The banner streams on the true wind, on the same arithmetic a boat's
-//! pennant uses — see [`crate::boat::pennant_pose`]. Cloth is cloth, and two
-//! rules for how it lies would show up the first time a player anchored off a
-//! cairn and watched their own masthead disagree with it. The *shape* is its
-//! own ([`banner_mesh`]), cut to the convention that pose aims things in: a
-//! tie at the origin, the cloth running down -Z and hanging down -Y. Built to
-//! any other convention it would be aimed across the wind rather than along
-//! it, which is what a rectangle from the shape library did.
+//! The banner streams on the true wind, on the same arithmetic a boat's pennant
+//! uses — see [`crate::boat::pennant_pose`]: two rules for how cloth lies would
+//! show up the first time a player anchored off a cairn and watched their own
+//! masthead disagree. The *shape* is its own ([`banner_mesh`]), cut to the
+//! convention that pose aims things in — a tie at the origin, the cloth running
+//! down -Z and hanging down -Y.
 //!
 //! # Standing it on the ground
 //!

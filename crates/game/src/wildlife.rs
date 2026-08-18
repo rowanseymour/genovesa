@@ -3,17 +3,11 @@
 //!
 //! None of it can be touched or pointed at, and those two facts decide the
 //! architecture. A creature a player could interact with has to be the
-//! server's — authoritative, synchronised, on the wire the way other players
-//! are — because two machines are only free to disagree about what nobody
-//! can act on. And a creature worth *pointing at* has to be the server's
-//! too, or "look!" is a thing that happens to one player at a time. Both of
-//! those kinds are the *beasts* now — sharks, pods of dolphins, the odd
-//! whale, server-owned and wire-borne, drawn by [`crate::beasts`]; the
-//! dolphins and whales lived here once, and moved out when the second rule
-//! was understood. What stays is the texture nobody compares notes on:
-//! birds are everywhere and nowhere in particular, so each client raises
-//! its own out of nothing but the ground it was already sent and its own
-//! clock, and the protocol is untouched.
+//! server's, two machines being free to disagree only about what nobody can act
+//! on; and one worth *pointing at* has to be too, or "look!" happens to one
+//! player at a time. Both kinds are the *beasts* — drawn by [`crate::beasts`].
+//! What stays here is the texture nobody compares notes on: each client raises
+//! its own birds out of the ground it was already sent and its own clock.
 //!
 //! The birds come in two shapes, at opposite ends of what decoration can be:
 //!

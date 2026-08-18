@@ -464,25 +464,17 @@ fn hang_the_light(mut commands: Commands) {
 /// of how a night being run off at sixty times the pace reaches the picture,
 /// since nothing on this side knows that is happening.
 ///
-/// The gap is taken as the shorter way round, which is safe because the
-/// server never *jumps* its clock — and what bounds how far ahead of us it
-/// can get is two constants of the `server` crate's. A wish for dawn stands
-/// `WAIT_LAPSE` (a second and a half) before it lapses, and a night runs off
-/// at `NIGHT_PACE` (sixty times), so a client that has stopped hearing from a
-/// server mid-night falls at most those ninety seconds of world time behind
-/// it — 0.15 of a day, against the half a day this decides the way round on.
-/// Once the wish has lapsed both clocks are back at a second to the second
-/// and the gap stops growing. Raising either constant spends that margin, so
-/// raising them far enough is a decision about *this*, not only about how
-/// long a night takes to sit through.
+/// The gap is taken as the shorter way round, which is safe because the server
+/// never *jumps* its clock: a client that has stopped hearing from one mid-night
+/// falls at most 0.15 of a day behind — the server's `WAIT_LAPSE` at
+/// `NIGHT_PACE` — against the half day this decides the way round on. Raising
+/// either constant spends that margin.
 ///
-/// The ease trails the server all through a run-off rather than sitting on
-/// it — by around 0.05 of a day — so this machine is still in the night for
-/// about a second after the server has reached daybreak, and goes on
-/// offering to wait it out and sending `WantDawn`. That is meant to be
-/// harmless rather than missed: the server tests `is_night` before it runs
-/// anything off, so the late asking does nothing, and on screen it reads as
-/// the tail of the night it is.
+/// The ease trails the server through a run-off rather than sitting on it, so
+/// this machine is still in the night for about a second after the server has
+/// reached daybreak and goes on sending `WantDawn`. Harmless: the server tests
+/// `is_night` before it runs anything off, and on screen it reads as the tail
+/// of the night it is.
 fn advance_the_day(time: Res<Time>, mut sky: ResMut<Sky>) {
     let step = time.delta_secs() / protocol::DAY_SECONDS;
     sky.phase = (sky.phase + step).rem_euclid(1.0);

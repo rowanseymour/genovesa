@@ -1,28 +1,21 @@
 //! What the beasts look like: the server's creatures, drawn.
 //!
-//! A beast is the opposite arrangement from the wildlife in every way that
-//! matters. The wildlife is scenery this client invents for itself and the
-//! server has never heard of; a beast is a creature the *server* means —
-//! the shark because it will one day act on a player, the dolphins and the
-//! whale because they are rare enough to point at, and "look, a whale!"
-//! only lands if both players are under the same sea. The server owns where
-//! a beast is and where it is going, tells everyone on a beat
-//! ([`protocol::ToClient::Beast`], one message that is both introduction and
-//! movement), and this module's whole job is the half a server has no
-//! opinion on: what each kind looks like being there.
+//! A beast is the opposite arrangement from the wildlife. That is scenery this
+//! client invents and the server has never heard of; a beast is a creature the
+//! *server* means. The server owns where one is and where it is going and tells
+//! everyone on a beat ([`protocol::ToClient::Beast`], one message that is both
+//! introduction and movement); this module's job is the half a server has no
+//! opinion on — what each kind looks like being there.
 //!
-//! That half is not nothing. The wire carries a point and a velocity on the
-//! ground plane; everything the player actually sees is decided here — the
-//! body eased along the tellings the way remote players' markers are, the
-//! bearing swung to follow the water it is swimming, and everything about
-//! depth. The shark holds just under the surface and breathes its depth on
-//! a slow cycle, so the dorsal fin cuts the water for a while, slides
-//! under, and comes back — the fin standing out of the swell *is* the shark
-//! as far as most encounters go, which is why the model's fin is built tall
-//! (see the master's NOTES). The dolphins and the whale porpoise: a sine
-//! about cruising depth, pitched by its own slope, the motion these animals
-//! had as client-side wildlife carried over whole now that the *place* is
-//! the server's word.
+//! The wire carries a point and a velocity on the ground plane; everything the
+//! player sees is decided here — the body eased along the tellings the way
+//! remote players' markers are, the bearing swung to follow the water, and
+//! everything about depth. The shark holds just under the surface and breathes
+//! its depth on a slow cycle, so the dorsal fin cuts the water for a while,
+//! slides under, and comes back: the fin standing out of the swell *is* the
+//! shark as far as most encounters go, which is why the model's fin is built
+//! tall. The dolphins and the whale porpoise — a sine about cruising depth,
+//! pitched by its own slope.
 //!
 //! A pod is one beast. The wire says where the pod is; how many dolphins
 //! that is, and where each swims in the formation, is dealt from the
@@ -30,15 +23,12 @@
 //! same pod without another byte crossing the wire. The same trick the
 //! eagles play with chunk coordinates, one rung up.
 //!
-//! The shark's tail is the model's own: the file carries one clip, `swim`,
-//! a lateral wave that travels nose to tail, and it plays on its own clock —
-//! scaled by how fast the water is going by, but never seeked. That is the
-//! player's gait inverted, and deliberately so: feet on ground have contact
-//! to keep, where a tail in water only has to look like the thing pushing,
-//! so a clip at roughly the right rate reads perfectly and costs no
-//! bookkeeping. Both conductors climb out of an arriving model to see what
-//! it is part of — see [`crate::models::above`] — so the figure's takes only
-//! walkers and this one only the players hung under a beast.
+//! The shark's tail is the model's own: one clip, `swim`, played on its own
+//! clock — scaled by how fast the water is going by, but never seeked. The
+//! player's gait inverted, deliberately: feet on ground have contact to keep,
+//! where a tail in water only has to look like the thing pushing. Both
+//! conductors climb out of an arriving model to see what it is part of — see
+//! [`crate::models::above`].
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;

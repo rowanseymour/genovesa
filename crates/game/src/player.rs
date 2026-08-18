@@ -1,21 +1,17 @@
 //! The player as a person, distinct from whatever is carrying them.
 //!
 //! The boat used to *be* the player: one entity, driven by the movement keys,
-//! followed by the camera, reported to the server. That held only as long as
-//! there was exactly one way to exist in the world, and now there are two —
-//! aboard a boat, and ashore on their own feet — with a rowboat to come
-//! between them. All of them are one person getting about by different means.
+//! followed by the camera, reported to the server. That held only while there
+//! was one way to exist in the world, and now there are two — aboard a boat,
+//! and ashore on their own feet.
 //!
-//! Being aboard is [`ChildOf`]: the player rides the scene graph, standing
-//! wherever their vehicle carries them, and stepping ashore is nothing more
-//! than leaving the hierarchy — [`embark_or_land`] is the one threshold,
+//! Being aboard is [`ChildOf`]: the player rides the scene graph, and stepping
+//! ashore is leaving the hierarchy — [`embark_or_land`] is the one threshold,
 //! crossed both ways by the same key. Ashore, [`walk`] drives them with the
-//! keys the helm answers to afloat; which of the two systems is listening is
-//! decided entirely by whether the player has a parent, so there is no mode
-//! flag anywhere to fall out of step with the scene graph. What is *drawn* is
-//! not this module's business at all: [`crate::figure`] hangs a person under
-//! the entity, standing on the deck afloat and walking on the sand ashore,
-//! and learns which of those is happening from the transform rather than from
+//! keys the helm answers to afloat, and which of the two systems is listening
+//! is decided entirely by whether the player has a parent, so no mode flag can
+//! fall out of step with the scene graph. What is *drawn* is
+//! [`crate::figure`]'s business, and it reads the transform rather than
 //! anything said here.
 //!
 //! Everything that wants "where the player is" — the camera, the position
@@ -572,25 +568,16 @@ fn landing(ground: Option<&Ground>, boat: &Transform) -> Option<(Vec2, f32)> {
 ///
 /// The land is [`climb`]'s: ground rising or falling faster than
 /// [`WALKABLE_RISE`] across the step is not walked over. A frame's advance is
-/// taken in strides of at most half a facet and each of them judged in turn, so
-/// that however long the frame was, no stride has a whole facet of ground hidden
-/// inside it — what the limit is held to is the height field's own resolution
-/// rather than the frame rate. A walker turned back mid-advance keeps the
-/// strides they had already made and stops there.
+/// taken in strides of at most half a facet and each judged in turn, so no
+/// stride has a whole facet of ground hidden inside it however long the frame
+/// was. A walker turned back mid-advance keeps the strides already made.
 ///
 /// That is a limit on the step and not on the spot, so it turns a walker back
 /// from a cliff without pinning them against it — the face of a bluff can be
-/// crossed along its contour, where the ground being climbed is level, exactly
-/// as a person picks their way across a steep hillside rather than straight up
-/// it. The two rules are ANDed, and between them the climb has the last word:
-/// the shoreward clause above frees a walker who is merely out of their depth,
-/// not one standing under a drop-off, who has nowhere to go until the water
-/// falls. Letting them climb the drop instead would be the worse answer.
-///
-/// The walker then stands on the ground wherever the frame left them —
-/// knee-deep in the shallows, on the sand above the waterline — and keeps their
-/// last height over a chunk that has not arrived, exactly as everything riding
-/// the world does.
+/// crossed along its contour, as a person picks their way across a steep
+/// hillside. Between the two rules the climb has the last word: the shoreward
+/// clause frees a walker merely out of their depth, not one standing under a
+/// drop-off, who has nowhere to go until the water falls.
 fn walk(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,

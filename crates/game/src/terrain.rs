@@ -69,21 +69,17 @@ const SEA_EXTENT: f32 = 8000.0;
 /// far off that lattice as anything can get.
 ///
 /// Heights arrive quantised — see [`dequantize`] — so every corner this module
-/// draws is one of the values `HEIGHT_FLOOR + n * HEIGHT_STEP` and nothing in
-/// between. A plane put at a whole number of steps is therefore not merely
-/// close to flat ground at that height but *exactly* coplanar with it, to
-/// within nanometres, and coplanar surfaces fight over the depth buffer. Both
-/// planes below travel with the camera, so their half of the fight is
-/// re-rasterised every frame and the result flickers: a patch of ground
-/// appearing and disappearing through the water, its shape changing with a
-/// fraction of a degree of camera movement.
+/// draws is one of the values `HEIGHT_FLOOR + n * HEIGHT_STEP`. A plane at a
+/// whole number of steps is therefore *exactly* coplanar with flat ground at
+/// that height, and coplanar surfaces fight over the depth buffer: both planes
+/// below travel with the camera, so the fight is re-rasterised every frame and
+/// flickers.
 ///
-/// A whole number of steps is what both clearances used to be — the sea stood
-/// at 0.08 m, four of them — and 2 cm of quantisation is coarse enough that
-/// real ground lands on a given step often enough to see: any shoal flat to
-/// within a centimetre of the sea's height is a facet or two pinned exactly to
-/// it. Half a step off, no ground can ever be nearer than a centimetre, which
-/// the depth buffer resolves everywhere the haze lets anything be seen.
+/// A whole number of steps is what both clearances used to be, and 2 cm of
+/// quantisation is coarse enough that real ground lands on a given step often
+/// enough to see. Half a step off, no ground can ever be nearer than a
+/// centimetre, which the depth buffer resolves everywhere the haze lets
+/// anything be seen.
 const OFF_LATTICE: f32 = HEIGHT_STEP / 2.0;
 
 /// Height of the sea's surface, in metres.
@@ -105,27 +101,20 @@ const WATER_ALPHA: f32 = 0.84;
 
 /// How far out from the camera's focus chunks are wanted, in metres.
 ///
-/// Worth deriving rather than guessing at, since it is the single number that
-/// decides how much ground the machine is asked to hold — and now also how
-/// much a server is asked to send. At the furthest zoom the eye sits
-/// `MAX_DISTANCE * cos(PITCH)` — about 235 m — back from the focus
-/// horizontally, and `MAX_DISTANCE * sin(PITCH)`, about 298 m, above it. The
-/// haze closes at [`crate::HAZE_END`], 900 m, and that is a distance through
-/// the air rather than across the ground, so the furthest visible ground is
-/// `sqrt(HAZE_END² - 298²) ≈ 849 m` from the eye and therefore up to about
-/// 1084 m from the focus.
+/// Worth deriving rather than guessing at, being the single number that decides
+/// how much ground the machine holds and a server is asked to send. At the
+/// furthest zoom the eye sits about 235 m back from the focus horizontally and
+/// 298 m above it; the haze closes at [`crate::HAZE_END`], 900 m through the
+/// air, so the furthest visible ground is `sqrt(900² - 298²) ≈ 849 m` from the
+/// eye and up to about 1084 m from the focus.
+///
+/// That extreme sits directly *behind* the camera, the offset only adding to
+/// the reach in the one direction the view is not looking, so 1024 m covers
+/// everything in shot with room over. What is left of the gap is chunk
+/// granularity: [`within`] measures to a chunk's nearest corner.
 ///
 /// Public because the chart's own reach is measured against it: a chunk the
-/// survey can see has to be a chunk this has already brought in, or the chart
-/// would have holes in it that nothing came back to fill.
-///
-/// That extreme sits directly *behind* the camera, though — the 235 m only
-/// adds to the reach in the direction the eye is offset in, which is the one
-/// direction the view is not looking. Ahead of the camera the visible ground
-/// stops at 849 m less the offset. So 1024 m covers everything in shot with
-/// room over, and what is left of the gap is taken up by chunk granularity:
-/// [`within`] measures to a chunk's nearest corner, so a chunk is asked for
-/// whenever any of its 128 m reaches inside the radius.
+/// survey can see has to be one this has already brought in.
 pub const STREAM_RADIUS: f32 = 1024.0;
 
 /// How far out a chunk has to fall before it is forgotten. The gap behind
@@ -578,16 +567,12 @@ fn chunk_mesh(chunk: IVec2, heights: &[f32], surfaces: &[Surface]) -> Mesh {
 /// from quad to quad is only how high the sheet sits, and that changes at all
 /// only where a chunk holds more than one lake.
 ///
-/// **Where the water stops is not decided here.** A quad is drawn wherever
-/// any of its corners has a level at all — which the server sends well past
-/// the water's edge — so the sheet runs on *into* the bank and the
-/// ground mesh, being opaque and higher, hides the part that has gone
-/// underground. The waterline the player sees is therefore the true
-/// intersection of the two surfaces, meandering at whatever precision the
-/// depth buffer has, rather than the outline of the last quad that happened
-/// to be under water. It is exactly how the sea already meets every coast,
-/// which is the point: a lake shore should not read as a different kind of
-/// edge from a sea shore.
+/// **Where the water stops is not decided here.** A quad is drawn wherever any
+/// of its corners has a level at all — which the server sends well past the
+/// water's edge — so the sheet runs on *into* the bank and the opaque ground
+/// mesh hides the part that has gone underground. The waterline the player sees
+/// is therefore the true intersection of the two surfaces, exactly as the sea
+/// already meets every coast.
 fn water_mesh(chunk: IVec2, water: &[u16]) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();

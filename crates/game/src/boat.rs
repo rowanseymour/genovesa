@@ -1,26 +1,19 @@
 //! Boats: the hulls the player gets about in, and the keys that steer the one
 //! they are aboard.
 //!
-//! The player themself is not here. They are a person — see [`crate::player`]
-//! — riding this boat as a child of it, and the boat is one of the vehicles
-//! they will get about in rather than the player's own shape. What *kind* of
-//! boat an entity is lives in its [`Hull`]: the dimensions and manners the
-//! rules below are written against — the ship ([`SHIP`]) and the rowing boat
-//! ([`ROWBOAT`]) — so a new kind of boat is a new `Hull` and a new model, not
-//! a new module. The rowboat is not in the game's flow yet: nothing in the
-//! world deals one out, and the only way aboard is the dev switch —
-//! `set boat rowboat` at the console, or `--boat rowboat` on the command
-//! line — which [`refit`] serves by re-rigging the player's own hull in
-//! place.
+//! The player themself is not here — they are a person, see [`crate::player`],
+//! riding this boat as a child of it. What *kind* of boat an entity is lives in
+//! its [`Hull`]: the dimensions and manners the rules below are written
+//! against, so a new kind of boat is a new `Hull` and a new model rather than a
+//! new module. The rowboat is not in the game's flow yet; the only way aboard
+//! is the dev switch, which [`refit`] serves by re-rigging the player's own
+//! hull in place.
 //!
 //! A hull is modelled rather than drawn here: [`MODEL`] is a glTF file built
-//! from a Blender master under `assets-src/`, and this module spawns its
-//! meshes and steers what they hang off. The few dimensions a `Hull` names
-//! are the ones the rules read — where the keel is, and how deep. Those are
-//! not the model's to change quietly, so
-//! `the_model_is_the_hull_the_keel_is_probed_along` holds the file to them;
-//! everything else about the shape is the modeller's, and this file has no
-//! opinion on it.
+//! from a Blender master under `assets-src/`, and this module spawns its meshes
+//! and steers what they hang off. The few dimensions a `Hull` names are the
+//! ones the rules read, and are not the model's to change quietly —
+//! `the_model_is_the_hull_the_keel_is_probed_along` holds the file to them.
 //!
 //! A boat faces down its own -Z, so [`Transform::forward`] is the way it is
 //! pointing and steering can leave the axis convention alone. Its origin is on
@@ -49,11 +42,10 @@ use crate::{eased, matte, model_mesh, AppState, Helm};
 /// look depends on are written down.
 const MODEL: &str = "models/boat.glb";
 
-/// The rowing boat, as a file: `assets-src/models/rowboat/`. Rigged, unlike
-/// the ship — the oars move under the boat's own skin — so it cannot be
-/// pulled apart mesh by mesh the way [`MODEL`] is: a skinned mesh has to
-/// arrive as a whole scene or it is a shape with no skeleton behind it, the
-/// same rule the figure and the sharks live by.
+/// The rowing boat, as a file: `assets-src/models/rowboat/`. Rigged, unlike the
+/// ship, so it cannot be pulled apart mesh by mesh the way [`MODEL`] is — a
+/// skinned mesh has to arrive as a whole scene or it is a shape with no
+/// skeleton behind it.
 const ROWBOAT_MODEL: &str = "models/rowboat.glb";
 
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
@@ -75,11 +67,9 @@ pub enum HullKind {
 }
 
 impl HullKind {
-    /// Every kind there is, and the order the two places that offer a
-    /// choice of one offer them in. Written down once because a kind added
-    /// to the enum and not to this list is a boat no word can reach: both
-    /// [`HullKind::named`] and [`HullKind::choices`] are read off it, so
-    /// the console and the command line learn a new boat together.
+    /// Every kind there is, and the order the two places offering a choice
+    /// offer them in. Both [`HullKind::named`] and [`HullKind::choices`] read
+    /// off it, so the console and the command line learn a new boat together.
     const ALL: [Self; 2] = [Self::Ship, Self::Rowboat];
 
     /// The dimensions and manners this kind of boat is driven by.
@@ -104,9 +94,8 @@ impl HullKind {
     }
 
     /// The words there are, as a phrase to be told off with — "ship or
-    /// rowboat". What both the console and the command line answer a word
-    /// they do not know with, so neither can go stale while the other is
-    /// taught a new boat.
+    /// rowboat" — which both the console and the command line answer an
+    /// unknown word with.
     pub fn choices() -> String {
         Self::ALL.map(Self::name).join(" or ")
     }
@@ -138,20 +127,15 @@ struct Hull {
     /// surface's slope, and a slope read a few centimetres wide of the hull
     /// is the same slope.
     beam: f32,
-    /// Keel depth below the waterline. The sea is translucent, so this much
-    /// of the hull shows through the water as a darker shape under the deck —
-    /// but what makes it the game's business rather than the model's is
-    /// [`Hull::grounding_draft`], which is measured from it.
+    /// Keel depth below the waterline. What makes it the game's business
+    /// rather than the model's is [`Hull::grounding_draft`], measured from it.
     draft: f32,
     /// Where somebody aboard stands: metres above the waterline, and the
-    /// station on the keel's axis. The ship's is its quarterdeck, beside the
-    /// tiller; the rowboat's is its sole, amidships. A player is put down
-    /// here rather than at the hull's origin, which is the waterline and so
-    /// is knee-deep in the bilges. The model's numbers rather than the
-    /// game's to choose, like the draft: held to the file by
-    /// `the_model_is_the_hull_the_keel_is_probed_along`. The ship's main
-    /// deck height is *not* here — nothing below the sail's corners reads
-    /// it, so it belongs to the model alone.
+    /// station on the keel's axis. A player is put down here rather than at
+    /// the hull's origin, which is the waterline and so is knee-deep in the
+    /// bilges. The model's numbers rather than the game's to choose, like the
+    /// draft, and held to the file by
+    /// `the_model_is_the_hull_the_keel_is_probed_along`.
     helm_deck: f32,
     helm_station: f32,
     /// Where the keel begins and ends, in metres from amidships — negative
@@ -159,11 +143,10 @@ struct Hull {
     /// along these, so what runs aground is the line that is drawn.
     forefoot_station: f32,
     heel_station: f32,
-    /// The masthead, where there is a mast: the pennant is tied on at its
-    /// head, so like the deck and the draft its numbers are the model's
-    /// rather than the game's to choose — a mast re-cut in Blender and not
-    /// re-measured here would fly its pennant in mid-air beside the spar,
-    /// which is what `the_model_flies_a_pennant_from_its_masthead` is for.
+    /// The masthead, where there is a mast: the pennant is tied on at its head,
+    /// so like the deck and the draft its numbers are the model's — a mast
+    /// re-cut in Blender and not re-measured here would fly its pennant in mid
+    /// air, which `the_model_flies_a_pennant_from_its_masthead` catches.
     /// `None` is an unsparred boat: no pennant, no sail, and the wind is no
     /// longer the throttle — see [`steer`].
     mast: Option<Mast>,
@@ -217,10 +200,9 @@ impl Hull {
     /// far below the waterline stops it.
     ///
     /// On the coasts the generator draws this puts the hull within a metre or
-    /// two of the waterline; where it holds a boat further off, it is off a
-    /// shelf too thin to float one, and the shallows are painted as shallows
-    /// long before they are this thin — so a boat held out is held out of
-    /// water it can be seen to be held out of.
+    /// two of the waterline; further out it is off a shelf too thin to float
+    /// one, which the palette has been painting as shallows for a while — so a
+    /// boat held out is held out of water it can be seen to be held out of.
     fn grounding_draft(&self) -> f32 {
         self.draft - KEEL_BITE
     }
@@ -370,27 +352,20 @@ const KEEL_BITE: f32 = 0.2;
 /// probes, so ground that rises across a facet is read on the way up rather
 /// than stepped over.
 ///
-/// That is what the spacing buys, and it is worth being plain that it is less
-/// than "nothing gets past". A crest only one lattice line wide is *not* seen:
-/// the field is linear between its corners, so two probes either side of such a
-/// crest read its flanks, and the hull sails through a rock standing at the
-/// waterline. Coasts are safe from it by being coasts — the bottom shelves, so
-/// the ground under the keel is near enough monotone, and the innermost probe
-/// is reading the shallowest water and reading it honestly. What is exposed is
-/// the isolated skerry, which the generator draws on purpose and draws about a
-/// facet across. Seeing one reliably would mean probing at a fraction of a
-/// metre rather than at two, on every frame and at both poses, to buy a rock in
-/// open water — while the coasts, which are what a boat is actually stopped by,
-/// need none of it. Sailing through a skerry is the smaller wrong, and the one
-/// that can be paid off from the other end, by giving the skerries some width.
+/// That is less than "nothing gets past". A crest only one lattice line wide is
+/// *not* seen — the field is linear between its corners, so two probes either
+/// side read its flanks and the hull sails through a rock at the waterline.
+/// Coasts are safe by being coasts: the bottom shelves, so the ground under the
+/// keel is near enough monotone. What is exposed is the isolated skerry, and
+/// seeing one reliably would mean probing at a fraction of a metre on every
+/// frame at both poses, to buy a rock in open water. Sailing through a skerry
+/// is the smaller wrong, and can be paid off from the other end by giving the
+/// skerries some width.
 ///
-/// The sides are not probed: a hull here is a shallow V, drawing its full
-/// draft on the centreline and nothing at all at the beam, so a probe out
-/// there would
-/// have to carry a draught of its own to say anything the keel has not said.
-/// That is a standing condition on the model rather than an observation about
-/// one — a hull remodelled with a flat bottom carried out to the beam would
-/// need probes out there too.
+/// The sides are not probed: a hull here is a shallow V, drawing its full draft
+/// on the centreline and nothing at the beam. That is a standing condition on
+/// the model — a hull remodelled with a flat bottom carried out to the beam
+/// would need probes out there too.
 const KEEL_PROBES: usize = 4;
 
 /// Way below this, with no drive asked for, is stopped, and [`steer`] snaps
@@ -408,35 +383,29 @@ const WAY_STOPPED: f32 = 0.02;
 const HEEL_SETTLED: f32 = 0.005;
 
 /// The no-go zone: within this of head-to-wind, set sails carry nothing, in
-/// radians. This is the one piece of sailing realism kept for its own sake,
-/// because it *is* the game — upwind is tacked for, downwind is free — and
-/// 45 degrees is wide enough that pinching reads as a mistake while a
-/// full-helm tack still crosses the whole zone inside a second (see
-/// `a_tack_carries_way_through_the_eye_of_the_wind` for the arithmetic,
-/// pinned).
+/// radians. The one piece of sailing realism kept for its own sake, because it
+/// *is* the game — upwind is tacked for, downwind is free — and 45 degrees is
+/// wide enough that pinching reads as a mistake while a full-helm tack still
+/// crosses the zone inside a second.
 ///
-/// These are the game's sailing rules rather than any hull's manners, which
-/// is why they are module constants and not [`Hull`] fields, the same
-/// standing [`KEEL_BITE`] has: the ship sails by them today, and the rowboat
-/// to come is rowed, not sailed.
+/// The game's sailing rules rather than any hull's manners, which is why they
+/// are module constants and not [`Hull`] fields.
 const NO_GO: f32 = std::f32::consts::FRAC_PI_4;
 
-/// Where the sails reach their full drive: a beam reach, a quarter turn off
-/// the wind. From the edge of the no-go zone to here the drive ramps
-/// linearly, and from here through a dead run it is full — no downwind
-/// taper, on purpose. A real hull's polar sags a little dead downwind, but
-/// modelling that only makes the fastest point of sail one the player is
-/// never quite on, which is realism spent making the game worse.
+/// Where the sails reach their full drive: a beam reach, a quarter turn off the
+/// wind. From the edge of the no-go zone to here the drive ramps linearly, and
+/// from here through a dead run it is full — no downwind taper, on purpose. A
+/// real polar sags a little dead downwind, which only makes the fastest point
+/// of sail one the player is never quite on.
 const FULL_DRIVE: f32 = std::f32::consts::FRAC_PI_2;
 
 /// The band the wind's strength drives the hull across: the fraction of
 /// [`Hull::speed`] made in a flat calm, and the fraction made once the wind
-/// saturates. The floor is what keeps a calm from stranding anybody — the
-/// world is crossed by boat and the weather holds its spells for minutes at
-/// a time, so no sky may take the boat away — and the ceiling is a modest
-/// reward for sailing a blow rather than a new top gear. The angle to the
-/// wind is the game; the strength is flavour inside this band. Under the
-/// assumed 7 m/s breeze the factor comes out near 0.9.
+/// saturates. The floor keeps a calm from stranding anybody — the world is
+/// crossed by boat and the weather holds its spells for minutes — and the
+/// ceiling is a modest reward for sailing a blow rather than a new top gear.
+/// The angle to the wind is the game; the strength is flavour inside this
+/// band.
 const DRIVE_BAND: (f32, f32) = (0.6, 1.1);
 
 /// The wind at which the drive saturates, in metres per second — a strong
@@ -465,24 +434,20 @@ fn strength(wind_speed: f32) -> f32 {
     floor + (ceiling - floor) * (wind_speed / WIND_SATURATES).clamp(0.0, 1.0)
 }
 
-/// The lean a turn asks of the hull, in radians of roll: the full-turn heel,
-/// by how hard the helm is over, by the way's share of the hull's speed —
-/// that share clamped at one, because a blow drives past hull speed (see
-/// [`DRIVE_BAND`]'s ceiling) and the full-turn heel is a ceiling of its own,
-/// not a proportion to be outgrown. Port helm is a positive turn and an
-/// outward lean is to starboard, which about the forward axis is a negative
-/// roll — hence the sign.
+/// The lean a turn asks of the hull, in radians of roll: the full-turn heel, by
+/// how hard the helm is over, by the way's share of the hull's speed — clamped
+/// at one, a blow driving past hull speed while the full-turn heel is a ceiling
+/// of its own. Port helm is a positive turn and an outward lean is to
+/// starboard, which about the forward axis is a negative roll.
 fn heel_for(hull: &Hull, helm: f32, way: f32) -> f32 {
     -hull.heel_at_full_turn * helm * (way / hull.speed).clamp(-1.0, 1.0)
 }
 
 /// The speed set sails ask for, as a factor on [`Hull::speed`]: the polar at
-/// this heading times the wind's strength. `bow` is the hull's forward in
-/// the map's terms; `wind` is [`sea::SeaConditions::wind`] — the *true*
-/// wind, not the apparent, so the speed a heading earns holds still while
-/// the boat gathers way towards it. The pennant at the masthead flies the
-/// apparent wind and will disagree; that disagreement is real sailing, not
-/// a bug to reconcile.
+/// this heading times the wind's strength. The *true* wind, not the apparent,
+/// so the speed a heading earns holds still while the boat gathers way towards
+/// it. The pennant flies the apparent wind and will disagree, which is real
+/// sailing rather than a bug to reconcile.
 fn sail_drive(bow: Vec2, wind: Vec2) -> f32 {
     let blowing = wind.length();
     if blowing < WIND_NAMED {
@@ -509,12 +474,9 @@ const PENNANT: (f32, f32) = (1.2, 0.3);
 /// against sky and sea without adding a new colour to a palette this small.
 const SAIL_COLOR: Color = Color::srgb(0.93, 0.89, 0.79);
 
-/// The sail, as corners in the frame of an entity stood at the mast's foot
-/// on the waterline — so everything [`trim_the_sails`] does is a rotation
-/// about the mast, which is what trimming is. Tack and head up the luff,
-/// clew aft along the boom, in metres. The head stops short of the masthead
-/// so the pennant flies clear of the cloth, and the clew ends inboard of the
-/// transom.
+/// The sail, as corners in the frame of an entity stood at the mast's foot on
+/// the waterline, so everything [`trim_the_sails`] does is a rotation about the
+/// mast. Tack and head up the luff, clew aft along the boom, in metres.
 const SAIL_TACK: Vec3 = Vec3::new(0.0, 1.3, 0.0);
 const SAIL_HEAD: Vec3 = Vec3::new(0.0, 6.5, 0.0);
 const SAIL_CLEW: Vec3 = Vec3::new(0.0, 1.3, 3.0);
@@ -525,9 +487,8 @@ const SAIL_BELLY: Vec3 = Vec3::new(0.4, 3.4, 1.1);
 
 /// How far the boom lies off the centreline, in radians: close-hauled at the
 /// edge of the no-go zone, eased out to nearly square on a dead run. Visual
-/// only — the drive is [`sail_drive`]'s business — but a sail sheeted the
-/// way the wind asks is what the eye reads as "the wind is doing this",
-/// which is the whole point of drawing one.
+/// only — the drive is [`sail_drive`]'s business — but a sail sheeted the way
+/// the wind asks is what the eye reads as "the wind is doing this".
 const TRIM_BAND: (f32, f32) = (0.26, 1.35);
 
 /// The apparent wind that flies the pennant out, in metres per second, and
@@ -537,13 +498,11 @@ const TRIM_BAND: (f32, f32) = (0.26, 1.35);
 /// straight would read as a signboard rather than as cloth.
 const PENNANT_FLIES: (f32, f32) = (5.0, 0.14);
 
-/// How far the pennant's tie stands off the mast's axis, in metres: the
-/// spar's half-width and a little air. The flag is tied to the spar's
-/// *surface* on the side it is flying — sliding round the timber with the
-/// wind, the way a ring on a mast would — because a tie on the axis swings
-/// every sag of the cloth down through the spar itself, and a becalmed flag
-/// hung entirely inside the masthead. Held to the model's actual girth by
-/// `the_model_flies_a_pennant_from_its_masthead`.
+/// How far the pennant's tie stands off the mast's axis, in metres: the spar's
+/// half-width and a little air. The flag is tied to the spar's *surface* on the
+/// side it is flying, the way a ring on a mast would slide — a tie on the axis
+/// swings every sag of the cloth down through the spar itself, and hung a
+/// becalmed flag entirely inside the masthead.
 const PENNANT_TIE_OFF: f32 = 0.1;
 
 /// Below this apparent wind, in metres per second, the pennant keeps the
@@ -561,23 +520,18 @@ const FLUTTER: (f32, f32) = (0.16, 7.0);
 
 /// A boat in the world: what kind it is, and what it is doing.
 ///
-/// `kind` and the `hull` its dimensions are copied from are what the boat is
-/// sailed as, and are only ever set together — by [`Boat::of`], and by
-/// [`refit`] when the dev switch says otherwise, which is also what holds
-/// them to the [`Rigged`] the entity is dressed in. The rest is the sailing
-/// state. `way` is the speed the hull is actually making along its heading, in
-/// metres per second, ahead positive — the state the eased throttle lives
-/// in. The keys name a speed; [`steer`] brings `way` towards it.
+/// `kind` and the `hull` its dimensions are copied from are only ever set
+/// together — by [`Boat::of`], and by [`refit`] when the dev switch says
+/// otherwise, which is also what holds them to the [`Rigged`] the entity is
+/// dressed in.
 ///
-/// `heel` is the roll the hull is showing *for the turn*, in radians about
-/// its own forward, positive with the masthead to port. `pitch` and `roll`
-/// are the tilt the water is showing on it — [`float`] easing the deck
-/// towards the sea's own slope under the hull, pitch about the athwart axis
-/// with the bow up positive, roll the same sign and the same rotation factor
-/// as the heel. All three are kept here rather than read back off the
-/// transform because the transform holds heading, pitch and the two rolls
-/// multiplied together, and unpicking a quaternion every frame to learn
-/// numbers these systems wrote themselves is work for nothing.
+/// The rest is sailing state. `way` is the speed the hull is making along its
+/// heading, ahead positive — the keys name a speed and [`steer`] brings `way`
+/// towards it. `heel` is the roll shown *for the turn*, positive with the
+/// masthead to port; `pitch` and `roll` are the tilt the water is showing,
+/// [`float`] easing the deck towards the sea's own slope. All are kept here
+/// rather than read back off the transform, which holds heading, pitch and
+/// both rolls multiplied together.
 #[derive(Component)]
 pub struct Boat {
     kind: HullKind,
@@ -698,31 +652,26 @@ struct Fitting;
 ///
 /// The kind lives on the entity rather than only on [`Boat`] because a hull
 /// outlives the sailing systems: stepping ashore takes the `Boat` off and
-/// leaves the fittings standing, and the wire deals every hull back as a
-/// ship — so a `Boat` that has just been re-inserted says nothing about
-/// what the entity is actually wearing. The invariant [`refit`] keeps is
-/// that this says what the hull is dressed as, a `Boat` alongside it agrees
-/// with it, and the dev switch is what both are brought to.
+/// leaves the fittings standing, so a `Boat` just re-inserted says nothing
+/// about what the entity is wearing. [`refit`] keeps this saying what the hull
+/// is dressed as, with any `Boat` alongside it agreeing.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 struct Rigged(HullKind);
 
 /// A hull the sea is cut away inside — the shape of the hole, which is the
-/// hull's waterline outline in its own frame: two superellipse halves
-/// sharing their beam at the widest station, cut square at the transom.
-/// Two halves because one ellipse cannot be a boat — fat enough for the
-/// transom's corners it wraps whole metres of clear water round the bow,
-/// fine enough for the bow it pinches at the quarters and lets slivers of
-/// sea into the sternsheets.
+/// hull's waterline outline in its own frame: two superellipse halves sharing
+/// their beam at the widest station, cut square at the transom. Two halves
+/// because one ellipse cannot be a boat — fat enough for the transom's corners
+/// it wraps metres of clear water round the bow, fine enough for the bow it
+/// pinches at the quarters.
 ///
-/// Sized so the edge lands within the planking's thickness at the
-/// waterline: a hair too wide shows a dark sliver of missing sea against
-/// the topsides, a hair too narrow a sliver of sea inside the bilges, and
-/// of the two the sliver outside is the one the hull's own freeboard hides.
+/// Sized so the edge lands within the planking's thickness at the waterline: a
+/// hair too wide shows a dark sliver of missing sea against the topsides, a
+/// hair too narrow a sliver of sea inside the bilges, and the freeboard hides
+/// the first.
 ///
-/// On the boat entity itself rather than among its fittings, and read off
-/// the entity rather than off [`Boat`], so a moored open hull keeps its
-/// hole after its `Boat` comes off with the crew. [`cut_the_water`] is what
-/// reads it.
+/// On the boat entity rather than among its fittings, so a moored open hull
+/// keeps its hole after its `Boat` comes off with the crew.
 #[derive(Component, Clone, Copy)]
 struct OpenHull {
     /// Metres from the widest station forward to where the outline closes
@@ -958,13 +907,11 @@ impl Plugin for BoatPlugin {
                 // Only the steering stops when the game is paused. Floating is
                 // not motion — it sets the hull to the height of the ground
                 // under it — so leaving it running means a chunk arriving
-                // while the pause menu is up is settled on before the player
-                // looks again, rather than snapping under them on resume.
-                // The pennant and the sail last, and outside the pause like
-                // the floating: both are drawn off the hull's rotation and
-                // the wind, so reading either before this frame's steering
-                // had written it would leave the cloth a frame behind the
-                // mast it hangs on.
+                // under the pause menu is settled on before the player looks
+                // again. The pennant and the sail come last, and outside the
+                // pause for the same reason: both are drawn off the hull's
+                // rotation, and reading it before this frame's steering wrote
+                // it leaves the cloth a frame behind its mast.
                 (
                     // The dev boat switch first, so a frame that changes the
                     // kind sails and floats the hull it settled on.
@@ -995,11 +942,9 @@ pub(crate) fn scuttle(mut fleet: ResMut<Fleet>) {
 /// the way the opening view looks — with the player aboard.
 ///
 /// The *offline* entry, and only that: a served world's hulls arrive as
-/// [`protocol::ToClient::Boat`] tellings and go through [`Fleet::told`],
-/// which is also what puts the player on the deck of their own. What is
-/// left for this is a world with no server behind it at all — the headless
-/// tests', which sail and land and board without a session — and it keeps
-/// the old ceremony whole: boat under the view, player at the helm.
+/// tellings and go through [`Fleet::told`]. What is left for this is a world
+/// with no server behind it at all — the headless tests' — and it keeps the old
+/// ceremony whole: boat under the view, player at the helm.
 fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
     let boat = spawn_hull(
         &mut commands,
@@ -1032,12 +977,11 @@ fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
 /// caller's decision. `named` is its wire id, for the hulls a server told
 /// us about.
 ///
-/// The meshes hang off the hull as children rather than on it: hull and
-/// spar stay two meshes not for their colours — both carry their own — but
-/// because the game measures them separately, the keel probed along one and
-/// the pennant tied to the other. Their geometry is already in the boat's
-/// own frame, so the children sit at the identity and the only transform
-/// anything writes is the boat's own.
+/// The meshes hang off the hull as children. Hull and spar stay two meshes not
+/// for their colours — both carry their own — but because the game measures
+/// them separately, the keel probed along one and the pennant tied to the
+/// other. Their geometry is already in the boat's frame, so the children sit at
+/// the identity.
 fn spawn_hull(
     commands: &mut Commands,
     kit: &mut HullKit,
@@ -1097,13 +1041,11 @@ fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: HullKind)
     }
 
     // The ship's model carries its own colours on its facets — see the
-    // master's NOTES — so the timber is drawn with one white matte that does
-    // nothing but let them through, the same way every painted model here is.
-    // The file's PBR materials are still ignored: lit the way the file asked
-    // for, the hull would be the one surface in the world with a highlight on
-    // it. The cloth materials are drawn from both faces — left single-sided
-    // the pennant would wink out every time the wind put its back to the
-    // camera.
+    // master's NOTES — so the timber is drawn with one white matte that lets
+    // them through. The file's PBR materials are ignored: lit as the file
+    // asked, the hull would be the one surface in the world with a highlight.
+    // The cloth is drawn from both faces, a single-sided pennant winking out
+    // every time the wind put its back to the camera.
     let fittings = kit
         .fittings
         .get_or_insert_with(|| Fittings {
@@ -1174,18 +1116,15 @@ fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: HullKind)
 /// kind: the old fittings come off, the new kind's go on, the hull's manners
 /// change with it, and whoever is aboard is stood at the new hull's helm.
 ///
-/// Two things can disagree with the switch and they are asked separately,
-/// because either can be wrong on its own. [`Rigged`] is what the hull is
-/// dressed as; [`Boat`] is the manners it is sailed by, and it is the one
-/// the wire can reset underneath a rig — [`Fleet::told`] deals a ship's
-/// `Boat` back on every helm grant, so a hull left ashore in rowboat rig and
-/// boarded again arrives dressed as a dinghy and sailed as a ship. Whichever
-/// of the two is out, the switch is what it is brought back to.
+/// Two things can disagree with the switch and are asked separately, either
+/// being able to be wrong on its own. [`Rigged`] is what the hull is dressed
+/// as; [`Boat`] is the manners it is sailed by, and it is the one the wire can
+/// reset underneath a rig — so a hull left ashore in rowboat rig and boarded
+/// again arrives dressed as a dinghy and sailed as a ship.
 ///
-/// Temporary in intent — the switch exists so the rowboat can be seen in the
-/// water at all — and honest in shape: what crosses the wire never mentions
-/// the kind, so under a server this is one client redressing its own hull
-/// and everyone else still sees a ship.
+/// Temporary in intent, and honest in shape: what crosses the wire never
+/// mentions the kind, so under a server this is one client redressing its own
+/// hull while everyone else still sees a ship.
 fn refit(
     mut commands: Commands,
     mut kit: HullKit,
@@ -1235,19 +1174,12 @@ fn refit(
 
 /// Tells the sea where not to be: the waterline footprint of any open hull,
 /// written into the sea's material, whose fragment shader discards the water
-/// inside it. That is the whole trick that lets the rowboat's sole sit below
-/// the waterline the way a real one's does — the sea is one sheet drawn
-/// straight through everything, and without the hole it stands in the
-/// bilges of any boat that is looked into.
+/// inside it. The sea is one sheet drawn straight through everything, so
+/// without the hole it stands in the bilges of any boat looked into.
 ///
-/// The material is reached through the depth window, and written through the
-/// same read-compare-write two-step as the wake — see
-/// [`crate::wake::lay_the_wake`], whose arrangement this borrows — so a hull
-/// lying still re-uploads nothing.
-///
-/// One hole, because the dev switch makes at most one open hull. The day
-/// the world deals rowboats out, this grows a dimension exactly the way the
-/// wake's track will.
+/// Written through the same read-compare-write two-step as the wake — see
+/// [`crate::wake::lay_the_wake`] — so a hull lying still re-uploads nothing.
+/// One hole, the dev switch making at most one open hull.
 fn cut_the_water(
     hulls: Query<(&Transform, &OpenHull)>,
     window: Option<Res<sea::DepthWindow>>,
@@ -1327,26 +1259,20 @@ fn moor(
 /// The hoist hangs *below* the tie rather than straddling it, because a flag
 /// is tied at its top corner and swings from there.
 ///
-/// Its two dimensions are the caller's because there are two of these cloths
-/// and they are the same cloth at two sizes: this masthead pennant, and the
-/// banner on a cairn's staff — see [`crate::cairn`]. They already share
-/// [`pennant_pose`], and a second mesh built to some other convention would be
-/// a second cloth obeying the first one's arithmetic, which is a flag flying
-/// at a right angle to the wind.
+/// Its two dimensions are the caller's because there are two of these cloths at
+/// two sizes: this masthead pennant and the banner on a cairn's staff, which
+/// already share [`pennant_pose`].
 ///
-/// The one thing it is not is flat, and that is the whole reason it is three
-/// triangles instead of one. A flat pennant vanishes whenever the wind lines
-/// up with the camera — which at a fixed camera bearing is several times an
-/// hour, and looks exactly like the flag having been deleted. Pushing a
-/// single interior point out to one side puts a shallow belly in the cloth,
-/// which is both what a real flag does and enough to keep some part of it
-/// facing the viewer from any direction. It costs two triangles.
+/// The one thing it is not is flat, which is the whole reason it is three
+/// triangles. A flat pennant vanishes whenever the wind lines up with the
+/// camera — several times an hour at a fixed bearing, and indistinguishable
+/// from the flag having been deleted. Pushing one interior point out to a side
+/// puts a shallow belly in the cloth, which keeps some part of it facing the
+/// viewer from any direction.
 ///
-/// Rigid cloth is still a lie in a calm — real canvas folds down the mast
-/// rather than swinging round like a boom — and [`PENNANT`]'s narrow hoist is
-/// what makes the lie cheap: at three tenths of a metre the missing fold is a
-/// hand's width, watched from forty metres up, while the length that carries
-/// the reading is the part that behaves.
+/// Rigid cloth is still a lie in a calm, and [`PENNANT`]'s narrow hoist is what
+/// makes the lie cheap: at three tenths of a metre the missing fold is a hand's
+/// width, watched from forty metres up.
 pub(crate) fn pennant_mesh(length: f32, hoist: f32) -> Mesh {
     let tie = Vec3::ZERO;
     let foot = Vec3::new(0.0, -hoist, 0.0);
@@ -1423,12 +1349,10 @@ fn sail_trim(bow: Vec2, wind: Vec2) -> f32 {
 /// sail's own local vertical, which *is* the mast however the hull heels and
 /// pitches, the sail being a child of it.
 ///
-/// A hull with no [`Boat`] on it is nobody's here — another player's, told
-/// from the wire, or our own the moment we step off it — and its canvas is
-/// furled without asking. Whose sails those hulls have set is not on the
-/// wire at all, and reading the flag off a component that has just been
-/// taken away would leave a beached hull under full sail for as long as the
-/// schedule happened to order things that way.
+/// A hull with no [`Boat`] on it is nobody's here, and its canvas is furled
+/// without asking: whether those hulls have sails set is not on the wire, and
+/// reading the flag off a component just taken away would leave a beached hull
+/// under full sail.
 fn trim_the_sails(
     conditions: Res<sea::SeaConditions>,
     boats: Hulls<Without<Sail>>,
@@ -1462,11 +1386,9 @@ fn trim_the_sails(
 /// how far it hangs off the horizontal, in radians. `flying` is the bearing it
 /// is on now, which a wind too slack to have a direction leaves alone.
 ///
-/// The bearing is where the air is *going*, which needs no defending here the
-/// way it does on the compass: a flag is blown, and the eye reads it as blown.
-/// The droop is the whole of the strength reading — flat out in a blow, dead
-/// down in a calm, and everything between — so a player who never looks at
-/// the corner of the screen still knows what the wind is doing.
+/// The bearing is where the air is *going*: a flag is blown, and the eye reads
+/// it as blown. The droop is the whole of the strength reading, so a player who
+/// never looks at the corner of the screen still knows what the wind is doing.
 pub(crate) fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
     let (full, sag) = PENNANT_FLIES;
     let hard = (apparent.length() / full).clamp(0.0, 1.0);
@@ -1487,18 +1409,13 @@ pub(crate) fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
 ///
 /// Which is the *apparent* wind — the world's wind less the boat's own way
 /// through it — and that is the difference between this and the compass, on
-/// purpose. An instrument wants the true wind, because a bearing that changed
-/// as the player accelerated would be useless for steering by; a flag has no
-/// such duty and every reason to be honest, so a boat driving into a light
-/// air blows its own pennant astern, and one running before a breeze at
-/// nearly the speed of it flies limp. The two disagreeing is not a fault to
-/// be reconciled — it is the same thing sailors get from a burgee and a
-/// masthead instrument, and a player who notices has learned something true
-/// about sailing.
+/// purpose. An instrument wants the true wind, a bearing that changed as the
+/// player accelerated being useless to steer by; a flag has no such duty, so a
+/// boat driving into a light air blows its own pennant astern. The two
+/// disagreeing is what sailors get from a burgee and a masthead instrument.
 ///
 /// The boat's rotation is taken back out of the flag's, so heel, pitch and
-/// heading move where the pennant *is* without touching where it points: the
-/// masthead swings through a turn and the cloth stays on the wind.
+/// heading move where the pennant *is* without touching where it points.
 fn fly_the_pennant(
     time: Res<Time>,
     conditions: Res<sea::SeaConditions>,
@@ -1511,9 +1428,7 @@ fn fly_the_pennant(
         };
         // Every flag in the world flies on the same wind. Our own hull adds
         // the wind of its way; a told hull's way is not on the wire, so its
-        // flag reads the true wind alone — moored hulls have no way anyway,
-        // and a hull under somebody else's sail being a knot or two off in
-        // its flag is nothing a passing witness can measure.
+        // flag reads the true wind alone — moored hulls have no way anyway.
         let way = boat.map_or(0.0, |boat| boat.way);
         // A pennant is only ever spawned on a masted rig, and a hull with no
         // [`Boat`] is a told hull, which is always a ship — so the mast is
@@ -1557,28 +1472,22 @@ fn fly_the_pennant(
 /// because at the shoreline the two heights meet.
 ///
 /// The waterline is the hull's origin, so a boat that has run aground is
-/// half-buried in the hillside; that is what aground looks like, and steering
-/// is what will keep it off. No easing on the water's motion either: the
-/// swell is gentle, and a hull seven metres long simply is where the water
-/// is.
+/// half-buried in the hillside; that is what aground looks like. No easing on
+/// the water's motion either: the swell is gentle, and a hull seven metres long
+/// simply is where the water is.
 ///
 /// Afloat, the hull also wears the water's *slope*: the swell is sampled off
-/// the bow and the stern and out at either beam, and the deck eases towards
-/// the plane those four heights describe — pitching as seas pass under it
-/// fore and aft, rolling as they pass across, on the hull's own sway
-/// response, which is where its weight lives. The height above is not eased
-/// and the tilt is, deliberately: the hull *is* where the water is, but it is
-/// metres long, and turning to a shape that long takes it time the height
-/// does not need. A beached hull eases level instead — the ground is holding
-/// it, and a deck still working to water sliding past a held keel would give
-/// the trick away.
+/// the bow, the stern and either beam, and the deck eases towards the plane
+/// those four heights describe, on the hull's own sway response. The height is
+/// not eased and the tilt is, deliberately — the hull *is* where the water is,
+/// but turning a shape that long takes time the height does not need. A beached
+/// hull eases level instead, the ground holding it.
 ///
-/// The tilt goes on and comes off as a factor of its own. The rotation holds
-/// heading, then the water's pitch, then a single roll factor that the wave
-/// roll shares with the turn's heel — so this system strips the tilt it
-/// applied last frame from the right and hangs the new one on, and [`steer`],
-/// multiplying its heel delta on from the right, keeps reaching the roll
-/// factor it always has.
+/// The tilt goes on and comes off as a factor of its own: the rotation holds
+/// heading, then the water's pitch, then a single roll factor the wave roll
+/// shares with the turn's heel — so this strips the tilt it applied last frame
+/// from the right and hangs the new one on, and [`steer`] keeps reaching the
+/// roll factor it always has.
 pub(crate) fn float(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
@@ -1669,18 +1578,16 @@ fn settled(eased: f32, target: f32) -> f32 {
 /// its sign and its ordering against itself, both of which the offset leaves
 /// alone.
 ///
-/// This is the whole of collision. The ground the client has is a height field
-/// on a two-metre lattice, and the boat is a keel line above it, so "is there
-/// water enough here" is a handful of lookups rather than anything to do with
-/// intersecting the hull's triangles: [`Ground::height`] answers on exactly the
-/// facets the mesh was built from, which is what makes the ground the boat is
-/// stopped by the ground the player can see.
+/// This is the whole of collision. The ground is a height field on a two-metre
+/// lattice and the boat is a keel line above it, so "is there water enough
+/// here" is a handful of lookups rather than triangle intersection —
+/// [`Ground::height`] answers on exactly the facets the mesh was built from,
+/// which is what makes the ground the boat is stopped by the ground the player
+/// can see.
 ///
 /// A probe over a chunk that has not arrived says nothing rather than
-/// objecting, the same choice [`float`] makes: ground the client has not been
-/// sent is not ground it may invent. Outrunning the stream would take a stalled
-/// server, and if land does turn up under the hull, backing off still works —
-/// see [`steer`] for why.
+/// objecting, the same choice [`float`] makes. If land does turn up under the
+/// hull, backing off still works — see [`steer`].
 fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32 {
     let Some(ground) = ground else {
         return f32::NEG_INFINITY;
@@ -1709,86 +1616,58 @@ fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32
 /// `player::walk` — and a hull left at anchor holds station rather than
 /// sailing off with its absent owner's keystrokes.
 ///
-/// With the sails set the wind is the throttle: the target speed is the
-/// hull's times [`sail_drive`] — the polar at this heading, the strength of
-/// the blow — and the player's whole control of it is the helm, the game
-/// trimming the sails itself. Furling takes the target to zero; the way runs
-/// off on the glide and the hull holds station where it dies, which is all
-/// "anchored" means here. Backing is the one drive the wind has no part in —
-/// held astern with the sails furled, at the hull's own astern speed —
-/// because backing off a beach is how a grounding is undone, and an escape
-/// that waited on a favourable wind would be no escape. The sail keys are
-/// taps rather than holds, and a frame that carries both taps furls first
-/// and hoists second — a fixed order rather than a race, erring towards
-/// sailing.
+/// With the sails set the wind is the throttle — the target speed is the hull's
+/// times [`sail_drive`], and the player's whole control of it is the helm.
+/// Furling takes the target to zero; the way runs off on the glide and the hull
+/// holds station where it dies, which is all "anchored" means here. Backing is
+/// the one drive the wind has no part in, because backing off a beach is how a
+/// grounding is undone and an escape that waited on a favourable wind would be
+/// no escape. The sail keys are taps, and a frame carrying both furls first and
+/// hoists second.
 ///
-/// The way is eased rather than instant: whatever names the target speed,
-/// the hull's way relaxes towards it on its own way-response curve, stepped
-/// exactly for however long the frame was, so the ramp is the same shape at
-/// any frame rate. That covers both ends of a sail — way gathered over
-/// seconds when the sails go up, and carried into a glide when they come
-/// down — from one constant, with [`WAY_STOPPED`] closing the tail the
-/// exponential would otherwise never finish. The glide is also what makes
-/// tacking work at all: the target dies crossing the no-go zone, but the way
-/// carried into the turn is enough to bring the bow through the eye and out
-/// the other side still moving.
+/// The way is eased rather than instant, stepped exactly for however long the
+/// frame was so the ramp is the same shape at any frame rate, with
+/// [`WAY_STOPPED`] closing the tail the exponential would never finish. The
+/// glide is also what makes tacking work at all: the target dies crossing the
+/// no-go zone, but the way carried into the turn brings the bow through the eye
+/// and out the other side still moving.
 ///
-/// The helm answers even with no way on, which no rudder would; a boat that
-/// can't point where it's told while stationary is annoying before it is
-/// realistic. It answers aground as well, and for a better reason than that:
-/// a turn refused alongside an advance is a hull wedged bow-first against a
-/// shore with nothing left that would free it, so the bow may always come
-/// round even where the hull may not go.
+/// The helm answers with no way on, and aground: a turn refused alongside an
+/// advance is a hull wedged bow-first against a shore with nothing left that
+/// would free it, so the bow may always come round even where the hull may not
+/// go.
 ///
-/// Land is what the hull may not go through, and the frame's advance is
-/// offered to [`grounding`] before it is taken. It is allowed if the pose it
-/// would reach floats — or, failing that, if it is aground no *deeper* than
-/// the pose already held. That second half is not an escape hatch for a boat
-/// that has got itself ashore; it is the only rule that both frees one and
-/// can't be played. It is also narrower than it reads. A hull that is floating
-/// can only ever be allowed a pose that floats — `here` at or under zero makes
-/// the second clause imply the first — so a boat under way never reaches dry
-/// ground at all: it halts still afloat, with at most the fifth of a metre
-/// of [`KEEL_BITE`] in the mud, and backing off from
-/// there is the *first* clause doing the work, the water astern being water.
-/// What the second clause is for is the pose the boat did not sail into — a
-/// `--focus` that puts it inland, and ground arriving under a hull already
-/// sitting there. Out of those every way down to the sea is downhill, so it
-/// goes; and every way further in is uphill, so nosing the bow over a beach to
-/// unlock the island — which "aground already, let it through" would hand a
-/// player on the first frame — is refused like any other climb. Which is also
-/// why the comparison carries no tolerance: a hair of slack is a hair of climb
-/// every frame, and a hair a frame is a metre a second up a hillside.
+/// Land is what the hull may not go through, and the frame's advance is offered
+/// to [`grounding`] before it is taken. It is allowed if the pose it would
+/// reach floats, or failing that if it is aground no *deeper* than the pose
+/// already held — the only rule that both frees a stranded hull and cannot be
+/// played. It is narrower than it reads: a floating hull can only ever be
+/// allowed a pose that floats, since `here` at or under zero makes the second
+/// clause imply the first, so a boat under way halts still afloat with at most
+/// [`KEEL_BITE`] in the mud. What the second clause is for is the pose the boat
+/// did not sail into — a `--focus` inland, or ground arriving under a hull
+/// already sitting there — out of which every way down to the sea is downhill
+/// and every way further in is refused like any other climb. Which is why the
+/// comparison carries no tolerance: a hair a frame is a metre a second up a
+/// hillside.
 ///
 /// Only the pose at the end of the advance is judged; the path swept getting
-/// there is covered by the probes of the frame before, which holds for as long
-/// as a frame's advance stays under the probe spacing. At the ship's speed that is
-/// seventeen centimetres at sixty frames a second, and two and a half metres
-/// at the quarter second Bevy clamps a stalled frame to — so the sweep is only
-/// ever missed on a frame that was already a visible break in the picture.
+/// there is covered by the probes of the frame before, which holds while a
+/// frame's advance stays under the probe spacing — seventeen centimetres at
+/// sixty frames a second, and two and a half metres at the quarter second Bevy
+/// clamps a stalled frame to.
 ///
-/// Turning at speed also heels the hull: the target lean is helm times way —
-/// sharpness times speed, so a hard turn at full way carries the whole of
-/// the hull's full-turn heel, a gentle one at half way a quarter of it, and a bow
-/// swung round at rest none at all — and the shown heel relaxes towards it on
-/// the hull's heel-response curve, which is both the roll into the turn and the
-/// straightening out of it. The way's share is clamped at the hull's own
-/// speed, because a strong blow drives past it — see [`DRIVE_BAND`]'s
-/// ceiling — and the full-turn heel is a ceiling of its own, not a
-/// proportion to be outgrown: the biggest lean the hull ever shows, however
-/// hard the day. Signed way keeps the geometry honest going
-/// astern: the same helm turns about a centre on the other side, so the heel
-/// flips with it. The roll is applied about the boat's own forward axis, and
-/// the keel lies along that axis, so heeling moves nothing [`grounding`]
-/// probes or [`steer`] advances along — it is wholly a thing the eye gets.
+/// Turning at speed also heels the hull, on the target of [`heel_for`] and the
+/// hull's heel-response curve, which is both the roll into the turn and the
+/// straightening out of it. The roll is applied about the boat's own forward
+/// axis, and the keel lies along that axis, so heeling moves nothing
+/// [`grounding`] probes along — it is wholly a thing the eye gets.
 ///
-/// Both poses are judged with the rotation the helm has just applied, so a
-/// turn only ever changes where the advance goes, never whether it is allowed.
-/// Being stopped takes the way off, which is what running aground does; the
-/// ease then makes coming off again the few seconds it should be. What the
-/// hull is stopped *by* is the keel line and nothing else — the stem rakes out
-/// over the forefoot, so a bow can overhang a cliff face by half a metre
-/// before anything objects, which from a camera forty metres up is nothing.
+/// Both poses are judged with the rotation the helm has just applied, so a turn
+/// only ever changes where the advance goes, never whether it is allowed. What
+/// the hull is stopped *by* is the keel line and nothing else — the stem rakes
+/// out over the forefoot, so a bow can overhang a cliff face by half a metre
+/// before anything objects.
 fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
@@ -1875,13 +1754,10 @@ fn steer(
         }
     }
 
-    // Heel last, against the way this frame settled on, so running
-    // aground starts the straightening the same frame it takes the way
-    // off. The transform holds heading, then the water's pitch,
-    // then one roll factor the heel shares with the wave roll — see
-    // [`float`] — and the helm above multiplies heading on from the
-    // left, so rolling on from the right reaches that roll factor alone
-    // and the guard keeps an idle boat's rotation unwritten.
+    // Heel last, against the way this frame settled on, so running aground
+    // starts the straightening the same frame it takes the way off. The helm
+    // above multiplies heading on from the left, so rolling on from the right
+    // reaches the roll factor alone — see [`float`].
     let target_heel = heel_for(&hull, helm, boat.way);
     if boat.heel != target_heel {
         let heel_t = eased(1.0 / hull.heel_response, time.delta_secs());
