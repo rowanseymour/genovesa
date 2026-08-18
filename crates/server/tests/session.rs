@@ -206,6 +206,54 @@ impl Client {
         }
     }
 
+    /// The next word about a rowing boat, ignoring everything else.
+    ///
+    /// Which is how a test learns the name of a hull it had lowered — the
+    /// telling is the only place the world says it — and reading for the kind
+    /// rather than off the top of the inbox is what keeps somebody else's
+    /// sloop arriving in the same breath from being mistaken for it.
+    fn hear_a_rowboat(&self) -> protocol::BoatId {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let (told, kind, ..) = self.hear_a_boat_kinded();
+            if kind == BoatKind::Rowboat {
+                return told;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ten seconds and nothing went over the side"
+            );
+        }
+    }
+
+    /// Says a word the world always answers and reads until the answer comes
+    /// back, which waits out everything said before it.
+    ///
+    /// The same proof as [`Client::boat_changed_hands`] for the asks that have
+    /// no telling of their own to wait on: a move and a helm report are
+    /// broadcast to everybody *but* the player who made them, so there is
+    /// nothing of theirs coming back to read. One connection is read in order,
+    /// so a reply to a later word is a reply after an earlier one was acted
+    /// on.
+    fn caught_up(&self) {
+        self.say(ToServer::Command {
+            line: "help".to_string(),
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if matches!(
+                ToClient::read(&mut &self.0).expect("read"),
+                ToClient::Reply { .. }
+            ) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ten seconds and the world said nothing back"
+            );
+        }
+    }
+
     /// The next word that a boat has left the world, ignoring everything
     /// else — bounded like the boats' own reader.
     fn hear_a_boat_gone(&self) -> protocol::BoatId {
@@ -1063,13 +1111,14 @@ fn leaving_and_rejoining_with_papers_resumes_in_place() {
     let _ = alice.hear(); // Bob's arrival
 
     // Bob sails out — he arrived seated at a helm, so the boat is how he
-    // goes anywhere. One connection read in order means the sailing is
-    // processed before the hang-up that follows it.
+    // goes anywhere. Waited out before the hang-up: a drop with the sailing
+    // still unread would throw it away, see [`Client::caught_up`].
     let out = Vec2::new(640.0, -320.0);
     bob.say(ToServer::Helm {
         position: out,
         heading: 0.0,
     });
+    bob.caught_up();
     drop(bob);
     // Alice hearing the departure is what guarantees it is filed: the world
     // remembers a leaver before anyone is told they left.
@@ -1174,7 +1223,11 @@ fn a_boat_left_at_anchor_is_anyones_within_reach() {
     });
 
     // Alice sails off and steps ashore — the boat stays where she left it,
-    // nobody's — and then leaves the world entirely.
+    // nobody's — and then leaves the world entirely. Heard out of the boat
+    // before the drop, and this is the one place that mattered most: the
+    // departure frees a leaver's helm whether or not they stepped off it, so
+    // losing the disembark to a reset would leave the boat exactly as this
+    // test wants to find it and prove nothing at all.
     let far = alices_spawn + Vec2::new(600.0, 0.0);
     alice.say(ToServer::Helm {
         position: far,
@@ -1183,6 +1236,7 @@ fn a_boat_left_at_anchor_is_anyones_within_reach() {
     alice.say(ToServer::Disembark {
         position: far + Vec2::new(2.0, 0.0),
     });
+    alice.boat_changed_hands(a_boat, None);
     drop(alice);
 
     // Bob hears the helm empty out where she left it.
@@ -1432,19 +1486,7 @@ fn a_tender_goes_back_aboard_when_its_keeper_leaves_the_world() {
         position: spawn + Vec2::new(3.0, 0.0),
         heading: 0.0,
     });
-    // Read for the rowing boat rather than off the top of her inbox: Bob's
-    // arrival put words about his own sloop in it too.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let tender = loop {
-        let (told, kind, ..) = alice.hear_a_boat_kinded();
-        if kind == BoatKind::Rowboat {
-            break told;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "five seconds and nothing went over the side"
-        );
-    };
+    let tender = alice.hear_a_rowboat();
 
     // Out of the tender and back aboard the ship, which leaves the dinghy
     // floating and free while its lowerer is still here — and then the line
@@ -1500,19 +1542,7 @@ fn a_beached_tender_is_still_there_when_its_keeper_walked_out_of_the_world() {
         position: spawn + Vec2::new(3.0, 0.0),
         heading: 0.0,
     });
-    // Read for the rowing boat rather than off the top of her inbox: Bob's
-    // arrival put words about his own sloop in it too.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let tender = loop {
-        let (told, kind, ..) = alice.hear_a_boat_kinded();
-        if kind == BoatKind::Rowboat {
-            break told;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "five seconds and nothing went over the side"
-        );
-    };
+    let tender = alice.hear_a_rowboat();
 
     let ashore = spawn + Vec2::new(40.0, 0.0);
     alice.say(ToServer::Helm {
@@ -1549,6 +1579,155 @@ fn a_beached_tender_is_still_there_when_its_keeper_walked_out_of_the_world() {
     assert!(
         carol.boats_introduced().contains(&BoatKind::Rowboat),
         "the beached dinghy was hoisted and its keeper stranded"
+    );
+}
+
+#[test]
+fn quitting_in_the_dinghy_costs_the_world_nothing() {
+    // The third way to leave, and the one an ordinary player takes most: mid
+    // passage, oars in the water, close the game. They are aboard something,
+    // so the hoist at the door reaches for their tender — and the tender is
+    // the boat they are sitting in.
+    //
+    // Taking it makes the world forget a hull its keeper's own papers still
+    // name, and the entry block answers a name no boat answers to by dealing
+    // a fresh one, which cannot be their own ship: lowering spent its
+    // virginity. So a sloop per handshake, minted, saved and posted to every
+    // joiner after — the leak the hoist exists to close, reopened wider by
+    // the closing. Four turns of it is what this counts.
+    let addr = host(7);
+    let (mut alice, mut a, spawn, token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a newcomer's story starts aboard");
+    // An onlooker, so that each hang-up can be watched being filed rather
+    // than raced: a rejoin that got in front of it would be met as a
+    // stranger and dealt a hull for that reason instead of this one.
+    let watcher = Client::join(addr).0;
+    let alongside = spawn + Vec2::new(3.0, 0.0);
+
+    for turn in 0..4 {
+        if turn > 0 {
+            // Back aboard the ship she is anchored beside, which is the only
+            // place a tender can be lowered from — and which takes the one
+            // she rowed back in.
+            alice.say(ToServer::Board { boat: ship });
+            alice.boat_changed_hands(ship, Some(a));
+        }
+        // Over the side, and the line goes dead with her still in it. Hearing
+        // the dinghy is what proves the lowering landed, see
+        // [`Client::caught_up`].
+        alice.say(ToServer::Lower {
+            position: alongside,
+            heading: 0.0,
+        });
+        let tender = alice.hear_a_rowboat();
+        drop(alice);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while watcher.hear() != (ToClient::Left { id: a }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "five seconds and nobody left the world"
+            );
+        }
+
+        // And she comes back to the boat she was rowing, which is the whole
+        // of what keeps this from costing anything.
+        let (back, id, _spawn, dealt, seat) = Client::join_aboard(addr, Some(token));
+        assert_eq!(dealt, token, "the papers were not the ones handed over");
+        assert_eq!(
+            seat,
+            Some(tender),
+            "turn {turn}: a keeper who hung up mid-row was not put back in the dinghy"
+        );
+        alice = back;
+        a = id;
+    }
+
+    // Three sloops and one dinghy, whatever the count of handshakes: Alice's
+    // ship, the onlooker's, and the counting client's own, plus the boat
+    // Alice is sitting in. Four turns on an unconditional hoist left six
+    // sloops, one minted per handshake.
+    let (carol, ..) = Client::join_aboard(addr, None);
+    let fleet = carol.boats_introduced();
+    let sloops = fleet
+        .iter()
+        .filter(|kind| **kind == BoatKind::Sloop)
+        .count();
+    let dinghies = fleet
+        .iter()
+        .filter(|kind| **kind == BoatKind::Rowboat)
+        .count();
+    assert_eq!(sloops, 3, "a handshake minted a ship: {fleet:?}");
+    assert_eq!(dinghies, 1, "a handshake left a dinghy behind: {fleet:?}");
+}
+
+#[test]
+fn a_dinghy_somebody_else_took_up_is_not_hoisted_from_under_them() {
+    // Whose tender a hull is is a fact about the hull, and it has to move when
+    // the hull does. Alice lowers one and steps out; Bob comes alongside,
+    // takes it — a free dinghy lying where a lowering is going *is* the boat
+    // lowered — rows it up the beach and steps out of it himself. Alice's own
+    // going must not take it with her.
+    //
+    // Held against the player instead, her departure hoists a name she was
+    // still remembering and Bob is left standing on an island with his ship
+    // offshore: the exact strand the exception for a keeper who left afoot
+    // exists to prevent, arrived at from the other end.
+    let addr = host(1);
+    let (alice, a, alices_spawn, _t, a_ship) = Client::join_aboard(addr, None);
+    let a_ship = a_ship.expect("a newcomer's story starts aboard");
+    let (bob, b, _bobs_spawn, _t2, _b_ship) = Client::join_aboard(addr, None);
+
+    // Alice puts her tender over the side and steps out of it, leaving it
+    // floating free beside her ship.
+    let afloat = alices_spawn + Vec2::new(3.0, 0.0);
+    alice.say(ToServer::Lower {
+        position: afloat,
+        heading: 0.0,
+    });
+    let tender = alice.hear_a_rowboat();
+    alice.say(ToServer::Disembark { position: afloat });
+    alice.boat_changed_hands(tender, None);
+
+    // Bob sails up and lowers where it lies, which takes that hull rather
+    // than minting another — and it is his from then on.
+    bob.say(ToServer::Helm {
+        position: afloat + Vec2::new(2.0, 0.0),
+        heading: 0.0,
+    });
+    bob.say(ToServer::Lower {
+        position: afloat,
+        heading: 0.0,
+    });
+    bob.boat_changed_hands(tender, Some(b));
+
+    // He rows it up the beach and steps out onto the sand, which is where it
+    // has to still be when he next wants it.
+    let beach = afloat + Vec2::new(60.0, 0.0);
+    bob.say(ToServer::Helm {
+        position: beach,
+        heading: 0.0,
+    });
+    bob.say(ToServer::Disembark { position: beach });
+    bob.boat_changed_hands(tender, None);
+
+    // Alice takes her own ship's helm and hangs up at it — leaving the world
+    // aboard something, which is the case the hoist is for.
+    alice.say(ToServer::Board { boat: a_ship });
+    alice.boat_changed_hands(a_ship, Some(a));
+    drop(alice);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while bob.hear() != (ToClient::Left { id: a }) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "five seconds and nobody left the world"
+        );
+    }
+
+    // Bob's dinghy is still on the beach where he left it.
+    let (carol, ..) = Client::join_aboard(addr, None);
+    assert!(
+        carol.boats_introduced().contains(&BoatKind::Rowboat),
+        "a dinghy was hoisted out from under the player who had rowed off in it"
     );
 }
 
@@ -1748,10 +1927,13 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
         position: far,
         heading: 1.0,
     });
+    // Where the boat ends up is the whole of this test, so the sailing is
+    // waited out rather than raced against the drop — see
+    // [`Client::caught_up`].
+    alice.caught_up();
     drop(alice);
-    // Bob was introduced to her on arriving; her session read the helm
-    // report before it read the end of her line, so hearing the leaving
-    // after that is hearing both.
+    // Bob was introduced to her on arriving, and her helm report is answered
+    // by now, so hearing the leaving after that is hearing both.
     assert!(matches!(bob.hear(), ToClient::Joined { id, .. } if id == a));
     assert_eq!(bob.hear(), ToClient::Left { id: a });
 
@@ -2870,10 +3052,12 @@ fn a_returning_player_is_told_their_own_claims_however_far_off_they_are() {
     assert_eq!(client.hear_a_cairn().2, "Ilha Verde");
 
     // Away on foot, four kilometres of it — well past `CAIRN_SIGHT` — and
-    // then the line drops. One connection is read in order, so the walk is
-    // filed before the hang-up that follows it.
+    // then the line drops. The walk is waited out first: a walker hears
+    // nothing of their own moving, so without a word to read back the drop
+    // could reset the connection over it — see [`Client::caught_up`].
     let away = ashore + Vec2::new(4_096.0, 0.0);
     client.say(ToServer::Move { position: away });
+    client.caught_up();
     let watcher = Client::join(addr).0;
     drop(client);
     // Somebody else hearing the departure is what says it has been filed: the
