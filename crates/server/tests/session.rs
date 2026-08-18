@@ -1262,10 +1262,11 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
 }
 
 #[test]
-fn a_hull_nobody_ever_touched_is_handed_to_the_next_arrival() {
+fn a_hull_whose_keeper_has_left_the_world_is_handed_to_the_next_arrival() {
     // What bounds the fleet against a client that joins and hangs up in a
-    // loop: the boat minted for an arrival who did nothing with it is the
-    // boat the next arrival is handed, rather than another being minted.
+    // loop: the boat minted for somebody who has gone is the boat the next
+    // arrival is handed, rather than another being minted. Their having left
+    // the world aboard it is not a claim on it — see the loop below.
     let addr = host(1);
     // A watcher, so the leaving can be *heard* to have been dealt with
     // before the next arrival knocks — a hull is only spare once its keeper
@@ -1287,7 +1288,7 @@ fn a_hull_nobody_ever_touched_is_handed_to_the_next_arrival() {
     assert_eq!(
         second,
         Some(first),
-        "the world minted a second hull rather than handing on the untouched one"
+        "the world minted a second hull rather than handing on the free one"
     );
 }
 
@@ -1322,6 +1323,50 @@ fn a_hull_somebody_stepped_off_is_not_handed_to_the_next_arrival() {
         bobs,
         Some(parked),
         "a newcomer was handed the boat somebody had parked and walked away from"
+    );
+}
+
+#[test]
+fn joining_and_hanging_up_over_and_over_leaves_one_hull_behind() {
+    // The fleet against a client that joins and hangs up in a loop. Every
+    // arrival is put aboard something, so the bound cannot be on minting; it
+    // is that the hull the last one walked away from is the hull this one is
+    // handed. A world that answered each arrival with a new sloop would carry
+    // every one of them in its file and post every one of them to every future
+    // joiner, for a loop that costs the client a socket.
+    let path = scratch("hulls").join("one.world");
+    let world = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        .expect("bind")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    let addr = world.local_addr().expect("addr");
+    let host = world.spawn().expect("spawn");
+
+    // Somebody who stays, because the hull only comes free when the leaver
+    // has actually left: hearing them go is the one guarantee the next
+    // arrival is asking a world that has finished with the last.
+    let (watcher, ..) = Client::join(addr);
+
+    for _ in 0..20 {
+        let (client, id, spawn, _token, _aboard) = Client::join_aboard(addr, None);
+        // Stepping ashore first, that being the loop that used to leave a
+        // hull behind every time round: it stopped the hull counting as
+        // never-touched, and nothing afterwards could make it spare again.
+        client.say(ToServer::Disembark { position: spawn });
+        drop(client);
+        while !matches!(watcher.hear(), ToClient::Left { id: gone } if gone == id) {}
+    }
+    drop(watcher);
+    drop(host);
+
+    let kept = std::fs::read_to_string(&path).expect("the kept world");
+    let hulls = kept
+        .lines()
+        .filter(|line| line.starts_with("boat "))
+        .count();
+    assert_eq!(
+        hulls, 2,
+        "twenty joins left {hulls} hulls: the watcher's, and one the loop should be passing along"
     );
 }
 
