@@ -243,7 +243,11 @@ dodged by leaving it. Returning players are known by a token their own machine
 keeps, dealt on first visit; there are no accounts. A dedicated server keeps a
 world the same way when given `--world <file>` — and the file *is* the world,
 small enough to copy anywhere, raising the same islands on whatever machine
-hosts it, which is the seed's promise.
+hosts it, which is the seed's promise. Stopping either kind closes the world
+rather than dropping it: quitting the game, or a Ctrl-C or a `kill` at a
+server, hangs up on whoever is still in the world and writes it down before the
+process goes, so the file is current and not as of some save half a minute
+ago. Asked twice, a server stops where it stands.
 
 Worlds open in the morning, and a kept world reopens at the hour it closed
 on; `--time` opens a new world at any hour instead — or winds a kept one

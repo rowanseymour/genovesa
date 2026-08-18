@@ -31,6 +31,7 @@ use game::models::ModelsPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
 use game::player::PlayerPlugin;
 use game::sky::SkyPlugin;
+use game::stopping::StoppingPlugin;
 use game::terrain::TerrainPlugin;
 use game::trees::TreesPlugin;
 use game::wake::WakePlugin;
@@ -165,8 +166,13 @@ fn run(args: Args, session: Option<Session>) {
             // stand on, and the menus. Nested only because a plugin tuple
             // holds fifteen.
             (LogbookPlugin, BackdropPlugin, MenuPlugin),
-            // Harmless offline: its systems condition on the joined session.
-            NetPlugin,
+            // The session — harmless offline, its systems conditioning on a
+            // joined one — and the machine's own way of asking this to quit,
+            // which matters most in a run that is hosting: the world is
+            // written down in the drop an ordinary exit reaches and a killed
+            // process does not. Paired only because a plugin tuple holds
+            // fifteen.
+            (NetPlugin, StoppingPlugin),
             CapturePlugin {
                 resolution: args.resolution,
                 shots: args.shots,

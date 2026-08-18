@@ -28,6 +28,7 @@ pub mod net;
 pub mod player;
 pub mod sea;
 pub mod sky;
+pub mod stopping;
 pub mod terrain;
 pub mod trees;
 pub mod wake;
