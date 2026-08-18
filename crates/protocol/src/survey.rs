@@ -657,25 +657,9 @@ impl Survey {
     /// test can pin.
     pub fn islands(&self) -> Vec<Island> {
         let mut islands = Vec::new();
-        self.coastlines(&mut |id, ring| {
-            let measured = measure(ring);
-            if measured.is_island() {
-                islands.push(Island {
-                    id,
-                    centre: measured.centre,
-                    extent: measured.extent,
-                });
-            }
-        });
+        self.coastlines(&mut |id, ring| islands.extend(island_of(id, ring)));
         islands.sort_by_key(|island| (island.id.x, island.id.y));
         islands
-    }
-
-    /// The island of this identity, if the survey has closed it — which is how
-    /// a claim is settled: the claimant names an island, and the answer is
-    /// whether the coast they are standing on says there is one.
-    pub fn island(&self, id: IVec2) -> Option<Island> {
-        self.islands().into_iter().find(|island| island.id == id)
     }
 
     /// The island a point stands on, if this survey has closed one around it.
@@ -704,14 +688,9 @@ impl Survey {
         let mut under: Option<Island> = None;
         self.coastlines(&mut |id, ring| {
             let points: Vec<Vec2> = ring.collect();
-            let measured = measure(&mut points.iter().copied());
-            if !measured.is_island() || !rings(&points, at) {
+            let measured = island_of(id, &mut points.iter().copied());
+            let Some(island) = measured.filter(|_| rings(&points, at)) else {
                 return;
-            }
-            let island = Island {
-                id,
-                centre: measured.centre,
-                extent: measured.extent,
             };
             let smaller = under.is_none_or(|held| {
                 island
@@ -734,10 +713,8 @@ impl Survey {
     /// every ring over to be measured.
     pub fn tally(&self) -> SurveyTally {
         let mut islands = 0;
-        let (complete, open) = self.coastlines(&mut |_, ring| {
-            if measure(ring).is_island() {
-                islands += 1;
-            }
+        let (complete, open) = self.coastlines(&mut |id, ring| {
+            islands += usize::from(island_of(id, ring).is_some());
         });
         SurveyTally {
             surveyed: self.chunks(),
@@ -747,6 +724,23 @@ impl Survey {
             islands,
         }
     }
+}
+
+/// One walked ring as an island, if it is one — the measuring and the test
+/// that decides, in the one place, for every caller who walks the coasts.
+///
+/// [`Survey::islands`], [`Survey::island_under`] and [`Survey::tally`] each
+/// ask the same question of every ring [`Survey::coastlines`] hands over, and
+/// what an island *is* must be one answer: a ring that counted towards the
+/// tally and then failed to appear in the list would be two rules wearing one
+/// name.
+fn island_of(id: IVec2, ring: &mut dyn Iterator<Item = Vec2>) -> Option<Island> {
+    let measured = measure(ring);
+    measured.is_island().then_some(Island {
+        id,
+        centre: measured.centre,
+        extent: measured.extent,
+    })
 }
 
 /// A mark as a point on the world-wide step lattice: 255 whole steps to a
@@ -1184,7 +1178,17 @@ fn spread(points: &[Vec2]) -> f32 {
     (most - least).max_element()
 }
 
-/// How far a point lies off the segment from `from` to `to`.
+/// How far a point lies off the *line* through `from` and `to` — measured
+/// perpendicular to it, and so not bounded by the ends.
+///
+/// The line and not the segment, which is what [`simplify`] wants: the two
+/// ends are points of the run being thinned, and what is being asked is how far
+/// the coast between them strays from the straight of it. The server has a
+/// near neighbour of this — how far a cairn lies off the *way* a hull ran,
+/// which is clamped to the ends because a cairn beyond either of them is
+/// simply not on that run — and the two must not be mistaken for each other. A
+/// coastal point past the end of its chord is a shore doubling back, and
+/// measuring it to the nearer end instead would thin a headland away.
 fn off_the_line(point: Vec2, from: Vec2, to: Vec2) -> f32 {
     let span = to - from;
     let length = span.length();

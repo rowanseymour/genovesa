@@ -93,15 +93,27 @@ pub fn clock(phase: f32) -> String {
 /// powers of two run together.
 pub const DEFAULT_PORT: u16 = 24816;
 
+/// The most letters an island's name may run to — what a client stops taking
+/// at, and the number [`NAME_BYTES`] is worked out from.
+///
+/// A chart has room for a real name and not for a sentence, and the cap is
+/// what keeps one island's lettering off its neighbour's. It lives here rather
+/// than on the sheet that draws it because a client that let somebody type
+/// past it would be a client offering names the wire then refused, with
+/// nothing on screen to say why — see the note on [`NAME_BYTES`] about which
+/// of the two counts what.
+pub const NAME_LETTERS: usize = 24;
+
 /// The longest an island's name may be, in bytes — see [`island_name`].
 ///
 /// Bytes rather than characters because bytes are what the wire counts and
 /// what a frame is measured in, and the thing being bounded is what a hostile
-/// client can make a server hold and hand on. The number is the twenty-four
-/// characters a chart is drawn to allow, at the four bytes a character costs
-/// in the worst case UTF-8 has: a name of two dozen letters fits whatever
-/// alphabet it is written in.
-pub const NAME_BYTES: usize = 96;
+/// client can make a server hold and hand on. Derived from [`NAME_LETTERS`] at
+/// the four bytes a character costs in the worst case UTF-8 has, rather than
+/// written down beside it: a name of two dozen letters fits whatever alphabet
+/// it is written in, and the two numbers saying so were only ever kept in step
+/// by a comment.
+pub const NAME_BYTES: usize = NAME_LETTERS * 4;
 
 /// A name for an island as the wire will carry it, or `None` for something
 /// that is not a name at all.

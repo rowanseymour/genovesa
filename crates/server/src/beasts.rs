@@ -134,7 +134,7 @@ use std::time::Duration;
 use glam::Vec2;
 use protocol::{BeastId, BeastKind, PlayerId, ToClient};
 
-use crate::{broadcast_all, Shared};
+use crate::{broadcast_all, Held, Shared};
 
 /// How often the beasts are minded, which is also how often everyone is told
 /// where they are. Slower than the players' own ten-a-second trickle: a
@@ -979,7 +979,7 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
         // it said until the first beat rewrites it, so a save landing in the
         // beat between reopening and here still writes the beasts down.
         {
-            let remembered = shared.beasts.lock().expect("no poisoned lock").clone();
+            let remembered = shared.beasts.held().clone();
             for record in remembered {
                 flock.adopt(&record);
             }
@@ -996,27 +996,22 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
             // picture of where everyone is, and never holds the session up
             // while it thinks.
             let players: Vec<(PlayerId, Vec2)> = {
-                let players = shared.players.lock().expect("no poisoned lock");
+                let players = shared.players.held();
                 players
                     .iter()
                     .map(|(id, player)| (*id, player.position))
                     .collect()
             };
-            let summoned: Vec<(BeastKind, Vec2)> = shared
-                .summoned
-                .lock()
-                .expect("no poisoned lock")
-                .drain(..)
-                .collect();
+            let summoned: Vec<(BeastKind, Vec2)> = shared.summoned.held().drain(..).collect();
 
             let news = flock.beat(&shared, &players, &summoned);
 
             // The ledger a save reads, rewritten while no other lock is
             // held: the flock stays this thread's own, and what everyone
             // else sees is a summary from at most a beat ago.
-            *shared.beasts.lock().expect("no poisoned lock") = flock.records();
+            *shared.beasts.held() = flock.records();
 
-            let players = shared.players.lock().expect("no poisoned lock");
+            let players = shared.players.held();
             for word in news {
                 broadcast_all(&players, word);
             }
