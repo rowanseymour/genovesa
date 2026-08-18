@@ -17,3 +17,10 @@ world = { path = "../world" }
 # The words of the session, shared with every client so the two sides of the
 # wire cannot drift.
 protocol = { path = "../protocol" }
+
+# The signals that mean stop — see `signals`. Nothing in the standard library
+# can hear one, and a world that is not told it is stopping cannot write itself
+# down on the way out. Unix only, that being where these signals exist;
+# everywhere else the module is an honest no-op.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

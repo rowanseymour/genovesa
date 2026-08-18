@@ -28,25 +28,30 @@ fn chunk_at(point: Vec2) -> IVec2 {
 /// the test process ends. Most of what is tested here is a conversation, not a
 /// lifetime — the tests that are about the lifetime host their own.
 fn host(seed: u32) -> SocketAddr {
-    let server = Server::bind(("127.0.0.1", 0), WorldConfig { seed }).expect("bind");
-    let addr = server
-        .local_addr()
-        .expect("a bound listener has an address");
-    std::thread::spawn(move || server.run());
-    addr
+    forever(Server::bind(("127.0.0.1", 0), WorldConfig { seed }).expect("bind"))
 }
 
 /// The same, opened at a chosen hour of its day, for the tests that are
 /// about the night — which nothing else can reach, a world's clock running
 /// at ten minutes to the day from whenever it was bound.
 fn host_at(seed: u32, opening: f32) -> SocketAddr {
-    let server = Server::bind(("127.0.0.1", 0), WorldConfig { seed })
-        .expect("bind")
-        .opening_at(opening);
-    let addr = server
-        .local_addr()
-        .expect("a bound listener has an address");
-    std::thread::spawn(move || server.run());
+    forever(
+        Server::bind(("127.0.0.1", 0), WorldConfig { seed })
+            .expect("bind")
+            .opening_at(opening),
+    )
+}
+
+/// Serves a world that nothing ever stops, and says where.
+///
+/// The handle is deliberately let go of without being dropped: dropping it is
+/// what ends a world, and these are the worlds meant to outlast the tests
+/// talking to them. What it leaks is one thread and one world for the length
+/// of a test binary that is about to exit anyway.
+fn forever(server: Server) -> SocketAddr {
+    let host = server.spawn().expect("spawn");
+    let addr = host.addr();
+    std::mem::forget(host);
     addr
 }
 

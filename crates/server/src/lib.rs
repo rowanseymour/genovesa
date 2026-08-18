@@ -20,6 +20,7 @@ pub mod beasts;
 pub mod cli;
 mod console;
 mod keeper;
+pub mod signals;
 
 use std::collections::HashMap;
 use std::io;
@@ -371,7 +372,7 @@ pub struct Server {
     /// senders belong to the things that serve, and when the last of those has
     /// gone the workers are told so.
     ///
-    /// It is also why the pool starts at [`Server::run`] rather than at
+    /// It is also why the pool starts at [`Server::spawn`] rather than at
     /// [`Server::bind`]: starting it clones the shared state, and
     /// [`Server::reporting_to`] has to be the only owner of it.
     queue: (mpsc::SyncSender<ChunkRequest>, mpsc::Receiver<ChunkRequest>),
@@ -641,9 +642,9 @@ impl Server {
     /// then stays: everything served afterwards comes out of it.
     ///
     /// Nothing is generated beyond that entry island, and no worker is
-    /// started: a bound server is a world with a door, and [`Server::run`] or
-    /// [`Server::spawn`] is what opens it. The world is ephemeral until
-    /// [`Server::keeping_in`] or [`Server::keeping_at`] says otherwise.
+    /// started: a bound server is a world with a door, and [`Server::spawn`]
+    /// is what opens it. The world is ephemeral until [`Server::keeping_in`]
+    /// or [`Server::keeping_at`] says otherwise.
     pub fn bind(addr: impl ToSocketAddrs, config: WorldConfig) -> io::Result<Self> {
         Self::from_record(addr, keeper::WorldRecord::fresh(config.seed), None, false)
     }
@@ -823,24 +824,17 @@ impl Server {
         self.shared.world.seed()
     }
 
-    /// Serves forever on this thread: every connection gets a thread of its
-    /// own, from handshake to hang-up. What a dedicated server does, there
-    /// being nothing else for its process to be doing.
-    pub fn run(self) {
-        let (wanted, requests) = self.queue;
-        make_ground(&self.shared, requests);
-        watch_the_sky(&self.shared);
-        beasts::mind_the_beasts(&self.shared);
-        accept(&self.listener, &self.shared, &wanted);
-    }
-
     /// Serves on a thread of its own, and hands back the handle that ends it.
     ///
-    /// What a game hosting a world for its own player does: the session has to
-    /// run alongside a frame loop rather than instead of it, and it has to
-    /// *stop* when the player leaves the world — a listener still holding the
-    /// port, and a roster still relaying the last positions of a world nobody
-    /// is in, would outlive the match that made them.
+    /// The only way to serve, and so the only way to stop: every connection
+    /// gets a thread of its own from handshake to hang-up, and dropping what
+    /// this hands back is what ends the world — see [`Host`]. A game hosting
+    /// for its own player needs that (the session runs alongside a frame loop
+    /// rather than instead of it, and must stop when the player leaves), and a
+    /// dedicated server, which has nothing else for its process to be doing,
+    /// needs it just as much: it is asked to stop by a signal rather than by a
+    /// player, and a world that could only be served forever would have
+    /// nowhere to be written down when that came. See [`signals`].
     pub fn spawn(self) -> io::Result<Host> {
         let addr = self.listener.local_addr()?;
         let (wanted, requests) = self.queue;
