@@ -734,6 +734,9 @@ mod tests {
             AssetPlugin::default(),
             TimePlugin,
             StatesPlugin,
+            // The boat's plugin readies the rowboat's clips, and clips and
+            // the graph they hang in are assets of this plugin's.
+            bevy::animation::AnimationPlugin,
             BoatPlugin,
             SkyPlugin,
         ))

@@ -64,12 +64,12 @@ out and shipping them is the pose that moves: an oar turns about the crutch it
 sits in and nowhere else, so the stroke is a rotation and nothing more. The
 drive is the shorter half of the cycle, the way a stroke is.
 
-**The stroke is meant to be seeked rather than played**, exactly as the
-figure's run is — by ground covered, so the blades bite at whatever speed the
-boat is making and a boat backing water runs the cycle backwards. That needs
-one number the file cannot carry: how far one stroke drives the boat, which is
-a little more than its own length. See `crates/game/src/figure.rs` for the
-arrangement.
+**The stroke is seeked rather than played**, exactly as the figure's run is —
+by water covered, so the blades bite at whatever speed the boat is making and
+a boat backing water pulls the cycle backwards. The one number this needs and
+the file cannot carry — how far one stroke drives the boat, a little more than
+its own length — is `PULL` in `crates/game/src/boat.rs`, where `row` does the
+seeking and settles the oars stowed at rest.
 
 The two are **states and not a dial**. Crossfading them sweeps the looms
 through the gunwale, which is what shipping the oars looks like and is fine
