@@ -146,7 +146,8 @@ Usage: game [options]
 
 Options:
   --state <screen>  start on `mainmenu`, `setsail`, `newworld`, `joinworld`,
-                    `settings`, `inworld`, `paused`, `pausedcontrols` or
+                    `options`, `display`, `controls`, `inworld`, `paused`,
+                    `pausedoptions`, `pauseddisplay`, `pausedcontrols` or
                     `chart`
                     [default: mainmenu, or inworld when shots or a server are
                     asked for]
@@ -330,14 +331,19 @@ fn state(value: &str) -> Result<(AppState, Helm), String> {
         "setsail" => Ok((AppState::SetSail, Helm::Sailing)),
         "newworld" => Ok((AppState::NewWorld, Helm::Sailing)),
         "joinworld" => Ok((AppState::JoinWorld, Helm::Sailing)),
-        "settings" => Ok((AppState::Settings, Helm::Sailing)),
+        "options" => Ok((AppState::Options, Helm::Sailing)),
+        "display" => Ok((AppState::Display, Helm::Sailing)),
+        "controls" => Ok((AppState::Controls, Helm::Sailing)),
         "inworld" => Ok((AppState::InWorld, Helm::Sailing)),
         "paused" => Ok((AppState::InWorld, Helm::Paused)),
+        "pausedoptions" => Ok((AppState::InWorld, Helm::Options)),
+        "pauseddisplay" => Ok((AppState::InWorld, Helm::Display)),
         "pausedcontrols" => Ok((AppState::InWorld, Helm::Controls)),
         "chart" => Ok((AppState::InWorld, Helm::Chart)),
         other => Err(format!(
             "`{other}` is not a screen — try mainmenu, setsail, newworld, \
-             joinworld, settings, inworld, paused, pausedcontrols or chart"
+             joinworld, options, display, controls, inworld, paused, \
+             pausedoptions, pauseddisplay, pausedcontrols or chart"
         )),
     }
 }
@@ -419,7 +425,9 @@ mod tests {
     fn opens_on_any_of_the_screens_by_name() {
         assert_eq!(ok("--state mainmenu").state, AppState::MainMenu);
         assert_eq!(ok("--state newworld").state, AppState::NewWorld);
-        assert_eq!(ok("--state settings").state, AppState::Settings);
+        assert_eq!(ok("--state options").state, AppState::Options);
+        assert_eq!(ok("--state display").state, AppState::Display);
+        assert_eq!(ok("--state controls").state, AppState::Controls);
         assert_eq!(ok("--state inworld").state, AppState::InWorld);
     }
 
@@ -437,6 +445,10 @@ mod tests {
         let controls = ok("--state pausedcontrols");
         assert_eq!(controls.state, AppState::InWorld);
         assert_eq!(controls.helm, Helm::Controls);
+
+        let display = ok("--state pauseddisplay");
+        assert_eq!(display.state, AppState::InWorld);
+        assert_eq!(display.helm, Helm::Display);
     }
 
     /// Pausing is inside the served world, so it is one of the few screens a

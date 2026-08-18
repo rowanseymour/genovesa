@@ -27,6 +27,7 @@ pub mod models;
 pub mod net;
 pub mod player;
 pub mod sea;
+pub mod settings;
 pub mod sky;
 pub mod stopping;
 pub mod terrain;
@@ -211,8 +212,14 @@ pub enum AppState {
     NewWorld,
     /// Naming a server to play in.
     JoinWorld,
+    /// The way to the two screens below, and nothing else — see
+    /// [`crate::menu`].
+    Options,
+    /// Choosing how the game is drawn: how much screen it takes, how many
+    /// pixels it draws and whether the sun casts. See [`crate::settings`].
+    Display,
     /// Choosing which key does what.
-    Settings,
+    Controls,
     InWorld,
 }
 
@@ -238,10 +245,19 @@ pub enum Helm {
     Sailing,
     /// The pause menu is up over the world.
     Paused,
-    /// The controls screen, opened from the pause menu. Distinct from
-    /// [`AppState::Settings`], which is the same screen reached from the main
-    /// menu with no world behind it — both are built by `spawn_controls`, and
+    /// The options screen, opened from the pause menu.
+    ///
+    /// Every screen from here down is doubled — one of these and one
+    /// [`AppState`] beside it — and that doubling is the point rather than an
+    /// oversight. The same screen reached from the main menu has no world
+    /// behind it; reached from the pause menu it must not take one down, and
+    /// leaving `AppState::InWorld` is exactly what would. One builder each, and
     /// the only difference is which screen Back returns to.
+    Options,
+    /// The display screen, opened from the options screen — see
+    /// [`AppState::Display`].
+    Display,
+    /// The controls screen, likewise — see [`AppState::Controls`].
     Controls,
     /// The debug console is up over the world, taking the keyboard — see
     /// [`console`]. A state here rather than a flag of the console's own

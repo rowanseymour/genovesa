@@ -660,10 +660,10 @@ fn stow_the_chart(mut commands: Commands) {
 
 /// Opens the chart, and closes it again.
 ///
-/// Only from the helm and only back to it: the pause menu, the controls screen
-/// and the console each have the keyboard for their own reasons while they are
-/// up, and a chart key typed into any of them means what that screen says it
-/// means.
+/// Only from the helm and only back to it: the pause menu, the screens under
+/// it and the console each have the keyboard for their own reasons while they
+/// are up, and a chart key typed into any of them means what that screen says
+/// it means.
 fn chart_key(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
@@ -678,7 +678,7 @@ fn chart_key(
     match helm.get() {
         Helm::Sailing => next.set(Helm::Chart),
         Helm::Chart => next.set(Helm::Sailing),
-        Helm::Paused | Helm::Controls | Helm::Console => {}
+        Helm::Paused | Helm::Options | Helm::Display | Helm::Controls | Helm::Console => {}
     }
 }
 
@@ -2956,7 +2956,13 @@ mod tests {
         // up, and a chart key typed into one of them means what that screen
         // says it means — a letter in the console, a key being bound on the
         // controls screen.
-        for busy in [Helm::Paused, Helm::Controls, Helm::Console] {
+        for busy in [
+            Helm::Paused,
+            Helm::Options,
+            Helm::Display,
+            Helm::Controls,
+            Helm::Console,
+        ] {
             let mut app = keyed_app();
             app.world_mut().resource_mut::<NextState<Helm>>().set(busy);
             app.update();
