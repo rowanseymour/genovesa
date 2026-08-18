@@ -567,7 +567,7 @@ fn embark_or_land(
             // the whole exchange local.
             if let Some(online) = online {
                 online.connection.disembark(spot);
-                fleet.hand_back(&mut commands, hull_entity, &hull_place);
+                fleet.hand_back(&mut commands, hull_entity, Some(&hull_place));
             }
         }
         None => {

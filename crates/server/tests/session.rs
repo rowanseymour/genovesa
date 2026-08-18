@@ -340,6 +340,29 @@ impl Client {
         }
     }
 
+    /// Whether the session said nothing about any boat — which is what a
+    /// refusal with no state to show sounds like on this half of the wire:
+    /// a lower that was not granted, or an ask after a hull that is not
+    /// there to answer.
+    ///
+    /// Bracketed rather than waited for, exactly as
+    /// [`Client::nothing_was_said_about_a_cairn`] is, and for the same
+    /// reason: silence has no arrival to wait for, so a reply to a line
+    /// typed *after* the ask is the proof that whatever the ask had to say
+    /// has been said already.
+    fn nothing_was_said_about_a_boat(&self) -> bool {
+        self.say(ToServer::Command {
+            line: "help".to_string(),
+        });
+        loop {
+            match ToClient::read(&mut &self.0).expect("read") {
+                ToClient::Boat { .. } | ToClient::BoatGone { .. } => return false,
+                ToClient::Reply { .. } => return true,
+                _ => {}
+            }
+        }
+    }
+
     /// The next word about a beast of the wanted kind, ignoring everything
     /// else — bounded, because the rest of the session chatters on
     /// regardless and a world that raises no such beast would otherwise keep
@@ -1201,6 +1224,149 @@ fn a_tender_is_lowered_alongside_and_the_ship_left_at_anchor() {
 }
 
 #[test]
+fn a_boat_is_lowered_from_a_ships_helm_alongside_and_from_nowhere_else() {
+    let addr = host(7);
+    let (client, _id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a newcomer's story starts aboard");
+    let (told, ..) = client.hear_a_boat_kinded();
+    assert_eq!(told, ship);
+
+    // At the ship's helm, but asking for the boat to go in across the bay:
+    // a tender is lowered over the side, not sent to the far shore.
+    client.say(ToServer::Lower {
+        position: spawn + Vec2::new(500.0, 0.0),
+        heading: 0.0,
+    });
+    assert!(
+        client.nothing_was_said_about_a_boat(),
+        "a tender was lowered across the bay"
+    );
+
+    // Afoot: a walker has no ship under them to lower anything from.
+    client.say(ToServer::Disembark { position: spawn });
+    let (told, _k, _at, _h, occupant) = client.hear_a_boat_kinded();
+    assert_eq!((told, occupant), (ship, None));
+    client.say(ToServer::Lower {
+        position: spawn + Vec2::new(3.0, 0.0),
+        heading: 0.0,
+    });
+    assert!(
+        client.nothing_was_said_about_a_boat(),
+        "somebody on their own feet lowered a boat"
+    );
+
+    // And from the thwarts of the boat itself: a dinghy carries no dinghy.
+    // Back aboard the ship first, and down into its boat.
+    client.say(ToServer::Board { boat: ship });
+    let (told, ..) = client.hear_a_boat_kinded();
+    assert_eq!(told, ship);
+    let alongside = spawn + Vec2::new(3.0, 0.0);
+    client.say(ToServer::Lower {
+        position: alongside,
+        heading: 0.0,
+    });
+    let (_tender, kind, ..) = client.hear_a_boat_kinded();
+    assert_eq!(kind, BoatKind::Rowboat);
+    let _ship_at_anchor = client.hear_a_boat_kinded();
+    client.say(ToServer::Lower {
+        position: alongside + Vec2::new(1.0, 0.0),
+        heading: 0.0,
+    });
+    assert!(
+        client.nothing_was_said_about_a_boat(),
+        "a rowing boat lowered a rowing boat"
+    );
+}
+
+#[test]
+fn a_boat_lying_free_alongside_is_the_boat_that_goes_over_the_side() {
+    // Lower, step out onto the ship's own spot, take her helm again, lower
+    // again: the hull floating alongside is the one that is lowered, so the
+    // loop turns on one dinghy rather than minting one per turn.
+    let addr = host(7);
+    let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a newcomer's story starts aboard");
+    let (told, ..) = client.hear_a_boat_kinded();
+    assert_eq!(told, ship);
+
+    let alongside = spawn + Vec2::new(3.0, 0.0);
+    client.say(ToServer::Lower {
+        position: alongside,
+        heading: 0.0,
+    });
+    let (tender, ..) = client.hear_a_boat_kinded();
+    let _ship_at_anchor = client.hear_a_boat_kinded();
+
+    // Out of the tender, back aboard the ship, and over the side again.
+    client.say(ToServer::Disembark { position: spawn });
+    let (told, _k, _at, _h, occupant) = client.hear_a_boat_kinded();
+    assert_eq!((told, occupant), (tender, None));
+    client.say(ToServer::Board { boat: ship });
+    let (told, ..) = client.hear_a_boat_kinded();
+    assert_eq!(told, ship);
+    client.say(ToServer::Lower {
+        position: alongside,
+        heading: 0.5,
+    });
+
+    let (again, kind, at, heading, occupant) = client.hear_a_boat_kinded();
+    assert_eq!(again, tender, "a second hull was minted beside the first");
+    assert_eq!(kind, BoatKind::Rowboat);
+    assert_eq!(at, alongside);
+    assert_eq!(heading, 0.5, "the boat was not laid the way it was asked");
+    assert_eq!(occupant, Some(id), "the asker was not seated in the boat");
+}
+
+#[test]
+fn a_boat_left_behind_is_hoisted_when_its_keeper_lowers_another() {
+    // One boat in the water each. Sail away from the one you lowered and
+    // lower another, and the first goes out of the world — otherwise every
+    // turn of that loop leaves a hull in the file and in every future
+    // joiner's post.
+    let addr = host(7);
+    let (client, _id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a newcomer's story starts aboard");
+    let (told, ..) = client.hear_a_boat_kinded();
+    assert_eq!(told, ship);
+
+    client.say(ToServer::Lower {
+        position: spawn + Vec2::new(3.0, 0.0),
+        heading: 0.0,
+    });
+    let (left_behind, ..) = client.hear_a_boat_kinded();
+    let _ship_at_anchor = client.hear_a_boat_kinded();
+
+    // Out of it, back aboard the ship, and away — the dinghy stays where it
+    // was left, as any abandoned hull does.
+    client.say(ToServer::Disembark { position: spawn });
+    let _tender_at_anchor = client.hear_a_boat_kinded();
+    client.say(ToServer::Board { boat: ship });
+    let _her_helm = client.hear_a_boat_kinded();
+    let far = spawn + Vec2::new(400.0, 0.0);
+    client.say(ToServer::Helm {
+        position: far,
+        heading: 0.0,
+    });
+
+    // A boat over the side in the new anchorage is a new hull — the old one
+    // is nowhere near — and the old one is hoisted out of the world after
+    // the tellings that say where its keeper is.
+    client.say(ToServer::Lower {
+        position: far + Vec2::new(3.0, 0.0),
+        heading: 0.0,
+    });
+    let (tender, kind, ..) = client.hear_a_boat_kinded();
+    assert_ne!(tender, left_behind, "a boat a sea away was lowered again");
+    assert_eq!(kind, BoatKind::Rowboat);
+    let _ship_at_anchor = client.hear_a_boat_kinded();
+    assert_eq!(
+        client.hear_a_boat_gone(),
+        left_behind,
+        "the boat left behind was not hoisted out of the world"
+    );
+}
+
+#[test]
 fn boarding_the_ship_from_the_tender_hoists_it_back_aboard() {
     let addr = host(7);
     let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
@@ -1245,9 +1411,13 @@ fn boarding_the_ship_from_the_tender_hoists_it_back_aboard() {
     );
 
     // Retired means retired: asking after the hoisted hull is asking after
-    // a boat this world never made, which ends the session.
+    // nothing, and is answered with silence rather than a hang-up — a client
+    // may honestly ask after a hull whose going is still on the wire.
     client.say(ToServer::Board { boat: tender });
-    client.until_hung_up();
+    assert!(
+        client.nothing_was_said_about_a_boat(),
+        "a retired hull answered for itself"
+    );
 }
 
 #[test]

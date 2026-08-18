@@ -682,7 +682,7 @@ fn receive(
     mut ground: Option<ResMut<Ground>>,
     mut kit: crate::boat::HullKit,
     mut told: Told,
-    players: Query<(Entity, Option<&ChildOf>), With<crate::player::Player>>,
+    players: Query<Entity, With<crate::player::Player>>,
     poses: Query<&Transform, With<crate::boat::Vessel>>,
     mut lost: Local<bool>,
 ) {
@@ -837,7 +837,7 @@ fn receive(
                     );
                 }
             }
-            ToClient::BoatGone { id } => told.fleet.gone(&mut commands, &players, id),
+            ToClient::BoatGone { id } => told.fleet.gone(&mut commands, &players, &poses, id),
             ToClient::Cairn {
                 island,
                 at,
@@ -1493,6 +1493,58 @@ mod tests {
                 .count()
                 == 1
         });
+    }
+
+    #[test]
+    fn a_hull_taken_from_under_a_player_leaves_them_where_it_lay() {
+        // The order this client is not supposed to have to handle: a hull
+        // told gone while the fleet still has us aboard it, with no word
+        // first about where we went. It cannot happen on this wire — the
+        // seating is always said before the going — which is exactly why the
+        // answer to it wants pinning: a player is posed against their hull,
+        // so one taken away without a pose of their own stands at the world
+        // origin, an ocean from wherever they were.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+        let me = PlayerId(1);
+        let afloat = Vec2::new(60.0, -20.0);
+
+        (ToClient::Boat {
+            id: BoatId(2),
+            kind: protocol::BoatKind::Rowboat,
+            position: afloat,
+            heading: 0.0,
+            occupant: Some(me),
+        })
+        .write(&mut &server)
+        .expect("tender granted");
+        run_until(&mut app, "the player is seated in the boat", |app| {
+            aboard_hull(app) == Some(BoatId(2))
+        });
+
+        (ToClient::BoatGone { id: BoatId(2) })
+            .write(&mut &server)
+            .expect("tender hoisted");
+        run_until(&mut app, "the boat is out from under them", |app| {
+            aboard_hull(app).is_none()
+        });
+
+        let (place, unsettled) = app
+            .world_mut()
+            .query_filtered::<(&Transform, Has<crate::player::Unsettled>), With<crate::player::Player>>()
+            .single(app.world())
+            .expect("the player went with the hull");
+        assert_eq!(
+            place.translation.xz(),
+            afloat,
+            "the player was left at the world's origin rather than where the boat lay"
+        );
+        assert!(
+            unsettled,
+            "the player was put down without being left to find the ground"
+        );
     }
 
     #[test]

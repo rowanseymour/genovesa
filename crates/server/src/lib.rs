@@ -442,6 +442,15 @@ pub(crate) struct Player {
     /// [`BoatState::occupant`] says from the boat's side. The two are only
     /// ever written together, under the lock order [`Shared::boats`] sets.
     aboard: Option<BoatId>,
+    /// The ship's boat this player has in the water: the tender their last
+    /// [`ToServer::Lower`] put over the side, remembered so that lowering
+    /// another hoists it — one boat in the water each, see the `Lower` arm.
+    /// Not ownership, which boats do not have: it is a fact about the
+    /// player's own doing, and it says nothing about who may row the hull it
+    /// names. Session-local, like [`BoatState::virgin`], and dangling once
+    /// somebody's boarding has retired the hull — a name that no longer
+    /// answers retires nothing.
+    lowered: Option<BoatId>,
     /// When this player last asked for the night to be over, if they have —
     /// see [`ToServer::WantDawn`], which stands only for [`WAIT_LAPSE`].
     waiting_since: Option<Instant>,
@@ -1339,6 +1348,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             .map_or_else(|| shared.spawn_for(id), |record| record.position),
         token,
         aboard: None,
+        lowered: None,
         waiting_since: None,
         // Where this player has already been, taken back up: the survey is
         // the world's memory of them and picks up where it left off.
@@ -1673,10 +1683,17 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 };
                 let (answer, granted, hoisted) = {
                     let mut boats = shared.boats.held();
-                    // A boat this world never made is a broken or hostile
-                    // client, and there is no state to answer with.
+                    // A name no boat answers to is answered with silence, and
+                    // not — as it once was — with a hang-up. Ids are retired
+                    // now: a tender hoisted in is gone the instant its crew
+                    // steps aboard the ship, and any client that heard of it
+                    // may honestly ask after it in the same breath, its
+                    // [`ToClient::BoatGone`] still on the wire. There is no
+                    // state to answer with either way, and a refusal that
+                    // says nothing is what every other ungranted boarding
+                    // sounds like.
                     let Some(state) = boats.get(&boat) else {
-                        break;
+                        continue;
                     };
                     // What the asker would be stepping aboard from: their own
                     // feet, or — for a ship's helm only — the thwarts of a
@@ -1708,9 +1725,12 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                         player.aboard = Some(boat);
                         player.position = state.position;
                         // The rowing boat goes back aboard as the ship's own:
-                        // out of the world, its name retired with it.
+                        // out of the world, its name retired with it — and
+                        // no longer the boat this player has in the water,
+                        // if it was theirs to begin with.
                         if let Some(Some(tender)) = stepping_from {
                             boats.remove(&tender);
+                            player.lowered.take_if(|last| *last == tender);
                             hoisted = Some(tender);
                         }
                     }
@@ -1789,48 +1809,100 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     // one, and only alongside it — a tender is lowered over
                     // the side, not sent across the bay. Anything else is
                     // answered with the usual silence.
-                    let ship = player
-                        .aboard
-                        .and_then(|aboard| boats.get_mut(&aboard).map(|state| (aboard, state)))
-                        .filter(|(_, state)| {
+                    let ship = player.aboard.filter(|aboard| {
+                        boats.get(aboard).is_some_and(|state| {
                             state.kind == BoatKind::Sloop
                                 && state.position.distance(position) <= BOARD_GRANT
-                        });
+                        })
+                    });
                     match ship {
-                        Some((ship, state)) => {
+                        Some(ship) => {
                             // The ship is left at anchor for anyone, exactly
                             // as a disembark leaves it.
-                            state.occupant = None;
-                            state.virgin = false;
-                            let ship_told = state.told(ship);
-                            let tender = BoatId(keeper::mint());
-                            let state = BoatState {
+                            let ship_told = {
+                                let state = boats.get_mut(&ship).expect("looked up a breath ago");
+                                state.occupant = None;
+                                state.virgin = false;
+                                state.told(ship)
+                            };
+                            // A rowing boat already lying free where this one
+                            // is going *is* the boat being lowered: stepped
+                            // down into rather than minted alongside. Which
+                            // is one of the two things bounding the fleet on
+                            // this path — a client looping lower, step out,
+                            // board, lower is handed the same hull every
+                            // time, exactly as the join loop is handed the
+                            // same virgin sloop, see [`BoatState::virgin`].
+                            // A dinghy somebody else left floating there is
+                            // fair game for the same reason a free helm is:
+                            // boats have keepers, not owners.
+                            let alongside = boats
+                                .iter()
+                                .find(|(_, boat)| {
+                                    boat.kind == BoatKind::Rowboat
+                                        && boat.occupant.is_none()
+                                        && boat.position.distance(position) <= BOARD_GRANT
+                                })
+                                .map(|(&found, _)| found);
+                            let tender = alongside.unwrap_or_else(|| BoatId(keeper::mint()));
+                            let state = boats.entry(tender).or_insert(BoatState {
                                 kind: BoatKind::Rowboat,
                                 position,
                                 heading,
-                                occupant: Some(id),
+                                occupant: None,
                                 // Never virgin: a tender is somebody's doing
                                 // from the moment it touches the water, and
                                 // must never be dealt to an arrival as the
                                 // boat their story starts aboard.
                                 virgin: false,
-                            };
+                            });
+                            state.position = position;
+                            state.heading = heading;
+                            state.occupant = Some(id);
                             let tender_told = state.told(tender);
-                            boats.insert(tender, state);
+                            // And the other thing bounding it: one boat in
+                            // the water each. The last one this player put
+                            // over the side is hoisted out of the world as
+                            // this one goes in — otherwise a client that
+                            // lowers, steps out, boards and sails on leaves a
+                            // hull behind every time, and every one of them
+                            // is written to the world file and posted to
+                            // every future joiner. Only while it still lies
+                            // free: a hull somebody is sitting in is theirs
+                            // until they step out of it, and a name that no
+                            // longer answers has nothing to retire.
+                            let hoisted = player
+                                .lowered
+                                .replace(tender)
+                                .filter(|last| *last != tender)
+                                .filter(|last| {
+                                    boats
+                                        .get(last)
+                                        .is_some_and(|state| state.occupant.is_none())
+                                });
+                            if let Some(last) = hoisted {
+                                boats.remove(&last);
+                            }
                             player.aboard = Some(tender);
                             player.position = position;
-                            Some((tender_told, ship_told))
+                            Some((tender_told, ship_told, hoisted))
                         }
                         None => None,
                     }
                 };
-                if let Some((tender_told, ship_told)) = &granted {
+                if let Some((tender_told, ship_told, hoisted)) = &granted {
                     // The rowing boat first — that telling is what seats the
                     // asker — and only then the ship it stepped down from,
                     // so no client ever holds a helm the world has already
-                    // given away.
+                    // given away. The hull the world took back last of all,
+                    // on the same rule the hoist of a tender goes by: nobody
+                    // hears of a boat vanishing before they have heard where
+                    // its crew went.
                     broadcast_all(&players, tender_told.clone());
                     broadcast_all(&players, ship_told.clone());
+                    if let Some(last) = hoisted {
+                        broadcast_all(&players, ToClient::BoatGone { id: *last });
+                    }
                 }
                 drop(players);
                 // Stepping down moves the player at most a boat-length, and

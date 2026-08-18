@@ -239,10 +239,11 @@ const SHIP: Hull = Hull {
 };
 
 /// The rowing boat: the small end of the fleet, and [`ROWBOAT_MODEL`]'s
-/// subject. Nothing in the world deals one out yet — see the module doc —
-/// so these numbers serve the dev switch; the dimensions are the model's,
-/// and `the_rowboat_model_is_the_dinghy_the_game_floats` holds the file to
-/// them the way the ship's tests hold its.
+/// subject. The ship's boat, lowered alongside to put somebody ashore and
+/// rowed in from there — how every landing happens, see
+/// `player::embark_or_land`. The dimensions are the model's, and
+/// `the_rowboat_model_is_the_dinghy_the_game_floats` holds the file to them
+/// the way the ship's tests hold its.
 const ROWBOAT: Hull = Hull {
     // A dinghy rather than a skiff: the model was recut smaller and
     // shallower the day the sea learned to cut a hole around an open hull —
@@ -723,15 +724,28 @@ impl Fleet {
     /// Gives our hull back to its moorings — what stepping ashore does. The
     /// sailing systems come off, the hull holds station where it lies until
     /// a telling moves it, and the fleet stops calling any helm ours.
-    pub fn hand_back(&mut self, commands: &mut Commands, hull: Entity, pose: &Transform) {
+    ///
+    /// `pose` is where the hull is standing, which is where it is moored: the
+    /// caller reads it off the scene, and a hull spawned earlier in this same
+    /// batch of tellings has none there yet. Optional for exactly that
+    /// reason — the *bookkeeping* must happen either way, or the fleet goes
+    /// on calling a helm ours after the telling took it away. Left unmoored,
+    /// the hull is moored by the next telling about it, which is on the wire
+    /// already: nothing takes a helm from us without saying where the hull
+    /// it left us is.
+    pub fn hand_back(&mut self, commands: &mut Commands, hull: Entity, pose: Option<&Transform>) {
         if let Some(boat) = self.helmed.take() {
             self.crews.remove(&boat);
         }
-        let forward = pose.forward();
-        commands.entity(hull).remove::<Boat>().insert(ToldHull {
-            position: pose.translation.xz(),
-            heading: f32::atan2(-forward.x, -forward.z),
-        });
+        let mut hull = commands.entity(hull);
+        hull.remove::<Boat>();
+        if let Some(pose) = pose {
+            let forward = pose.forward();
+            hull.insert(ToldHull {
+                position: pose.translation.xz(),
+                heading: f32::atan2(-forward.x, -forward.z),
+            });
+        }
     }
 
     /// A word about a boat: the first spawns its hull, every later one
@@ -753,7 +767,7 @@ impl Fleet {
         &mut self,
         commands: &mut Commands,
         kit: &mut HullKit,
-        players: &Query<(Entity, Option<&ChildOf>), With<Player>>,
+        players: &Query<Entity, With<Player>>,
         poses: &Query<&Transform, With<Vessel>>,
         me: PlayerId,
         id: BoatId,
@@ -779,11 +793,11 @@ impl Fleet {
             // this is the defence for the word arriving out of that order:
             // believed, because the server is the authority on whose hands
             // are on a helm. Before the crew bookkeeping, which the telling's
-            // own word should have the last say on.
-            if let Ok(pose) = poses.get(hull) {
-                let pose = *pose;
-                self.hand_back(commands, hull, &pose);
-            }
+            // own word should have the last say on. Whether or not the scene
+            // can say where the hull stands: this telling moors it below on
+            // its own word, which is the better mooring of the two anyway.
+            let pose = poses.get(hull).ok().copied();
+            self.hand_back(commands, hull, pose.as_ref());
         }
 
         match occupant {
@@ -799,10 +813,8 @@ impl Fleet {
                 // own telling follows on the wire, the grant being sent first
                 // exactly so that no client holds two helms between them.
                 if let Some(former) = self.former_hull() {
-                    if let Ok(pose) = poses.get(former) {
-                        let pose = *pose;
-                        self.hand_back(commands, former, &pose);
-                    }
+                    let pose = poses.get(former).ok().copied();
+                    self.hand_back(commands, former, pose.as_ref());
                 }
                 // The hull comes off its moorings and under the sailing
                 // systems, snapped to where the server says it lies, and the
@@ -815,7 +827,7 @@ impl Fleet {
                     Transform::from_xyz(position.x, 0.0, position.y)
                         .with_rotation(Quat::from_rotation_y(heading)),
                 ));
-                if let Ok((player, _)) = players.single() {
+                if let Ok(player) = players.single() {
                     commands
                         .entity(player)
                         .remove::<DespawnOnExit<AppState>>()
@@ -847,17 +859,24 @@ impl Fleet {
         self.helmed.and_then(|held| self.hulls.get(&held)).copied()
     }
 
-    /// A boat is out of the world — a tender hoisted back aboard a ship.
-    /// The hull despawns; a player the fleet still believed aboard it — a
-    /// seating telling lost or out of order — is set back on their own feet
-    /// first, though the wire's order, the seating before the going, means
-    /// nobody ordinarily is. Judged by the fleet's own book rather than the
-    /// scene graph, whose parentage from a grant earlier this same frame is
-    /// still a queued command.
+    /// A boat is out of the world — a tender hoisted back aboard a ship, or
+    /// one its keeper left behind and the world took back. The hull
+    /// despawns; a player the fleet still believed aboard it — a seating
+    /// telling lost or out of order — is stood on the water where the hull
+    /// was and left [`crate::player::Unsettled`] to find the ground, exactly
+    /// as `net::enter_afoot` puts down a player who enters on their own
+    /// feet. Their pose was the hull's to hold, so leaving them with it
+    /// would drop them at the world origin. Ordinarily nobody is: the wire
+    /// says who is seated where before it says a hull is gone.
+    ///
+    /// Judged by the fleet's own book rather than the scene graph, whose
+    /// parentage from a grant earlier this same frame is still a queued
+    /// command.
     pub fn gone(
         &mut self,
         commands: &mut Commands,
-        players: &Query<(Entity, Option<&ChildOf>), With<Player>>,
+        players: &Query<Entity, With<Player>>,
+        poses: &Query<&Transform, With<Vessel>>,
         id: BoatId,
     ) {
         let Some(hull) = self.hulls.remove(&id) else {
@@ -865,11 +884,25 @@ impl Fleet {
         };
         self.crews.remove(&id);
         if self.helmed.take_if(|held| *held == id).is_some() {
-            if let Ok((player, _)) = players.single() {
-                commands
-                    .entity(player)
+            if let Ok(player) = players.single() {
+                let mut player = commands.entity(player);
+                player
                     .remove::<ChildOf>()
                     .insert(DespawnOnExit(AppState::InWorld));
+                if let Ok(pose) = poses.get(hull) {
+                    // The hull's place, and the way it was pointing — its
+                    // yaw alone, a heeling boat being no reason to stand
+                    // somebody at an angle. Sea level to start with, like
+                    // any other entry afoot: the ground is what settles it.
+                    let at = pose.translation;
+                    let forward = pose.forward();
+                    player.insert((
+                        Transform::from_xyz(at.x, 0.0, at.z).with_rotation(Quat::from_rotation_y(
+                            f32::atan2(-forward.x, -forward.z),
+                        )),
+                        crate::player::Unsettled,
+                    ));
+                }
             }
         }
         commands.entity(hull).despawn();
@@ -2107,9 +2140,34 @@ mod tests {
             .kind
     }
 
-    fn cut_for(app: &mut App) -> bool {
-        let hull = hull(app);
+    fn cut_for(app: &mut App, hull: Entity) -> bool {
         app.world().entity(hull).contains::<OpenHull>()
+    }
+
+    /// The one hull of a kind in the match — once the boat is down there are
+    /// two, and a test usually means one of them by name.
+    fn hull_rigged(app: &mut App, kind: BoatKind) -> Entity {
+        let hulls: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<(Entity, &Rigged), With<Vessel>>()
+            .iter(app.world())
+            .filter(|(_, rigged)| rigged.0 == kind)
+            .map(|(hull, _)| hull)
+            .collect();
+        assert_eq!(hulls.len(), 1, "expected exactly one {kind:?} in the world");
+        hulls[0]
+    }
+
+    /// One press of the gunwale key, released again afterwards — which at a
+    /// ship's helm is the whole of putting the boat in the water, this app
+    /// having no server to ask.
+    fn press_board(app: &mut App) {
+        hold(app, KeyCode::KeyF);
+        run_frames(app, 1);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyF);
+        run_frames(app, 1);
     }
 
     fn stood_at(app: &mut App) -> f32 {
@@ -2122,17 +2180,148 @@ mod tests {
     }
 
     /// A hull's kind is settled the moment it is rigged and never changes:
-    /// what it is dressed as, sailed as, and stood upon are one answer. The
-    /// rowboat's half of the story is exercised through the gunwale key —
-    /// see `player`'s tests — lowering being the only way one enters a
-    /// world.
+    /// what it is dressed as, sailed as, and stood upon are one answer.
     #[test]
     fn a_hull_is_rigged_and_sailed_as_the_kind_it_was_spawned() {
         let mut app = test_app();
+        let ship = hull(&mut app);
         assert_eq!(rigged(&mut app), BoatKind::Sloop);
         assert_eq!(sailed(&mut app), BoatKind::Sloop);
-        assert!(!cut_for(&mut app), "a closed hull needs no hole");
+        assert!(!cut_for(&mut app, ship), "a closed hull needs no hole");
         assert_eq!(stood_at(&mut app), SHIP.helm_deck);
+    }
+
+    /// And the rowboat's half of the same answer, reached the only way one
+    /// enters a world: lowered from the ship by the gunwale key. The hole is
+    /// the half nothing else would notice going missing — an open boat that
+    /// was never cut for is drawn with the sea standing in its bilges, which
+    /// is a thing to see rather than a thing to fail on.
+    #[test]
+    fn a_lowered_boat_is_rigged_as_a_rowboat_and_the_sea_is_cut_for_it() {
+        let mut app = test_app();
+        press_board(&mut app);
+
+        let tender = hull_rigged(&mut app, BoatKind::Rowboat);
+        assert_eq!(
+            app.world().entity(tender).get::<Boat>().map(Boat::kind),
+            Some(BoatKind::Rowboat),
+            "the boat that went in the water is not sailed as one"
+        );
+        assert!(cut_for(&mut app, tender), "an open boat wants its hole");
+        assert_eq!(stood_at(&mut app), ROWBOAT.helm_deck);
+        // And the ship it came off keeps its own kind and its own deck: a
+        // hull is rigged once, at spawn, and nothing about the lowering
+        // reaches back to it.
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        assert!(!cut_for(&mut app, ship), "a closed hull needs no hole");
+    }
+
+    /// The sea carries one hole and a world can hold several open hulls, so
+    /// which one gets it is a choice — and the one the player is aboard is
+    /// the only one whose bilges the camera is actually looking into.
+    #[test]
+    fn the_hole_in_the_sea_follows_the_boat_the_player_is_aboard() {
+        let mut app = test_app();
+        // A sea to write to. The real one is dressed by the terrain plugin,
+        // which needs a window to draw in; this is that setup with nothing
+        // but the material and its depth window, which is all the hole is
+        // written through.
+        app.init_asset::<Image>().init_asset::<sea::SeaMaterial>();
+        let depth = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(sea::depth_image());
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<sea::SeaMaterial>>()
+            .add(sea::SeaMaterial {
+                base: StandardMaterial::default(),
+                extension: sea::SeaExtension::new(depth.clone(), Vec2::ZERO),
+            });
+        app.insert_resource(sea::DepthWindow::new(depth, material.clone(), Vec2::ZERO));
+
+        // Two open boats a long way apart — the bare hulls the system reads,
+        // no models needed — and the player put aboard the further one.
+        let open = ROWBOAT.open_footprint.expect("the rowboat is an open boat");
+        let (first, carrier) = (Vec2::new(-300.0, 0.0), Vec2::new(300.0, 0.0));
+        for at in [first, carrier] {
+            app.world_mut()
+                .spawn((Vessel, open, Transform::from_xyz(at.x, 0.0, at.y)));
+        }
+        let aboard = app
+            .world_mut()
+            .query_filtered::<(Entity, &Transform), With<OpenHull>>()
+            .iter(app.world())
+            .find(|(_, pose)| pose.translation.xz() == carrier)
+            .map(|(hull, _)| hull)
+            .expect("the boats were just spawned");
+        let player = app
+            .world_mut()
+            .query_filtered::<Entity, With<Player>>()
+            .single(app.world())
+            .expect("a match should have a player in it");
+        app.world_mut().entity_mut(player).insert(ChildOf(aboard));
+        run_frames(&mut app, 1);
+
+        // The hole's centre is the footprint's, a fraction of a metre abaft
+        // the hull's own origin — so which boat it is cut for is not in
+        // question at six hundred metres.
+        let hole = app
+            .world()
+            .resource::<Assets<sea::SeaMaterial>>()
+            .get(&material)
+            .expect("the sea's material")
+            .extension
+            .hole;
+        let cut_at = Vec2::new(hole.x, hole.y);
+        assert!(
+            cut_at.distance(carrier) < open.abaft + 0.1,
+            "the sea was cut at {cut_at}, not under the boat the player is in"
+        );
+    }
+
+    /// Which side the ship's boat goes in on: the shoreward one, when the
+    /// ground under either beam says which that is.
+    #[test]
+    fn the_tender_goes_in_on_the_shoreward_side() {
+        let ground = test_ground();
+        // Lying off the island's own slope, near enough in that the two
+        // beams stand over ground of visibly different heights. Facing
+        // *away* from the island, so that the shoreward side is starboard
+        // and an answer of port would be the fallback rather than the rule.
+        let at = Vec2::new(TEST_ISLAND_REACH - 10.0, 0.0);
+        let ship = Transform::from_xyz(at.x, 0.0, at.y)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI));
+        let (berth, heading) = tender_berth(&ship, Some(&ground));
+        assert!(
+            berth.x < at.x,
+            "the boat went in at {berth}, on the seaward side of a ship at {at}"
+        );
+        // Clear of both hulls' planking, and pointed the way the ship lies:
+        // a tender is lowered over the side, not aimed.
+        let abeam = berth.distance(at);
+        assert!(
+            abeam > (SHIP.beam + ROWBOAT.beam) / 2.0,
+            "the boat went in {abeam} m abeam, inside the ship's own planking"
+        );
+        // Half a turn is half a turn whichever way it is written down.
+        assert!(
+            (heading.abs() - std::f32::consts::PI).abs() < 1e-5,
+            "the boat was laid at {heading}, not along a ship lying at PI"
+        );
+    }
+
+    #[test]
+    fn the_tender_goes_in_to_port_when_no_ground_says_otherwise() {
+        // Open water, or ground that has not arrived: no side is shoreward,
+        // and port is the habit sailors would expect.
+        let ship = Transform::IDENTITY;
+        let (berth, _heading) = tender_berth(&ship, None);
+        assert!(
+            berth.x < 0.0,
+            "with nothing to go on the boat went in to starboard, at {berth}"
+        );
+        assert_eq!(berth.y, 0.0, "the boat went in fore or aft of abeam");
     }
 
     #[test]

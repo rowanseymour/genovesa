@@ -427,6 +427,14 @@ pub enum ToServer {
     /// disembark leaves it. A refusal is the usual silence, the world being
     /// as the asker last heard it.
     ///
+    /// The hull that is lowered need not be a new one, and a grant may take
+    /// one away: a rowing boat already lying free where this one is asked
+    /// for is the boat that goes over the side, and whatever boat the asker
+    /// last lowered is hoisted out of the world if it still lies free —
+    /// [`ToClient::BoatGone`], after the two tellings above. A player has
+    /// one boat in the water at a time; a client that draws its own tender
+    /// before the answer comes must be ready for either.
+    ///
     /// The way back aboard is [`ToServer::Board`] from the rowing boat's
     /// thwarts: the grant seats the asker at the ship's helm and the tender
     /// is hoisted back in — see [`ToClient::BoatGone`].
@@ -660,10 +668,16 @@ pub enum ToClient {
         occupant: Option<PlayerId>,
     },
     /// A boat is out of the world: a rowing boat hoisted back aboard the
-    /// ship whose boarding it carried — see [`ToServer::Board`]. The id is
-    /// retired with it; a client drops the hull. Unlike a beast's going this
-    /// is not a matter of who is near enough to care: a boat was told to
-    /// everyone, so everyone hears when it stops being there to see.
+    /// ship whose boarding it carried — see [`ToServer::Board`] — or the one
+    /// its keeper left floating somewhere when they lowered another, see
+    /// [`ToServer::Lower`]. The id is retired with it; a client drops the
+    /// hull. Unlike a beast's going this is not a matter of who is near
+    /// enough to care: a boat was told to everyone, so everyone hears when
+    /// it stops being there to see.
+    ///
+    /// A name so retired is answered with silence if anything asks after it,
+    /// never with a hang-up: a client may honestly still have this message
+    /// in flight when it sends a [`ToServer::Board`] naming the hull.
     BoatGone {
         id: BoatId,
     },
