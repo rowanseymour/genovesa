@@ -135,6 +135,15 @@ const LONGEST: f32 = 2.5;
 /// Thin enough and nothing is ever inside it. Not zero: a scale of zero
 /// cannot be inverted, and the shader would be handed NaN for every
 /// coordinate it asked for.
+///
+/// All of which is a way round somebody else's bug, and it has a number:
+/// <https://github.com/bevyengine/bevy/issues/24836>. A light texture is not
+/// a decal and was never meant to be clustered as one; the engine's GPU
+/// clustering counted it as one anyway. It is fixed on the engine's main
+/// branch and in no release this has ever built against, so the thing to do
+/// on the next engine bump is read that issue: once the fix is in the version
+/// `Cargo.toml` names, this constant has nothing left to dodge and should go,
+/// depth and all.
 const NO_DEPTH: f32 = 1e-6;
 
 /// The clouds, as they stand: the mask itself, and how far downwind the
