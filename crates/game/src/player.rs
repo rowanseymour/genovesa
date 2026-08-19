@@ -34,6 +34,7 @@ use protocol::BoatKind;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::{spawn_hull, tender_berth, Boat, Fleet, HullId, HullKit, Rigged, Vessel};
+use crate::cairn::{Cairn, BERTH};
 use crate::chart::Chart;
 use crate::figure::FigurePlugin;
 use crate::net::Online;
@@ -396,6 +397,37 @@ fn wading(ground: Option<&Ground>, at: Vec2) -> f32 {
     }
 }
 
+/// Every cairn this client has been told of, as a query — the only solid thing
+/// in the world. `Without<Player>` because Bevy cannot see that a cairn is
+/// never the walker, and the walker's own transform is held mutably.
+type Stones<'w, 's> = Query<'w, 's, &'static Transform, (With<Cairn>, Without<Player>)>;
+
+/// Whether a step would walk into a pillar of stone.
+///
+/// A rule about the step rather than a shape to intersect — the same choice the
+/// ground is made solid by, where a cliff is a limit on the climb and not a
+/// wall. A cairn is a stack of rock about a metre across, so "is there a cairn
+/// where I am putting my foot" is a handful of distances against the few a
+/// client has been told of.
+///
+/// Refused only when the step goes *further in*. A claim raises a cairn where
+/// the claimant is standing, so that is the one place somebody is certain to be
+/// inside the berth; every step that lengthens the distance is allowed, so they
+/// walk out of it. That is [`wading`]'s shoreward clause again, and for the
+/// same reason: a rule that can trap somebody is a bug however rarely it fires.
+/// A step *along* the berth is allowed too, so a walker turned back rounds the
+/// stones rather than sticking on them — the climb rule's contour clause in
+/// another shape.
+///
+/// [`BERTH`] is the cairn's own: how much room a pillar takes up is a fact
+/// about the pillar.
+fn barged(cairns: &Stones, from: Vec2, to: Vec2) -> bool {
+    cairns.iter().any(|stones| {
+        let stones = stones.translation.xz();
+        to.distance(stones) < BERTH && to.distance(stones) < from.distance(stones)
+    })
+}
+
 /// Every hull the gunwale key might mean, as a query: where each lies, what
 /// kind it was rigged as, the sailing state of the one this player steers —
 /// the others have none — and the name it answers to on the wire, which is
@@ -641,7 +673,7 @@ fn landing(ground: Option<&Ground>, boat: &Transform) -> Option<(Vec2, f32)> {
 /// stands when not. Standing is exact — an idle walker's transform goes
 /// unwritten frame after frame, the same stillness an idle boat holds.
 ///
-/// Two things can refuse a step, and a step has to satisfy both.
+/// Three things can refuse a step, and a step has to satisfy all of them.
 ///
 /// The water is [`wading`]'s answer, judged like the keel's: the step is
 /// allowed into walkable ground, or anywhere no *deeper* than where they
@@ -658,14 +690,20 @@ fn landing(ground: Option<&Ground>, boat: &Transform) -> Option<(Vec2, f32)> {
 /// That is a limit on the step and not on the spot, so it turns a walker back
 /// from a cliff without pinning them against it — the face of a bluff can be
 /// crossed along its contour, as a person picks their way across a steep
-/// hillside. Between the two rules the climb has the last word: the shoreward
-/// clause frees a walker merely out of their depth, not one standing under a
-/// drop-off, who has nowhere to go until the water falls.
+/// hillside.
+///
+/// The stone is [`barged`]'s: a cairn is the one built thing in this world with
+/// any substance to it, and a step into one is not taken.
+///
+/// Between the three the climb has the last word: the shoreward clause frees a
+/// walker merely out of their depth, not one standing under a drop-off, who has
+/// nowhere to go until the water falls.
 fn walk(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     time: Res<Time>,
     ground: Option<Res<Ground>>,
+    cairns: Stones,
     mut players: Query<(&mut Transform, Has<ChildOf>), With<Player>>,
 ) {
     let Ok((mut transform, aboard)) = players.single_mut() else {
@@ -710,7 +748,7 @@ fn walk(
             );
             let (here, there) = (wading(ground, from), wading(ground, to));
             let wadeable = there <= 0.0 || there <= here;
-            if !wadeable || climb(ground, from, to) > WALKABLE_RISE {
+            if !wadeable || climb(ground, from, to) > WALKABLE_RISE || barged(&cairns, from, to) {
                 break;
             }
             transform.translation += stride;
@@ -1171,6 +1209,77 @@ mod tests {
             at.y > SHORE_BLUFF_FOOT - 1.0,
             "the walker stopped {} m up, nowhere near the bluff they were sent at",
             at.y
+        );
+    }
+
+    /// Stands a cairn somewhere, as the session's drain would — the component
+    /// and a transform being all [`barged`] reads, and the stones themselves
+    /// being `cairn`'s business rather than this module's.
+    fn raise_cairn(app: &mut App, at: Vec2) {
+        let height = ground_height(app, at);
+        app.world_mut().spawn((
+            Cairn {
+                island: IVec2::ZERO,
+            },
+            Transform::from_xyz(at.x, height, at.y),
+        ));
+    }
+
+    /// How far the walker is standing from a spot on the map.
+    fn away_from(app: &mut App, spot: Vec2) -> f32 {
+        player_transform(app).translation.xz().distance(spot)
+    }
+
+    #[test]
+    fn a_cairn_stops_the_walker_at_arms_length() {
+        // The only solid thing in the world. Marched straight at one, the
+        // walker fetches up against it rather than strolling through the
+        // stones — and fetches up *at* it, not turned back somewhere short of
+        // it by a rule that reaches further than the pillar does.
+        let mut app = shore_app();
+        go_ashore(&mut app);
+        face(&mut app, Vec2::NEG_X);
+        let stood = player_transform(&mut app).translation.xz();
+        let stones = stood + Vec2::new(-6.0, 0.0);
+        raise_cairn(&mut app, stones);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 300);
+
+        let off = away_from(&mut app, stones);
+        assert!(
+            off >= BERTH - 1e-3,
+            "the walker ended {off} m from the middle of a cairn, inside its {BERTH} m berth"
+        );
+        assert!(
+            off < BERTH + 0.5,
+            "the walker stopped {off} m off a cairn they were marched at, well short of its {BERTH} m berth"
+        );
+    }
+
+    #[test]
+    fn a_cairn_raised_where_the_player_stands_lets_them_walk_out_of_it() {
+        // A claim raises a cairn where the claimant is standing, so the one
+        // place a walker is certain to be inside the berth is the moment their
+        // own claim is granted. Every step that lengthens the distance is
+        // allowed, so they walk out of it — a rule that can shut somebody
+        // inside a metre of stone is a bug however rarely it fires.
+        let mut app = shore_app();
+        go_ashore(&mut app);
+        face(&mut app, Vec2::NEG_X);
+        let stones = player_transform(&mut app).translation.xz();
+        raise_cairn(&mut app, stones);
+        assert!(
+            away_from(&mut app, stones) < BERTH,
+            "the walker was not inside the berth to begin with"
+        );
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 300);
+
+        assert!(
+            away_from(&mut app, stones) > BERTH,
+            "the walker is walled in by their own claim"
         );
     }
 

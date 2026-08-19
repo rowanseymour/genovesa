@@ -179,23 +179,33 @@ const SURVEY_SLAB: usize = 64;
 /// How near a cairn a player has to be to be told about it, in metres.
 ///
 /// A cairn is a thing standing in the world rather than an announcement, so it
-/// is told to whoever could be looking at it. Wide enough that a client has it
-/// before it has drawn the ground it stands on, and narrow enough that who
-/// holds what is something a player finds out by going there. It earns
-/// [`Knowing::Sighted`] and no more — that there is a cairn, and where; what
-/// the island is *called* costs a landing, see [`CAIRN_VISIT`].
+/// is told to whoever could be looking at it. Narrow enough that who holds what
+/// is something a player finds out by going there, and wide enough to be a
+/// *sighting* — the range at which a pale pillar on a headland is a thing you
+/// could pick out, rather than the range the server happens to be willing to
+/// say so at. It earns [`Knowing::Sighted`] and no more — that there is a
+/// cairn, and where; what the island is *called* costs a landing, see
+/// [`CAIRN_VISIT`].
 ///
 /// It does not gate a player's own claims, which they are told wherever they
 /// stand — see [`tell_the_cairns_about`], where the difference is argued.
-pub const CAIRN_SIGHT: f32 = 1_536.0;
+///
+/// It was half as wide again when a cairn was a banner on a twenty-metre staff,
+/// which carried a mile; it was cut to match the mark becoming a stone pillar
+/// at head height (see `game::cairn` for why it did). That puts it just inside
+/// the radius a client streams terrain over, where it used to sit well outside.
+/// Not load-bearing — a cairn waits unfooted and unseen until there is ground
+/// under it either way — and the easier way round: the wait is now a few frames
+/// rather than half a kilometre of sailing.
+pub const CAIRN_SIGHT: f32 = 1_000.0;
 
 /// How near a cairn a player has to come to read what is written on it, in
 /// metres.
 ///
-/// Twelve times narrower than [`CAIRN_SIGHT`], and the whole difference between
-/// the two tiers of knowing. A banner on a twenty-metre staff is a daymark: it
-/// says *somebody is here* from a mile off. A name is lettering, and lettering
-/// is read by walking up to it.
+/// Nearly eight times narrower than [`CAIRN_SIGHT`], and the whole difference
+/// between the two tiers of knowing. Stone standing on a headland says *somebody
+/// is here*, and says it to anyone who passes. A name is lettering, and
+/// lettering is read by walking up to it.
 ///
 /// Short enough that no honest voyage collects a name in passing, long enough
 /// that a player who has beached is not left hunting for the spot — a stone's
@@ -2478,7 +2488,7 @@ fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> bool 
 ///
 /// Told only when it is news, which is the whole reason [`Player::known`]
 /// exists: a player parked beside a cairn reports ten times a second, and each
-/// of those would otherwise be a message about a heap of stones that has not
+/// of those would otherwise be a message about a pillar of stone that has not
 /// moved.
 ///
 /// A walk of every claim in the world per report — bounded by how many islands

@@ -348,33 +348,36 @@ const SHOAL_SCATTER: f32 = 3.0;
 /// in pixels: what a chart draws a beacon at is the engraver's business and not
 /// the world's, so it holds its size however far the sheet is zoomed.
 ///
-/// The silhouette of the thing itself — a heap of stones, a staff out of it and
-/// a banner on the staff — rather than the plain triangle a chart draws a
-/// beacon with: a player who has seen one on a headland knows this without
-/// being told what it means.
+/// The silhouette of the thing itself — a pillar of stacked stone, tapering as
+/// it rises — rather than the plain triangle a chart draws a beacon with: a
+/// player who has walked up to one on a headland knows this without being told
+/// what it means.
 ///
 /// Drawn from the spot upward, so the *foot* of it is where the cairn stands.
-/// Centred on its position it would put the stones half a heap north of where
+/// Centred on its position it would put the stones half a pillar north of where
 /// they are, which on a chart is a lie about a landmark.
 ///
-/// The proportions are the standing thing's own: a heap broader than it is
-/// tall, a staff several times its height, and a tall square-ended banner down
-/// one side of the top. A steep mound under a short pole with a tapering
-/// pennant on it is the flag on a golf green.
+/// The proportions are the standing thing's own, exaggerated as an engraver's
+/// are: taller against its width than the stone is, because at this size a
+/// true-proportioned pillar is a squat blob and it is the *taper* that has to
+/// survive being three pixels wide. Courses are not drawn — they would close
+/// into a smudge, where the mark's one job is being told from a rock, a dot and
+/// a letter at a glance.
 ///
 /// Drawn hollow, which took three tries to find. Filled, it is the only solid
 /// shape on a sheet that is otherwise all line, so it reads as a marker dropped
-/// on a map rather than as something engraved on it — and every silhouette
-/// tried that way came out as some other solid object. The banner hangs from
-/// the head of the staff and stops short of the stones, as it does on the thing
-/// itself; run down to meet them the three shapes close up into one.
-const CAIRN_HEAP: Vec2 = Vec2::new(12.0, 5.0);
-const CAIRN_STAFF: f32 = 15.0;
-const CAIRN_BANNER: Vec2 = Vec2::new(6.5, 8.0);
+/// on a map rather than as something engraved on it — at this size an ink blot
+/// with a slightly wonky edge.
+const CAIRN_PILLAR: Vec2 = Vec2::new(9.0, 13.0);
+/// How wide the crown is against the foot, as a fraction — the taper, which is
+/// the one thing the mark has to carry. The stone's own is about half, and half
+/// on paper reads as a wedge; this is it pulled back to where it still says
+/// *narrower at the top* without saying *tent*.
+const CAIRN_TAPER: f32 = 0.62;
 const CAIRN_WEIGHT: f32 = 1.4;
 
 /// How far a cairn's own lettering sits off its mark, in pixels — clear of the
-/// banner rather than under it, so a name is never read through the staff.
+/// crown rather than under it, so a name is never read through the stone.
 const CAIRN_NAME_GAP: f32 = 7.0;
 
 /// The hand the islands are named in: an italic cut of the Fell types, the
@@ -1116,8 +1119,8 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
     // Half a line on top of the gap, `Text2d` hanging its lettering off the
     // middle of the line where the gap is measured to the foot of it. Without
     // it the name sits half a line lower than the constant says and its
-    // descenders come down over the banner.
-    let above = (CAIRN_HEAP.y + CAIRN_STAFF + CAIRN_NAME_GAP + NAME_SIZE / 2.0) * metres_per_pixel;
+    // descenders come down over the stone.
+    let above = (CAIRN_PILLAR.y + CAIRN_NAME_GAP + NAME_SIZE / 2.0) * metres_per_pixel;
     written.extend(
         chart
             .cairns()
@@ -1156,39 +1159,30 @@ fn letter(engraver: &mut Engraver, text: String, at: Vec2, metres_per_pixel: f32
     ));
 }
 
-/// A cairn on the paper: a heap of stones, a staff out of it, and a banner.
+/// A cairn on the paper: a pillar of stone, tapering as it rises.
 ///
 /// `at` is the spot itself and the mark is built up from it — see
-/// [`CAIRN_HEAP`] for why it stands on its position rather than being centred
+/// [`CAIRN_PILLAR`] for why it stands on its position rather than being centred
 /// on it. `scale` is metres to the pixel, the mark being measured in pixels of
 /// paper and drawn in metres of world.
 ///
-/// The banner hangs one way always, and hangs rather than flies: a symbol that
-/// changed with the weather would be a chart redrawn every time the wind
-/// backed. The banner in the world streams on the true wind; the one on the
-/// paper only says there is one.
+/// One closed run of four points. The mark is deliberately the simplest shape
+/// on the sheet that is still unmistakably *made*: nothing else drawn here has
+/// a straight edge that is not a coast, and nothing else is symmetrical about a
+/// vertical.
 fn cairn_mark(out: &mut Strokes, at: Vec2, scale: f32) {
     let paper = |pixels: f32| pixels * scale;
-    let heap = paper(CAIRN_HEAP.y);
-    let crown = at + Vec2::new(0.0, heap);
-    let top = at + Vec2::new(0.0, heap + paper(CAIRN_STAFF));
-
     let weight = paper(CAIRN_WEIGHT);
-    let base = paper(CAIRN_HEAP.x) / 2.0;
-    let (wide, deep) = (paper(CAIRN_BANNER.x), paper(CAIRN_BANNER.y));
+    let foot = paper(CAIRN_PILLAR.x) / 2.0;
+    let crown = foot * CAIRN_TAPER;
+    let up = Vec2::new(0.0, paper(CAIRN_PILLAR.y));
 
-    out.run(
-        &[at - Vec2::new(base, 0.0), at + Vec2::new(base, 0.0), crown],
-        true,
-        weight,
-    );
-    out.segment(crown, top, weight);
     out.run(
         &[
-            top,
-            top + Vec2::new(wide, 0.0),
-            top + Vec2::new(wide, -deep),
-            top + Vec2::new(0.0, -deep),
+            at - Vec2::new(foot, 0.0),
+            at + Vec2::new(foot, 0.0),
+            at + up + Vec2::new(crown, 0.0),
+            at + up - Vec2::new(crown, 0.0),
         ],
         true,
         weight,

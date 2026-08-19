@@ -161,9 +161,9 @@ The one thing this machine keeps of a world between visits is the token the
 player holds it by, which by definition cannot live anywhere else.
 
 An island whose shore has been run right around, and that the player is
-standing on, can be *claimed*, and a granted claim leaves a cairn: stones, a
-staff and a banner on the headland where the claimant stood, which anybody who
-sails past can see. The claim is what earns a name — click an island you hold
+standing on, can be *claimed*, and a granted claim leaves a cairn: a pillar of
+stacked stone on the headland where the claimant stood, which anybody who walks
+up that coast can see. The claim is what earns a name — click an island you hold
 and the keyboard becomes the pen, because a chart is written on rather than
 filled in — and the name rides with the claim, so what one player reads on the
 paper is what everybody reads. That is why what a *survey* is — how ground
@@ -175,16 +175,17 @@ claimant's word for any of it.
 
 ![A cairn on a claimed island](docs/cairn.png)
 
-*A granted claim, on the scree cap of the island it speaks for. The banner
-streams on the true wind, on the same arithmetic a masthead pennant does — so
-a player anchored offshore can read the weather off somebody else's claim.*
+*A granted claim, on the scree cap of the island it speaks for. Head height,
+stacked in courses that step in as they rise, and pale enough that it is the
+lightest thing on any island — nothing the ground is drawn in is that white, so
+a mark that is says a person made it.*
 
 Nobody is announced. What one player knows of another's claims is earned by
-being there, in three steps: sight the banner from offshore and the stones go
-on the chart unlettered — somebody is here, and that is all a daymark says at a
-mile. Come near enough to read the stones — a landing, usually, though a cairn
-built on a headland can be read from a boat lying right off it — and the word
-carved on them is yours, lettered on the paper beside the mark. Whose hand
+being there, in three steps: pass close enough to pick the stones out and they
+go on the chart unlettered — somebody is here, and that is all standing stone
+says. Come near enough to read them — a landing, usually, though a cairn built
+on a headland can be read from a boat lying right off it — and the word carved
+on them is yours, lettered on the paper beside the mark. Whose hand
 carved it is never said. Sail the whole coast yourself and you have the island
 itself, drawn in the ordinary way and open to a claim of your own if nobody has
 taken it. Only the last of the three is the player's own seeing, and only the

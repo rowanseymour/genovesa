@@ -1367,9 +1367,10 @@ fn moor(
 /// The hoist hangs *below* the tie rather than straddling it, because a flag
 /// is tied at its top corner and swings from there.
 ///
-/// Its two dimensions are the caller's because there are two of these cloths at
-/// two sizes: this masthead pennant and the banner on a cairn's staff, which
-/// already share [`pennant_pose`].
+/// Its two dimensions are the caller's although only one cloth is cut from it
+/// now: a cairn flew the second off the same arithmetic and is a pillar of
+/// stone with nothing on it — see [`crate::cairn`]. A size written down at the
+/// call is what let there be two at all.
 ///
 /// The one thing it is not is flat, which is the whole reason it is three
 /// triangles. A flat pennant vanishes whenever the wind lines up with the
@@ -1381,7 +1382,7 @@ fn moor(
 /// Rigid cloth is still a lie in a calm, and [`PENNANT`]'s narrow hoist is what
 /// makes the lie cheap: at three tenths of a metre the missing fold is a hand's
 /// width, watched from forty metres up.
-pub(crate) fn pennant_mesh(length: f32, hoist: f32) -> Mesh {
+fn pennant_mesh(length: f32, hoist: f32) -> Mesh {
     let tie = Vec3::ZERO;
     let foot = Vec3::new(0.0, -hoist, 0.0);
     let fly = Vec3::new(0.0, -hoist * 0.5, -length);
@@ -1497,7 +1498,7 @@ fn trim_the_sails(
 /// The bearing is where the air is *going*: a flag is blown, and the eye reads
 /// it as blown. The droop is the whole of the strength reading, so a player who
 /// never looks at the corner of the screen still knows what the wind is doing.
-pub(crate) fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
+fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
     let (full, sag) = PENNANT_FLIES;
     let hard = (apparent.length() / full).clamp(0.0, 1.0);
     let bearing = if apparent.length() > PENNANT_CALM {
