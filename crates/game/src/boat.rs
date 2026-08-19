@@ -1327,12 +1327,11 @@ fn moor(
 /// The hoist hangs *below* the tie rather than straddling it, because a flag
 /// is tied at its top corner and swings from there.
 ///
-/// Its two dimensions are the caller's because there are two of these cloths
-/// and they are the same cloth at two sizes: this masthead pennant, and the
-/// banner on a cairn's staff — see [`crate::cairn`]. They already share
-/// [`pennant_pose`], and a second mesh built to some other convention would be
-/// a second cloth obeying the first one's arithmetic, which is a flag flying
-/// at a right angle to the wind.
+/// Its two dimensions are the caller's although only one cloth is cut from it
+/// now. A cairn used to fly a banner off the same arithmetic, and does not —
+/// see [`crate::cairn`] for why it is a pillar of stone with nothing on it. A
+/// size that is written down at the call rather than baked into the mesh costs
+/// nothing and is what let the second cloth exist at all.
 ///
 /// The one thing it is not is flat, and that is the whole reason it is three
 /// triangles instead of one. A flat pennant vanishes whenever the wind lines
@@ -1347,7 +1346,7 @@ fn moor(
 /// what makes the lie cheap: at three tenths of a metre the missing fold is a
 /// hand's width, watched from forty metres up, while the length that carries
 /// the reading is the part that behaves.
-pub(crate) fn pennant_mesh(length: f32, hoist: f32) -> Mesh {
+fn pennant_mesh(length: f32, hoist: f32) -> Mesh {
     let tie = Vec3::ZERO;
     let foot = Vec3::new(0.0, -hoist, 0.0);
     let fly = Vec3::new(0.0, -hoist * 0.5, -length);
@@ -1467,7 +1466,7 @@ fn trim_the_sails(
 /// The droop is the whole of the strength reading — flat out in a blow, dead
 /// down in a calm, and everything between — so a player who never looks at
 /// the corner of the screen still knows what the wind is doing.
-pub(crate) fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
+fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
     let (full, sag) = PENNANT_FLIES;
     let hard = (apparent.length() / full).clamp(0.0, 1.0);
     let bearing = if apparent.length() > PENNANT_CALM {

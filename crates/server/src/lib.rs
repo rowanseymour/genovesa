@@ -215,10 +215,11 @@ const SURVEY_SLAB: usize = 64;
 ///
 /// A cairn is a thing standing in the world rather than an announcement, so it
 /// is told to whoever could be looking at it: everybody nearby when one is
-/// raised or renamed, and everybody put down beside one when they join. Wide
-/// enough that a client has it before it has drawn the ground it stands on —
-/// a client streams something like a kilometre around its camera — and narrow
-/// enough that who holds what is something a player finds out by going there.
+/// raised or renamed, and everybody put down beside one when they join. Narrow
+/// enough that who holds what is something a player finds out by going there,
+/// and wide enough to be a *sighting* — the range at which a pale pillar on a
+/// headland is a thing you could pick out, rather than the range at which the
+/// server happens to be willing to say so.
 ///
 /// It does not gate a player's own claims, which they are told on joining
 /// wherever they stand — see [`tell_the_cairns_about`], where the difference
@@ -228,20 +229,35 @@ const SURVEY_SLAB: usize = 64;
 /// and where. What the island is *called* costs a landing — see
 /// [`CAIRN_VISIT`].
 ///
+/// It was half as wide again when a cairn was a banner on a twenty-metre staff
+/// — that carried a mile, and the radius was cut to match when the mark became
+/// a stone pillar at head height (see `game::cairn` for why it did). A kilometre
+/// is about as far as a pale speck on a green headland is a thing anybody can
+/// honestly claim to have seen, so this is the far tier meaning what it says:
+/// [`Knowing::Sighted`] is earned where a hull could have seen the stones, not
+/// merely where the server knows they are.
+///
+/// It now falls just inside the radius a client streams terrain over, where it
+/// used to sit well outside it. That ordering is not load-bearing — a cairn
+/// waits unfooted and unseen until there is ground under it either way, which
+/// is `game::cairn`'s business — and the way round it is now is the easier one:
+/// the ground a mark stands on has usually been asked for before the mark is
+/// told of, so the wait is a few frames rather than half a kilometre of
+/// sailing.
+///
 /// Public with [`CAIRN_VISIT`] so that a test which has to stand at a chosen
 /// remove from a cairn can work out where that is, rather than writing a
 /// distance down twice and having one of them rot.
-pub const CAIRN_SIGHT: f32 = 1_536.0;
+pub const CAIRN_SIGHT: f32 = 1_000.0;
 
 /// How near a cairn a player has to come to read what is written on it, in
 /// metres.
 ///
-/// Twelve times narrower than [`CAIRN_SIGHT`], and the whole difference between
-/// the two tiers of knowing. A banner on a twenty-metre staff is meant to be
-/// read from a mile off — that is what a daymark is for — and it says only
-/// *somebody is here*. A name is lettering, and lettering is read by walking up
-/// to it. So a passing hull learns an island is spoken for and has to land to
-/// learn whose word is on it.
+/// Nearly eight times narrower than [`CAIRN_SIGHT`], and the whole difference between
+/// the two tiers of knowing. Stone standing on a headland says only *somebody
+/// is here*, and says it to anyone who passes. A name is lettering, and
+/// lettering is read by walking up to it. So a passing hull learns an island is
+/// spoken for and has to land to learn whose word is on it.
 ///
 /// Short enough that no honest voyage collects a name in passing, and long
 /// enough that a player who has beached and walked up the shore is not left
@@ -2335,7 +2351,7 @@ fn learns(player: &mut Player, island: IVec2, claim: &Claim, near: f32) -> (Opti
 /// exists rather than this being a distance check per report. A player standing
 /// beside a cairn reports their position ten times a second; without a record
 /// of what they have already been told, each of those would be a message about
-/// a heap of stones that has not moved.
+/// a pillar of stone that has not moved.
 ///
 /// A walk of every claim in the world per report, bounded by how many islands
 /// anybody has claimed rather than by how far anybody has sailed, which is what

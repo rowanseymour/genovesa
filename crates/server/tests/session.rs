@@ -2051,9 +2051,9 @@ fn only_the_claimant_may_name_the_island() {
 
 #[test]
 fn a_passing_hull_reads_the_stones_and_a_landing_reads_the_word() {
-    // Presence-gated knowledge, in one voyage. A cairn is a daymark on a
-    // twenty-metre staff and says *somebody is here* from a mile off; the
-    // name is lettering, and lettering is read by walking up to it.
+    // Presence-gated knowledge, in one voyage. Stone standing on a headland
+    // says *somebody is here* to anybody who passes; the name is lettering,
+    // and lettering is read by walking up to it.
     let addr = host(CLAIMABLE);
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
     alice.say(ToServer::Disembark { position: ashore });
@@ -2065,8 +2065,8 @@ fn a_passing_hull_reads_the_stones_and_a_landing_reads_the_word() {
     });
     assert_eq!(alice.hear_a_cairn().2, "Ilha Verde");
 
-    // Bob stands off it — inside the reach a staff and banner carry, well
-    // outside the reach a word does. Seaward of the cairn rather than at some
+    // Bob stands off it — inside the reach a sighting carries, well outside
+    // the reach a word does. Seaward of the cairn rather than at some
     // bearing of its own, so that the way he sails to get there runs away from
     // the stones and cannot brush past them.
     let world = behind_the_curtain(CLAIMABLE);
@@ -2112,8 +2112,8 @@ fn a_claimant_walking_round_their_own_cairn_is_not_told_about_it_again() {
     assert_eq!((told, yours), (island, true));
 
     // A few paces about it, at every remove that could earn anybody anything:
-    // right beside it, a stone's throw off, and out where only the banner
-    // would show.
+    // right beside it, a stone's throw off, and out where the stones are a
+    // speck on a headland and nothing more.
     for step in [1.0, server::CAIRN_VISIT / 2.0, server::CAIRN_SIGHT / 2.0] {
         alice.say(ToServer::Move {
             position: ashore + Vec2::new(step, 0.0),

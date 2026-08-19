@@ -836,7 +836,7 @@ fn receive(
                 // Believed within the same reason the beasts are: a cairn is
                 // stood on the ground at this point every frame until the
                 // ground arrives, and one telling of a place that is not a
-                // place would be a staff at NaN for the rest of the session.
+                // place would be a pillar at NaN for the rest of the session.
                 if at.is_finite() {
                     told.cairns.told(&mut commands, island, at);
                     // The sheet and the world hear the same word. What the

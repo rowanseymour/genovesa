@@ -675,7 +675,7 @@ pub enum ToClient {
     Surveyed {
         found: Vec<(IVec2, survey::Soundings)>,
     },
-    /// A cairn: a heap of stones standing where somebody claimed an island,
+    /// A cairn: a pillar of stone standing where somebody claimed an island,
     /// which is how anybody else finds out it is spoken for.
     ///
     /// One message is both the introduction and every change after, as with

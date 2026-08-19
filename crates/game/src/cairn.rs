@@ -6,126 +6,133 @@
 //! this side is the answer: [`protocol::ToClient::Cairn`], told to whoever
 //! comes near one, the same way a beast or a boat is. This module is the half
 //! the server has no opinion on — what being claimed *looks like* from the
-//! water.
+//! ground.
 //!
 //! # Why it is a thing and not a widget
 //!
 //! The obvious way to show an island is spoken for is a label floating over
 //! it, and it is the wrong way. A player arriving at an island has their eyes
 //! on the island; a marker drawn in screen space says *the game* is telling
-//! you something, where a stone and a flag on a headland says *somebody was
-//! here*, which is the whole of what a claim means. It also has to survive
-//! being looked at from off the coast, at sea level, from a boat that is
-//! moving — so it is built as a real daymark is built: a cairn of stone for
-//! the mass, a staff for the height, and a banner for the movement, because at
-//! any distance the eye finds the thing that *moves* long before it finds the
-//! thing that is merely tall. How far it actually carries is [`STAFF`]'s
-//! business, and less far than the first draft of this paragraph claimed.
+//! you something, where a pillar of stone on a headland says *somebody was
+//! here*, which is the whole of what a claim means.
 //!
-//! The banner streams on the true wind, on the same arithmetic a boat's
-//! pennant uses — see [`crate::boat::pennant_pose`]. Cloth is cloth, and two
-//! rules for how it lies would show up the first time a player anchored off a
-//! cairn and watched their own masthead disagree with it. The *shape* is its
-//! own ([`banner_mesh`]), cut to the convention that pose aims things in: a
-//! tie at the origin, the cloth running down -Z and hanging down -Y. Built to
-//! any other convention it would be aimed across the wind rather than along
-//! it, which is what a rectangle from the shape library did.
+//! # Why it is the size of a person
+//!
+//! It was a beacon first: twenty metres of staff and seven of banner standing
+//! out of a heap six metres across, built to be read from a mile off. It read
+//! from a mile and it read as *civic* — a mast and a flag that size are what a
+//! shipyard puts up, not what one person carrying rock does in an afternoon.
+//! Stood next to the player it was worse than out of proportion: the heap alone
+//! was twice their height, so walking up to your own claim meant disappearing
+//! behind it.
+//!
+//! So it is a survey mark rather than a daymark — a pillar of dry stone a
+//! little over head height, stacked in [`COURSES`] that step in as they rise.
+//! The taper is the whole of what says *built*: rock dropped in a pile is a
+//! cone, and rock stacked to stand is a pillar, and a person reads the
+//! difference without being told it. What it costs is the mile, and that is a
+//! real cost, paid deliberately — see [`STONE`] for what is bought with it.
 //!
 //! # Standing it on the ground
 //!
 //! A cairn arrives as a point on the plane, and the height it stands at is
 //! this side's own business: the server has no camera and no need of one.
-//! Ground arrives in chunks and a cairn can be told of before the ground under
-//! it has come — the server tells them from further off than a client streams
-//! terrain, deliberately, so a daymark is in sight before the shore it stands
-//! on resolves. So a cairn waits [`Unfooted`] until there is ground to stand
-//! on, exactly as an arriving player does.
+//! Ground arrives in chunks, and a cairn can be told of before the chunk under
+//! it has landed — the telling and the chunks are separate answers travelling
+//! at their own speeds — so a cairn waits [`Unfooted`] until there is ground to
+//! stand on, exactly as an arriving player does.
 //!
-//! It waits *unseen*. The gap between the two distances is half a kilometre of
-//! sailing, and a cairn drawn at its told point before its ground arrives is a
-//! cairn standing on the open sea for the whole of the approach, which then
-//! jumps onto the headland as the shore streams in. Hidden until it is footed,
-//! the daymark simply appears with the island it belongs to.
+//! It used to be a long wait by construction: cairns were told from half a
+//! kilometre further out than terrain streamed, so the wait was the whole
+//! approach. `server::CAIRN_SIGHT` is inside the stream radius now, and the
+//! wait is usually a few frames. The rule is unchanged and has to be — what
+//! it guards against is a chunk that has not arrived, and *when* it has not
+//! arrived is not this side's to promise.
+//!
+//! It waits *unseen*. A cairn drawn at its told point before its ground
+//! arrives is a cairn standing on the open sea for the whole of the approach,
+//! which then jumps onto the headland as the shore streams in. Hidden until it
+//! is footed, the mark simply appears with the island it belongs to.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::PrimitiveTopology;
-
-use crate::boat::pennant_pose;
-use crate::sea::SeaConditions;
 use crate::terrain::Ground;
-use crate::{matte, AppState};
+use crate::{between, matte, signed, unit, AppState};
 
-/// How tall the staff stands above the stones, in metres.
+/// How tall the pillar stands, in metres — a little over head height on the
+/// person who stacked it, which is as high as anybody piles rock by hand
+/// without building steps to do it.
 ///
-/// A daymark is a thing to be seen from off the coast, and this is the number
-/// that decides from how far. It was nine metres — a human-scale flagstaff —
-/// until somebody stood one up and looked at it: against a camera that sits
-/// hundreds of metres off and terrain drawn in facets tens of metres across,
-/// nine metres is a pin on a golf green. Twenty is a beacon, which is what
-/// this is: not a flagpole somebody planted but a mark built to be found.
+/// Head height is the point of it rather than an accident of the number: a
+/// mark you can see over is landscape, and a mark you cannot is a thing
+/// somebody put there. Below about a metre and a half it reads as a stone
+/// wall's end; above two it starts wanting scaffolding to be believed.
+const PILLAR: f32 = 1.7;
+
+/// How wide the pillar is at the foot and at the crown, in metres.
 ///
-/// It does not carry a mile. Nothing built at a size this world could believe
-/// would — at a kilometre a cloth this size is a few pixels of colour, which
-/// is enough to notice and not enough to read. What carries at that range is
-/// the mark on the chart, which is the survey's business and not this one's.
-const STAFF: f32 = 20.0;
+/// The taper is the shape a stack of loose rock has to take to stand up, and
+/// so the shape that says a person stacked it. Straight-sided it is a bollard;
+/// tapered much harder than this it is back to being a heap.
+const PILLAR_WIDTH: (f32, f32) = (1.0, 0.45);
 
-/// How deep the staff is driven into the heap, in metres — a staff resting on
-/// the stones would be a staff the first blow took away. What it costs is that
-/// the head stands this much lower than [`STAFF`] above the stones, which is
-/// why the height of the head is worked out once rather than written twice.
-const SUNK: f32 = 0.8;
+/// How many courses the stones are stacked in — few enough that each is a
+/// visible step in the taper, which is what carries the drystone read at the
+/// distance the thing is actually looked at from.
+const COURSES: usize = 4;
 
-/// How far below the head of the staff the banner is tied, in metres. The
-/// staff showing above the cloth is what says *staff* rather than *pole with a
-/// flag glued on the end*.
-const TIE_BELOW: f32 = 1.2;
-
-/// The cairn of stones at its foot: how far across the base is, and how high
-/// it is heaped, in metres.
+/// How far off its own axis a course may sit, in metres, and how far round it
+/// may be turned, in radians.
 ///
-/// Wide enough to read as built rather than dropped, and low enough that the
-/// staff is plainly the tall part. Six metres across is a heap somebody spent
-/// a day on, which is the right amount of work for a thing that says *this one
-/// is mine*: at the two metres it started out as it read as a stone somebody
-/// tripped over rather than as anything anybody meant.
-const STONES: (f32, f32) = (6.0, 3.0);
+/// Nothing structural — a few centimetres and a few degrees. A pillar stacked
+/// plumb and square is a machined object, and the whole argument for the shape
+/// is that hands made it. The wobble is dealt from the island's own id, so
+/// every machine stacks one island's pillar identically and no two islands get
+/// the same pillar.
+const LEAN: f32 = 0.05;
+const SKEW: f32 = 0.5;
 
-/// The banner: how far it flies from the staff, and how deep it hangs, in
-/// metres.
+/// The stone, in the shades one course may be dealt.
 ///
-/// Big enough to be the thing the eye catches on the approach, which makes it
-/// far larger — and far deeper in proportion — than the pennant at a masthead.
-/// A masthead flag is a narrow streamer because it is read for its
-/// *direction*, by its own crew, from ten metres. This one is read by a
-/// stranger, from as far off as it carries, for being there at all: a streamer
-/// at that range is a thread, so this is a flag.
-const BANNER: (f32, f32) = (7.0, 3.6);
-
-/// The stone a cairn is piled from. The world's rock, near enough: a cairn is
-/// built out of whatever the island had, and an island's high ground is scree.
-const STONE_COLOR: Color = Color::srgb(0.55, 0.52, 0.48);
-
-/// The staff, which is driftwood or ship's timber — either way, wood that has
-/// been in the weather.
-const STAFF_COLOR: Color = Color::srgb(0.62, 0.51, 0.36);
-
-/// The banner. Not the pennant's ochre: a pennant says *whose boat*, and this
-/// says *somebody claimed this*, so they should not be mistaken for each other
-/// at a distance. Deep red reads against sky, sea, sand and green alike, which
-/// is what a daymark has to do.
-const BANNER_COLOR: Color = Color::srgb(0.72, 0.16, 0.16);
-
-/// How fast the banner swings onto a shifted wind, in radians a second.
+/// Bleached coral rag: an island in this ocean has it, one person can carry
+/// it, and it is nearly white, which is the part that does the work. Nothing
+/// the ground is drawn in goes above sand at `0.86` — see
+/// [`protocol::ground::TONES`] — so a pillar this pale is the lightest thing
+/// on any island, and light in a way no ground here is. That is what replaces
+/// the banner: at the range this is meant to be found at, the eye is looking
+/// for something that is not the palette, and a white mark against green is
+/// exactly that.
 ///
-/// Slower than a pennant, because it is bigger cloth on a fixed staff with no
-/// hull swinging under it: the only motion it has is the wind's own, so the
-/// wind's own is what has to read.
-const SWING: f32 = 2.0;
+/// Three shades rather than one because a single flat grey over four courses
+/// reads as one moulded object. Dealt per course, so the stack has stones of
+/// different rock in it, as a stack picked up off a hillside does.
+const STONE: [Color; 3] = [
+    Color::srgb(0.93, 0.92, 0.88),
+    Color::srgb(0.87, 0.86, 0.81),
+    Color::srgb(0.80, 0.79, 0.75),
+];
+
+/// How many sides a course is cut with. Five, because it is odd: a drum with
+/// an even count shows two parallel faces and a flat silhouette from half the
+/// angles a player walks round it at, and five never does.
+const FACES: u32 = 5;
+
+/// How near the middle of a pillar a walker may come, in metres — the stone's
+/// own half-width at the foot, plus a body's breadth.
+///
+/// Here rather than in `player`, because it is a fact about how big the thing
+/// is: change [`PILLAR_WIDTH`] and this is what has to move with it. What
+/// *does* the refusing is `player::walk`, which owns every rule about where a
+/// walker may put their feet.
+pub const BERTH: f32 = PILLAR_WIDTH.0 / 2.0 + 0.4;
+
+/// Salts for the courses' wobble — one question each, off the same bits. See
+/// [`crate::unit`].
+const SALT_LEAN: u32 = 0x0CA1_2117;
+const SALT_SKEW: u32 = 0x5EA5_1DE0;
+const SALT_STONE: u32 = 0xC0_2A11E5;
 
 /// The cairns this client has been told of, by the entity standing for each.
 ///
@@ -176,7 +183,7 @@ impl Cairns {
 ///
 /// Whose it is is not on it. Nothing in the world is drawn differently for a
 /// claim being the player's own — a stranger's cairn is exactly as much of a
-/// daymark as your own, and one that announced itself by its colour would be a
+/// mark as your own, and one that announced itself by its colour would be a
 /// claim nobody had to sail up to. It is the *sheet* that cares: see
 /// [`crate::chart`], which is told the same word and keeps `yours` on it.
 #[derive(Component)]
@@ -197,16 +204,6 @@ type Waiting<'w, 's> = Query<
     (With<Cairn>, With<Unfooted>),
 >;
 
-/// The banner on the staff, and the bearing it is streaming on.
-///
-/// Its own, rather than read back off the transform, for the reason a
-/// pennant's is: a calm has to leave the cloth where the last of the wind put
-/// it rather than snap it to somewhere new.
-#[derive(Component)]
-struct Banner {
-    bearing: f32,
-}
-
 /// What building a cairn needs in hand — the two asset stores and the pieces
 /// cut from them — bundled so that [`dress`] is one system parameter rather
 /// than three. Nothing else builds a cairn: the telling arrives in
@@ -216,102 +213,84 @@ struct Banner {
 struct CairnKit<'w, 's> {
     meshes: ResMut<'w, Assets<Mesh>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
-    /// The pieces every cairn is built from, made once and cloned per cairn:
-    /// an archipelago somebody has worked their way through is one banner
-    /// mesh, not forty.
+    /// The pieces every cairn is built from, made once and dealt from per
+    /// cairn: an archipelago somebody has worked their way through is four
+    /// course meshes, not forty pillars' worth.
     stonework: Local<'s, Option<Stonework>>,
 }
 
-/// The handles [`dress`] deals from — see [`CairnKit::stonework`].
+/// The handles [`dress`] deals from — see [`CairnKit::stonework`]. One mesh
+/// per course, each narrower than the one under it, and the shades a course
+/// may be cut from.
 #[derive(Clone)]
 struct Stonework {
-    stone: Handle<StandardMaterial>,
-    timber: Handle<StandardMaterial>,
-    cloth: Handle<StandardMaterial>,
-    heap: Handle<Mesh>,
-    staff: Handle<Mesh>,
-    banner: Handle<Mesh>,
+    shades: [Handle<StandardMaterial>; STONE.len()],
+    courses: [Handle<Mesh>; COURSES],
 }
 
-/// Builds the stones, the staff and the banner on a cairn that has just been
-/// heard of — see [`Cairns::told`], which puts up the bare thing.
-fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<Entity, Added<Cairn>>) {
+/// How wide a course is, and how high it sits, in metres — the taper worked
+/// out in one place so that the mesh and nothing else decides it.
+///
+/// A course is a drum of constant width, and the width is the pillar's at the
+/// middle of the band it fills, so the taper comes out as steps rather than as
+/// a smooth cone. That is what a stacked pillar does: each course is whatever
+/// the stones in it are, and it is the *stack* that narrows.
+fn course(nth: usize) -> (f32, f32) {
+    let deep = PILLAR / COURSES as f32;
+    let (foot, crown) = PILLAR_WIDTH;
+    let up = (nth as f32 + 0.5) / COURSES as f32;
+    (foot + (crown - foot) * up, deep * (nth as f32 + 0.5))
+}
+
+/// Stacks the courses on a cairn that has just been heard of — see
+/// [`Cairns::told`], which puts up the bare thing.
+fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<(Entity, &Cairn), Added<Cairn>>) {
     if raised.is_empty() {
         return;
     }
-    let (across, high) = STONES;
-    let (flies, hangs) = BANNER;
     let stonework = kit
         .stonework
         .get_or_insert_with(|| Stonework {
-            stone: kit.materials.add(matte(STONE_COLOR)),
-            timber: kit.materials.add(matte(STAFF_COLOR)),
-            // Drawn from both faces, as the boat's cloth is: a banner left
-            // single-sided would wink out every time the wind put its back to
-            // the camera, which for a fixed staff is half of every day.
-            cloth: kit.materials.add(StandardMaterial {
-                double_sided: true,
-                cull_mode: None,
-                ..matte(BANNER_COLOR)
+            shades: std::array::from_fn(|nth| kit.materials.add(matte(STONE[nth]))),
+            // Flat-shaded, which is the world's own language, and unwelded
+            // first: flat normals cannot be computed over shared vertices,
+            // which is a panic rather than a warning and does not show up
+            // until something actually builds the mesh.
+            courses: std::array::from_fn(|nth| {
+                let (across, _) = course(nth);
+                kit.meshes.add(
+                    Cylinder::new(across / 2.0, PILLAR / COURSES as f32)
+                        .mesh()
+                        .resolution(FACES)
+                        .build()
+                        .with_duplicated_vertices()
+                        .with_computed_flat_normals(),
+                )
             }),
-            // A cone rather than a dome: heaped stone stands at the angle
-            // loose rock stands at, and the flat facets of a low-sided cone
-            // are what a pile of rock looks like in a world with no textures
-            // in it.
-            // Seven sides and its own normals per facet, which is the world's
-            // own language: everything here is flat-shaded, and the shape
-            // library's default cone is smooth enough to read as a grey egg
-            // sitting on faceted ground. The vertices are unwelded first —
-            // flat normals cannot be computed over shared ones, which is a
-            // panic rather than a warning and does not show up until
-            // something actually builds the mesh.
-            heap: kit.meshes.add(
-                Cone::new(across / 2.0, high)
-                    .mesh()
-                    .resolution(7)
-                    .build()
-                    .with_duplicated_vertices()
-                    .with_computed_flat_normals(),
-            ),
-            staff: kit.meshes.add(Cylinder::new(0.09, STAFF)),
-            // The masthead's own cloth at another size, and it has to be: the
-            // pose it is aimed by is the pennant's — tie at the origin, cloth
-            // down -Z and hanging -Y — and a rectangle from the shape library
-            // lies in the XY plane about its own middle, which is a banner
-            // aimed across the wind, straddling the staff, and swinging flat
-            // into the horizontal every time the wind drops.
-            banner: kit.meshes.add(banner_mesh(flies, hangs)),
         })
         .clone();
 
-    // The head of the staff, which is what the banner is tied below and the
-    // one height in a cairn that is worked out rather than written down.
-    let head = high + STAFF - SUNK;
-    for cairn in &raised {
+    for (cairn, island) in &raised {
         commands.entity(cairn).with_children(|children| {
-            children.spawn((
-                Name::new("Stones"),
-                Mesh3d(stonework.heap.clone()),
-                MeshMaterial3d(stonework.stone.clone()),
-                Transform::from_xyz(0.0, high / 2.0, 0.0),
-            ));
-            children.spawn((
-                Name::new("Staff"),
-                Mesh3d(stonework.staff.clone()),
-                MeshMaterial3d(stonework.timber.clone()),
-                // Standing in the heap rather than on it — see [`SUNK`].
-                Transform::from_xyz(0.0, head - STAFF / 2.0, 0.0),
-            ));
-            children.spawn((
-                Name::new("Banner"),
-                Banner { bearing: 0.0 },
-                Mesh3d(stonework.banner.clone()),
-                MeshMaterial3d(stonework.cloth.clone()),
-                // The tie, which is where the cloth is made fast and so the
-                // only part of the banner that stays put: the rest of it is
-                // [`fly_the_banner`]'s, and hangs and streams from here.
-                Transform::from_xyz(0.0, head - TIE_BELOW, 0.0),
-            ));
+            for nth in 0..COURSES {
+                let (_, up) = course(nth);
+                // The island's own id and the course's place in the stack, so
+                // that one island is stacked the same way on every machine and
+                // two islands are not stacked alike — see [`LEAN`].
+                let bits = (island.island.x as u32)
+                    ^ (island.island.y as u32).rotate_left(16)
+                    ^ (nth as u32).wrapping_mul(0x9E37_79B9);
+                let off = Vec2::new(signed(bits, SALT_LEAN), signed(bits, SALT_LEAN ^ 1)) * LEAN;
+                children.spawn((
+                    Name::new(format!("Course {nth}")),
+                    Mesh3d(stonework.courses[nth].clone()),
+                    MeshMaterial3d(
+                        stonework.shades[between(bits, SALT_STONE, (0, STONE.len() - 1))].clone(),
+                    ),
+                    Transform::from_xyz(off.x, up, off.y)
+                        .with_rotation(Quat::from_rotation_y(unit(bits, SALT_SKEW) * SKEW)),
+                ));
+            }
         });
     }
 }
@@ -319,47 +298,11 @@ fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<Entity, Added<
 /// Stands the cairns on the ground once there is ground to stand them on, and
 /// shows them the moment they are standing on it.
 ///
-/// The cloth: a square-ended banner, cut to the convention
-/// [`pennant_pose`] aims things in — tied at the origin, flying down -Z and
-/// hanging down -Y.
-///
-/// Its own shape rather than the pennant's, though it borrows the pennant's
-/// arithmetic and its belly. A pennant is tapered, and a tapered flag on a
-/// staff is a *pennant*: on a stone heap it reads as a pin on a golf green,
-/// which is a thing this world spent a screenshot finding out. A claim is a
-/// flag planted, so the cloth is square-ended and deep, and reads as one.
-///
-/// The belly is why this is nine vertices rather than six: a flat quad edge-on
-/// to the camera disappears, and a cloth with a curve in it catches the light
-/// on one side. Unindexed, so each facet keeps its own normal — the flat
-/// shading everything here is drawn in.
-fn banner_mesh(flies: f32, hangs: f32) -> Mesh {
-    let tie = Vec3::ZERO;
-    let foot = Vec3::new(0.0, -hangs, 0.0);
-    let head = Vec3::new(0.0, 0.0, -flies);
-    let clew = Vec3::new(0.0, -hangs, -flies);
-    // Out to one side, deepest around the middle of the cloth, by a tenth of
-    // the fly — the pennant's proportion, on a bigger flag.
-    let belly = Vec3::new(flies * 0.1, -hangs * 0.5, -flies * 0.5);
-
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    )
-    .with_inserted_attribute(
-        Mesh::ATTRIBUTE_POSITION,
-        vec![
-            tie, foot, belly, foot, clew, belly, clew, head, belly, head, tie, belly,
-        ],
-    )
-    .with_computed_flat_normals()
-}
-
-/// and for the same reason: the point the world named is on the plane, and
-/// what height that is depends on ground this client may not have yet. The
-/// showing is the same frame as the settling and not a moment later — the
-/// whole reason a cairn is hidden is that it would otherwise be drawn
-/// somewhere it is not.
+/// The walking twin of `player::find_footing`, and for the same reason: the
+/// point the world named is on the plane, and what height that is depends on
+/// ground this client may not have yet. The showing is the same frame as the
+/// settling and not a moment later — the whole reason a cairn is hidden is
+/// that it would otherwise be drawn somewhere it is not.
 fn stand_the_cairns(mut commands: Commands, ground: Option<Res<Ground>>, mut waiting: Waiting) {
     let Some(ground) = ground else {
         return;
@@ -370,32 +313,6 @@ fn stand_the_cairns(mut commands: Commands, ground: Option<Res<Ground>>, mut wai
             *shown = Visibility::Inherited;
             commands.entity(cairn).remove::<Unfooted>();
         }
-    }
-}
-
-/// Streams the banners on the wind.
-///
-/// The true wind, not an apparent one: a cairn has no way through the water to
-/// take out of it, which is the whole difference between this and a masthead.
-/// Every banner on every island lies the same way at the same moment, and a
-/// player who has learned to read one has learned to read the weather.
-fn fly_the_banner(
-    time: Res<Time>,
-    conditions: Res<SeaConditions>,
-    mut banners: Query<(&mut Banner, &mut Transform)>,
-) {
-    let wind = conditions.wind();
-    for (mut banner, mut place) in &mut banners {
-        let (wanted, droop) = pennant_pose(wind, banner.bearing);
-        // Swung towards the wind rather than snapped onto it — see [`SWING`].
-        // Taken the short way round, or a wind crossing north would send every
-        // banner in the archipelago the long way about at once.
-        let swing = (wanted - banner.bearing + std::f32::consts::PI)
-            .rem_euclid(std::f32::consts::TAU)
-            - std::f32::consts::PI;
-        banner.bearing += swing * (SWING * time.delta_secs()).min(1.0);
-
-        place.rotation = Quat::from_rotation_y(banner.bearing) * Quat::from_rotation_x(-droop);
     }
 }
 
@@ -420,14 +337,12 @@ impl Plugin for CairnPlugin {
         // initialising a resource twice is free, and each plugin's tests run
         // it alone.
         app.init_resource::<Cairns>()
-            .init_resource::<SeaConditions>()
             .add_systems(
                 Update,
-                // None of this is the player's hands, so none of it pauses:
-                // the wind does not stop blowing because somebody opened a
-                // menu, and a cairn whose ground arrived while the game was
-                // paused should be standing on it when they look back.
-                (dress, stand_the_cairns, fly_the_banner).run_if(in_state(AppState::InWorld)),
+                // Neither of these is the player's hands, so neither pauses: a
+                // cairn whose ground arrived while the game was paused should
+                // be standing on it when they look back.
+                (dress, stand_the_cairns).run_if(in_state(AppState::InWorld)),
             )
             .add_systems(OnExit(AppState::InWorld), strike);
     }
@@ -441,7 +356,7 @@ mod tests {
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
     use super::*;
-    use crate::testing::{set_wind, test_ground, FRAME};
+    use crate::testing::{test_ground, FRAME};
 
     /// A headless app with the cairn systems and nothing else: no ground until
     /// a test hands some over, which is the state a cairn told from further
@@ -476,7 +391,8 @@ mod tests {
         state.apply(app.world_mut());
     }
 
-    /// Every cairn standing, with what is built on it and whether it is shown.
+    /// Every cairn standing, with how many courses are stacked on it and
+    /// whether it is shown.
     fn standing(app: &mut App) -> Vec<(IVec2, usize, Visibility, Vec3)> {
         app.world_mut()
             .query::<(&Cairn, &Children, &Visibility, &Transform)>()
@@ -487,33 +403,121 @@ mod tests {
             .collect()
     }
 
+    /// Where each course of one cairn sits, and how wide it is — read off the
+    /// transforms and the meshes, which is what the drawing actually uses.
+    fn courses(app: &mut App) -> Vec<Transform> {
+        let mut found: Vec<_> = app
+            .world_mut()
+            .query_filtered::<(&Name, &Transform), With<Mesh3d>>()
+            .iter(app.world())
+            .map(|(name, place)| (name.to_string(), *place))
+            .collect();
+        found.sort_by(|(a, _), (b, _)| a.cmp(b));
+        found.into_iter().map(|(_, place)| place).collect()
+    }
+
     #[test]
     fn a_second_word_about_one_cairn_builds_nothing_new() {
         // A cairn is told again when it is christened, and a christening is a
         // word about the *sheet*: the stones are where they were, and dressing
-        // them twice would leave one cairn wearing two staffs and two banners.
+        // them twice would leave one cairn wearing eight courses.
         let mut app = cairn_app();
         let island = IVec2::new(76, 255);
         tell(&mut app, island, Vec2::new(120.0, -40.0));
         app.update();
         assert_eq!(
             standing(&mut app),
-            vec![(island, 3, Visibility::Hidden, Vec3::new(120.0, 0.0, -40.0))],
-            "the stones, the staff and the banner did not go up as one cairn"
+            vec![(
+                island,
+                COURSES,
+                Visibility::Hidden,
+                Vec3::new(120.0, 0.0, -40.0)
+            )],
+            "the courses did not go up as one pillar"
         );
 
         tell(&mut app, island, Vec2::new(120.0, -40.0));
         app.update();
         let after = standing(&mut app);
         assert_eq!(after.len(), 1, "a christening raised a second cairn");
-        assert_eq!(after[0].1, 3, "a christening dressed the cairn again");
+        assert_eq!(
+            after[0].1, COURSES,
+            "a christening stacked the pillar again"
+        );
+    }
+
+    #[test]
+    fn the_courses_stack_up_the_pillar_and_step_in_as_they_go() {
+        // The one piece of arithmetic in the module. A course sits at the
+        // middle of the band it fills and is as wide as the pillar is there,
+        // so the stack rises without a gap and narrows without a jump — and
+        // no course may be so far off its axis that it overhangs the one
+        // under it, which is a pillar that has fallen over.
+        let mut app = cairn_app();
+        tell(&mut app, IVec2::new(-9, 4), Vec2::ZERO);
+        app.update();
+
+        let deep = PILLAR / COURSES as f32;
+        let stacked = courses(&mut app);
+        assert_eq!(stacked.len(), COURSES, "the pillar is not COURSES high");
+        for (nth, place) in stacked.iter().enumerate() {
+            let (across, up) = course(nth);
+            assert!(
+                (place.translation.y - up).abs() < 1e-5,
+                "course {nth} sits at {}, not {up}",
+                place.translation.y
+            );
+            assert!(
+                place.translation.xz().length() < LEAN * 1.5,
+                "course {nth} leans {} metres off the pillar",
+                place.translation.xz().length()
+            );
+            if nth > 0 {
+                let (under, _) = course(nth - 1);
+                assert!(
+                    across < under,
+                    "course {nth} is no narrower than the one under it"
+                );
+            }
+        }
+        assert!(
+            (stacked.last().expect("a course").translation.y + deep / 2.0 - PILLAR).abs() < 1e-5,
+            "the crown does not come out at PILLAR"
+        );
+    }
+
+    #[test]
+    fn two_islands_are_not_stacked_the_same_way() {
+        // The wobble is dealt from the island's own id, so one island is the
+        // same pillar on every machine and two islands are different ones.
+        // Dealt from a constant it would be one pillar repeated across the
+        // archipelago, which is what a single flat cone looked like.
+        let mut app = cairn_app();
+        tell(&mut app, IVec2::new(1, 1), Vec2::ZERO);
+        tell(&mut app, IVec2::new(-40, 17), Vec2::new(500.0, 0.0));
+        app.update();
+
+        let leans: Vec<_> = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Mesh3d>>()
+            .iter(app.world())
+            .map(|place| (place.translation.xz(), place.rotation))
+            .collect();
+        assert_eq!(
+            leans.len(),
+            COURSES * 2,
+            "two pillars, COURSES courses each"
+        );
+        assert!(
+            leans[..COURSES] != leans[COURSES..],
+            "both islands stacked their stones identically"
+        );
     }
 
     #[test]
     fn a_cairn_waits_unseen_until_there_is_ground_to_stand_on() {
-        // The half-kilometre between what the server tells and what the client
-        // streams: told first, and drawn only once the shore it stands on has
-        // arrived — see the module doc.
+        // Told first and drawn later: a cairn whose chunk has not landed yet
+        // is not a cairn standing on the open sea — see the module doc.
         let mut app = cairn_app();
         let island = IVec2::new(3, -2);
         let at = Vec2::new(50.0, 0.0);
@@ -521,7 +525,12 @@ mod tests {
         app.update();
         assert_eq!(
             standing(&mut app),
-            vec![(island, 3, Visibility::Hidden, Vec3::new(at.x, 0.0, at.y))],
+            vec![(
+                island,
+                COURSES,
+                Visibility::Hidden,
+                Vec3::new(at.x, 0.0, at.y)
+            )],
             "a cairn was drawn standing on the sea"
         );
 
@@ -534,7 +543,7 @@ mod tests {
             standing(&mut app),
             vec![(
                 island,
-                3,
+                COURSES,
                 Visibility::Inherited,
                 Vec3::new(at.x, height, at.y)
             )],
@@ -547,50 +556,6 @@ mod tests {
                 .next()
                 .is_none(),
             "a footed cairn is still queued for ground"
-        );
-    }
-
-    #[test]
-    fn a_banner_swings_the_short_way_round_a_wind_crossing_north() {
-        // The only arithmetic in the module. A banner lying just west of north
-        // and a wind gone just east of it are a tenth of a turn apart; taken
-        // as a raw difference they are nine tenths, and every banner in the
-        // archipelago sweeps the long way round at once.
-        let mut app = cairn_app();
-        tell(&mut app, IVec2::ZERO, Vec2::ZERO);
-        app.update();
-
-        let lying = 3.0;
-        let mut banners = app.world_mut().query::<&mut Banner>();
-        banners
-            .single_mut(app.world_mut())
-            .expect("a cairn flies one banner")
-            .bearing = lying;
-        // A wind whose cloth wants to lie at -3.0 radians — a tenth of a turn
-        // the other side of the cut, and hard enough that the pose is a
-        // bearing rather than a calm holding the old one.
-        let wanted = -3.0_f32;
-        let strong = 8.0;
-        set_wind(
-            &mut app,
-            Vec2::new(-wanted.sin() * strong, -wanted.cos() * strong),
-        );
-        app.update();
-
-        let swung = app
-            .world_mut()
-            .query::<&Banner>()
-            .single(app.world())
-            .expect("a cairn flies one banner")
-            .bearing;
-        assert!(
-            swung > lying,
-            "the banner went the long way about: {lying} to {swung}"
-        );
-        assert!(
-            swung - lying < 0.05,
-            "the banner swung {} radians in a frame",
-            swung - lying
         );
     }
 
@@ -616,7 +581,12 @@ mod tests {
         app.update();
         assert_eq!(
             standing(&mut app),
-            vec![(island, 3, Visibility::Hidden, Vec3::new(9.0, 0.0, 9.0))],
+            vec![(
+                island,
+                COURSES,
+                Visibility::Hidden,
+                Vec3::new(9.0, 0.0, 9.0)
+            )],
             "the next world's cairn went looking for the last one's entity"
         );
     }
