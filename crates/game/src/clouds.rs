@@ -120,6 +120,28 @@ const ALOFT: f32 = 1.6;
 /// stops being a shape and becomes a stripe across the whole island.
 const LONGEST: f32 = 2.5;
 
+/// How deep the mask's projector stands along the light's own direction, in
+/// metres.
+///
+/// A hair, and it has to be. Nothing about a mask wants a depth — the shader
+/// that reads one asks only for the two coordinates across the light, so this
+/// number never reaches a cloud shadow. It reaches the *other* thing Bevy
+/// carries a light texture on: a light mask rides the clustered-decal
+/// machinery, and a decal is a box, so anything standing inside the unit cube
+/// of this transform gets the mask composited onto it as **colour** rather
+/// than as light. The mask is a one-channel image, and one channel read as a
+/// colour is red.
+///
+/// At the metre this used to be, that box was a metre-thick slab standing on
+/// the waterline and lying across the world at the angle of the sun, and
+/// wherever it cut the ground it painted a band — straight across open water,
+/// wandering over a hillside the way any plane through rolling ground does,
+/// and sliding with the weather and the hour like something the world meant.
+/// Thin enough and nothing is ever inside it. Not zero: a scale of zero
+/// cannot be inverted, and the shader would be handed NaN for every
+/// coordinate it asked for.
+const NO_DEPTH: f32 = 1e-6;
+
 /// The clouds, as they stand: the mask itself, and how far downwind the
 /// weather has carried it.
 ///
@@ -156,6 +178,9 @@ impl Clouds {
     /// below `sky::GRAZE`. A light exactly on the horizon would squeeze the
     /// mask to nothing, and a transform that cannot be inverted hands the
     /// shader NaN for every coordinate it asks for.
+    ///
+    /// The depth it stands in is [`NO_DEPTH`], which is not about the light
+    /// at all — see there.
     pub fn stand_the_light(&self, from: Vec3) -> Transform {
         // Standing on the waterline, downwind of where it began. The height is
         // nothing to argue about — sliding the mask along the light's own
@@ -169,7 +194,7 @@ impl Clouds {
         // in, and squeezed along the axis the sun leans in — which is the
         // whole of the cap [`LONGEST`] describes.
         let squeeze = (from.y * LONGEST).min(1.0);
-        stand.scale = Vec3::new(TILE / 2.0, TILE / 2.0 * squeeze, 1.0);
+        stand.scale = Vec3::new(TILE / 2.0, TILE / 2.0 * squeeze, NO_DEPTH);
         stand
     }
 }
@@ -357,6 +382,7 @@ fn smoothstep(from: f32, to: f32, at: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use bevy::asset::AssetPlugin;
+    use bevy::math::Vec3Swizzles;
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
@@ -441,8 +467,11 @@ mod tests {
         }
         .stand_the_light(SUN);
 
-        let onto_the_mask =
-            |stand: &Transform, at: Vec3| stand.compute_affine().inverse().transform_point3(at);
+        // The mask's coordinates, which are two: the third axis of this
+        // transform is [`NO_DEPTH`] and so is not a length in metres at all.
+        let onto_the_mask = |stand: &Transform, at: Vec3| {
+            stand.compute_affine().inverse().transform_point3(at).xy()
+        };
         for ground in [
             Vec3::ZERO,
             Vec3::new(120.0, 0.0, -80.0),
