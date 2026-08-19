@@ -7,27 +7,22 @@
 //! thing that has to live on this side by definition, since a world that
 //! handed it back on request would be a world where anybody could be anybody.
 //!
-//! Everything else has gone the same way in turn: the berth, then the survey,
-//! and now the island names, which went when a name stopped being a private
-//! note and started riding with the claim it is written on. All of it is the
-//! world's, told over the wire like the players, the boats and the beasts.
-//! This module is what is left when a client is finally only a client, and it
-//! is not expected to shrink further.
+//! Everything else has gone the same way in turn — the berth, then the survey,
+//! then the island names — and is now the world's, told over the wire like the
+//! players, the boats and the beasts.
 //!
-//! Books are keyed by the [`WorldId`] the server names in its handshake —
-//! never by address, since a world moved to another host is meant to still
-//! be the same world. Like the server's world file, the format is plain
-//! versioned text, written whole beside the file and renamed over it, and a
-//! build refuses a file it only half-understands — except the keys a past
-//! format-1 build wrote and this one has outgrown, which are read past
-//! rather than refused: whatever else an old book holds, its token is still
-//! this player's name in that world, and losing it would make them a
-//! stranger where they have a history.
+//! Books are keyed by the [`WorldId`] the server names in its handshake, never
+//! by address, a world moved to another host being meant to still be the same
+//! world. Like the server's world file, the format is plain versioned text
+//! written whole beside the file and renamed over it, and a build refuses a
+//! file it only half-understands — except keys an older format wrote and this
+//! one has outgrown, which are read past: an old book's token is still this
+//! player's name in that world.
 
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
@@ -86,11 +81,17 @@ pub fn for_session(session: &Session) -> Option<Logbook> {
 
 /// The token this machine holds `world` by, if it has sailed there before —
 /// what the handshake presents, read before any app exists.
+///
+/// Through [`read`] rather than off the line it is written on, so that a book
+/// this build will not open is a book it does not present papers out of
+/// either. The two answers have to be the same answer: a token good enough to
+/// arrive with, from a file [`for_session`] then refuses to write to, would be
+/// a player who is themselves for one visit and can never be again.
 pub fn token_for(world: WorldId) -> Option<Token> {
-    let path = place_for(world)?;
-    let text = fs::read_to_string(path).ok()?;
-    let token = text.lines().find_map(|line| line.strip_prefix("token "))?;
-    Some(Token(u64::from_str_radix(token, 16).ok()?))
+    match read(world) {
+        Read::Book(book) => Some(book.token),
+        Read::Missing | Read::Refused => None,
+    }
 }
 
 /// Throws this machine's book for `world` away, for a world being discarded:
@@ -198,7 +199,7 @@ fn write_down(logbook: &Logbook) {
 
 /// Composed whole beside the file and renamed over it, like the server's
 /// world file: at no instant is the name pointing at half a book.
-fn keep(path: &PathBuf, logbook: &Logbook) -> io::Result<()> {
+fn keep(path: &Path, logbook: &Logbook) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -316,6 +317,26 @@ mod tests {
         assert!(!path.exists(), "the book outlived the world");
         // And a world nobody kept a book for is forgotten quietly.
         forget(WorldId(0x0BAD_0F00_D000_0002));
+    }
+
+    #[test]
+    fn a_book_this_build_will_not_open_presents_no_papers() {
+        // One answer, not two. A token read off a file this build refuses
+        // would arrive at a world whose book the session then declines to
+        // write to — the player themselves for one visit and a stranger ever
+        // after — so the handshake reads the book the way everything else
+        // does, and a refused one has no papers in it.
+        crate::testing::quarantine_data_dir();
+        let world = WorldId(0x0BAD_0F00_D000_0003);
+        let path = place_for(world).expect("a place to keep it");
+        fs::create_dir_all(path.parent().expect("a directory to keep it in")).expect("temp space");
+        fs::write(&path, "genovesa logbook 999\ntoken 2a\n").expect("a book from a later build");
+
+        assert_eq!(token_for(world), None, "papers out of a refused book");
+        // And the file is left exactly where it is, refusing to understand
+        // one being no licence to destroy it.
+        assert!(path.exists(), "the refused book was thrown away");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

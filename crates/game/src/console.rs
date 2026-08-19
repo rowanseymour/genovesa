@@ -11,13 +11,12 @@
 //! `time 18:00` moves the sun for everyone in the session — and the prompt
 //! itself teaches the difference.
 //!
-//! The console is part of every build, unlike the readout it switches on:
-//! it is *how* debug states are reached now, and a player who stumbles into
-//! it can type `help` at a server that will answer. It opens only at the
-//! helm — the menus have text fields of their own, and a backquote typed
-//! into an address must not summon anything — and while it is up the
-//! keyboard is its alone, [`Helm::Console`] being a state exactly so that
-//! every system reading the player's hands sits out.
+//! The console is part of every build, unlike the readout it switches on: it is
+//! *how* debug states are reached, and a player who stumbles into it can type
+//! `help` at a server that will answer. It opens only at the helm — the menus
+//! have text fields of their own — and while it is up the keyboard is its
+//! alone, [`Helm::Console`] being a state exactly so every system reading the
+//! player's hands sits out.
 //!
 //! The key is hard-wired as [`KeyCode::Backquote`] — a *position*, the key
 //! left of 1, whatever a layout prints on it — and reserved from rebinding,
@@ -37,8 +36,7 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::boat::HullKind;
-use crate::debug::{Toggles, BACKDROP, BOAT, REACH, SWITCHES, TEXT};
+use crate::debug::{Toggles, BACKDROP, REACH, SWITCHES, TEXT};
 use crate::net::Online;
 use crate::Helm;
 
@@ -244,7 +242,7 @@ fn variables() -> Vec<&'static str> {
     SWITCHES
         .iter()
         .map(|switch| switch.name)
-        .chain([REACH, BOAT])
+        .chain([REACH])
         .collect()
 }
 
@@ -278,7 +276,6 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
         }
         [var] => read(var, toggles).unwrap_or_else(|| no_such(var)),
         [var, value] if *var == REACH => reach(value, &mut toggles.reach),
-        [var, value] if *var == BOAT => boat(value, &mut toggles.boat),
         [var, value] => match toggles.switch(var) {
             Some(state) => switch(var, value, state),
             None => no_such(var),
@@ -293,9 +290,6 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
 fn read(var: &str, toggles: &mut Toggles) -> Option<String> {
     if var == REACH {
         return Some(format!("{REACH} {:.0}m", toggles.reach));
-    }
-    if var == BOAT {
-        return Some(format!("{BOAT} {}", toggles.boat.name()));
     }
     toggles.switch(var).map(|on| onoff(var, *on))
 }
@@ -342,20 +336,6 @@ fn reach(value: &str, state: &mut f32) -> String {
             format!("reach {metres:.0}m")
         }
         None => "`reach` is metres — `set reach 450`, or `set reach default`".to_string(),
-    }
-}
-
-/// Sets which kind of boat this client rigs its own hull as — the dev
-/// stand-in for the rowboat being dealt by the world; see
-/// [`crate::debug::Toggles::boat`]. Answered with the state it is now in,
-/// like every other write here.
-fn boat(value: &str, state: &mut HullKind) -> String {
-    match HullKind::named(value) {
-        Some(kind) => {
-            *state = kind;
-            format!("{BOAT} {}", kind.name())
-        }
-        None => format!("`{BOAT}` is {} — `set boat rowboat`", HullKind::choices()),
     }
 }
 
@@ -551,8 +531,6 @@ mod tests {
         assert_eq!(toggles.reach, 450.0);
         assert_eq!(set(&["reach", "default"], &mut toggles), "reach 900m");
         assert_eq!(toggles.reach, crate::HAZE_END);
-        assert_eq!(set(&["boat", "rowboat"], &mut toggles), "boat rowboat");
-        assert_eq!(toggles.boat, HullKind::Rowboat);
         assert_eq!(set(&["shadows", "on"], &mut toggles), "shadows on");
         assert!(toggles.shadows);
     }
@@ -565,7 +543,7 @@ mod tests {
         };
         assert_eq!(
             set(&[], &mut toggles),
-            "stats off / shadows on / haze on / wireframe on / reach 900m / boat ship"
+            "stats off / shadows on / haze on / wireframe on / reach 900m"
         );
         assert_eq!(set(&["haze"], &mut toggles), "haze on");
     }
@@ -586,15 +564,6 @@ mod tests {
         let not_metres = set(&["reach", "far"], &mut toggles);
         assert!(not_metres.contains("metres"), "unhelpful: {not_metres}");
         assert_eq!(toggles.reach, crate::HAZE_END);
-
-        // The boat's answer names the boats there are, which is the only
-        // way to find out what to type.
-        let not_a_boat = set(&["boat", "dinghy"], &mut toggles);
-        assert!(
-            not_a_boat.contains("ship or rowboat"),
-            "unhelpful: {not_a_boat}"
-        );
-        assert_eq!(toggles.boat, HullKind::Ship);
     }
 
     /// A headless app at the helm, with the console systems and the states
@@ -823,7 +792,7 @@ mod tests {
         assert!(app
             .world()
             .resource::<Console>()
-            .said("stats  shadows  haze  wireframe  reach  boat"));
+            .said("stats  shadows  haze  wireframe  reach"));
     }
 
     #[test]

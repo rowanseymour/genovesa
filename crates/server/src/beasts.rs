@@ -1,36 +1,29 @@
 //! The beasts: the creatures the server *means*.
 //!
 //! The game's client-side wildlife — the eagles, the seabird lines — is
-//! scenery a client raises for itself out of ground it was already sent, and
-//! the server has never heard of it. That arrangement holds exactly as long
-//! as a creature can never matter, and there are two ways to matter. The
-//! shark's way is consequence: it will one day go for a player swimming
-//! where it hunts, and a shark that one client could see and another could
-//! not would make that moment a private hallucination. The whale's and the
-//! dolphins' way is company: they are rare, pointable events, and two
-//! players anchored side by side must be able to point at the same one.
-//! Birds are texture nobody compares notes on, and stay each client's own.
+//! scenery a client raises for itself, and the server has never heard of it.
+//! That holds exactly as long as a creature can never matter, and there are
+//! two ways to matter. The shark's way is consequence: it will one day go for
+//! a player swimming where it hunts, and one client seeing it while another
+//! did not would make that moment a private hallucination. The whale's and the
+//! dolphins' way is company: they are rare, pointable events, and two players
+//! anchored side by side must be able to point at the same one. Birds are
+//! texture nobody compares notes on, and stay each client's own.
 //!
 //! So a beast is run the way a player is: the server holds where it is and
 //! tells everyone on a beat, and a client's whole part is to draw what it is
 //! told — see [`ToClient::Beast`], one message that is both introduction and
-//! movement, so joining a session mid-life needs no catching up beyond the
-//! next beat. What a shark looks like, how deep a whale rides, how many
-//! dolphins a pod is drawn as: drawing, and none of this module's business.
+//! movement, so joining mid-life needs no catching up beyond the next beat.
 //!
-//! Beasts are world state with session manners. The manners are unchanged
-//! from when they were the whole story: beasts are raised where the players
-//! are, live while anyone is near, and are let go when the last of them
-//! sails away — the *population* is a performance around whoever is present,
-//! not a fact a seed means the way it means palms. But the animals alive
-//! when a kept world is written are in its file, and reopen where they
-//! stood, because a beast is the kind of thing that will one day act on a
-//! player — and nothing with consequence may be escapable by relogging. A
-//! shark that had somebody cornered when they quit must still have them
-//! cornered when they reload; the same rule that keeps a gale waiting keeps
-//! the fin. What is kept per beast is only what a save could ever show —
-//! see `keeper::BeastRecord` — and everything re-derived each beat starts
-//! over, which nothing can see. Nothing here touches the world's digests.
+//! Beasts are world state with session manners. Raised where the players are,
+//! alive while anyone is near, let go when the last of them sails away: the
+//! *population* is a performance around whoever is present, not a fact a seed
+//! means the way it means palms. But the animals alive when a kept world is
+//! written are in its file and reopen where they stood, because nothing with
+//! consequence may be escapable by relogging — a shark that had somebody
+//! cornered when they quit must still have them cornered when they reload.
+//! What is kept is only what a save could ever show, see `keeper::BeastRecord`;
+//! everything re-derived starts over, which nothing can see.
 //!
 //! # What passes for a mind
 //!
@@ -41,11 +34,9 @@
 //! - A **whale or a pod is passing through**. Its one place is open water a
 //!   kilometre or so off, laid so the course runs near whoever it was raised
 //!   for, and reaching it is the end of the animal: it goes down and is let
-//!   go. So a whale is not a whale *stationed* near a player, and could not
-//!   drift into being one — it was always crossing, the meeting was the
-//!   middle of a crossing, and it will be gone whether or not anybody
-//!   followed. The journey is the life; there is no separate clock saying
-//!   when it is over.
+//!   go. So a whale is never *stationed* near a player and could not drift
+//!   into being so — the meeting was the middle of a crossing, and the journey
+//!   is the life, with no separate clock saying when it is over.
 //! - A **shark lives somewhere**. Its one place is the shallows off a coast,
 //!   and reaching it is the *start*: from there it snoops its strip of water
 //!   for as long as its life runs, which is the one kind here that has a life
@@ -53,11 +44,10 @@
 //!
 //! Nothing is plotted beyond that point. Where the animal is going is a
 //! *want*, and every beat it is steered towards that through the water it
-//! actually finds — off a headland, round a boat — so a course is what a
-//! beast has swum rather than something it was issued. Deciding where an
-//! animal would be *before* it was there was tried and thrown out: it made an
-//! animal that could not be surprised, and a boat is exactly the surprise
-//! these animals are for.
+//! actually finds, so a course is what a beast has swum rather than something
+//! it was issued. Deciding where an animal would be *before* it was there was
+//! tried and thrown out: it made an animal that could not be surprised, and a
+//! boat is exactly the surprise these animals are for.
 //!
 //! Two rules finish the shape:
 //!
@@ -78,51 +68,34 @@
 //! What an animal does about anything else in the water is one entry in a
 //! table — [`REGARDS`], a row per kind and a column per thing there is to meet
 //! — and the entry carries its own reach, because how far off a whale starts
-//! caring is a fact about a whale *and a hull* rather than a fact about
-//! whales. A single "how wary is this kind" number was the first shape of this
-//! and it was one column of the table wearing the whole thing's clothes: it
-//! cannot say that dolphins drive a shark off while a shark gives a pod room,
-//! which is two different answers to one pairing and the interesting half of
-//! what these animals are.
+//! caring is a fact about a whale *and a hull*. A single "how wary is this
+//! kind" number was the first shape of this and could not say that dolphins
+//! drive a shark off while a shark gives a pod room, which is the interesting
+//! half of what these animals are.
 //!
-//! A stance is about *steering*, and never about the life. Whatever an animal
-//! makes of a boat, it is still bound where it was bound and it still ends
-//! where it was always going to end: a regard slots into [`swim`] between
-//! wanting to be somewhere and holding to water it can be in, which is to say
-//! it outranks the journey and the ground outranks it. Nothing here can make an
-//! animal live longer, die sooner, or arrive somewhere it was not going.
+//! A stance is about *steering*, never about the life: a regard slots into
+//! [`swim`] between wanting to be somewhere and holding to water it can be in,
+//! so it outranks the journey and the ground outranks it. Nothing here can
+//! make an animal live longer, die sooner, or arrive somewhere it was not
+//! going.
 //!
-//! Most of what a player gets out of that is a kind of studied indifference,
-//! and that is the point: these animals are going somewhere and a boat is a
-//! thing in the way, so what they mostly do about one is give it a berth
-//! ([`skirt`]) or, for a whale, go under it and stay under while it is there.
-//! Neither is minding a player.
-//!
-//! The exception is the pod, which will come and *ride a bow* ([`ride`]) — the
-//! one thing in this file that closes on a player on purpose, and the one
-//! stance that takes over where an animal is going rather than bending how it
-//! gets there. It has to take over: two swings under the same clamp cancel, and
-//! a station cannot be kept by an animal that is only half-arguing for it. So a
-//! ride is bounded instead, and a pod peels off and finishes the crossing it
-//! was always on — the alternative being a pod that has become scenery attached
-//! to a boat, which is the failure every stance that closes a range invites.
-//! The beasts still cannot see *each other* at all, though: see [`REGARDS`] for
-//! what that would take and why it is not built.
+//! Mostly that comes out as studied indifference — a berth given ([`skirt`]),
+//! or a whale going under and staying under while a boat is there. The
+//! exception is the pod, which will come and *ride a bow* ([`ride`]): the one
+//! thing here that closes on a player on purpose, and the one stance that
+//! takes over where an animal is going rather than bending how it gets there.
+//! It has to take over, two swings under the same clamp cancelling. So a ride
+//! is bounded instead and the pod peels off to finish its crossing — the
+//! alternative being a pod that has become scenery attached to a boat.
 //!
 //! The one thing the server cannot yet see is whether a player is *in the
 //! water*: a client reports a position, not whether its player is afoot,
-//! aboard, or wading, and a boat has never crossed the wire at all. So the
-//! table's two player columns are read as one — a pod will happily ride the bow
-//! of a swimmer, having no way to know it is not a boat. What a swimmer really
-//! needs is the shark, and that is what the split is blocked on; it belongs to
-//! the wire rather than to this file. The *way* a player is going is a
-//! different matter and needed no wire at all, being a thing successive
-//! positions already say — see [`Wake`].
+//! aboard or wading. So the table's two player columns are read as one — a pod
+//! will happily ride the bow of a swimmer. What a swimmer really needs is the
+//! shark, and that split is blocked on the wire rather than on this file.
 
-// The docs here are for somebody reading this file, and nearly everything
-// worth pointing at from them — the table, the stances, the swimming — is
-// private to it and staying that way. Linking to those is the whole use of a
-// link in a module nobody outside the crate can name.
+// Nearly everything worth pointing at from these docs — the table, the
+// stances, the swimming — is private to this file and staying that way.
 #![allow(rustdoc::private_intra_doc_links)]
 
 use std::collections::HashMap;
@@ -134,7 +107,7 @@ use std::time::Duration;
 use glam::Vec2;
 use protocol::{BeastId, BeastKind, PlayerId, ToClient};
 
-use crate::{broadcast_all, Shared};
+use crate::{broadcast_all, Held, Shared};
 
 /// How often the beasts are minded, which is also how often everyone is told
 /// where they are. Slower than the players' own ten-a-second trickle: a
@@ -248,12 +221,11 @@ const UNDERWAY: f32 = 1.5;
 /// How long a pod stays on a bow, in beats, drawn per ride: half a minute to a
 /// minute and a half.
 ///
-/// Bounded, and this is the bound that matters most in the file. A pod's
-/// journey *is* its life — see [`Habitat::journey`] — and a stance that closes
-/// the range is a stance that can hold an animal somewhere until the player
-/// gets bored, which is a pod that has quietly stopped crossing anywhere and
-/// become scenery attached to a boat. Riding is a thing that happens in the
-/// middle of a crossing and then stops happening, so the crossing finishes.
+/// Bounded, and this is the bound that matters most in the file. A stance that
+/// closes the range can hold an animal somewhere until the player gets bored,
+/// which is a pod that has quietly stopped crossing anywhere and become
+/// scenery attached to a boat. Riding happens in the middle of a crossing and
+/// then stops happening, so the crossing finishes.
 const RIDE: (u32, u32) = (120, 360);
 
 /// And how long before it will take an interest in a bow again, in beats. Long
@@ -275,13 +247,11 @@ const CLOSING: f32 = 0.5;
 /// place — and so the life around them is written once.
 struct Habitat {
     kind: BeastKind,
-    /// The seafloor this kind calls home, in metres of terrain height —
-    /// how each kind claims its own water, exactly as the client-side
-    /// wildlife's crossings did before these animals moved to the server.
-    /// The shark's band is the sunlit strip where a beach shelves away,
-    /// which is where the players are; dolphins ask only for depth; whales
-    /// for real depth. It is the water a beast is raised to be *in*, and what
-    /// it holds to once it is there.
+    /// The seafloor this kind calls home, in metres of terrain height: the
+    /// water a beast is raised to be *in* and holds to once it is there. The
+    /// shark's band is the sunlit strip where a beach shelves away, which is
+    /// where the players are; dolphins ask only for depth, whales for real
+    /// depth.
     band: (f32, f32),
     /// And the water it will *cross* to get there, which is a different
     /// question and only differs for the shark: a shark is born in the deep
@@ -290,33 +260,26 @@ struct Habitat {
     /// routes round a reef rather than over it — the journey is the animal,
     /// and taking a short cut through a shark's water would be some other one.
     crossing: (f32, f32),
-    /// Cruising pace, metres per second. A shark ambles; the dolphins' and
-    /// the whale's paces are exactly the speeds their crossings kept as
-    /// client-side wildlife, and not only for character: the client pitches
-    /// a porpoising body by its leap *against this speed*, so the arcs were
-    /// tuned at these numbers and a slower whale is a steeper, spy-hopping
-    /// whale.
+    /// Cruising pace, metres per second. A shark ambles. The other two are
+    /// tuning as much as character: the client pitches a porpoising body by
+    /// its leap *against this speed*, so a slower whale is a steeper,
+    /// spy-hopping whale.
     cruise: f32,
     /// How many of this kind are kept in the waters around each player.
     /// Sharks come in twos — the second is what makes the first read as
     /// *sharks live here* rather than as a one-off — while a pod or a whale
     /// is an event, and two events at once read as an aquarium.
     about: usize,
-    /// How far around a player counts as their waters, in metres: this kind
-    /// is counted and raised inside this reach, and a beast with nobody
-    /// inside it is one nobody can see — which is what [`FORGOTTEN_AFTER`]
-    /// eventually does something about. Wider for the animals meant to be met
-    /// seldom.
+    /// How far around a player counts as their waters, in metres: this kind is
+    /// counted and raised inside this reach, and a beast with nobody inside it
+    /// is one nobody can see — which is what [`FORGOTTEN_AFTER`] eventually
+    /// does something about. Wider for the animals meant to be met seldom.
+    /// Nothing here models an animal no player could ever meet, which is the
+    /// whole reason a session can afford to run these at all.
     ///
-    /// Every beast there is, is raised around somebody and let go when there
-    /// is no longer anybody: nothing here models an animal no player could
-    /// ever meet, which is the whole reason a session can afford to run these
-    /// at all.
-    ///
-    /// For a traveller it has a second job, and it is the binding one: the far
-    /// end of a journey has to fall inside it, or the animal is dropped in the
-    /// middle of its own crossing rather than finishing it. See
-    /// [`Habitat::journey`], where that arithmetic is written out.
+    /// For a traveller it has a second, binding job: the far end of a journey
+    /// has to fall inside it, or the animal is dropped mid-crossing rather
+    /// than finishing it. See [`Habitat::journey`].
     waters: f32,
     /// The ring a newcomer is raised on, in metres from the player it is
     /// raised for: outside the view at any ordinary zoom, inside `waters`. It
@@ -327,13 +290,10 @@ struct Habitat {
     /// that is not passing through.
     ///
     /// This is most of what a whale or a pod *is*, and the whole of how long
-    /// one lasts: it is born, it swims this far, it goes down. A pod met off a
-    /// headland is genuinely on its way somewhere and will genuinely be gone,
-    /// and neither the going nor the being gone is about the player — the one
-    /// thing about them that is, is that the course is laid to pass near
-    /// whoever it was raised for, because an animal crossing the map out of
-    /// sight is an animal nobody meets. The shark journeys nowhere: its water
-    /// is a strip along a coast, and what it does with it is
+    /// one lasts: it is born, it swims this far, it goes down. The only thing
+    /// about it that is about the player is that the course is laid to pass
+    /// near whoever it was raised for, an animal crossing out of sight being
+    /// one nobody meets. The shark journeys nowhere — see
     /// [`Habitat::meander`].
     ///
     /// How far it may run is not free: a journey is only a life if the animal
@@ -341,11 +301,10 @@ struct Habitat {
     /// that keep it minded. Born `r` out on the `ring` and aimed at a point
     /// `a` abeam of the player, an animal that swims `out` metres finishes at
     /// `√(r²(out/L − 1)² + (out·a/L)²)` from where the player was, with
-    /// `L = √(r² + a²)` — which for the closest birth, the widest [`ABEAM`]
-    /// and the longest draw is 774 m for a pod and 1062 m for a whale, both
-    /// comfortably inside their waters. Journeys that did not fit were the
-    /// first version of this and it was the wrong shape: two crossings in five
-    /// ended in the animal being forgotten mid-passage instead of arriving.
+    /// `L = √(r² + a²)` — at worst 774 m for a pod and 1062 m for a whale,
+    /// both comfortably inside their waters. Journeys that did not fit were
+    /// the first version of this, and two crossings in five ended in the
+    /// animal being forgotten mid-passage instead of arriving.
     journey: Option<(f32, f32)>,
     /// How long one of these lives, in beats, drawn per beast from this span.
     ///
@@ -422,11 +381,8 @@ const HABITATS: [Habitat; 3] = [
 ///
 /// The wire says only the first half — `ToServer::Move` carries a position and
 /// nothing else — so the second is worked out here, from where the same player
-/// was a beat ago. That is enough, and cheaply: a client trickles ten positions
-/// a second and a beat is four of them, so somebody under way has moved a metre
-/// or two by the time anything asks and somebody at anchor has moved nothing at
-/// all. Deriving it rather than asking for it also means no wire change and no
-/// version bump for a behaviour that is entirely the server's.
+/// was a beat ago. That is enough: a beat is four position reports, so somebody
+/// under way has moved a metre or two by the time anything asks.
 ///
 /// What it is *for* is [`Regard::Play`], which needs to know where a bow is,
 /// and a position alone cannot say — a boat has a front only if it is going
@@ -458,11 +414,9 @@ impl Wake {
 
 /// What one kind of beast makes of one thing it has met.
 ///
-/// The reach lives in the stance rather than on the kind, and that is the
-/// whole reason this is not a number on [`Habitat`]: a whale gives a hull
+/// The reach lives in the stance rather than on the kind: a whale gives a hull
 /// forty-five metres and another whale nothing at all, so "how far off does
-/// this animal start caring" has no one answer per kind. It has one per
-/// pairing, which is what [`REGARDS`] is.
+/// this animal start caring" has one answer per pairing and not per kind.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Regard {
     /// Nothing at all: as far as this animal is concerned that is water, and
@@ -474,28 +428,21 @@ enum Regard {
     /// Not shyness, and the difference decides the steering: these animals are
     /// going somewhere and a boat is in the way, so what they do about one is
     /// *avoid contact* — hold the course and pass it wide — rather than break
-    /// off and flee, which is what turning straight away from a hull would read
-    /// as and did. The pass is aimed to clear [`BERTH`] of the reach, the gap
-    /// between the two being what buys the turn room to be gradual.
+    /// off and flee, which is what turning straight away from a hull read as
+    /// when it was tried. The pass is aimed to clear [`BERTH`] of the reach.
     ///
-    /// In no cell at the moment, which is not the same thing as `Harry` being
-    /// in none: this one is written and working, and every `Play` beast falls
-    /// back on it the moment there is no bow to ride. It is kept as a stance in
-    /// its own right because giving way without wanting anything is what the
-    /// shark-versus-pod cell will want, and because a kind that merely yields is
-    /// the ordinary case — the pod having stopped being it is the exception.
+    /// In no cell at the moment, unlike `Harry`, this one is written and
+    /// working: every `Play` beast falls back on it the moment there is no bow
+    /// to ride.
     #[allow(dead_code)]
     Berth(f32),
     /// Go under while it is inside this many metres, and pass wide of it as
     /// well — the whale's answer, and [`breathe`]'s business.
     ///
-    /// Both halves, and deliberately: the dive is what is *characteristic* of a
-    /// whale meeting a hull but it is not the whole of what a whale does about
-    /// one. A stance that only sounded would be a whale going down and then
-    /// swimming its line straight at the boat on top of it, which is not a
-    /// whale minding a boat less — it is a whale that has stopped being a body
-    /// in the water. Near enough to be worth avoiding is near enough to go down
-    /// for, so it is one reach and not two.
+    /// Both halves, deliberately: a stance that only sounded would be a whale
+    /// going down and then swimming its line straight at the boat on top of
+    /// it. Near enough to be worth avoiding is near enough to go down for, so
+    /// it is one reach and not two.
     Sound(f32),
     /// Close on it and stay with it while it is inside this many metres: a pod
     /// running a shark out of its water, and one day a shark working a swimmer.
@@ -508,13 +455,11 @@ enum Regard {
     /// dolphins on a bow wave, and the one entry in this table that closes the
     /// range for the pleasure of it.
     ///
-    /// It is the only stance that takes over where an animal is going rather
-    /// than bending it — see [`ride`] — and so the only one with a clock on it.
-    /// Everything else here is a swing applied to a course the animal keeps;
-    /// this one *is* the course while it lasts, which is why it has to stop
-    /// lasting. When it is not riding, a `Play` beast passes a hull the same
-    /// way a `Berth` one does: a boat at anchor has no bow, and something has
-    /// to keep a pod from swimming through it.
+    /// The only stance that takes over where an animal is going rather than
+    /// bending it — see [`ride`] — and so the only one with a clock on it:
+    /// everything else is a swing applied to a course the animal keeps, while
+    /// this one *is* the course while it lasts. When it is not riding, a
+    /// `Play` beast passes a hull the way a `Berth` one does.
     Play(f32),
 }
 
@@ -524,12 +469,9 @@ enum Regard {
 /// of the table is what the beasts make of each other and a kind's row lines up
 /// with its own column.
 ///
-/// `Afloat` and `Swimming` are one player in two states rather than two things,
-/// and the wire cannot yet tell them apart: `ToServer::Move` carries a position
-/// and nothing else, and a boat has never crossed it at all. They are kept
-/// apart here regardless, because what a shark makes of a swimmer is most of
-/// why beasts are on the server in the first place, and a table that could not
-/// even write the distinction down would be the wrong table to be waiting with.
+/// `Afloat` and `Swimming` are one player in two states, and the wire cannot
+/// yet tell them apart. They are kept apart here regardless, because what a
+/// shark makes of a swimmer is most of why beasts are on the server at all.
 /// Until a client says how its player is travelling, every player is read as
 /// [`A_PLAYER`].
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -575,28 +517,19 @@ const A_PLAYER: Met = Met::Afloat;
 /// kind in [`HABITATS`] order, a column per [`Met`]. The row is who is
 /// deciding; the column is what they have come across.
 ///
-/// It is asymmetric on purpose and has to stay so. Dolphins run a shark out of
-/// their water while a shark gives a pod a wide berth, and that is two answers
-/// to one pairing — a single number held *between* two kinds could not say it,
-/// and neither could the one number per kind this replaced, which was this
-/// table with the player column and nothing else.
+/// It is asymmetric on purpose and has to stay so: dolphins run a shark out of
+/// their water while a shark gives a pod a wide berth, which is two answers to
+/// one pairing that no single number held *between* two kinds could say.
 ///
-/// The reaches are in metres, and both are the ones their kinds always kept. A
-/// whale's suits a wide animal on a long turn, and it is also the range it goes
-/// down at, so it wants to be the distance at which a whale would rather not
-/// find out. A pod's is a few boat lengths — how far off a pod cares about a
-/// hull at all, which is one fact about pods and boats however it answers it:
-/// inside it a pod comes to a moving bow and gives way to a still one, and
-/// outside it a boat is somebody else's business.
-///
-/// That the reach did *not* widen when `Play` arrived is worth knowing, because
-/// widening it was tried. Fifty metres reads better as the range you notice a
-/// bow wave from, but the same number is what the give-way half promises to
-/// clear by [`BERTH`], and a pod cannot deliver twenty-five metres of that
-/// against a course laid at the hull — the swing and the goal want are clamped
-/// alike, so it made fourteen. A reach that keeps one of its two promises is
-/// worse than a close one that keeps both, and a pod sprints to a bow anyway
-/// (see [`ride`]), so five seconds of warning is warning enough.
+/// The reaches are in metres. A whale's suits a wide animal on a long turn and
+/// is also the range it goes down at. A pod's is a few boat lengths: inside it
+/// a pod comes to a moving bow and gives way to a still one, and outside it a
+/// boat is somebody else's business. Widening that when `Play` arrived was
+/// tried — fifty metres reads better as the range you notice a bow wave from,
+/// but the same number is what the give-way half promises to clear by
+/// [`BERTH`], and against a course laid at the hull a pod could only make
+/// fourteen of the twenty-five. A reach that keeps one of its two promises is
+/// worse than a close one that keeps both.
 ///
 /// The shark's is `Ignore` and pointedly so: that a shark gives you no room is
 /// the first thing a player learns about one.
@@ -604,31 +537,20 @@ const A_PLAYER: Met = Met::Afloat;
 /// # What is not filled in
 ///
 /// The nine cells of the top-left block are what one beast makes of another,
-/// and every one of them is `Ignore`, because the beasts have never seen each
-/// other. Standing them up is not a matter of writing stances in:
+/// and every one is `Ignore`, because the beasts have never seen each other.
+/// Standing them up is not a matter of writing stances in:
 ///
 /// - There is no still picture of what is *in* the water the way [`Flock::beat`]
-///   takes one of where the players are. It would have to be that same pattern
-///   widened to everything, and a beast finds itself in such a list unless it
-///   is skipped by id.
+///   takes one of where the players are.
 /// - `Harry` and `Play` both close the range, and two animals with stances on
-///   each other make a chase. A chase drags both of them across the map, which
-///   is a quiet way of subverting the journey that is a traveller's whole life,
-///   so an engagement has to be bounded before either is safe to write.
+///   each other make a chase, which drags both across the map and quietly
+///   subverts the journey that is a traveller's whole life. An engagement has
+///   to be bounded before either is safe to write.
 ///
-/// None of that is worth building until a cell asks for it, so the cells that
-/// would ask are the ones left saying nothing. What they are for, when they
-/// come: a pod harrying a shark off its water, a shark standing well clear of
-/// a pod that would, and the travellers with nothing to say to each other.
-///
-/// `Play` is written and `Harry` is not, which is not an accident of order.
-/// Riding a bow is the same closing move as harrying, with the one difference
-/// that makes it safe to write first: the thing being closed on is a *player*,
-/// who has no stance of their own and so cannot close back. One animal
-/// approaching one boat cannot make the mutual chase that two animals with
-/// opinions about each other can, so the bound on it — [`RIDE`] — only has to
-/// stop a pod forgetting its crossing, rather than stop two animals towing each
-/// other off the map.
+/// `Play` is written and `Harry` is not, which is not an accident of order: the
+/// thing a ride closes on is a *player*, who has no stance and so cannot close
+/// back, so [`RIDE`] only has to stop a pod forgetting its crossing rather than
+/// stop two animals towing each other off the map.
 #[rustfmt::skip]
 const REGARDS: [[Regard; Met::ALL.len()]; HABITATS.len()] = {
     use Regard::{Ignore, Play, Sound};
@@ -719,23 +641,19 @@ struct Riding {
     /// plus as much again as it takes to make up whatever gap is left to the
     /// station — see [`CLOSING`].
     ///
-    /// The boat's speed *alone* was the first version and it could not work:
-    /// a pod that matches a boat the instant it decides to ride is a pod that
-    /// holds whatever gap it happened to notice the boat at, forever, which is
-    /// an animal keeping station on a point twenty metres from the one it
-    /// wanted. Matching is what it does once it is *there*, and the closing
-    /// term falls to nothing exactly as it arrives, so the two are one number
-    /// rather than a sprint and a mode change.
+    /// The boat's speed *alone* was the first version and could not work: a pod
+    /// that matches a boat the instant it decides to ride holds whatever gap it
+    /// happened to notice the boat at, forever. The closing term falls to
+    /// nothing exactly as it arrives, so the two are one number rather than a
+    /// sprint and a mode change.
     pace: f32,
 }
 
 /// One beast, as the server minds it.
 ///
 /// It carries its [`Habitat`] rather than its kind, the habitat holding the
-/// kind: the map holds every beast there is, whatever it is, and every beat
-/// asks each of them where it lives — to swim it, to decide whether anyone
-/// is still near enough to mind it, and to say how fast it is going. Looking
-/// that up by kind each time was a scan of the table per beast per question.
+/// kind: every beat asks each beast where it lives several times over, and
+/// looking that up by kind was a scan of the table per beast per question.
 struct Beast {
     habitat: &'static Habitat,
     position: Vec2,
@@ -752,12 +670,10 @@ struct Beast {
     goal: Option<Vec2>,
     /// Beats since it was raised, and the beats it has to live.
     ///
-    /// For a shark that is its life: when the one passes the other it goes.
-    /// For a traveller it is only a backstop — the journey is what ends a
-    /// whale, and this is what ends one that has spent an implausible while
-    /// failing to make its journey, which is a whale in a bay it cannot find
-    /// the mouth of. Counted rather than clocked, a beat being the only time
-    /// this file keeps.
+    /// For a shark that is its life. For a traveller it is only a backstop —
+    /// the journey is what ends a whale, and this ends one that has spent an
+    /// implausible while failing to make it, which is a whale in a bay it
+    /// cannot find the mouth of.
     age: u32,
     life: u32,
     /// Beats since it last changed what it is doing — how long a leaving has
@@ -770,22 +686,18 @@ struct Beast {
     surfaced: bool,
     /// Beats until the whale changes its mind about that — see [`breathe`].
     bout: u32,
-    /// Beats since anybody was last within its kind's `waters`. A beast is
-    /// only ever raised around a player and only worth swimming while one is
-    /// near, so this running past [`FORGOTTEN_AFTER`] is the sea quietly
-    /// getting on without it — which it does by sending the animal down, not
-    /// by taking it away. It goes on counting after that and nothing reads it:
-    /// once an animal is leaving, the leaving is the only thing left to finish.
+    /// Beats since anybody was last within its kind's `waters`. Running past
+    /// [`FORGOTTEN_AFTER`] is the sea getting on without it — which it does by
+    /// sending the animal down, not by taking it away. It goes on counting
+    /// after that and nothing reads it.
     unminded: u32,
     /// The lazy arc it is currently swimming, in radians a beat, redrawn
     /// every [`ARC`] beats of dwelling from its habitat's `meander`.
     turning: f32,
-    /// The bow it is riding, if it is riding one — see [`ride`]. It is the one
-    /// piece of state here that belongs to a stance rather than to a life, and
-    /// it is deliberately kept out of [`Doing`]: a riding pod is still bound
-    /// where it was bound and still ends where it was going to end, and putting
-    /// this in the life machine would have been the version where a pod that
-    /// met a boat stopped being a pod that was crossing somewhere.
+    /// The bow it is riding, if it is riding one — see [`ride`]. The one piece
+    /// of state here belonging to a stance rather than to a life, and
+    /// deliberately kept out of [`Doing`]: a riding pod is still bound where it
+    /// was bound and still ends where it was going to end.
     riding: Option<Riding>,
     /// Beats before it will look at another bow — see [`ALOOF`]. Counts down
     /// whether or not there is anything to ride, so a pod that peels off in
@@ -798,9 +710,7 @@ impl Beast {
     /// is where both of those are decided and what they mean to each kind.
     ///
     /// It arrives already swimming, on a bearing drawn with its spot when it
-    /// has nowhere in particular to be: a beast is never doing nothing, and
-    /// the first telling anyone hears of it carries a velocity like every
-    /// other.
+    /// has nowhere in particular to be: a beast is never doing nothing.
     fn born(habitat: &'static Habitat, at: Vec2, toward: Option<Vec2>, entropy: u32) -> Self {
         let heading = toward
             .map(|goal| (goal - at).normalize_or(Vec2::X))
@@ -814,11 +724,9 @@ impl Beast {
             age: 0,
             life: span(entropy, 0x11FE, habitat.life),
             since: 0,
-            // A traveller is itself from the first beat: its journey is its
-            // life, and it is born at the far end of one rather than out of
-            // sight. The shark comes in under the water, its swim in from the
-            // deep being a commute nobody is meant to watch — it surfaces
-            // when it reaches the shallows it will live in.
+            // A traveller is itself from the first beat, its journey being its
+            // life. The shark comes in under the water, its swim in from the
+            // deep being a commute nobody is meant to watch.
             surfaced: habitat.journey.is_some(),
             bout: span(entropy, 0xB0_07, SURFACED_BOUT),
             unminded: 0,
@@ -851,11 +759,8 @@ impl Beast {
         // shark that has arrived is standing in it, and nothing else here has
         // anywhere further to be.
         self.goal = None;
-        // And whatever it was riding, it has other business now. A pod that
-        // reached the far end of its crossing is leaving, and leaving is done
-        // under the water and away from boats — a pod that sounded and went on
-        // holding station off somebody's bow would be an animal doing two
-        // incompatible things at once.
+        // And whatever it was riding, it has other business now: leaving is
+        // done under the water and away from boats.
         self.riding = None;
     }
 
@@ -873,16 +778,14 @@ impl Beast {
     }
 
     /// Metres per second. The distinction is not which part of life this is
-    /// but whether the swimming is the animal *being itself* — which is what
-    /// the pace its kind was drawn at is for, the client pitching a
-    /// porpoising body against exactly this number — or merely getting
-    /// somewhere, which is nobody's spectacle and better over with.
+    /// but whether the swimming is the animal *being itself*, at the pace its
+    /// kind was drawn at, or merely getting somewhere, which is nobody's
+    /// spectacle and better over with.
     ///
-    /// A pod on a bow is the exception, and matches the boat: see
-    /// [`Riding::pace`] for why holding station cannot be done at a fixed
-    /// speed. It is held to what the animal could actually swim — a boat can
-    /// outrun a pod, and one that does simply leaves it behind, which the
-    /// range check in [`ride`] then reads as the ride being over.
+    /// A pod on a bow is the exception and matches the boat — see
+    /// [`Riding::pace`] — held to what the animal could actually swim. A boat
+    /// that outruns a pod leaves it behind, which [`ride`]'s range check then
+    /// reads as the ride being over.
     fn pace(&self) -> f32 {
         if let Some(riding) = &self.riding {
             return riding.pace.min(self.habitat.cruise * TRANSIT);
@@ -912,11 +815,10 @@ fn habitat_of(kind: BeastKind) -> &'static Habitat {
 /// *seen*: this sounds outward from close by, so the reply can say how far
 /// away the animal is.
 ///
-/// The kind's own water is preferred and any water will do. That is the
+/// The kind's own water is preferred and any water will do, which is the
 /// console being a console: a whale summoned into a lagoon is a whale to look
-/// at, and within a few beats the band correction in [`swim`] has it working
-/// its way back out to water a whale belongs in anyway. Only somewhere with
-/// no water at all is refused.
+/// at, and [`swim`]'s band correction works it back out within a few beats.
+/// Only somewhere with no water at all is refused.
 pub(crate) fn conjure(shared: &Shared, kind: BeastKind, near: Vec2, entropy: u32) -> Option<Vec2> {
     let habitat = habitat_of(kind);
     sound_out(shared, near, entropy, &SUMMONS_RINGS, habitat.band)
@@ -956,22 +858,19 @@ fn sound_out(
 /// on every beat.
 ///
 /// The flock is owned by this thread outright rather than shared — nothing
-/// else ever needs to read it, because [`ToClient::Beast`] is an upsert and a
-/// newly joined client is caught up by the next beat with nobody having to
-/// introduce anything. That is what keeps this file free of locks of its own:
-/// the roster's lock is taken to read positions and again to broadcast, and
-/// no lock outlives either.
+/// else needs to read it, [`ToClient::Beast`] being an upsert that catches a
+/// newly joined client up on the next beat. That is what keeps this file free
+/// of locks of its own.
 ///
-/// The thread ends with the session, within a beat of [`Shared::stopping`]
-/// being set, and is deliberately not joined — the same terms the sky thread
-/// lives on.
+/// The thread ends with the session and is deliberately not joined, on the
+/// same terms the sky thread lives on.
 pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
     let shared = shared.clone();
     thread::spawn(move || {
-        // Stirred into every roll the beasts make, so two sessions on one
-        // seed do not raise their animals on the same bearings. Decorative
-        // randomness: nothing here ever needs to agree with another machine,
-        // the tellings being the agreement.
+        // Stirred into every roll the beasts make, so two sessions on one seed
+        // do not raise their animals on the same bearings. Decorative: nothing
+        // here needs to agree with another machine, the tellings being the
+        // agreement.
         let mut flock = Flock::new(shared.world.seed());
 
         // The beasts the world's file remembered, taken back up before the
@@ -979,7 +878,7 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
         // it said until the first beat rewrites it, so a save landing in the
         // beat between reopening and here still writes the beasts down.
         {
-            let remembered = shared.beasts.lock().expect("no poisoned lock").clone();
+            let remembered = shared.beasts.held().clone();
             for record in remembered {
                 flock.adopt(&record);
             }
@@ -996,27 +895,22 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
             // picture of where everyone is, and never holds the session up
             // while it thinks.
             let players: Vec<(PlayerId, Vec2)> = {
-                let players = shared.players.lock().expect("no poisoned lock");
+                let players = shared.players.held();
                 players
                     .iter()
                     .map(|(id, player)| (*id, player.position))
                     .collect()
             };
-            let summoned: Vec<(BeastKind, Vec2)> = shared
-                .summoned
-                .lock()
-                .expect("no poisoned lock")
-                .drain(..)
-                .collect();
+            let summoned: Vec<(BeastKind, Vec2)> = shared.summoned.held().drain(..).collect();
 
             let news = flock.beat(&shared, &players, &summoned);
 
             // The ledger a save reads, rewritten while no other lock is
             // held: the flock stays this thread's own, and what everyone
             // else sees is a summary from at most a beat ago.
-            *shared.beasts.lock().expect("no poisoned lock") = flock.records();
+            *shared.beasts.held() = flock.records();
 
-            let players = shared.players.lock().expect("no poisoned lock");
+            let players = shared.players.held();
             for word in news {
                 broadcast_all(&players, word);
             }
@@ -1024,18 +918,16 @@ pub(crate) fn mind_the_beasts(shared: &Arc<Shared>) {
     });
 }
 
-/// Every beast there is, and the bits the next decision about one comes out
-/// of. Split from the thread above so that a beat is a function that can be
-/// called a thousand times in a test rather than something that only happens
-/// while a real quarter-second goes by.
+/// Every beast there is, and the bits the next decision about one comes out of.
+/// Split from the thread above so a beat can be called a thousand times in a
+/// test rather than only while a real quarter-second goes by.
 struct Flock {
     beasts: HashMap<BeastId, Beast>,
     next_id: u32,
     entropy: u32,
     /// Where everyone was a beat ago, which is the whole of how a course is
-    /// arrived at — see [`Wake`]. Kept here rather than on the roster because
-    /// it is nobody else's business: the session knows where a player is, and
-    /// which way they are going is a thing the beasts want and work out.
+    /// arrived at — see [`Wake`]. Kept here rather than on the roster, being
+    /// nobody else's business.
     ///
     /// Trimmed to whoever is still connected on every beat, so a player who
     /// leaves and comes back is a stranger again rather than somebody who has
@@ -1075,11 +967,9 @@ impl Flock {
         }
 
         // Everyone, with the way they are making worked out from where they
-        // were when this last ran. A beat is the only clock this file has, so
-        // it is also the interval a speed is measured over — which makes a
-        // newcomer, having no last time, somebody standing still until the
-        // next beat has an opinion. That is a quarter second of a pod not
-        // knowing there is a bow there, and nobody's loss.
+        // were when this last ran. A newcomer, having no last time, stands
+        // still until the next beat has an opinion — a quarter second of a pod
+        // not knowing there is a bow there, and nobody's loss.
         let players: Vec<Wake> = afloat
             .iter()
             .map(|(id, position)| {
@@ -1108,13 +998,11 @@ impl Flock {
             self.keep(beast);
         }
 
-        // In id order rather than the map's own, which is a `HashMap`'s and so
-        // differs from run to run. Nothing about a beast has to agree with
-        // another machine — every last thing about one is *told* — but the
-        // entropy below is chained from beast to beast, so the map's order
-        // decides which animal gets which bits, and a test that failed under
-        // one process order could not be re-run under it. The sort costs a
-        // handful of ids a beat.
+        // In id order rather than the map's own, which differs from run to
+        // run. Nothing about a beast has to agree with another machine, but
+        // the entropy below is chained from beast to beast, so the map's order
+        // would decide which animal got which bits and a test that failed
+        // under one process order could not be re-run under it.
         let mut minding: Vec<BeastId> = self.beasts.keys().copied().collect();
         minding.sort_unstable_by_key(|id| id.0);
 
@@ -1135,23 +1023,17 @@ impl Flock {
             // for long enough that swimming it is arithmetic about something
             // no player could see.
             //
-            // It is counted in beats rather than measured in metres so that it
-            // has some patience in it: a player tacking along a coast, or
-            // turning back for a second look, leaves and re-enters an animal's
-            // waters constantly, and a rule with no hysteresis would spend that
-            // whole time letting the same shark go and raising it again.
+            // Counted in beats rather than measured in metres so that it has
+            // some patience in it: a player tacking along a coast leaves and
+            // re-enters an animal's waters constantly, and a rule with no
+            // hysteresis would spend that whole time letting the same shark go
+            // and raising it again.
             //
-            // What it does *not* do is drop the animal where it stands. A beast
-            // is let go the one way anything here is let go — it goes down
-            // first, and [`mind`] hands it over once it is under and deep, or
-            // once [`LEAVING_PATIENCE`] has run out of patience with where it
-            // has got to. Dropping it in place was the first version and it
-            // broke the promise the module's opening makes: a pod crossing away
-            // from the only player near enough to count is surfaced, so what
-            // that cost was a pod blinking out in plain sight. An animal
-            // already on its way out has nothing to be told: its exit is
-            // running, and restarting it would be an animal that never got to
-            // the end of a dive.
+            // What it does *not* do is drop the animal where it stands. It
+            // goes down first, and [`mind`] hands it over once it is under and
+            // deep or once [`LEAVING_PATIENCE`] is out. Dropping it in place
+            // was the first version, and it cost a surfaced pod blinking out
+            // in plain sight.
             let watched = players
                 .iter()
                 .any(|player| player.position.distance(beast.position) <= beast.habitat.waters);
@@ -1215,12 +1097,10 @@ impl Flock {
     }
 
     /// Takes back up a beast the world's file remembered — the reverse of
-    /// [`Flock::records`]. One still bound somewhere is rebuilt the way a
-    /// raise builds one, still making for its goal; one that was living
-    /// where it stood is rebuilt the way a summons builds one, already
-    /// arrived. Everything re-derived each beat — stance, breath, wander —
-    /// starts over, which nothing can see; the id is fresh, ids being
-    /// meaningless across sessions.
+    /// [`Flock::records`]. One still bound somewhere is rebuilt as a raise
+    /// builds one, still making for its goal; one living where it stood as a
+    /// summons builds one, already arrived. Everything re-derived each beat
+    /// starts over, which nothing can see.
     fn adopt(&mut self, record: &crate::keeper::BeastRecord) {
         let habitat = habitat_of(record.kind);
         let entropy = self.roll();
@@ -1241,15 +1121,11 @@ impl Flock {
     /// exactly as a world it had already left.
     ///
     /// So is one that has got out past the world's own edge, or that is making
-    /// for somewhere past it — the reader checks where a beast is going as
-    /// well as where it is. A file may only say what it can be read back
-    /// saying, and the reader refuses a beast swimming where no player could
-    /// go, so a world that wrote one down would be a world that would not open
-    /// again. That is a far worse thing than a shark nobody sees leave. It
-    /// takes a player sailing to the very brink to make one at all, and
-    /// [`raise`] no longer will; this is the guarantee rather than the fix,
-    /// because a beast that swam out under its own steam would be just as
-    /// unreadable.
+    /// for somewhere past it. A file may only say what it can be read back
+    /// saying, and a world that wrote one down would be a world that would not
+    /// open again — far worse than a shark nobody sees leave. The guarantee
+    /// rather than the fix: [`raise`] no longer makes one, but a beast that
+    /// swam out under its own steam would be just as unreadable.
     fn records(&self) -> Vec<crate::keeper::BeastRecord> {
         self.beasts
             .values()
@@ -1285,21 +1161,16 @@ impl Flock {
 ///
 /// The order of the three swings matters and is not the order they read in.
 /// The band correction comes last on purpose: a whale gives a boat a berth,
-/// but never onto ground that is not a whale's — it will pass close by a hull
-/// sooner than beach itself dodging one. And wanting to be somewhere never
-/// overrides either, which is what stops an animal swimming into a headland
-/// because the far end of its journey lies beyond it.
+/// but never onto ground that is not a whale's. And wanting to be somewhere
+/// never overrides either, which is what stops an animal swimming into a
+/// headland because the far end of its journey lies beyond it.
 ///
-/// One stance does not fit that shape, and is the reason the want below is
-/// worked out as a *place to want* rather than applied where it is decided: a
-/// pod riding a bow ([`ride`]) replaces where it is going instead of bending
-/// how it gets there. It has to. A swing added to the goal want would be a swing
-/// fighting the goal want, both of them clamped to the same quarter radian a
-/// beat, and the animal would make about half of whichever it wanted more —
-/// which is exactly the way the berth falls short on a course laid dead through
-/// a hull, written up on [`skirt`]. Station keeping cannot afford to lose that
-/// argument, so it does not have it: while a pod is on a bow, the bow *is*
-/// where it wants to be, and the crossing waits.
+/// One stance does not fit that shape, which is why the want below is worked
+/// out as a *place to want* rather than applied where it is decided: a pod
+/// riding a bow ([`ride`]) replaces where it is going instead of bending how
+/// it gets there. It has to — a swing added to the goal want would be a swing
+/// fighting it, both clamped alike, and the animal would make about half of
+/// whichever it wanted more.
 fn swim(beast: &mut Beast, shared: &Shared, players: &[Wake], entropy: u32) {
     let habitat = beast.habitat;
 
@@ -1335,16 +1206,13 @@ fn swim(beast: &mut Beast, shared: &Shared, players: &[Wake], entropy: u32) {
         beast.heading = turned(beast.heading, off.clamp(-0.25, 0.25));
     }
 
-    // And the berth, which is where a regard that bends a course goes: after
-    // the want, so that what an animal has come across outranks where it was
-    // going, and before the ground below, so that nothing dodges onto a beach.
-    //
-    // A berth is passing a boat wide rather than breaking off from one — see
-    // [`skirt`], and [`Regard::Berth`] for why those are different animals.
-    // Bounded to the same turn per beat as everything else, so an avoidance
-    // reads as deciding rather than as deflection. Skipped while riding, for
-    // the obvious reason: an animal that came to a bow on purpose has nothing
-    // to say to a rule about keeping off hulls.
+    // And the berth, where a regard that bends a course goes: after the want,
+    // so what an animal has come across outranks where it was going, and
+    // before the ground below, so nothing dodges onto a beach. Bounded to the
+    // same turn per beat as everything else, so an avoidance reads as deciding
+    // rather than as deflection, and skipped while riding — an animal that
+    // came to a bow on purpose has nothing to say to a rule about keeping off
+    // hulls.
     if let Some(reach) = regard.berth().filter(|_| beast.riding.is_none()) {
         if let Some(boat) = nearest_player(players, beast.position, reach) {
             let round = skirt(beast, boat.position, reach);
@@ -1357,12 +1225,10 @@ fn swim(beast: &mut Beast, shared: &Shared, players: &[Wake], entropy: u32) {
     if !floor_in(shared, beast.position + beast.heading * SOUNDING, band) {
         for step in 1..=8 {
             // An eighth of a turn at a time, +1, -1, +2, -2, … out to a half
-            // turn either way: the nearest useful bearings first, and the two
-            // sides tried at the same offsets, so a beast working its way out
-            // of a bay has no favourite hand. The halving is integer division
-            // on purpose — floating it steps the sides half an eighth apart,
-            // which is one side always the wrong side of the other and never
-            // trying straight back the way it came.
+            // turn either way, so a beast working its way out of a bay has no
+            // favourite hand. The halving is integer division on purpose:
+            // floating it steps the sides half an eighth apart, which never
+            // tries straight back the way it came.
             let side = if step % 2 == 1 { 1.0 } else { -1.0 };
             let off = side * ((step + 1) / 2) as f32 * FRAC_PI_4;
             let tried = turned(beast.heading, off);
@@ -1393,14 +1259,10 @@ fn mind(beast: &mut Beast, shared: &Shared, players: &[Wake], entropy: u32) -> b
         // may well have crossed better on the way in.
         Doing::Bound => {
             let done = match beast.habitat.journey {
-                // A bound beast always has somewhere to be: [`raise`] gives
-                // one to every newcomer of either kind, and the only thing
-                // that clears a goal is [`Beast::settle`], which is how a
-                // beast stops being bound in the first place. A traveller
-                // that somehow had none would be a whale with no life left to
-                // live, and reading that as "arrived" would end it silently
-                // where it stood; reading it as "not yet" leaves it to the
-                // backstop below, which is the failure that can be seen.
+                // A bound beast always has somewhere to be. One that somehow
+                // had none, read as "arrived", would end silently where it
+                // stood; read as "not yet" it falls to the backstop below,
+                // which is the failure that can be seen.
                 Some(_) => beast
                     .goal
                     .is_some_and(|goal| beast.position.distance(goal) < ARRIVED),
@@ -1452,10 +1314,9 @@ fn mind(beast: &mut Beast, shared: &Shared, players: &[Wake], entropy: u32) -> b
 /// not simply steering round it: go under, and stay under while it is there.
 ///
 /// Nothing else here has anything to say, and it is [`REGARDS`] that says so
-/// rather than a kind named here: a stance that answers by going under is the
-/// only thing this has any business with. A shark is a fin whenever it is
-/// alive, and a pod arcs the whole way across the map; both of those are
-/// drawing, and this is deliberately the only thing that is not.
+/// rather than a kind named here. A shark is a fin whenever it is alive and a
+/// pod arcs the whole way across; both of those are drawing, and this is
+/// deliberately the only thing that is not.
 fn breathe(beast: &mut Beast, players: &[Wake], entropy: u32) {
     let Some(reach) = Regard::of(beast.habitat.kind, A_PLAYER).sounding() else {
         return;
@@ -1496,10 +1357,8 @@ fn breathe(beast: &mut Beast, players: &[Wake], entropy: u32) {
 ///
 /// Aiming the course at the watcher is the one thing about these animals that
 /// is *for* a player, and it is staging rather than behaviour: an animal
-/// crossing the map is only an animal anybody meets if the map it crosses is
-/// the one being looked at. The offset abeam is what makes it a passing
-/// rather than a collision course — the same trick, and for the same reason,
-/// as the client's seabird crossings.
+/// crossing the map is only met if the map it crosses is the one being looked
+/// at. The offset abeam makes it a passing rather than a collision course.
 fn journey(
     shared: &Shared,
     habitat: &Habitat,
@@ -1523,34 +1382,26 @@ fn journey(
 ///
 /// This is the one stance that *closes* on a player, and the whole of what it
 /// has to get right is stopping. A pod that comes to a bow and stays reads
-/// beautifully for about a minute and then reads as an animal that has forgotten
-/// what it was doing, because it has: its crossing is its life, and a boat that
-/// keeps sailing is a boat it would keep pace with until the far end of the map.
-/// So a ride is drawn a length when it starts ([`RIDE`]), and afterwards the pod
-/// wants nothing to do with bows for a good while ([`ALOOF`]) — long enough to
-/// have visibly gone on somewhere, rather than thinking better of it in sight of
-/// the boat it just left.
+/// beautifully for about a minute and then reads as an animal that has
+/// forgotten what it was doing, because it has. So a ride is drawn a length
+/// when it starts ([`RIDE`]), and afterwards the pod wants nothing to do with
+/// bows for a good while ([`ALOOF`]).
 ///
-/// It ends on any of four things, and the last three are as important as the
-/// clock: the beats run out, the player stops making way (there is no bow on a
-/// boat at anchor — see [`UNDERWAY`]), the player outruns or outmanoeuvres the
-/// pod and leaves it outside the reach it noticed them at, or the animal stops
-/// being one with anything to play — a pod that has reached the end of its
-/// crossing is leaving, and that is [`Beast::settle`]'s business.
+/// It ends on any of four things, and the last three matter as much as the
+/// clock: the beats run out, the player stops making way (see [`UNDERWAY`]),
+/// the player outruns the pod and leaves it outside the reach it noticed them
+/// at, or the animal stops being one with anything to play.
 ///
-/// What it does *not* touch is where the pod was going. The goal is still
-/// there, untouched, all the way through; [`swim`] simply wants the bow more
-/// while there is a bow to want, and the beat the ride ends the crossing picks
-/// up from wherever the pod has got to. That is the difference between a stance
-/// and a part of a life, and it is the reason this returns a bearing instead of
-/// setting one.
+/// What it does *not* touch is where the pod was going: the goal stands
+/// untouched, [`swim`] simply wants the bow more while there is one to want,
+/// and the crossing picks up from wherever the pod has got to. That is why
+/// this returns a bearing instead of setting one.
 fn ride(beast: &mut Beast, players: &[Wake], regard: Regard, entropy: u32) -> Option<Vec2> {
     beast.aloof = beast.aloof.saturating_sub(1);
 
     // Not a kind that plays, or not in a part of life that has any business
     // playing: an animal on its way out is under the water and making for the
-    // deep, and coming up alongside a hull on the way would undo the one promise
-    // the module's opening makes about how things leave.
+    // deep, and coming up alongside a hull would undo how things leave.
     let reach = regard.playing().filter(|_| beast.doing != Doing::Leaving);
     let Some(reach) = reach else {
         beast.riding = None;
@@ -1614,39 +1465,30 @@ fn ride(beast: &mut Beast, players: &[Wake], regard: Regard, entropy: u32) -> Op
 /// whichever side the animal is already leaning.
 ///
 /// This is the whole difference between an animal that is going somewhere and
-/// one that minds you. Turning away from the hull — which is what this was,
-/// when giving way was a thing wildlife did — makes every encounter about the
-/// player: the animal breaks off, runs, and comes back when you go, so a boat
-/// is a hole in the sea that pushes. A tangent holds the course and bends it
-/// round the obstacle, so what a player sees is a pod that was always going
-/// to pass them and made room to do it, which is what these animals do.
+/// one that minds you. Turning away from the hull, which is what this was
+/// once, makes every encounter about the player: the animal breaks off, runs,
+/// and comes back when you go, so a boat is a hole in the sea that pushes. A
+/// tangent holds the course and bends it round, so what a player sees is a pod
+/// that was always going to pass them and made room to do it.
 ///
 /// A beast already inside the clearance cannot skirt what it is standing in,
-/// and a beast the hull is behind has nothing to skirt: both simply keep the
-/// bearing they had, the first because there is no room left to make and the
-/// second because the boat is a thing it has already passed.
+/// and a beast the hull is behind has nothing to skirt: both keep the bearing
+/// they had.
 ///
-/// `reach` is the range the stance noticed the boat at — [`Regard::Berth`]'s
-/// number, or [`Regard::Sound`]'s — and the pass is aimed to clear it by
-/// [`BERTH`] of that. Noticing further out than it insists on passing is what
-/// leaves room for the turn to be gradual. The swing is capped at a quarter
-/// turn off the hull's own bearing, which is the widest a *pass* can be:
-/// anything beyond it is closing the range no more, and so is not passing the
-/// boat but running from it.
+/// `reach` is the range the stance noticed the boat at, and the pass is aimed
+/// to clear it by [`BERTH`] of that — noticing further out than it insists on
+/// passing is what leaves room for the turn to be gradual. The swing is capped
+/// at a quarter turn off the hull's own bearing, which is the widest a *pass*
+/// can be; beyond that it is running rather than passing.
 ///
 /// What comes back is a bearing to *want*, not one the animal takes: [`swim`]
-/// clamps the swing towards it to a quarter radian a beat, the same clamp the
-/// goal want gets. So the clearance above is what the pass aims at rather than
-/// what it always makes, and the one course where it falls short is the one
-/// laid dead through the hull — there the two swings are equal and opposite
-/// every beat and mostly cancel, and a pod that aims to clear by twelve and a
-/// half metres clears by six. Any course at all off the line clears it and
-/// more. Left alone rather than fixed by unclamping the berth: a swing that
-/// outranks the want at every range is an animal that abandons its journey for
-/// a boat, which is the one thing these stances are written not to be — see
-/// [`Regard::Berth`]. Fixing it properly means suspending the want while
-/// giving way rather than out-turning it, which is also what a stance that
-/// *closes* the range will need.
+/// clamps the swing towards it like any other. So the one course where the
+/// clearance falls short is the one laid dead through the hull, where the two
+/// swings are equal and opposite and mostly cancel — a pod aiming to clear by
+/// twelve and a half metres clears by six. Left alone rather than fixed by
+/// unclamping the berth, which would be an animal that abandons its journey
+/// for a boat; fixing it properly means suspending the want while giving way,
+/// which is also what a stance that *closes* the range will need.
 fn skirt(beast: &Beast, boat: Vec2, reach: f32) -> Vec2 {
     let to = boat - beast.position;
     let range = to.length();
@@ -1717,35 +1559,27 @@ fn floor_in(shared: &Shared, at: Vec2, band: (f32, f32)) -> bool {
 /// player is in has nothing of the sort to offer, which costs nothing and is
 /// tried afresh next beat.
 ///
-/// The two kinds of animal differ here and only here, which is the point of
-/// the ring being one number for both. A **traveller** is born in its own
-/// water on the ring and given the far end of a course past this player —
-/// birth and destination, and after that it is simply an animal swimming. A
-/// **shark** is born in deep water *off* the shallows it is going to live in,
-/// so the ring finds the home and the birth is sounded out from there: it has
-/// to come from somewhere nobody is, and the somewhere nobody is, at a coast,
-/// is offshore.
+/// The two kinds of animal differ here and only here. A **traveller** is born
+/// in its own water on the ring and given the far end of a course past this
+/// player. A **shark** is born in deep water *off* the shallows it will live
+/// in, so the ring finds the home and the birth is sounded out from there: it
+/// has to come from somewhere nobody is, which at a coast is offshore.
 ///
-/// A try is a whole candidate — a spot on the ring *and* the somewhere else
-/// each kind needs of it — because a ring spot with no course off it, or none
-/// with deep water behind it, is not a beast and the next spot along may well
-/// be. Failing all of them costs nothing and is tried afresh next beat.
+/// A try is a whole candidate — a ring spot *and* the somewhere else each kind
+/// needs of it — because a ring spot with no course off it is not a beast and
+/// the next spot along may well be.
 fn raise(habitat: &'static Habitat, shared: &Shared, player: Vec2, entropy: u32) -> Option<Beast> {
     (0..RAISE_ATTEMPTS).find_map(|attempt| {
         let bearing = unit(entropy, attempt * 2 + 1) * TAU;
         let out =
             habitat.ring.0 + unit(entropy, attempt * 2 + 2) * (habitat.ring.1 - habitat.ring.0);
         let on_the_ring = player + Vec2::from_angle(bearing) * out;
-        // Nothing swims past the end of the world. A player standing at the
-        // very brink has half their horizon outside it, and a beast raised out
-        // there is one the world's own file cannot write down — see
-        // [`Flock::records`]. A spot that is off the map makes way for the
-        // next, exactly as one with the wrong water under it does.
-        //
+        // Nothing swims past the end of the world: a player standing at the
+        // brink has half their horizon outside it, and a beast raised out
+        // there is one the file cannot write down — see [`Flock::records`].
         // Here for the cheapness of it, the ring spot being the one point both
-        // kinds have before any sounding is done; the candidate is held to it
-        // whole below, which is the check that actually covers the two points a
-        // beast is written down as.
+        // kinds have before any sounding; the check below is the one that
+        // actually covers both points a beast is written down as.
         if !crate::reachable(on_the_ring) {
             return None;
         }
@@ -1766,25 +1600,21 @@ fn raise(habitat: &'static Habitat, shared: &Shared, player: Vec2, entropy: u32)
                     &BIRTH_RINGS,
                     (f32::NEG_INFINITY, DEEP),
                 )?;
-                // The deep is sounded outward from the *home*, which sits most
-                // of the way to the edge of these waters already, so it will
-                // happily find water on the far side of it. A shark born out
-                // there is one that would be forgotten before it could swim in
-                // — it makes a bare half-metre a beat against a patience
-                // counted in beats — so the birth has to be inside the reach
-                // that keeps it minded, and a ring spot that cannot offer one
-                // makes way for the next.
+                // The deep is sounded outward from the *home*, which already
+                // sits most of the way to the edge of these waters, so it will
+                // happily find water beyond them. A shark born out there makes
+                // a bare half-metre a beat and would be forgotten before it
+                // could swim in, so the birth has to be inside the reach that
+                // keeps it minded.
                 (born.distance(player) <= habitat.waters)
                     .then(|| Beast::born(habitat, born, Some(on_the_ring), entropy))?
             }
         };
-        // Where it is *and* where it is going, because the file writes both and
-        // the reader refuses either past the edge. The ring spot is only one of
-        // the two, and which one it is differs by kind: a traveller is born
-        // there and bound somewhere a course length off, a shark is born out in
-        // the deep and bound for there. Each kind's second point comes from a
-        // sounding that walks outward from the first, so the edge is exactly
-        // where a sounding will have gone looking.
+        // Where it is *and* where it is going, because the file writes both
+        // and the reader refuses either past the edge. The ring spot is only
+        // one of the two, and which one differs by kind; the other comes from
+        // a sounding that walks outward from it, so the edge is exactly where
+        // a sounding will have gone looking.
         (crate::reachable(raised.position) && raised.goal.is_none_or(crate::reachable))
             .then_some(raised)
     })
@@ -1800,13 +1630,11 @@ fn turned(heading: Vec2, angle: f32) -> Vec2 {
 /// rounds, without its sequence. Everything random the beasts do comes
 /// through here.
 ///
-/// The game crate has these same rounds, and this is deliberately not shared
-/// with them: the only crate both sides could reach for is `protocol`, and
-/// nothing here belongs on the wire. None of what this decides ever needs to
-/// agree with another machine — where a shark is raised is *told*, not
-/// re-derived — so the two copies answering differently would cost nothing.
-/// The client's copy is the one where sameness matters, because it deals a
-/// pod's shape from an id every machine was given.
+/// The game crate has these same rounds, deliberately not shared: the only
+/// crate both sides could reach for is `protocol`, and nothing here belongs on
+/// the wire. Nothing this decides ever needs to agree with another machine —
+/// where a shark is raised is *told*, not re-derived — so two copies answering
+/// differently would cost nothing.
 fn scramble(mut x: u32) -> u32 {
     x = x.wrapping_add(0x9E37_79B9);
     x ^= x >> 16;

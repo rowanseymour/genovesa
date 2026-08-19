@@ -27,7 +27,9 @@ pub mod models;
 pub mod net;
 pub mod player;
 pub mod sea;
+pub mod settings;
 pub mod sky;
+pub mod stopping;
 pub mod terrain;
 pub mod trees;
 pub mod wake;
@@ -122,20 +124,14 @@ pub fn eased(rate: f32, dt: f32) -> f32 {
 /// Stirs bits until they stop resembling what they were — SplitMix's mixing
 /// rounds, without its sequence.
 ///
-/// Everything this crate invents out of thin air comes through here, and it
-/// is deliberately one function rather than one per module, because the two
-/// jobs it does are the same arithmetic wearing different hats. Most callers
-/// only want a number that does not look patterned — which bearing a
-/// crossing is laid on, how much a bird sits off its station — and could
-/// have used anything.
-///
-/// The rest want *agreement*: they feed in bits every machine was dealt
-/// alike — a chunk's coordinates, a [`protocol::BeastId`] — so that what is
-/// dealt from them comes out the same on every client without a byte
-/// crossing the wire. That is the eagles' trick over a summit and the
-/// beasts' over a pod, and it only holds while there is one mixer to be
-/// dealt by. Two copies of these rounds are two ways for two builds to
-/// disagree about what a pod looks like, with nothing to say so.
+/// Everything this crate invents out of thin air comes through here, and
+/// deliberately one function rather than one per module. Most callers only want
+/// a number that does not look patterned. The rest want *agreement*: they feed
+/// in bits every machine was dealt alike — a chunk's coordinates, a
+/// [`protocol::BeastId`] — so what is dealt comes out the same on every client
+/// without a byte crossing the wire. That only holds while there is one mixer,
+/// two copies being two ways for two builds to disagree with nothing to say
+/// so.
 pub fn scramble(mut x: u32) -> u32 {
     x = x.wrapping_add(0x9E37_79B9);
     x ^= x >> 16;
@@ -168,18 +164,14 @@ pub fn between(bits: u32, salt: u32, range: (usize, usize)) -> usize {
 /// pair being what turns a size in world metres into the scale the model is
 /// hung at.
 ///
-/// Every animal here is drawn at a size dealt from bits, the way palms are
-/// (see [`protocol::ground::Kind::scale`]) and for the same reason: one
-/// model stamped at one size reads as one animal repeated, which is what a
-/// row of identical palms taught. The sea's kinds deal from the
-/// [`protocol::BeastId`] and the sky's from the chunk or the crossing, so
-/// every client draws the same animal at the same size without a byte
-/// crossing the wire for it.
+/// Every animal is drawn at a size dealt from bits, the way palms are: one model
+/// stamped at one size reads as one animal repeated. The bits are ones every
+/// machine was dealt alike, so every client draws the same animal at the same
+/// size without a byte crossing the wire.
 ///
 /// Written in *world metres* rather than as a multiplier because that is the
-/// thing worth arguing about — a shark is three to four metres long, and
-/// what multiple of the file that happens to be is arithmetic. [`Size::model`]
-/// is what keeps the two honest.
+/// thing worth arguing about — a shark is three to four metres long, and what
+/// multiple of the file that happens to be is arithmetic.
 pub struct Size {
     /// What the file measures along the axis the range is quoted on — nose to
     /// tail for a swimmer, wingtip to wingtip for a bird.
@@ -220,8 +212,14 @@ pub enum AppState {
     NewWorld,
     /// Naming a server to play in.
     JoinWorld,
+    /// The way to the two screens below, and nothing else — see
+    /// [`crate::menu`].
+    Options,
+    /// Choosing how the game is drawn: how much screen it takes, how many
+    /// pixels it draws and whether the sun casts. See [`crate::settings`].
+    Display,
     /// Choosing which key does what.
-    Settings,
+    Controls,
     InWorld,
 }
 
@@ -230,13 +228,10 @@ pub enum AppState {
 ///
 /// A world lives exactly as long as `AppState::InWorld` does: the ground, the
 /// boat, the connection and the served world behind it all hang off entering
-/// and leaving that state. So pausing must not be a way of leaving it. Escape
-/// used to set [`AppState::MainMenu`] outright, which despawned the world,
-/// dropped the chunks and hung up the connection — and for a shared world that
-/// meant one mispress evicted everyone else sailing in it. Standing the pause
-/// menu up *inside* `InWorld` means the pause costs nothing but the player's
-/// own hands: chunks keep arriving, the server keeps serving, and the other
-/// boats keep moving.
+/// and leaving it, so pausing must not be a way of leaving it. Escape used to
+/// set [`AppState::MainMenu`] outright, which for a shared world meant one
+/// mispress evicted everyone else sailing in it. Standing the pause menu up
+/// *inside* `InWorld` costs nothing but the player's own hands.
 ///
 /// Which is why only the systems that read the player's input are held while
 /// paused. Everything that merely keeps the world true to itself — floating
@@ -250,10 +245,19 @@ pub enum Helm {
     Sailing,
     /// The pause menu is up over the world.
     Paused,
-    /// The controls screen, opened from the pause menu. Distinct from
-    /// [`AppState::Settings`], which is the same screen reached from the main
-    /// menu with no world behind it — both are built by `spawn_controls`, and
+    /// The options screen, opened from the pause menu.
+    ///
+    /// Every screen from here down is doubled — one of these and one
+    /// [`AppState`] beside it — and that doubling is the point rather than an
+    /// oversight. The same screen reached from the main menu has no world
+    /// behind it; reached from the pause menu it must not take one down, and
+    /// leaving `AppState::InWorld` is exactly what would. One builder each, and
     /// the only difference is which screen Back returns to.
+    Options,
+    /// The display screen, opened from the options screen — see
+    /// [`AppState::Display`].
+    Display,
+    /// The controls screen, likewise — see [`AppState::Controls`].
     Controls,
     /// The debug console is up over the world, taking the keyboard — see
     /// [`console`]. A state here rather than a flag of the console's own

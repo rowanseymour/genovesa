@@ -1,24 +1,19 @@
 //! Cloud shadows: the only part of the weather a camera pointed at the ground
 //! can see.
 //!
-//! There are no clouds in this world, and there is no room for any. The eye
-//! looks down at the ground from somewhere between thirty metres and three
-//! hundred, wherever the wheel has left it, and anything hung in the air
-//! between the two would spend its life covering the picture rather than
-//! decorating it. What a player would see of a real sky from up there is its
-//! *shadow* — patches of shade wandering across the sea and up the hillsides
-//! — so that is the whole of what is drawn, and the clouds themselves are
-//! never modelled at all.
+//! There are no clouds in this world and no room for any: the eye looks down
+//! from between thirty metres and three hundred, and anything hung in the air
+//! between would spend its life covering the picture. What a player would see
+//! of a real sky from up there is its *shadow*, so that is the whole of what is
+//! drawn.
 //!
-//! Which means this is not a thing in the world so much as a thing done to the
-//! light. Bevy will mask a directional light with a texture — the trick a film
-//! lamp does with a gobo — and a masked light carries the pattern onto every
-//! surface it touches, in one pass, for nothing: the ground, the water, the
-//! hull, the palms and whatever is walking about are all shaded by the same
-//! sun and so all fall under the same cloud, without a line of this file
-//! knowing that any of them exist. Doing it in the materials instead would
-//! have meant the same function written into the terrain's shader, the sea's
-//! and every model's, and three of them would have gone out of step.
+//! Which makes this a thing done to the light rather than a thing in the world.
+//! Bevy will mask a directional light with a texture — a film lamp's gobo — and
+//! a masked light carries the pattern onto every surface it touches in one
+//! pass, so everything under the same sun falls under the same cloud without a
+//! line of this file knowing any of them exist. In the materials instead it
+//! would be the same function written into three shaders, and three of them
+//! would have gone out of step.
 //!
 //! The mask lies in the plane facing the sun, and is projected down the light
 //! like everything else the light does. Three consequences, and each is a
@@ -120,6 +115,37 @@ const ALOFT: f32 = 1.6;
 /// stops being a shape and becomes a stripe across the whole island.
 const LONGEST: f32 = 2.5;
 
+/// How deep the mask's projector stands along the light's own direction, in
+/// metres.
+///
+/// A hair, and it has to be. Nothing about a mask wants a depth — the shader
+/// that reads one asks only for the two coordinates across the light, so this
+/// number never reaches a cloud shadow. It reaches the *other* thing Bevy
+/// carries a light texture on: a light mask rides the clustered-decal
+/// machinery, and a decal is a box, so anything standing inside the unit cube
+/// of this transform gets the mask composited onto it as **colour** rather
+/// than as light. The mask is a one-channel image, and one channel read as a
+/// colour is red.
+///
+/// At the metre this used to be, that box was a metre-thick slab standing on
+/// the waterline and lying across the world at the angle of the sun, and
+/// wherever it cut the ground it painted a band — straight across open water,
+/// wandering over a hillside the way any plane through rolling ground does,
+/// and sliding with the weather and the hour like something the world meant.
+/// Thin enough and nothing is ever inside it. Not zero: a scale of zero
+/// cannot be inverted, and the shader would be handed NaN for every
+/// coordinate it asked for.
+///
+/// All of which is a way round somebody else's bug, and it has a number:
+/// <https://github.com/bevyengine/bevy/issues/24836>. A light texture is not
+/// a decal and was never meant to be clustered as one; the engine's GPU
+/// clustering counted it as one anyway. It is fixed on the engine's main
+/// branch and in no release this has ever built against, so the thing to do
+/// on the next engine bump is read that issue: once the fix is in the version
+/// `Cargo.toml` names, this constant has nothing left to dodge and should go,
+/// depth and all.
+const NO_DEPTH: f32 = 1e-6;
+
 /// The clouds, as they stand: the mask itself, and how far downwind the
 /// weather has carried it.
 ///
@@ -156,6 +182,9 @@ impl Clouds {
     /// below `sky::GRAZE`. A light exactly on the horizon would squeeze the
     /// mask to nothing, and a transform that cannot be inverted hands the
     /// shader NaN for every coordinate it asks for.
+    ///
+    /// The depth it stands in is [`NO_DEPTH`], which is not about the light
+    /// at all — see there.
     pub fn stand_the_light(&self, from: Vec3) -> Transform {
         // Standing on the waterline, downwind of where it began. The height is
         // nothing to argue about — sliding the mask along the light's own
@@ -169,7 +198,7 @@ impl Clouds {
         // in, and squeezed along the axis the sun leans in — which is the
         // whole of the cap [`LONGEST`] describes.
         let squeeze = (from.y * LONGEST).min(1.0);
-        stand.scale = Vec3::new(TILE / 2.0, TILE / 2.0 * squeeze, 1.0);
+        stand.scale = Vec3::new(TILE / 2.0, TILE / 2.0 * squeeze, NO_DEPTH);
         stand
     }
 }
@@ -357,6 +386,7 @@ fn smoothstep(from: f32, to: f32, at: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use bevy::asset::AssetPlugin;
+    use bevy::math::Vec3Swizzles;
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
@@ -441,8 +471,11 @@ mod tests {
         }
         .stand_the_light(SUN);
 
-        let onto_the_mask =
-            |stand: &Transform, at: Vec3| stand.compute_affine().inverse().transform_point3(at);
+        // The mask's coordinates, which are two: the third axis of this
+        // transform is [`NO_DEPTH`] and so is not a length in metres at all.
+        let onto_the_mask = |stand: &Transform, at: Vec3| {
+            stand.compute_affine().inverse().transform_point3(at).xy()
+        };
         for ground in [
             Vec3::ZERO,
             Vec3::new(120.0, 0.0, -80.0),

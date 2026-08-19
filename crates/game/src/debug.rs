@@ -59,6 +59,10 @@ impl Plugin for DebugOverlayPlugin {
         }
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<Toggles>()
+            // The player's own switch over the same light this module's
+            // doctors — shared with the plugin that keeps it, each
+            // initialising it for its own tests, exactly as `Sky` is below.
+            .init_resource::<crate::settings::DisplaySettings>()
             // The hour the readout prints — shared with the plugin that
             // draws the sky, each initialising it for its own tests.
             .init_resource::<crate::sky::Sky>()
@@ -108,11 +112,6 @@ pub struct Toggles {
     /// the far edge of the shadows sits in plain sight is where the answer
     /// is.
     pub reach: f32,
-    /// `set boat` — which kind of boat this client rigs its own hull as.
-    /// A dev stand-in until the rowboat is in the game's flow: the choice
-    /// never crosses the wire, so everyone else still sees a ship. See
-    /// `boat::refit`, which is what acts on it.
-    pub boat: crate::boat::HullKind,
 }
 
 impl Default for Toggles {
@@ -123,7 +122,6 @@ impl Default for Toggles {
             haze: true,
             wireframe: false,
             reach: crate::HAZE_END,
-            boat: crate::boat::HullKind::default(),
         }
     }
 }
@@ -173,10 +171,6 @@ pub const SWITCHES: [Switch; 4] = [
 /// that would have to carry a second kind of value.
 pub const REACH: &str = "reach";
 
-/// The dev boat switch's name — a kind rather than on and off, so a special
-/// case beside [`REACH`] wherever the switches are walked.
-pub const BOAT: &str = "boat";
-
 impl Toggles {
     /// The boolean switch a name asks for, or `None` where the name is not
     /// one of them.
@@ -215,9 +209,6 @@ impl Toggles {
         if self.reach != Self::default().reach {
             on.push(format!("shadow {REACH} {:.0}m", self.reach));
         }
-        if self.boat != Self::default().boat {
-            on.push(format!("{BOAT} {}", self.boat.name()));
-        }
         (!on.is_empty()).then(|| format!("debug: {}", on.join(" / ")))
     }
 }
@@ -255,6 +246,7 @@ struct Held<'a> {
 fn apply_toggles(
     mut commands: Commands,
     toggles: Res<Toggles>,
+    display: Res<crate::settings::DisplaySettings>,
     wireframe: Option<ResMut<WireframeConfig>>,
     mut suns: Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
     cameras: Query<(Entity, Has<DistanceFog>), With<MapCamera>>,
@@ -262,7 +254,7 @@ fn apply_toggles(
 ) {
     let fresh_sun = !suns.is_empty() && !*lit;
     *lit = !suns.is_empty();
-    if !toggles.is_changed() && !fresh_sun {
+    if !toggles.is_changed() && !display.is_changed() && !fresh_sun {
         return;
     }
 
@@ -274,7 +266,14 @@ fn apply_toggles(
     }
 
     for (mut sun, mut cascades) in &mut suns {
-        sun.shadow_maps_enabled = toggles.shadows;
+        // Two switches over one light, and the `&&` is which of them outranks
+        // which: the display setting is what the player asked for and the
+        // console's is a doctoring of it, so `set shadows on` cannot light a
+        // world whose owner has turned the sun's casting off. Kept to one
+        // writer for the reason this whole system is written the way it is —
+        // two systems setting the same field would each undo the other on
+        // alternate frames.
+        sun.shadow_maps_enabled = display.shadows && toggles.shadows;
         *cascades = crate::terrain::cascades(toggles.reach);
     }
 
@@ -519,30 +518,23 @@ fn triangles_in(mesh: &Mesh) -> usize {
 /// frames, before the diagnostic has anything to average.
 ///
 /// One line per subject, slash-separated within it, so the block stays four
-/// lines however much it has to say: what the frame cost, what the sun added
-/// to it, what the streamer holds, and where this is. Every number carries its
-/// own noun — nothing is positional — because the lines come and go with what
-/// exists to count, and a reader should not have to know which line is missing
-/// to know what they are looking at.
+/// lines however much it has to say. Every number carries its own noun —
+/// nothing is positional — because the lines come and go with what exists to
+/// count.
 ///
 /// The chunk line is three numbers about two different things:
 ///
-/// - the **total** is every chunk this machine has an answer about, ground and
-///   water together, of which **ocean** is the share that was answered with
-///   nothing — sea costs nothing to hold, so the rest is where the memory
-///   went;
-/// - **requested** is ground asked for and not answered. It is deliberately
-///   outside the total, nothing being known about it yet, and it is the only
-///   number here about the *server* rather than about this machine.
+/// - the **total** is every chunk this machine has an answer about, of which
+///   **ocean** is the share answered with nothing — sea costs nothing to hold,
+///   so the rest is where the memory went;
+/// - **requested** is ground asked for and not answered, deliberately outside
+///   the total and the only number here about the *server*.
 ///
 /// There is no count of meshes still being assembled, though there is a stage
-/// for it. Before the world crossed the wire that number was the whole of the
-/// streaming backlog, because building a chunk was generating it; now it is
-/// the moment between a payload landing and its vertex buffers being filled,
-/// which an arrival's worth of chunks passes through in about six frames. A
-/// number that reads zero but for a tenth of a second, once, is not worth the
-/// line — and the failure it would have caught, meshes not landing, shows up
-/// as the count above this one standing still while the chunks climb.
+/// for it: it is the moment between a payload landing and its vertex buffers
+/// being filled, which an arrival's worth of chunks passes through in about six
+/// frames. The failure it would have caught shows up as the count above this
+/// one standing still while the chunks climb.
 fn overlay_text(
     fps: Option<f64>,
     counts: &Counts,
@@ -670,6 +662,92 @@ mod tests {
             stats: true,
             ..default()
         }
+    }
+
+    /// A headless app with a sun in it, standing in for a world's lighting:
+    /// what `apply_toggles` writes to is a `DirectionalLight` and a cascade
+    /// config, and neither of those needs a GPU to be looked at.
+    fn a_lit_app(display: crate::settings::DisplaySettings, toggles: Toggles) -> App {
+        let mut app = App::new();
+        app.insert_resource(display)
+            .insert_resource(toggles)
+            .add_systems(Update, apply_toggles);
+        app.world_mut().spawn((
+            DirectionalLight::default(),
+            crate::terrain::cascades(crate::HAZE_END),
+        ));
+        app.update();
+        app
+    }
+
+    fn sun_casts(app: &mut App) -> bool {
+        app.world_mut()
+            .query::<&DirectionalLight>()
+            .iter(app.world())
+            .next()
+            .expect("a sun")
+            .shadow_maps_enabled
+    }
+
+    /// Two switches over one light, and which of them outranks which. The
+    /// display setting is what the player asked for; the console's is a
+    /// doctoring of it, and a doctoring cannot overrule the request.
+    #[test]
+    fn the_console_cannot_light_a_world_whose_owner_turned_the_shadows_off() {
+        use crate::settings::DisplaySettings;
+
+        let off = DisplaySettings {
+            shadows: false,
+            ..default()
+        };
+        let mut app = a_lit_app(off, Toggles::default());
+        assert!(!sun_casts(&mut app), "the setting was not obeyed");
+
+        // The console saying yes to a sun the settings have already switched
+        // off changes nothing.
+        app.world_mut().resource_mut::<Toggles>().shadows = true;
+        app.update();
+        assert!(!sun_casts(&mut app), "the console overruled the setting");
+
+        // And with the setting on, the console can still take them away —
+        // which is the whole point of having it.
+        app.insert_resource(DisplaySettings::default());
+        app.update();
+        assert!(sun_casts(&mut app));
+        app.world_mut().resource_mut::<Toggles>().shadows = false;
+        app.update();
+        assert!(!sun_casts(&mut app), "the console lost its own switch");
+    }
+
+    /// A sun spawned *after* either switch was thrown still comes up the way
+    /// they say — leaving a world and entering another does exactly that.
+    #[test]
+    fn a_sun_hung_after_the_fact_comes_up_in_the_state_that_was_asked_for() {
+        use crate::settings::DisplaySettings;
+
+        let mut app = a_lit_app(
+            DisplaySettings {
+                shadows: false,
+                ..default()
+            },
+            Toggles::default(),
+        );
+        // The world the first sun belonged to goes, and another arrives.
+        let sun = app
+            .world_mut()
+            .query_filtered::<Entity, With<DirectionalLight>>()
+            .iter(app.world())
+            .next()
+            .expect("a sun");
+        app.world_mut().entity_mut(sun).despawn();
+        app.update();
+        app.world_mut().spawn((
+            DirectionalLight::default(),
+            crate::terrain::cascades(crate::HAZE_END),
+        ));
+        app.update();
+
+        assert!(!sun_casts(&mut app), "the new sun forgot the setting");
     }
 
     #[test]
@@ -946,11 +1024,10 @@ mod tests {
             haze: false,
             wireframe: true,
             reach: 225.0,
-            boat: crate::boat::HullKind::Rowboat,
         };
         assert_eq!(
             all.line().as_deref(),
-            Some("debug: no shadows / no haze / wireframe / shadow reach 225m / boat rowboat")
+            Some("debug: no shadows / no haze / wireframe / shadow reach 225m")
         );
 
         // And the reach only speaks up when it is not the world's own, since

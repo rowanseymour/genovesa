@@ -13,50 +13,53 @@
 //! with the picture through a turn instead of arriving ahead of it.
 //!
 //! The card is drawn *lying on the sea* rather than flat on the glass: a
-//! bearing on it is meant to be carried out into the picture, and against
-//! ground drawn at the camera's pitch an unforeshortened dial reads as a
-//! sticker on the screen instead of a direction in the world. The tilt is the
-//! projection itself — a flat card on the ground plane, seen from
-//! [`PITCH`][crate::camera::PITCH] above horizontal, is its upright drawing
-//! squashed vertically by `sin(PITCH)`, applied *after* the card's own spin
-//! so the letters shear the way paint on a deck would. Real 3D geometry
-//! parented to the camera was rejected: over a dial this size it differs from
-//! the squash only by a keystone too small to see, and it would need letters
-//! as meshes and an exemption from the fog, the lighting and the terrain's
-//! occlusion to survive drawing at all.
+//! bearing on it is carried out into the picture, and against ground drawn at
+//! the camera's pitch an unforeshortened dial reads as a sticker on the screen.
+//! The tilt is the projection itself — a flat card on the ground plane, seen
+//! from [`PITCH`][crate::camera::PITCH] above horizontal, is its upright
+//! drawing squashed vertically by `sin(PITCH)`, applied *after* the card's own
+//! spin so the letters shear the way paint on a deck would. Real 3D geometry
+//! parented to the camera differs only by a keystone too small to see, and
+//! would need letters as meshes and an exemption from the fog, the lighting and
+//! the terrain's occlusion.
 //!
-//! The card carries a second reading: an arrow lying along the wind. It is
-//! here rather than in a panel of its own because a wind is only ever wanted
+//! The card carries a second reading: the reader's own mark at the middle of
+//! it, spun to the way the boat is actually pointing.
+//!
+//! And a third: an arrow lying along the wind. A wind is only ever wanted
 //! *against* something — the way home, the way the boat is pointed — and both
-//! of those are bearings. One card holding north and the wind together
-//! answers "the wind is off my starboard bow" in a glance, where two
-//! instruments would leave the player doing the subtraction. That it costs
-//! nothing to draw is the smaller half of the argument.
+//! are bearings, so one card holding north, the bow and the wind together
+//! answers "the wind is off my starboard bow" in a glance.
 //!
-//! And a third: a ring of marks round the rim, one arc for every stretch of
-//! coast within sight. This camera looks *down*, so land a few hundred metres
-//! off can be outside the picture entirely while the player is close enough to
-//! walk up its beach — which makes finding the next island a matter of sailing
-//! at random until one turns up. The ring answers the question the picture
-//! cannot: something is over there, and it is that way.
+//! Those two have to be told apart at a glance or the card is worse than
+//! nothing, and they were not: with the wind the only arrow on the card it was
+//! read as the heading, an arrow through the middle of a compass being a
+//! heading on every instrument anybody has held. Ink alone would not have
+//! separated them — two arrows differing only in colour is a puzzle with two
+//! pieces — so they differ in what they are anchored to and in whether they
+//! are filled. The bow is solid and owns the centre; the wind is a stroked
+//! arrow that stops short of it and runs back out to windward, so it reads as
+//! weather arriving from outside rather than as something the player is doing.
+//! And because the card is aligned with the world, the bow lies the way the
+//! hull in the picture does — the instrument visibly agreeing with what the
+//! player is already looking at.
 //!
-//! It marks what has not been charted louder than what has, because the
-//! problem is finding *new* islands and a bearing to somewhere already
-//! surveyed is worth having without competing. And it reaches exactly as far
-//! as the haze does — see [`SIGHT`]. The card is an instrument, not a second
-//! sight: it says what the player could have noticed and did not, and nothing
-//! about what is over the horizon.
+//! And a fourth: a ring of marks round the rim, one arc per stretch of coast
+//! within sight. This camera looks *down*, so land a few hundred metres off can
+//! be outside the picture entirely while the player is close enough to walk up
+//! its beach. The ring answers what the picture cannot: something is over
+//! there, and it is that way.
 //!
-//! Which makes it a sailing instrument, and it is drawn as one: ashore the
-//! ring goes out altogether. Everything it could mark from a beach is either
-//! the island underfoot or in plain view across it, and a rim of arcs saying
-//! *land, that way* to somebody standing on land is the instrument talking
-//! over the picture instead of filling it in.
+//! It marks what has not been charted louder than what has, the problem being
+//! finding *new* islands, and it reaches exactly as far as the haze does — see
+//! [`SIGHT`]. The card says what the player could have noticed and did not, and
+//! nothing about what is over the horizon.
 //!
-//! Nothing about it crosses the wire. The sweep reads the chunks this machine
-//! was already sent, so a client written against the protocol alone would
-//! carry the same ring for the same nothing — which is the arrangement the
-//! chart is built on too.
+//! Ashore the ring goes out altogether: everything it could mark from a beach
+//! is either the island underfoot or in plain view across it.
+//!
+//! Nothing about it crosses the wire — the sweep reads the chunks this machine
+//! was already sent, the arrangement the chart is built on too.
 
 use std::f32::consts::TAU;
 
@@ -82,18 +85,75 @@ use crate::AppState;
 /// It was eighty-eight before the card carried land. The ring wants the outer
 /// band to itself and a letter has a size it is legible at, so the face had to
 /// grow by about what the ring takes rather than the letters shrinking into
-/// it. Larger again was tried and lost: at a hundred and sixty the letters are
-/// the same size in a much wider face, and the middle goes hollow.
-const FACE_SIZE: f32 = 128.0;
+/// it. Larger again was tried at that size and lost: at a hundred and sixty
+/// the letters are the same size in a much wider face, and the middle goes
+/// hollow.
+///
+/// That objection is what [`spawn_bow`] answers. A card with the reader's own
+/// mark standing at its centre has something for the room to be room *for*, so
+/// the width the earlier trial gave back is taken again — and a little more,
+/// to leave the wind somewhere to lie now that it no longer crosses the
+/// middle.
+const FACE_SIZE: f32 = 176.0;
 /// How far the face sits in from the corner of the window.
 const MARGIN: f32 = 12.0;
-/// The cardinal letters' size. Not scaled with the face — see [`FACE_SIZE`].
-const LETTER_SIZE: f32 = 13.0;
+/// The cardinal letters' size. Not scaled with the face — see [`FACE_SIZE`] —
+/// so it moves only when a letter has stopped being comfortable to read, and
+/// not by whatever ratio the face last grew by.
+const LETTER_SIZE: f32 = 15.0;
 /// How far the letters sit in from the rim, which is the outer band given over
 /// to the land ring — see [`RING_INSET`].
-const INSET: f32 = 13.0;
-/// How long each arm of the centre cross runs, short of the letters.
-const CROSS_ARM: f32 = 20.0;
+const INSET: f32 = 15.0;
+/// Where each arm of the centre cross begins and ends, as distances from the
+/// middle of the card.
+///
+/// A broken cross rather than two lines crossing, which is the bow's doing:
+/// the mark at the centre is the one solid thing on the card, and hairlines
+/// running out from under it in four directions turn it straight back into a
+/// drawing of an arrow. The arms start clear of it instead, so the cross reads
+/// as furniture the bow stands on rather than as part of the bow.
+const CROSS_ARM: (f32, f32) = (26.0, 52.0);
+
+/// The reader's own mark: the side, in pixels, of the square it is cut from.
+///
+/// Its point reaches half a diagonal from the middle and its blunt end half a
+/// side, so the mark is longer ahead of the player than behind them — which is
+/// the whole of how a shape this small says *this way* as well as *here*.
+///
+/// Nineteen was drawn and looked at, and read as a blob with a nib on it: a
+/// mark this small has to be seen out of the corner of an eye, and there was
+/// not enough of it either side of the point for the point to be what the eye
+/// caught. What the size buys is *length* rather than bulk — it is spent
+/// through [`BOW_NARROW`], which takes the width back off again.
+const BOW: f32 = 27.0;
+
+/// How much of its own width the bow keeps once it has been squeezed.
+///
+/// A corner of a square is a right angle, and a right angle is a *blunt* point
+/// — drawn at this size it read as a lump with a nib on it, and taking the
+/// flanks off square instead only made it a rounded square. What sharpens a
+/// point is narrowing the shape behind it, so the mark is drawn as a square
+/// stood on its corner and then squeezed across. Two thirds was tried and read
+/// as a guitar pick: a right angle taken down to sixty-five degrees is still
+/// blunt, and a mark only half again as long as it is wide has no length for
+/// the eye to run along. Half of it leaves a point near fifty degrees on a
+/// shape twice as long as it is wide, which is a dart.
+///
+/// That squeeze has to happen *between* the two turns — after the eighth that
+/// stands the square on its corner and before the bearing — so it narrows the
+/// mark across its own length rather than across the card. Which is why the
+/// bow is three nested nodes and not one, the same arrangement and the same
+/// reason as the face and the card it sits in.
+const BOW_NARROW: f32 = 0.5;
+
+/// How far each corner of the bow's square is taken off, as a fraction of its
+/// side — point first, then the two flanks it runs back from, then the tail.
+///
+/// The point is left sharp, which is the only one that had to be. The flanks
+/// are barely touched, so the sides run straight back from the point and carry
+/// the direction; the tail is taken right off, which stops the mark reading as
+/// a wedge with a base and lets it read as drawn.
+const BOW_CORNERS: (f32, f32, f32) = (0.0, 0.16, 0.5);
 
 /// The wind the arm is drawn at its full reach for, in metres per second — a
 /// fresh breeze rather than the hardest wind there is. Where the scale ends
@@ -113,12 +173,26 @@ const FULL_WIND: f32 = 10.0;
 /// the water call a calm at the same moment.
 const CALM: f32 = 0.5;
 
-/// How far the arm reaches from the centre, in pixels: at a calm, and at
+/// Where the arrow's point comes to rest, as a distance from the middle of the
+/// card in pixels.
+///
+/// The arm used to start at the centre and fly out from it, and that is what
+/// made the card ambiguous. The point stops short of the bow instead and the
+/// shaft runs *back* from it to windward, so the arrow arrives at the boat out
+/// of the weather and goes past — which is what a wind does, and reads as
+/// nothing the player is steering. The centre belongs to the bow alone.
+const ARM_HEAD: f32 = 24.0;
+
+/// How far the arm's tail lies from the middle, in pixels: at a calm, and at
 /// [`FULL_WIND`]. The far end stops short of the letters — the arm is a
-/// reading laid over the rose, not a hand touching its rim — and the near end
-/// is a stub rather than nothing, so a dying wind shrinks towards a point
-/// while the fade takes it.
-const ARM: (f32, f32) = (14.5, 36.0);
+/// reading laid over the rose, not a hand touching its rim — and at a calm it
+/// is a stub rather than nothing, so a dying wind shrinks back onto its own
+/// point while the fade takes it.
+///
+/// A stiffening wind therefore grows *outward*, away from the boat, which is
+/// the right way round: the reading lengthens without ever crowding the mark it
+/// is there to be read against.
+const ARM_TAIL: (f32, f32) = (34.0, 58.0);
 
 /// The arm's thickness, in pixels: heavier than the cross, which is
 /// furniture, and lighter than a letter.
@@ -481,7 +555,7 @@ impl Plugin for CompassPlugin {
             .add_systems(
                 Update,
                 (
-                    (turn_card, point_the_arm),
+                    (turn_card, point_the_arm, point_the_bow),
                     // The ring reads both, and both come and go with the
                     // world — as the chart's own survey does.
                     mark_the_land
@@ -499,6 +573,11 @@ struct CompassCard;
 /// Marks the face — the tilted, stationary dial the card spins inside.
 #[derive(Component)]
 struct CompassFace;
+
+/// Marks the bow — the reader's own mark at the middle of the card, spun to
+/// their heading the same way and for the same reason the arm is.
+#[derive(Component)]
+struct Bow;
 
 /// Marks the wind arm — the arrow that spins inside the card, on top of the
 /// card's own spin, so the bearing it shows is the world's and not the view's.
@@ -558,13 +637,14 @@ fn spawn_compass(mut commands: Commands, mut swept: ResMut<Swept>) {
                 UiTransform::IDENTITY,
             ))
             .with_children(|card| {
-                // The card in two halves with the wind arm between them: under
-                // the letters rather than over them, because where the arm
-                // reaches its furthest it is nearly touching one, and an
+                // The card in two halves with the two readings between them:
+                // under the letters rather than over them, because where the
+                // arm reaches its furthest it is nearly touching one, and an
                 // arrowhead drawn across a glyph would cost the letter more
                 // than it bought the arm.
                 spawn_cross(card);
                 spawn_arm(card);
+                spawn_bow(card);
                 spawn_ring(card);
                 spawn_letters(card);
             });
@@ -624,16 +704,24 @@ fn spawn_letter(
     });
 }
 
-/// The hairline cross behind the letters, drawn as two centred lines so the
-/// card reads as an instrument rather than as four floating letters.
+/// The hairline cross behind the letters, drawn as four arms standing off the
+/// middle so the card reads as an instrument rather than as four floating
+/// letters — see [`CROSS_ARM`] for why they stand off it.
 ///
 /// A cross and not a star. The chart's rose is a sixteen-point star, and this
 /// one deliberately is not: it is [`FACE_SIZE`] pixels squashed to the
-/// camera's pitch with an arrow lying across it, and a star drawn under that
-/// arrow is a smudge the arrow has to be picked out of. The flourish belongs
-/// where the paper is looked at rather than glanced at.
+/// camera's pitch with a bow and an arrow lying on it, and a star drawn under
+/// those is a smudge they have to be picked out of. The flourish belongs where
+/// the paper is looked at rather than glanced at.
 fn spawn_cross(card: &mut ChildSpawnerCommands) {
-    for (width, height) in [(1.0, CROSS_ARM * 2.0), (CROSS_ARM * 2.0, 1.0)] {
+    let (inner, outer) = CROSS_ARM;
+    let (length, middle) = (outer - inner, (inner + outer) / 2.0);
+    for (width, height, offset) in [
+        (1.0, length, Val2::px(0.0, -middle)),
+        (1.0, length, Val2::px(0.0, middle)),
+        (length, 1.0, Val2::px(-middle, 0.0)),
+        (length, 1.0, Val2::px(middle, 0.0)),
+    ] {
         card.spawn(Node {
             position_type: PositionType::Absolute,
             width: Val::Percent(100.0),
@@ -650,6 +738,10 @@ fn spawn_cross(card: &mut ChildSpawnerCommands) {
                     ..default()
                 },
                 BackgroundColor(CROSS),
+                UiTransform {
+                    translation: offset,
+                    ..UiTransform::IDENTITY
+                },
             ));
         });
     }
@@ -682,7 +774,7 @@ fn spawn_arm(card: &mut ChildSpawnerCommands) {
             WindInk,
             Node {
                 width: Val::Px(ARM_WIDTH),
-                height: Val::Px(ARM.0),
+                height: Val::Px(ARM_TAIL.0 - ARM_HEAD),
                 ..default()
             },
             BackgroundColor(INK),
@@ -732,6 +824,114 @@ fn spawn_barb(shaft: &mut ChildSpawnerCommands, side: f32) {
     ));
 }
 
+/// The reader's own mark at the middle of the card, spun to their heading by
+/// [`point_the_bow`].
+///
+/// A child of the card for the arm's reason: the card carries the turn from
+/// the world to the view already, so this node's own rotation is a bearing and
+/// nothing else.
+///
+/// Cut from a square, stood on the corner left sharp and squeezed across it —
+/// see [`BOW_NARROW`] for the squeeze and [`BOW_CORNERS`] for what is taken
+/// off the other three. Nothing here is drawn from triangles because a UI node
+/// is a rectangle and there are none to be had; a mesh would want a second
+/// camera over the world for one mark.
+///
+/// What matters most is not the shape but that it is **solid**, the wind arrow
+/// being strokes. That contrast is doing as much work as the bearing is: it is
+/// what stops the eye having to ask which arrow it is looking at, which is the
+/// question the card used to leave hanging.
+fn spawn_bow(card: &mut ChildSpawnerCommands) {
+    card.spawn(Node {
+        position_type: PositionType::Absolute,
+        width: Val::Percent(100.0),
+        height: Val::Percent(100.0),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        ..default()
+    })
+    .with_children(|spot| {
+        // Three nodes, one turn each, innermost first: the square is stood on
+        // its corner, the result is squeezed across, and the whole thing is
+        // laid on the bearing. See [`BOW_NARROW`] for why they cannot be one.
+        spot.spawn((
+            Bow,
+            Node {
+                width: Val::Px(BOW),
+                height: Val::Px(BOW),
+                ..default()
+            },
+            UiTransform::IDENTITY,
+        ))
+        .with_children(|turned| {
+            turned
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    UiTransform {
+                        scale: Vec2::new(BOW_NARROW, 1.0),
+                        ..UiTransform::IDENTITY
+                    },
+                ))
+                .with_children(|narrowed| {
+                    narrowed.spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                            border_radius: BorderRadius {
+                                top_left: Val::Percent(BOW_CORNERS.0 * 100.0),
+                                top_right: Val::Percent(BOW_CORNERS.1 * 100.0),
+                                bottom_left: Val::Percent(BOW_CORNERS.1 * 100.0),
+                                bottom_right: Val::Percent(BOW_CORNERS.2 * 100.0),
+                            },
+                            ..default()
+                        },
+                        BackgroundColor(INK),
+                        UiTransform {
+                            rotation: Rot2::radians(TAU / 8.0),
+                            ..UiTransform::IDENTITY
+                        },
+                    ));
+                });
+        });
+    });
+}
+
+/// The turn that lays the bow along a heading.
+///
+/// The bearing and nothing else: the eighth of a turn that brings the square's
+/// sharp corner round to the mark's own point is spent inside [`spawn_bow`],
+/// where the squeeze can be applied after it.
+fn bow_rotation(heading: Vec2) -> Rot2 {
+    Rot2::radians(bearing(heading))
+}
+
+/// Lays the bow along the way the player is actually pointing — the hull's
+/// bow, or the walker's own face, whichever is carrying them.
+///
+/// Hidden rather than left where it was when there is no heading to draw: a
+/// mark saying *here, this way* in the middle of the card is a claim, and a
+/// stale one would be read as confidently as a true one. Ashore it stays, the
+/// ring being the only reading a beach makes nonsense of.
+fn point_the_bow(
+    player: PlayerPlace,
+    mut bows: Query<(&mut UiTransform, &mut Visibility), With<Bow>>,
+) {
+    let heading = player.heading();
+    for (mut transform, mut visibility) in &mut bows {
+        match heading {
+            Some(heading) => {
+                *visibility = Visibility::Inherited;
+                transform.rotation = bow_rotation(heading);
+            }
+            None => *visibility = Visibility::Hidden,
+        }
+    }
+}
+
 /// Which way the arm lies on the card under a wind, or `None` when the wind
 /// is too slack to have a bearing at all — see [`CALM`].
 ///
@@ -763,7 +963,7 @@ fn arm_bearing(wind: Vec2) -> Option<Rot2> {
 /// second would be the machinery showing through.
 fn arm_reach(speed: f32) -> (f32, f32) {
     let hard = (speed / FULL_WIND).clamp(0.0, 1.0);
-    let length = ARM.0 + (ARM.1 - ARM.0) * hard;
+    let length = ARM_TAIL.0 + (ARM_TAIL.1 - ARM_TAIL.0) * hard - ARM_HEAD;
     // Two fades multiplied, doing different jobs. The first is the reading —
     // a light air is a fainter arm than a gale — and it keeps a floor, or a
     // real wind would be drawn too faint to find. The second is the calm,
@@ -797,10 +997,13 @@ fn point_the_arm(
     }
     for (mut node, mut transform) in &mut shafts {
         node.height = Val::Px(length);
-        // Centred on the card and pushed half its own length up its own axis,
-        // so it runs from the middle out to the point rather than across the
-        // middle — and the barbs, hung off its top edge, come with it.
-        transform.translation = Val2::px(0.0, -length / 2.0);
+        // Pushed *down* its own axis — to windward, the arm having been turned
+        // to the way the air is going — so the shaft lies between [`ARM_HEAD`]
+        // and the tail rather than across the middle. Its top edge is then the
+        // end nearest the bow, which is where the barbs are hung: they open
+        // back towards the tail, so the point is the inner end and the arrow
+        // flies at the boat.
+        transform.translation = Val2::px(0.0, ARM_HEAD + length / 2.0);
     }
     for mut colour in &mut ink {
         *colour = BackgroundColor(INK.with_alpha(alpha));
@@ -945,6 +1148,50 @@ mod tests {
         assert!(rotation(&mut app).angle_to(card_rotation(1.25)).abs() < 1e-5);
     }
 
+    /// Where the bow's point lands on the card under a heading, as a unit
+    /// vector in the card's own pixels — the sharp corner of the square, put
+    /// through the turn [`point_the_bow`] gives it. Screen coordinates, so y
+    /// climbs downwards and the rotation runs clockwise.
+    fn bow_point(heading: Vec2) -> Vec2 {
+        let (sin, cos) = bow_rotation(heading).as_radians().sin_cos();
+        // Up the node's own axis, the eighth of a turn that put it there
+        // having been spent inside `spawn_bow`.
+        let point = Vec2::new(0.0, -1.0);
+        Vec2::new(point.x * cos - point.y * sin, point.x * sin + point.y * cos)
+    }
+
+    #[test]
+    fn the_bow_points_the_way_the_player_is_headed() {
+        // Steering north lays the point at the top of the card, under the N.
+        let north = bow_point(NORTH);
+        assert!(
+            north.x.abs() < 1e-5 && north.y < 0.0,
+            "north did not read as up the card: {north}"
+        );
+
+        // And east a quarter turn clockwise of that, where the E is — the
+        // reading most likely to have come out mirrored.
+        let east = bow_point(Vec2::new(-NORTH.y, NORTH.x));
+        assert!(
+            east.y.abs() < 1e-5 && east.x > 0.0,
+            "east did not read as across the card: {east}"
+        );
+    }
+
+    #[test]
+    fn the_bow_stays_off_the_card_with_nobody_to_draw_it_for() {
+        // A mark saying *here, this way* is a claim, and there is nobody in
+        // this world to make it about.
+        let mut app = test_app();
+        app.update();
+        let visibility = *app
+            .world_mut()
+            .query_filtered::<&Visibility, With<Bow>>()
+            .single(app.world())
+            .expect("the bow should exist");
+        assert_eq!(visibility, Visibility::Hidden);
+    }
+
     #[test]
     fn the_arm_flies_with_the_wind() {
         // East is a quarter turn clockwise from north on the card, and a wind
@@ -986,7 +1233,10 @@ mod tests {
             faint < dark,
             "a fresh breeze drew no darker than a light air"
         );
-        assert!(fresh <= ARM.1, "the arm outgrew the room it has");
+        assert!(
+            ARM_HEAD + fresh <= ARM_TAIL.1,
+            "the arm outgrew the room it has"
+        );
 
         // Past the top of the scale there is nowhere further to go, and a
         // gale must not run the arrow out through the letters.

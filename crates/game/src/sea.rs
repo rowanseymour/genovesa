@@ -2,12 +2,10 @@
 //! them.
 //!
 //! The sea is drawn as low-poly waves — real geometry, displaced in the vertex
-//! shader and shaded flat, so a wave is a run of tilting facets like everything
-//! else in the world rather than a normal-mapped shimmer. On a surface as
-//! matte as this water a normal map would barely read anyway: there is no
-//! specular for it to perturb, and what sells the motion instead is facets
-//! changing tone as they tilt, and the waterline creeping up and down every
-//! beach as the surface rises and falls through the shore.
+//! shader and shaded flat, so a wave is a run of tilting facets rather than a
+//! normal-mapped shimmer. On water this matte a normal map would barely read:
+//! there is no specular for it to perturb, and what sells the motion is facets
+//! changing tone as they tilt and the waterline creeping up every beach.
 //!
 //! The sea belongs to the weather now. The server owns the wind — one
 //! authority, so every player in a world is under the same sky — and tells
@@ -20,43 +18,35 @@
 //!
 //! The swell is two regimes crossfaded by depth. Over open water it is three
 //! sines crossing at odd angles — see [`WAVES`]. In the shallows those hand
-//! over to a single longer shore wave whose *phase is the depth itself*:
-//! its crests are the depth contours, which by definition run parallel to
-//! whatever shore they approach, so waves wrap into bays and meet every
-//! beach face-on without any refraction being computed. That trick is why
-//! the shore wave has no heading — steering a directional wave by depth
-//! means integrating phase along its path, which has no honest local answer,
-//! while a contour is already the shape refraction bends a crest into. The
-//! shore wave's height is capped by the water it stands in, the way breaking
-//! caps a real one, and the fragment shader paints foam where the cap is
-//! biting on a crest.
+//! over to a single longer shore wave whose *phase is the depth itself*: its
+//! crests are the depth contours, which run parallel to whatever shore they
+//! approach, so waves wrap into bays and meet every beach face-on with no
+//! refraction computed. That is why the shore wave has no heading — steering a
+//! directional wave by depth means integrating phase along its path, which has
+//! no honest local answer. Its height is capped by the water it stands in, the
+//! way breaking caps a real one, and the fragment shader paints foam where the
+//! cap is biting.
 //!
 //! The open sea breaks too, once it is blowing hard enough: [`WHITECAP`] puts
 //! white down the leading faces of the swell wherever the three trains heap
-//! high enough together, in patches, with bare water between them. That is the
-//! same fragment shader and the same white as the surf, and it is deliberately
-//! never told what the wind is doing — the wind is in the amplitudes already,
-//! so a height to clear is all it takes for caps to arrive with the weather
-//! and go with it.
+//! high enough together. It is deliberately never told what the wind is doing —
+//! the wind is in the amplitudes already, so a height to clear is all it takes
+//! for caps to arrive with the weather.
 //!
 //! Depth reaches the shader through [`DepthWindow`]: a coarse byte-per-texel
 //! picture of the water depth around the camera, refilled a few rows a frame
-//! from the ground chunks the server has sent. The client is not generating
-//! anything here — it is reading the very heights it was given to draw, the
-//! same way it builds meshes from them.
+//! from the ground chunks the server has sent.
 //!
 //! Three parties have to agree on where the water stands at a moment: the
-//! shader displacing the sea mesh, the boat riding on it, and the markers
-//! other players stand as. The parameters live once, in this file, and reach
-//! the shader through a uniform so they cannot drift from the Rust side; the
-//! *formula* — [`swell`] — is written twice, here and in
-//! `assets/shaders/sea.wgsl`, and the two must be kept the same. Time is the
-//! other half of the agreement: the shader reads `globals.time`, which Bevy
-//! fills from `Time::elapsed_secs_wrapped`, so that is what every Rust
-//! caller of [`swell`] must pass. Depth is the last part, and there the
-//! agreement is deliberately loose: the shader reads the windowed texture,
-//! the boat asks the ground exactly, and the two differ by at most a texel
-//! of interpolation in water where the swell is smallest.
+//! shader displacing the sea mesh, the boat riding on it, and the markers other
+//! players stand as. The parameters live once here and reach the shader through
+//! a uniform; the *formula* — [`swell`] — is written twice, here and in
+//! `assets/shaders/sea.wgsl`, and the two must be kept the same. So is time:
+//! the shader reads `globals.time`, which Bevy fills from
+//! `Time::elapsed_secs_wrapped`, so that is what every Rust caller must pass.
+//! Depth is deliberately loose — the shader reads the windowed texture and the
+//! boat asks the ground exactly, differing by at most a texel of interpolation
+//! in water where the swell is smallest.
 //!
 //! The camera deliberately does *not* ride the swell. Its focus stays on the
 //! flat waterline, so the world bobs around a steady eye rather than the

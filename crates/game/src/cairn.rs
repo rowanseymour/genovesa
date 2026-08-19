@@ -10,28 +10,26 @@
 //!
 //! # Why it is a thing and not a widget
 //!
-//! The obvious way to show an island is spoken for is a label floating over
-//! it, and it is the wrong way. A player arriving at an island has their eyes
-//! on the island; a marker drawn in screen space says *the game* is telling
-//! you something, where a pillar of stone on a headland says *somebody was
+//! The obvious way to show an island is spoken for is a label floating over it,
+//! and it is the wrong way: a marker drawn in screen space says *the game* is
+//! telling you something, where stone standing on a headland says *somebody was
 //! here*, which is the whole of what a claim means.
 //!
 //! # Why it is the size of a person
 //!
-//! It was a beacon first: twenty metres of staff and seven of banner standing
-//! out of a heap six metres across, built to be read from a mile off. It read
-//! from a mile and it read as *civic* — a mast and a flag that size are what a
-//! shipyard puts up, not what one person carrying rock does in an afternoon.
-//! Stood next to the player it was worse than out of proportion: the heap alone
-//! was twice their height, so walking up to your own claim meant disappearing
-//! behind it.
+//! It was a beacon first — twenty metres of staff and seven of banner out of a
+//! heap six across, built to be read from a mile. It read from a mile and it
+//! read as *civic*: a mast and a flag that size are what a shipyard puts up,
+//! not what one person carrying rock does in an afternoon. Up close it was
+//! worse, the heap alone standing twice the player's height, so walking up to
+//! your own claim meant disappearing behind it.
 //!
-//! So it is a survey mark rather than a daymark — a pillar of dry stone a
-//! little over head height, stacked in [`COURSES`] that step in as they rise.
-//! The taper is the whole of what says *built*: rock dropped in a pile is a
-//! cone, and rock stacked to stand is a pillar, and a person reads the
-//! difference without being told it. What it costs is the mile, and that is a
-//! real cost, paid deliberately — see [`STONE`] for what is bought with it.
+//! So it is a survey mark rather than a daymark: a pillar of dry stone a little
+//! over head height, stacked in [`COURSES`] that step in as they rise. The
+//! taper is the whole of what says *built* — rock dropped in a pile is a cone,
+//! rock stacked to stand is a pillar, and a person reads the difference without
+//! being told it. What it costs is the mile, paid deliberately — see [`STONE`]
+//! for what is bought with it.
 //!
 //! # Standing it on the ground
 //!
@@ -298,11 +296,12 @@ fn dress(mut commands: Commands, mut kit: CairnKit, raised: Query<(Entity, &Cair
 /// Stands the cairns on the ground once there is ground to stand them on, and
 /// shows them the moment they are standing on it.
 ///
-/// The walking twin of `player::find_footing`, and for the same reason: the
-/// point the world named is on the plane, and what height that is depends on
-/// ground this client may not have yet. The showing is the same frame as the
-/// settling and not a moment later — the whole reason a cairn is hidden is
-/// that it would otherwise be drawn somewhere it is not.
+/// The arrangement an arriving walker is put down by — see [`crate::player`]'s
+/// own settling — and for the same reason: the point the world named is on the
+/// plane, and what height that is depends on ground this client may not have
+/// yet. The showing is the same frame as the settling and not a moment later —
+/// the whole reason a cairn is hidden is that it would otherwise be drawn
+/// somewhere it is not.
 fn stand_the_cairns(mut commands: Commands, ground: Option<Res<Ground>>, mut waiting: Waiting) {
     let Some(ground) = ground else {
         return;

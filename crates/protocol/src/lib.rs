@@ -9,17 +9,15 @@
 //! corner heights on a fixed grid, one palette entry per triangle, and — on
 //! the minority of chunks that hold a lake — the level its water stands at.
 //!
-//! That is a deliberate inversion of how this started. A seed used to be a
-//! world — every machine regenerated the same ocean, bit for bit, and terrain
-//! never travelled — which made the client the second half of the generator
-//! and made porting it to another language a promise to reproduce every noise
-//! octave and every rounding. Sending the ground instead costs bandwidth and
-//! buys a client that can be written by anyone who can read this file.
+//! A deliberate inversion of how this started. A seed used to be a world —
+//! every machine regenerating the same ocean bit for bit — which made the
+//! client the second half of the generator, and porting it to another language
+//! a promise to reproduce every noise octave. Sending the ground instead costs
+//! bandwidth and buys a client anyone who can read this file could write.
 //!
 //! Determinism did not stop mattering, it moved: a seed must still mean the
-//! same world wherever it is *hosted*, or re-hosting one would land everybody
-//! somewhere else. That promise now lives entirely in the `world` crate and
-//! its digests, on one machine at a time.
+//! same world wherever it is *hosted*, which now lives entirely in the `world`
+//! crate and its digests.
 //!
 //! Like the world's layout, the wire is a *format*: the bytes each message
 //! encodes to are pinned by tests, so that changing what a client receives is
@@ -93,15 +91,27 @@ pub fn clock(phase: f32) -> String {
 /// powers of two run together.
 pub const DEFAULT_PORT: u16 = 24816;
 
+/// The most letters an island's name may run to — what a client stops taking
+/// at, and the number [`NAME_BYTES`] is worked out from.
+///
+/// A chart has room for a real name and not for a sentence, and the cap is
+/// what keeps one island's lettering off its neighbour's. It lives here rather
+/// than on the sheet that draws it because a client that let somebody type
+/// past it would be a client offering names the wire then refused, with
+/// nothing on screen to say why — see the note on [`NAME_BYTES`] about which
+/// of the two counts what.
+pub const NAME_LETTERS: usize = 24;
+
 /// The longest an island's name may be, in bytes — see [`island_name`].
 ///
 /// Bytes rather than characters because bytes are what the wire counts and
 /// what a frame is measured in, and the thing being bounded is what a hostile
-/// client can make a server hold and hand on. The number is the twenty-four
-/// characters a chart is drawn to allow, at the four bytes a character costs
-/// in the worst case UTF-8 has: a name of two dozen letters fits whatever
-/// alphabet it is written in.
-pub const NAME_BYTES: usize = 96;
+/// client can make a server hold and hand on. Derived from [`NAME_LETTERS`] at
+/// the four bytes a character costs in the worst case UTF-8 has, rather than
+/// written down beside it: a name of two dozen letters fits whatever alphabet
+/// it is written in, and the two numbers saying so were only ever kept in step
+/// by a comment.
+pub const NAME_BYTES: usize = NAME_LETTERS * 4;
 
 /// A name for an island as the wire will carry it, or `None` for something
 /// that is not a name at all.
@@ -321,20 +331,24 @@ impl std::fmt::Display for BoatId {
 }
 
 /// What a boat is, which — as with the beasts — is the whole of what a
-/// client is told beyond where it stands and who is aboard. One kind today;
-/// the lineup this is the seam for runs from a rowing boat to a
-/// square-rigger, and each lands as a byte here when it becomes a vehicle
-/// rather than a model.
+/// client is told beyond where it stands and who is aboard. The lineup this
+/// is the seam for runs on to a square-rigger, which lands as a byte here
+/// when it becomes a vehicle rather than a model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BoatKind {
     /// A small Bermuda sloop: the boat every player's story starts aboard.
     Sloop,
+    /// The ship's boat: the open rowing boat a sloop lowers to put somebody
+    /// ashore — see [`ToServer::Lower`], which is where one enters the
+    /// world, and [`ToClient::BoatGone`], which is how it leaves.
+    Rowboat,
 }
 
 impl BoatKind {
     fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Sloop),
+            1 => Some(Self::Rowboat),
             _ => None,
         }
     }
@@ -342,6 +356,7 @@ impl BoatKind {
     fn byte(self) -> u8 {
         match self {
             Self::Sloop => 0,
+            Self::Rowboat => 1,
         }
     }
 }
@@ -391,11 +406,43 @@ pub enum ToServer {
     /// telling whose `occupant` says how it came out — there is no separate
     /// refusal, the boat's state being the whole of the answer. Whoever
     /// asks first is aboard: boats have keepers, not owners.
+    ///
+    /// Asked from the thwarts of a rowing boat laid alongside, a ship's helm
+    /// is granted the same way — and the rowing boat goes back aboard as the
+    /// ship's own, told to everyone as a [`ToClient::BoatGone`].
     Board { boat: BoatId },
     /// Steps off the occupied boat, landing at `position` — the walker's
     /// own spot, chosen by the client that judged the footing. The boat
     /// stays where it lies, at anchor for anyone.
     Disembark { position: Vec2 },
+    /// Puts the ship's boat in the water and steps down into it: `position`
+    /// is where it is lowered, alongside and so chosen by the client that
+    /// knows which side the shore is, and `heading` how it points.
+    ///
+    /// Granted to a player occupying a boat that carries one — a
+    /// [`BoatKind::Sloop`] — and only near that boat: a tender is lowered
+    /// over the side, not sent across the bay. The answer is a pair of
+    /// [`ToClient::Boat`] tellings, the rowing boat first with the asker
+    /// aboard and then their ship left at anchor for anyone, exactly as a
+    /// disembark leaves it. A refusal is the usual silence, the world being
+    /// as the asker last heard it.
+    ///
+    /// The hull that is lowered need not be a new one, and a grant may take
+    /// one away: a rowing boat already lying free where this one is asked
+    /// for is the boat that goes over the side, and whatever boat the asker
+    /// last had in the water is hoisted out of the world if it still lies
+    /// free — [`ToClient::BoatGone`], after the two tellings above. Last
+    /// *had*, rather than last lowered: a rowing boat belongs to whoever
+    /// took it up most recently, by lowering it or by boarding it, so the
+    /// boat a grant retires may be one the asker found afloat and rowed
+    /// rather than one they ever put over a side. A player has one boat in
+    /// the water at a time; a client that draws its own tender before the
+    /// answer comes must be ready for either.
+    ///
+    /// The way back aboard is [`ToServer::Board`] from the rowing boat's
+    /// thwarts: the grant seats the asker at the ship's helm and the tender
+    /// is hoisted back in — see [`ToClient::BoatGone`].
+    Lower { position: Vec2, heading: f32 },
     /// Claims the island of this identity — see [`survey::Island::id`], which
     /// is what a client names it by.
     ///
@@ -624,6 +671,20 @@ pub enum ToClient {
         heading: f32,
         occupant: Option<PlayerId>,
     },
+    /// A boat is out of the world: a rowing boat hoisted back aboard the
+    /// ship whose boarding it carried — see [`ToServer::Board`] — or the one
+    /// its keeper left floating somewhere when they lowered another, see
+    /// [`ToServer::Lower`]. The id is retired with it; a client drops the
+    /// hull. Unlike a beast's going this is not a matter of who is near
+    /// enough to care: a boat was told to everyone, so everyone hears when
+    /// it stops being there to see.
+    ///
+    /// A name so retired is answered with silence if anything asks after it,
+    /// never with a hang-up: a client may honestly still have this message
+    /// in flight when it sends a [`ToServer::Board`] naming the hull.
+    BoatGone {
+        id: BoatId,
+    },
     /// The server's answer to a [`ToServer::Command`], sent to the player
     /// who typed it and nobody else: plain text for the console the line
     /// was typed into, whether the command was served or not understood.
@@ -769,6 +830,11 @@ impl ToServer {
                 put_ivec2(&mut payload, *island);
                 put_str(&mut payload, name);
             }
+            Self::Lower { position, heading } => {
+                payload.push(11);
+                put_vec2(&mut payload, *position);
+                put_f32(&mut payload, *heading);
+            }
         }
         write_frame(to, &payload, MAX_CLIENT_FRAME)
     }
@@ -818,6 +884,10 @@ impl ToServer {
                 // [`island_name`] — where this layer's business is only that
                 // it arrived as text at all.
                 name: payload.str()?,
+            },
+            11 => Self::Lower {
+                position: payload.vec2()?,
+                heading: payload.f32()?,
             },
             tag => return Err(corrupt(format!("unknown client message tag {tag}"))),
         };
@@ -918,6 +988,10 @@ impl ToClient {
                         put_u32(&mut payload, player.0);
                     }
                 }
+            }
+            Self::BoatGone { id } => {
+                payload.push(16);
+                put_u64(&mut payload, id.0);
             }
             Self::Reply { text } => {
                 payload.push(10);
@@ -1079,6 +1153,9 @@ impl ToClient {
                 at: payload.vec2()?,
                 yours: payload.u8()? != 0,
                 name: payload.str()?,
+            },
+            16 => Self::BoatGone {
+                id: BoatId(payload.u64()?),
             },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
@@ -1376,6 +1453,10 @@ mod tests {
                 boat: BoatId(0x0102_0304_0506_0708),
             },
             ToServer::Disembark { position: at },
+            ToServer::Lower {
+                position: at,
+                heading: -2.5,
+            },
             ToServer::Claim {
                 island: IVec2::new(-1_234, 5_678),
             },
@@ -1428,6 +1509,14 @@ mod tests {
                 heading: 2.0,
                 occupant: None,
             },
+            ToClient::Boat {
+                id: BoatId(14),
+                kind: BoatKind::Rowboat,
+                position: at,
+                heading: 0.75,
+                occupant: Some(PlayerId(3)),
+            },
+            ToClient::BoatGone { id: BoatId(14) },
             ToClient::Joined {
                 id: PlayerId(1),
                 position: at,
@@ -1643,6 +1732,19 @@ mod tests {
                 0x68, 0x69, // "hi"
             ],
         );
+        assert_eq!(
+            bytes_of_client(&ToServer::Lower {
+                position: Vec2::new(1.5, -2.0),
+                heading: 0.75,
+            }),
+            [
+                13, 0,  // length
+                11, // tag
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // y = -2.0
+                0, 0, 0x40, 0x3F, // heading = 0.75
+            ],
+        );
 
         assert_eq!(
             bytes_of_server(&ToClient::Welcome {
@@ -1735,6 +1837,27 @@ mod tests {
         assert_eq!(empty[..2], [23, 0], "an empty boat is shorter by its hand");
         assert_eq!(empty[2..24], occupied[2..24], "emptiness moved the fields");
         assert_eq!(empty[24], 0, "nobody at the helm is flag 0");
+        // A rowing boat differs in exactly the kind byte.
+        let rowboat = bytes_of_server(&ToClient::Boat {
+            id: BoatId(7),
+            kind: BoatKind::Rowboat,
+            position: Vec2::new(1.5, -2.0),
+            heading: 0.75,
+            occupant: Some(PlayerId(9)),
+        });
+        assert_eq!(rowboat[11], 1, "a rowboat is kind byte 1");
+        assert_eq!(rowboat[..11], occupied[..11], "the kind moved the fields");
+        assert_eq!(rowboat[12..], occupied[12..], "the kind moved the fields");
+        assert_eq!(
+            bytes_of_server(&ToClient::BoatGone {
+                id: BoatId(0x0102_0304_0506_0708),
+            }),
+            [
+                9, 0,  // length
+                16, // tag
+                8, 7, 6, 5, 4, 3, 2, 1, // the boat retired, LE
+            ],
+        );
         assert_eq!(
             bytes_of_server(&ToClient::Refused { version: 9 }),
             [3, 0, 1, 9, 0],

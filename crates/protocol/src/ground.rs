@@ -1,34 +1,25 @@
 //! The ground, as it travels: the grid a chunk is drawn on, the small palette
 //! it is painted from, and the payload one chunk of it encodes to.
 //!
-//! This is the half of the wire that used to be nobody's business but the
-//! generator's. A client no longer generates anything, so everything it needs
-//! in order to *draw* a chunk has to be spelled out here, in a form that says
-//! nothing about how the ground was arrived at: corner heights on a fixed
-//! grid, and one palette entry per triangle. Whoever is holding a payload can
-//! build the mesh from it and has no way to ask what noise made it.
-//!
-//! Two things follow from that, and both are deliberate.
+//! A client generates nothing, so everything it needs in order to *draw* a
+//! chunk is spelled out here in a form that says nothing about how the ground
+//! was arrived at: corner heights on a fixed grid, and one palette entry per
+//! triangle.
 //!
 //! The **grid is the format**. [`FACET_METRES`] is how finely the ground is
-//! drawn, and moving it would move the payload, so it lives here rather than
-//! in the generator that samples it. Drawing at some other density — level of
-//! detail, say — is a change to the wire and not an implementation detail of
-//! either end.
+//! drawn, and moving it would move the payload, so it lives here rather than in
+//! the generator that samples it. Drawing at some other density — level of
+//! detail, say — is a change to the wire.
 //!
-//! And the **palette is the format**. Colours are named rather than sent: a
-//! [`Surface`] is a byte, and [`Surface::color`] is what it means. That keeps
-//! a chunk under twenty kilobytes instead of carrying three floats per
-//! triangle, and it keeps the two ends unable to disagree about what sand
-//! looks like — there is one table, and this is it.
+//! And the **palette is the format**: a [`Surface`] is a byte and
+//! [`Surface::color`] is what it means. That keeps a chunk under twenty
+//! kilobytes instead of three floats per triangle, and keeps the two ends
+//! unable to disagree about what sand looks like.
 //!
-//! The same goes for **standing water**. The sea is a plane at zero that a
-//! client draws whether or not it has been told anything, but a lake is not:
-//! it stands at a height decided by a rim saddle that may be half a
-//! kilometre away, on ground that says nothing about it. So where a chunk
-//! carries water, its surface crosses the wire as a second grid — see
-//! [`ChunkPayload::water`] — because there is no arithmetic a client could do
-//! on the heights it already has that would find the level.
+//! The same goes for **standing water**. The sea is a plane at zero any client
+//! can draw, but a lake stands at a height decided by a rim saddle that may be
+//! half a kilometre away, so where a chunk carries water its surface crosses
+//! the wire as a second grid — see [`ChunkPayload::water`].
 
 use glam::{IVec2, Vec2, Vec3};
 

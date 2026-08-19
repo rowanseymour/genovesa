@@ -245,6 +245,14 @@ impl Connection {
         self.say(ToServer::Disembark { position });
     }
 
+    /// Lowers the ship's boat at `position` — the berth [`crate::player`]
+    /// already chose alongside — and asks to be seated in it; the answer
+    /// comes back as the pair of boat tellings the wire promises, believed
+    /// when they land. Public on the same terms.
+    pub fn lower(&self, position: Vec2, heading: f32) {
+        self.say(ToServer::Lower { position, heading });
+    }
+
     /// Claims the island the player is standing on, which the server grants
     /// against its own survey or refuses — see [`crate::player`], which owns
     /// the key. What comes back is a cairn, or nothing at all.
@@ -344,16 +352,14 @@ impl Session {
 
     /// Opens a world on this machine and joins it, blocking likewise.
     ///
-    /// Every world started here goes through this, whether anyone else is
-    /// invited or not: the ground comes from a server, so playing alone means
-    /// running one and talking to it over the loopback. [`Reach`] is the only
-    /// difference between the two, and it is a question about the network
-    /// rather than about the session — a world of one's own is served exactly
-    /// as a shared one is, and the player is a client in it exactly as a guest
-    /// would be.
+    /// Every world started here goes through this, invited guests or not: the
+    /// ground comes from a server, so playing alone means running one and
+    /// talking to it over the loopback. [`Reach`] is the only difference
+    /// between the two, and it is a question about the network rather than
+    /// about the session.
     ///
     /// Joined over the loopback whatever it is bound to: whoever opened the
-    /// world is a player in it and gets there the short way.
+    /// world gets there the short way.
     ///
     /// `opening` is the hour of its day the world starts at, as a phase —
     /// [`server::OPENING`] for a world nobody asked anything particular of.
@@ -669,13 +675,15 @@ struct Told<'w> {
 /// assets travel in the [`crate::boat::HullKit`] the markers' own meshes
 /// and materials now come through too, one system not being allowed two
 /// hands on one store.
+#[allow(clippy::too_many_arguments)]
 fn receive(
     mut commands: Commands,
     mut online: ResMut<Online>,
     mut ground: Option<ResMut<Ground>>,
     mut kit: crate::boat::HullKit,
     mut told: Told,
-    walkers: Query<Entity, (With<crate::player::Player>, Without<ChildOf>)>,
+    players: Query<Entity, With<crate::player::Player>>,
+    poses: Query<&Transform, With<crate::boat::Vessel>>,
     mut lost: Local<bool>,
 ) {
     let (messages, connected) = online.connection.drain();
@@ -806,10 +814,10 @@ fn receive(
             ToClient::Vocabulary { verbs } => told.console.teach(verbs),
             ToClient::Boat {
                 id,
+                kind,
                 position,
                 heading,
                 occupant,
-                ..
             } => {
                 // Believed within the sky's reason: a hull is eased towards
                 // and drawn every frame, and one telling of a non-finite
@@ -818,15 +826,18 @@ fn receive(
                     told.fleet.told(
                         &mut commands,
                         &mut kit,
-                        &walkers,
+                        &players,
+                        &poses,
                         online.connection.id,
                         id,
+                        kind,
                         position,
                         heading,
                         occupant,
                     );
                 }
             }
+            ToClient::BoatGone { id } => told.fleet.gone(&mut commands, &players, &poses, id),
             ToClient::Cairn {
                 island,
                 at,
@@ -1100,8 +1111,10 @@ mod tests {
         .init_state::<AppState>()
         .add_sub_state::<Helm>()
         // Registered with the asset server, not merely inserted: a boat
-        // telling loads its hull's meshes through it.
+        // telling loads its hull's meshes through it — and a rowboat's,
+        // being rigged, arrive as a whole scene.
         .init_asset::<Mesh>()
+        .init_asset::<bevy::world_serialization::WorldAsset>()
         .init_resource::<Assets<StandardMaterial>>()
         .insert_resource(Online::new(connection));
         app.update();
@@ -1376,6 +1389,161 @@ mod tests {
             standing.translation.xz(),
             ashore,
             "the capsule is gliding in from where they boarded"
+        );
+    }
+
+    /// The hull this client's player is riding, by its wire name.
+    fn aboard_hull(app: &mut App) -> Option<BoatId> {
+        let hull = app
+            .world_mut()
+            .query_filtered::<&ChildOf, With<crate::player::Player>>()
+            .single(app.world())
+            .ok()?
+            .parent();
+        app.world()
+            .entity(hull)
+            .get::<crate::boat::HullId>()
+            .map(|named| named.0)
+    }
+
+    #[test]
+    fn helm_grants_cross_the_player_between_hulls_and_a_hoist_retires_one() {
+        // The whole online shape of going ashore by boat, as tellings: a
+        // ship granted, then a lower grant — the rowboat first with us
+        // aboard, then our ship left at anchor — then the boarding back and
+        // the tender's going. The player is re-seated by each grant, and
+        // whatever helm they held goes back to its moorings.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+        // What the fake server's welcome deals.
+        let me = PlayerId(1);
+
+        (ToClient::Boat {
+            id: BoatId(1),
+            kind: protocol::BoatKind::Sloop,
+            position: Vec2::ZERO,
+            heading: 0.0,
+            occupant: Some(me),
+        })
+        .write(&mut &server)
+        .expect("ship granted");
+        run_until(&mut app, "the player is seated at the ship's helm", |app| {
+            aboard_hull(app) == Some(BoatId(1))
+        });
+
+        (ToClient::Boat {
+            id: BoatId(2),
+            kind: protocol::BoatKind::Rowboat,
+            position: Vec2::new(3.0, 0.0),
+            heading: 0.5,
+            occupant: Some(me),
+        })
+        .write(&mut &server)
+        .expect("tender granted");
+        (ToClient::Boat {
+            id: BoatId(1),
+            kind: protocol::BoatKind::Sloop,
+            position: Vec2::ZERO,
+            heading: 0.0,
+            occupant: None,
+        })
+        .write(&mut &server)
+        .expect("ship at anchor");
+        run_until(&mut app, "the player crosses to the tender", |app| {
+            aboard_hull(app) == Some(BoatId(2))
+        });
+        // The ship went back to its moorings: the sailing systems came off
+        // with the grant that took its crew.
+        let ship = app
+            .world_mut()
+            .query::<(Entity, &crate::boat::HullId)>()
+            .iter(app.world())
+            .find(|(_, named)| named.0 == BoatId(1))
+            .map(|(hull, _)| hull)
+            .expect("the ship's hull is still in the world");
+        assert!(
+            app.world()
+                .entity(ship)
+                .get::<crate::boat::Boat>()
+                .is_none(),
+            "the ship kept its sailing systems after the helm was given up"
+        );
+
+        (ToClient::Boat {
+            id: BoatId(1),
+            kind: protocol::BoatKind::Sloop,
+            position: Vec2::ZERO,
+            heading: 0.0,
+            occupant: Some(me),
+        })
+        .write(&mut &server)
+        .expect("ship granted back");
+        (ToClient::BoatGone { id: BoatId(2) })
+            .write(&mut &server)
+            .expect("tender hoisted");
+        run_until(&mut app, "the player crosses back to the ship", |app| {
+            aboard_hull(app) == Some(BoatId(1))
+        });
+        run_until(&mut app, "the tender is out of the world", |app| {
+            app.world_mut()
+                .query::<&crate::boat::HullId>()
+                .iter(app.world())
+                .count()
+                == 1
+        });
+    }
+
+    #[test]
+    fn a_hull_taken_from_under_a_player_leaves_them_where_it_lay() {
+        // The order this client is not supposed to have to handle: a hull
+        // told gone while the fleet still has us aboard it, with no word
+        // first about where we went. It cannot happen on this wire — the
+        // seating is always said before the going — which is exactly why the
+        // answer to it wants pinning: a player is posed against their hull,
+        // so one taken away without a pose of their own stands at the world
+        // origin, an ocean from wherever they were.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+        let me = PlayerId(1);
+        let afloat = Vec2::new(60.0, -20.0);
+
+        (ToClient::Boat {
+            id: BoatId(2),
+            kind: protocol::BoatKind::Rowboat,
+            position: afloat,
+            heading: 0.0,
+            occupant: Some(me),
+        })
+        .write(&mut &server)
+        .expect("tender granted");
+        run_until(&mut app, "the player is seated in the boat", |app| {
+            aboard_hull(app) == Some(BoatId(2))
+        });
+
+        (ToClient::BoatGone { id: BoatId(2) })
+            .write(&mut &server)
+            .expect("tender hoisted");
+        run_until(&mut app, "the boat is out from under them", |app| {
+            aboard_hull(app).is_none()
+        });
+
+        let (place, unsettled) = app
+            .world_mut()
+            .query_filtered::<(&Transform, Has<crate::player::Unsettled>), With<crate::player::Player>>()
+            .single(app.world())
+            .expect("the player went with the hull");
+        assert_eq!(
+            place.translation.xz(),
+            afloat,
+            "the player was left at the world's origin rather than where the boat lay"
+        );
+        assert!(
+            unsettled,
+            "the player was put down without being left to find the ground"
         );
     }
 

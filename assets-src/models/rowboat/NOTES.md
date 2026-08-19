@@ -64,12 +64,12 @@ out and shipping them is the pose that moves: an oar turns about the crutch it
 sits in and nowhere else, so the stroke is a rotation and nothing more. The
 drive is the shorter half of the cycle, the way a stroke is.
 
-**The stroke is meant to be seeked rather than played**, exactly as the
-figure's run is — by ground covered, so the blades bite at whatever speed the
-boat is making and a boat backing water runs the cycle backwards. That needs
-one number the file cannot carry: how far one stroke drives the boat, which is
-a little more than its own length. See `crates/game/src/figure.rs` for the
-arrangement.
+**The stroke is seeked rather than played**, exactly as the figure's run is —
+by water covered, so the blades bite at whatever speed the boat is making and
+a boat backing water pulls the cycle backwards. The one number this needs and
+the file cannot carry — how far one stroke drives the boat, a little more than
+its own length — is `PULL` in `crates/game/src/boat.rs`, where `row` does the
+seeking and settles the oars stowed at rest.
 
 The two are **states and not a dial**. Crossfading them sweeps the looms
 through the gunwale, which is what shipping the oars looks like and is fine
@@ -77,11 +77,11 @@ taken briskly, but nothing should be left standing halfway.
 
 ## What the game does with it
 
-The world does not deal one out yet: the only way afloat is the dev switch —
-`set boat rowboat` at the console, `--boat rowboat` on a command line — which
-redresses the player's own hull on this client alone. The numbers the game
-holds this file to are the `ROWBOAT` hull's in `crates/game/src/boat.rs` —
-length, draft, the sole and the sea-hole footprint above — pinned by
+This is the ship's boat: the world deals one out whenever a ship's helm
+lowers it to go ashore, and takes it back aboard with the boarding that lays
+it alongside again. The numbers the game holds this file to are the
+`ROWBOAT` hull's in `crates/game/src/boat.rs` — length, draft, the sole and
+the sea-hole footprint above — pinned by
 `the_rowboat_model_is_the_dinghy_the_game_floats` the way the ship's are.
 Still the file's to give and the game's to be pinned to; what is not settled
 yet is where somebody aboard *sits*, the rower not being rigged.

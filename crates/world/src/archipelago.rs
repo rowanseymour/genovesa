@@ -36,9 +36,7 @@
 //! A player panning at the camera's own speed reaches the first of those in
 //! something over a year of continuous play, so the practical answer is that
 //! the ocean does not end. The numbers are here so that "infinite-ish" is a
-//! measurement rather than a hope, and so that anything that ever wants to
-//! *place* a world — a saved position, a server's coordinate space — knows
-//! where the arithmetic starts costing it.
+//! measurement rather than a hope.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -211,22 +209,15 @@ const SQUEEZE: f32 = 0.55;
 /// frame, and any blend short enough to spare the lagoon was a hard line on
 /// the page.
 ///
-/// What the skirt actually finds out there is worth stating plainly, because
-/// it is not what the name suggests. Measured on generated islands, the
-/// generator's own field is *already* exactly `-OCEAN_DEPTH` at the frame and
-/// everywhere past it: [`crate::terrain::MAX_DEPTH`] is the deepest the bed
-/// may go, `DEEP_FRACTION` anchors the deepest sixth or so of every map there,
-/// and the rim — where the falloff has silenced the noise and is pushing
-/// everything down — is the extreme of that distribution. So the blend in
-/// [`Island::height`] blends the floor into the floor, and nothing about the
-/// picture depends on it.
+/// Measured on generated islands, the generator's field is *already* exactly
+/// `-OCEAN_DEPTH` at the frame and past it — the rim is the extreme of the
+/// distribution `DEEP_FRACTION` anchors — so the blend in [`Island::height`]
+/// blends the floor into the floor and nothing in the picture depends on it.
 ///
-/// It is kept as the *guarantee* rather than as a mechanism. Nothing in the
-/// generator promises a rim at full depth — it falls out of a calibration that
-/// is free to be re-fitted, and a future one that left the rim a metre shy
-/// would print every island's chunk rectangle onto the open water as a step.
-/// The skirt makes the hand-over true by construction instead of by luck, for
-/// the price of a smoothstep on chunks that are mostly not built at all.
+/// It is kept as the *guarantee* rather than as a mechanism: nothing in the
+/// generator promises a rim at full depth, and a re-fitted calibration that
+/// left it a metre shy would print every island's chunk rectangle onto the
+/// open water as a step.
 ///
 /// One chunk, and it cannot be more: layout margins guarantee two chunks of
 /// gap between islands of a layer and [`CLEARANCE`] across layers, and skirts
@@ -671,40 +662,31 @@ impl Archipelago {
     /// Asked once, when a server binds, and sent in every welcome — a client
     /// has no layout to work it out from.
     ///
-    /// Entry used to be the origin itself: one point that could be agreed on
-    /// without asking the world anything. What that saved in questions it
-    /// spent in sailing — the nearest land averages half a kilometre out,
-    /// past the haze on every seed's worse days, so a new arrival saw water
-    /// in every direction and steered blind. Entry now opens in sight of the
-    /// first island's coast, and finding land takes no search at all.
+    /// Entry used to be the origin itself, which spent in sailing what it
+    /// saved in questions: the nearest land averages half a kilometre out,
+    /// past the haze on every seed's worse days, so a new arrival saw water in
+    /// every direction and steered blind.
     ///
-    /// Nearest by frame rather than by centre, as [`Archipelago::nearest_island`] ranks,
-    /// because it is the coast entry cares about — a big island's coast can
-    /// stand nearer than any small island's middle. And the waterline
-    /// rather than the frame, because the frame is a rectangle of map, not
-    /// of land: a fitted coast can recede hundreds of metres inside it, and
-    /// a spawn measured off the frame edge holds the island just past the
-    /// top of the opening screen. So the shore is found on the terrain
-    /// itself: the island's land nearest the origin, off a half-chunk
-    /// lattice over the frame, names the landfall; then the line from the
-    /// origin — water on every seed, by [`SPAWN_CLEARING`] — to that
-    /// landfall is *sounded*, [`SOUNDING`] metres a step, and the first
-    /// ground at sea level or above is the shore the spawn backs
-    /// [`SPAWN_OFFSHORE`] metres off. It steps further seaward should its
-    /// own spot prove dry — a spit beside the line, say — so the point is
-    /// water by measurement and not just by intent.
+    /// Nearest by frame rather than by centre, as
+    /// [`Archipelago::nearest_island`] ranks, because it is the coast entry
+    /// cares about. And the waterline rather than the frame, the frame being a
+    /// rectangle of map and not of land: a fitted coast can recede hundreds of
+    /// metres inside it. So the shore is found on the terrain itself — the
+    /// island's land nearest the origin, off a half-chunk lattice over the
+    /// frame, names the landfall; the line from the origin to it is *sounded*
+    /// [`SOUNDING`] metres a step, and the first ground at sea level is the
+    /// shore the spawn backs [`SPAWN_OFFSHORE`] metres off. It steps further
+    /// seaward should its own spot prove dry, so the point is water by
+    /// measurement rather than by intent.
     ///
-    /// Unlike the rest of the layout's questions this one generates its
-    /// island — the waterline is terrain — costing tens to hundreds of
-    /// milliseconds on a cold cache. Entry is exactly when that island is
-    /// about to be generated anyway, so within one [`Archipelago`] the cost
-    /// is borrowed rather than added.
+    /// Unlike the rest of the layout's questions this one generates its island,
+    /// costing tens to hundreds of milliseconds on a cold cache — borrowed
+    /// rather than added, entry being when that island is about to be
+    /// generated anyway.
     ///
-    /// Every *other* island keeps its distance by construction: frames of
-    /// one layer never stand closer than twice their layer's margin, frames
-    /// of different layers keep [`CLEARANCE`] more, and every such gap is
-    /// hundreds of metres — so a point on or beside the chosen island's
-    /// frame is far outside everything else's ground.
+    /// Every *other* island keeps its distance by construction: layout margins
+    /// leave hundreds of metres between frames, so a point beside the chosen
+    /// island's frame is far outside everything else's ground.
     ///
     /// [`None`] means the layout offered no island at all out to the widest
     /// window the search reaches, which is a broken layout rather than a wide
