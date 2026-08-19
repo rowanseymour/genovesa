@@ -90,6 +90,12 @@ impl Default for DisplaySettings {
 pub struct Wanted(pub DisplaySettings);
 
 /// How long an applied change has to be stood by before it is put back.
+///
+/// Ten seconds because the first two or three are not the player's: a mode
+/// switch blacks the monitor out while it resyncs, and only then is there
+/// anything to judge. What is left is enough to read a screen and reach for a
+/// button, and little enough that somebody looking at a display they cannot
+/// read is not looking at it for long.
 const TRIAL: Duration = Duration::from_secs(10);
 
 /// A change that has been applied but not yet stood by.
@@ -929,6 +935,28 @@ mod tests {
         assert!(
             !path.exists(),
             "a file was written by a visit that said nothing"
+        );
+
+        // Nor does a visit that applied something and let it be put back —
+        // what the trial does over in the menu, here as the two writes it
+        // makes. The file is promised a write per change that outlasted the
+        // screen, and this is not one.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Display);
+        app.update();
+        *app.world_mut().resource_mut::<DisplaySettings>() = DisplaySettings {
+            fullscreen: true,
+            ..DisplaySettings::default()
+        };
+        *app.world_mut().resource_mut::<DisplaySettings>() = DisplaySettings::default();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Options);
+        app.update();
+        assert!(
+            !path.exists(),
+            "a file was written by a change that was put back"
         );
 
         // Opening the screen, changing every setting on it and leaving does.
