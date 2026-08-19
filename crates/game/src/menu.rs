@@ -1,5 +1,6 @@
 //! Main menu, the new-world dialog, the join screen and the options screens.
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
@@ -14,7 +15,7 @@ use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
 use crate::camera::View;
 use crate::chart::{INK, INK_DIM, PAPER};
 use crate::net::{self, Dialing, Hosting, Online, Reach};
-use crate::settings::{self, DisplaySettings};
+use crate::settings::{self, DisplaySettings, OnTrial, Resolution, Trial, Wanted};
 use crate::{AppState, Helm};
 use server::{kept_worlds, random_seed, KeptWorld, WorldConfig, MAX_SEED};
 
@@ -48,7 +49,7 @@ const HEADING_SIZE: f32 = 34.0;
 /// one thing lit two ways — a button drawn in ink and a button drawn as a
 /// panel are two different objects — so the whole set travels together and no
 /// screen mixes them.
-#[derive(Clone, Copy)]
+#[derive(Component, Clone, Copy)]
 struct Palette {
     text: Color,
     dim: Color,
@@ -137,17 +138,28 @@ impl Plugin for MenuPlugin {
             .init_resource::<Rebinding>()
             // Shared the same way with the plugin that keeps them and the one
             // that applies them to the sun — see [`crate::settings`]. The
-            // display screen reads and writes them; nothing here applies them.
+            // display screen edits what is *wanted* and Apply is what makes
+            // that the settings; nothing here touches the window.
             .init_resource::<DisplaySettings>()
+            .init_resource::<Wanted>()
+            .init_resource::<OnTrial>()
+            .init_resource::<Picking>()
             .add_systems(OnEnter(AppState::MainMenu), spawn_main_menu)
             .add_systems(OnEnter(AppState::Options), spawn_options)
-            .add_systems(OnEnter(AppState::Display), spawn_display)
+            // Set from the machine before the screen is built out of it.
+            .add_systems(
+                OnEnter(AppState::Display),
+                (open_display, spawn_display).chain(),
+            )
             .add_systems(OnEnter(AppState::Controls), spawn_settings)
             // The pause menu and the screens behind it, all standing over a
             // world that is still running — see [`Helm`].
             .add_systems(OnEnter(Helm::Paused), spawn_pause_menu)
             .add_systems(OnEnter(Helm::Options), spawn_paused_options)
-            .add_systems(OnEnter(Helm::Display), spawn_paused_display)
+            .add_systems(
+                OnEnter(Helm::Display),
+                (open_display, spawn_paused_display).chain(),
+            )
             .add_systems(OnEnter(Helm::Controls), spawn_paused_settings)
             // Cleared before the screen is built, so that a screen only ever
             // shows what this visit to it has had to say.
@@ -181,6 +193,10 @@ impl Plugin for MenuPlugin {
             // still waiting for a key. Both ways to the same screen.
             .add_systems(OnExit(AppState::Controls), cancel_rebinding)
             .add_systems(OnExit(Helm::Controls), cancel_rebinding)
+            // And leaving the display screen settles what it had in the air:
+            // a trial nobody stopped is stood by, a list still down is shut.
+            .add_systems(OnExit(AppState::Display), close_display)
+            .add_systems(OnExit(Helm::Display), close_display)
             .add_systems(
                 Update,
                 (
@@ -223,15 +239,27 @@ impl Plugin for MenuPlugin {
                         .chain(),
                     // The two screens above the controls, each on both of the
                     // states it can be reached through.
-                    options_actions
-                        .run_if(in_state(AppState::Options).or_else(in_state(Helm::Options))),
-                    (display_actions, refresh_display)
-                        .chain()
-                        .run_if(in_state(AppState::Display).or_else(in_state(Helm::Display))),
-                    // Escape on any of the three, which all mean the same thing
-                    // by it: one step back. The controls screen is the
-                    // exception and hears its own — see [`settings_keys`].
-                    options_keys,
+                    // Chained the whole way down, so that everything a press
+                    // sets off lands on the frame it was pressed rather than
+                    // the frame after: Escape shuts the list, a press opens
+                    // it, a trial that has run out is put back, and only then
+                    // is the screen written out of what all of that left
+                    // behind. `options_keys` is in the chain rather than
+                    // beside it for exactly that reason — a list Escape shut
+                    // has to be gone before anything goes looking for it.
+                    (
+                        options_actions
+                            .run_if(in_state(AppState::Options).or_else(in_state(Helm::Options))),
+                        // Escape on any of the three screens, which all mean
+                        // the same thing by it: one step back. The controls
+                        // screen is the exception and hears its own — see
+                        // [`settings_keys`].
+                        options_keys,
+                        (display_actions, refresh_picker, run_trial, refresh_display)
+                            .chain()
+                            .run_if(in_state(AppState::Display).or_else(in_state(Helm::Display))),
+                    )
+                        .chain(),
                     pause_actions.run_if(in_state(Helm::Paused)),
                     // Wants the state itself, so it can only run where there
                     // is one — which is to say, inside a world.
@@ -371,11 +399,20 @@ enum MenuButton {
     ResetKeys,
     /// Fills the screen, or gives it back.
     ToggleFullscreen,
-    /// Steps down the ladder of resolutions and round to the top again — see
-    /// [`settings::Resolution`].
-    CycleResolution,
+    /// Drops the list of resolutions, or takes it back up.
+    OpenResolutions,
+    /// Takes the rung on this line of the list — see [`settings::LADDER`].
+    PickResolution(Resolution),
+    /// Shuts the list without taking anything from it. Carried by the sheet
+    /// spread behind the open list, so that a click anywhere else on the
+    /// screen is a click on this.
+    ShutResolutions,
     /// Stops the sun casting, or sets it casting again.
     ToggleShadows,
+    /// Makes what the screen is set to what the machine does — and afterwards
+    /// stands by it, which is the same button because during a trial there is
+    /// nothing else it could mean. See [`settings::OnTrial`].
+    ApplyDisplay,
     Back,
     /// Puts the player back at the helm of the world behind the pause menu.
     Resume,
@@ -413,10 +450,30 @@ enum DisplayText {
     Fullscreen,
     Resolution,
     Shadows,
-    /// Not a setting but a word about one: what the display will actually do
-    /// with the resolution asked of it — see [`settings::available`].
+    /// Not a setting but a word about them: what the display will really do
+    /// with the resolution being asked of it, and whether it has been asked
+    /// yet at all — see [`settings::available`].
     Caveat,
+    /// The Apply button's own label, which counts a trial down.
+    Apply,
 }
+
+/// Whether the list of resolutions is down.
+///
+/// A flag rather than an entity to go looking for, the same shape as
+/// [`Rebinding`] and for the same reason: there is one such list in the whole
+/// game, and what a system wants to know about it is never which one.
+#[derive(Resource, Default)]
+struct Picking(bool);
+
+/// Marks the display screen's root, which is what an open list's backing sheet
+/// is hung from — it has to cover the screen, so it cannot hang from the row.
+#[derive(Component)]
+struct DisplayScreen;
+
+/// Marks the cell the list of resolutions drops out of.
+#[derive(Component)]
+struct Resolutions;
 
 // ---------------------------------------------------------------------------
 // Main menu
@@ -1452,7 +1509,9 @@ fn options_actions(
 }
 
 /// Escape on the options screen and on the display screen: one step back,
-/// which is what Back does and what it means everywhere else in the menus.
+/// which is what Back does and what it means everywhere else in the menus —
+/// except that on the display screen a dropped list of resolutions is a step
+/// of its own, and is shut before the screen is.
 ///
 /// The controls screen is not here, and that is the whole reason this is a
 /// system of its own rather than an arm of [`helm_keys`]: there, Escape may
@@ -1461,6 +1520,7 @@ fn options_keys(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<State<AppState>>,
     helm: Option<Res<State<Helm>>>,
+    mut picking: ResMut<Picking>,
     mut next_app: ResMut<NextState<AppState>>,
     mut next_helm: ResMut<NextState<Helm>>,
 ) {
@@ -1479,7 +1539,14 @@ fn options_keys(
     if on(AppState::Options, Helm::Options) {
         close_options(over_a_world, &mut next_app, &mut next_helm);
     } else if on(AppState::Display, Helm::Display) {
-        back_to_options(over_a_world, &mut next_app, &mut next_helm);
+        // A dropped list answers the first Escape and the screen the second,
+        // the way a waiting key row does on the controls screen: what was
+        // opened last is what is shut first.
+        if picking.0 {
+            picking.0 = false;
+        } else {
+            back_to_options(over_a_world, &mut next_app, &mut next_helm);
+        }
     }
 }
 
@@ -1488,40 +1555,70 @@ fn options_keys(
 // ---------------------------------------------------------------------------
 
 /// The display screen as reached from the main menu.
-fn spawn_display(commands: Commands, settings: Res<DisplaySettings>) {
+fn spawn_display(commands: Commands, wanted: Res<Wanted>) {
     build_display(
         commands,
         &ON_PAPER,
-        &settings,
+        &wanted.0,
         DespawnOnExit(AppState::Display),
     );
 }
 
 /// And as reached from the pause menu — see [`spawn_paused_options`].
-fn spawn_paused_display(commands: Commands, settings: Res<DisplaySettings>) {
+fn spawn_paused_display(commands: Commands, wanted: Res<Wanted>) {
     build_display(
         commands,
         &OVER_THE_WORLD,
-        &settings,
+        &wanted.0,
         DespawnOnExit(Helm::Display),
     );
+}
+
+/// The screen opens set to whatever the machine is already doing, and never
+/// opens with the list of resolutions already down.
+fn open_display(
+    settings: Res<DisplaySettings>,
+    mut wanted: ResMut<Wanted>,
+    mut picking: ResMut<Picking>,
+) {
+    wanted.0 = *settings;
+    picking.0 = false;
+}
+
+/// Leaving stands by a change still on trial.
+///
+/// Not because a trial is a formality but because of what it is for: it
+/// catches a display the player cannot see, and a player who has found Back
+/// and pressed it has shown that they can. What they had set but never applied
+/// goes the other way and is simply dropped — [`open_display`] builds the
+/// screen out of the machine again next time.
+fn close_display(mut on_trial: ResMut<OnTrial>, mut picking: ResMut<Picking>) {
+    on_trial.0 = None;
+    picking.0 = false;
 }
 
 /// Three rows, and they are three because they are what somebody whose machine
 /// cannot keep up reaches for, in the order they reach for them: fill the
 /// screen, draw fewer pixels, stop casting shadows.
 ///
-/// Each is built with what the setting is *now* rather than empty for
-/// [`refresh_display`] to fill in, so the screen is right on the frame it
-/// appears rather than one after.
+/// None of the three does anything on its own — the screen edits [`Wanted`]
+/// and Apply is what reaches the window, for the reason that resource gives —
+/// so it is built out of what is *wanted* now rather than empty for
+/// [`refresh_display`] to fill in, and is right on the frame it appears rather
+/// than one after.
 fn build_display(
     mut commands: Commands,
     ink: &Palette,
-    settings: &DisplaySettings,
+    wanted: &DisplaySettings,
     until: impl Bundle,
 ) {
     commands
-        .spawn((Name::new("Display screen"), until, screen(ink)))
+        .spawn((
+            Name::new("Display screen"),
+            DisplayScreen,
+            until,
+            screen(ink),
+        ))
         .with_children(|screen| {
             screen
                 .spawn(panel(ink, 6.0, PANEL_PADDING))
@@ -1537,29 +1634,22 @@ fn build_display(
                             ..default()
                         })
                         .with_children(|rows| {
-                            spawn_setting_row(
+                            spawn_switch_row(
                                 rows,
                                 ink,
                                 "Fullscreen",
                                 MenuButton::ToggleFullscreen,
                                 DisplayText::Fullscreen,
-                                switch_label(settings.fullscreen),
+                                wanted.fullscreen,
                             );
-                            spawn_setting_row(
-                                rows,
-                                ink,
-                                "Resolution",
-                                MenuButton::CycleResolution,
-                                DisplayText::Resolution,
-                                &settings.resolution.label(),
-                            );
-                            spawn_setting_row(
+                            spawn_resolution_row(rows, ink, wanted);
+                            spawn_switch_row(
                                 rows,
                                 ink,
                                 "Shadows",
                                 MenuButton::ToggleShadows,
                                 DisplayText::Shadows,
-                                switch_label(settings.shadows),
+                                wanted.shadows,
                             );
                         });
 
@@ -1571,9 +1661,10 @@ fn build_display(
                         ink,
                         "window or the screen itself changes size to suit",
                     );
-                    // Held open whether or not there is a caveat to put in it,
-                    // so a resolution the display cannot do does not shove the
-                    // buttons down the moment it is picked.
+                    // Held open whether or not there is anything to put in it,
+                    // so that a resolution the display cannot do, or a change
+                    // waiting to be applied, does not shove the buttons down
+                    // the moment it has something to say.
                     panel.spawn((
                         DisplayText::Caveat,
                         Text::new(String::new()),
@@ -1592,47 +1683,113 @@ fn build_display(
                     panel
                         .spawn(Node {
                             margin: UiRect::top(Val::Px(10.0)),
+                            column_gap: Val::Px(10.0),
                             ..default()
                         })
                         .with_children(|row| {
+                            row.spawn(button(ink, MenuButton::ApplyDisplay, 130.0))
+                                .with_children(|button| {
+                                    // Its inks travel with it, the way the
+                                    // list's cell carries them: the system
+                                    // that dims this label sees both sheets at
+                                    // once and cannot tell from a label which
+                                    // of them it was drawn on.
+                                    button.spawn((
+                                        DisplayText::Apply,
+                                        *ink,
+                                        button_label(ink, "Apply"),
+                                    ));
+                                });
                             spawn_button(row, ink, MenuButton::Back, "Back", 130.0);
                         });
                 });
         });
 }
 
-/// One setting and how it is set, as a name on the left and a button on the
+/// How wide the control on the right of a setting's row is. One width for all
+/// of them, so the rows read as a column rather than as three separate
+/// questions — and it is the list's width too, which drops out of one of them.
+const CONTROL_WIDTH: f32 = 170.0;
+
+/// One setting and how it is set, as a name on the left and something on the
 /// right that changes it — the same shape as a key row, because it is the same
 /// question asked about something other than a key.
-fn spawn_setting_row(
+fn setting_row<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    ink: &Palette,
+    name: &str,
+) -> EntityCommands<'a> {
+    let mut row = parent.spawn(Node {
+        width: Val::Px(400.0),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::SpaceBetween,
+        ..default()
+    });
+    row.with_children(|row| {
+        row.spawn((
+            Text::new(name.to_string()),
+            TextFont {
+                font_size: FontSize::Px(18.0),
+                ..default()
+            },
+            TextColor(ink.text),
+        ));
+    });
+    row
+}
+
+/// A setting with two ways to be, which a button can carry on its own: it says
+/// which way it is set, and pressing it says the other.
+fn spawn_switch_row(
     parent: &mut ChildSpawnerCommands,
     ink: &Palette,
     name: &str,
     action: MenuButton,
     mark: DisplayText,
-    value: &str,
+    on: bool,
 ) {
-    parent
-        .spawn(Node {
-            width: Val::Px(400.0),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::SpaceBetween,
-            ..default()
-        })
-        .with_children(|row| {
-            row.spawn((
-                Text::new(name.to_string()),
-                TextFont {
-                    font_size: FontSize::Px(18.0),
-                    ..default()
-                },
-                TextColor(ink.text),
-            ));
-            row.spawn(padded_button(ink, action, 170.0, KEY_ROW_PADDING))
+    setting_row(parent, ink, name).with_children(|row| {
+        row.spawn(padded_button(ink, action, CONTROL_WIDTH, KEY_ROW_PADDING))
+            .with_children(|button| {
+                button.spawn((mark, button_label(ink, switch_label(on))));
+            });
+    });
+}
+
+/// The resolution's row, which is a list rather than a switch.
+///
+/// A setting with two ways to be can be a button that shows one of them; a
+/// setting with five cannot. The button that used to step through them applied
+/// four settings to reach the fifth, and in fullscreen each of those steps is a
+/// real display mode switch — the screen goes black and the monitor resyncs.
+/// So the list drops down instead and every rung is one press from any other.
+fn spawn_resolution_row(
+    parent: &mut ChildSpawnerCommands,
+    ink: &Palette,
+    wanted: &DisplaySettings,
+) {
+    setting_row(parent, ink, "Resolution").with_children(|row| {
+        // The list hangs off a cell of its own rather than off the button,
+        // because it is positioned against what it drops from and has to be
+        // able to cover it. The cell carries the inks too: the list is built
+        // long after this, by a system that sees both sheets at once and
+        // cannot tell from a row which of them it was drawn on.
+        row.spawn((Resolutions, *ink, Node::default()))
+            .with_children(|cell| {
+                cell.spawn(padded_button(
+                    ink,
+                    MenuButton::OpenResolutions,
+                    CONTROL_WIDTH,
+                    KEY_ROW_PADDING,
+                ))
                 .with_children(|button| {
-                    button.spawn((mark, button_label(ink, value)));
+                    button.spawn((
+                        DisplayText::Resolution,
+                        button_label(ink, &wanted.resolution.label()),
+                    ));
                 });
-        });
+            });
+    });
 }
 
 /// What a switch reads. It has to say which way it is set, not what pressing it
@@ -1645,10 +1802,138 @@ fn switch_label(on: bool) -> &'static str {
     }
 }
 
+/// Marks everything an open list puts on the screen, so that shutting it is
+/// one query rather than two entities to remember.
+#[derive(Component)]
+struct Dropped;
+
+/// The sheet behind an open list draws over the screen; the list draws over
+/// the sheet. Both are lifted out of the panel they belong to rather than
+/// ordered within it, since one of them has to cover the whole window.
+///
+/// The same two numbers the debug readout and the console take, and they are
+/// free to be: the console is a sibling of the pause menu and so is never up
+/// with this screen, and the readout has nothing to fear from a sheet that
+/// draws nothing.
+const BEHIND_THE_LIST: i32 = 1;
+const THE_LIST: i32 = 2;
+
+/// Puts the list of resolutions down, and takes it up again.
+///
+/// Spawned and despawned rather than kept and hidden: a list that is always
+/// there is a list that has to be held in step with what is picked whether
+/// anybody is looking at it or not. Commands queued here are applied before
+/// the frame is laid out, so it appears on the frame it was asked for rather
+/// than the one after — which is also why the rung already taken is coloured
+/// here rather than left to [`highlight_buttons`], whose `Changed<Interaction>`
+/// cannot fire until the frame after these commands land.
+///
+/// Nothing but the list going up or down is worth watching: what is *wanted*
+/// cannot change underneath an open list. Every control that writes it either
+/// shuts the list in the same press or sits behind the catcher, and a trial
+/// can neither begin nor run while the list is down.
+fn refresh_picker(
+    mut commands: Commands,
+    picking: Res<Picking>,
+    wanted: Res<Wanted>,
+    cells: Query<(Entity, &Palette), With<Resolutions>>,
+    screens: Query<Entity, With<DisplayScreen>>,
+    dropped: Query<Entity, With<Dropped>>,
+) {
+    if !picking.is_changed() {
+        return;
+    }
+    for entity in &dropped {
+        commands.entity(entity).despawn();
+    }
+    if !picking.0 {
+        return;
+    }
+    let (Ok((cell, ink)), Ok(screen)) = (cells.single(), screens.single()) else {
+        return;
+    };
+
+    // Everything the list does not catch. It is the whole window rather than
+    // the panel, so that a click anywhere at all shuts the list — and it is
+    // hung from the screen for the same reason, the panel being too small to
+    // do the job from inside a row.
+    commands.entity(screen).with_children(|screen| {
+        screen.spawn((
+            Dropped,
+            Button,
+            MenuButton::ShutResolutions,
+            GlobalZIndex(BEHIND_THE_LIST),
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+        ));
+    });
+
+    commands.entity(cell).with_children(|cell| {
+        cell.spawn((
+            Dropped,
+            GlobalZIndex(THE_LIST),
+            Node {
+                position_type: PositionType::Absolute,
+                // Straight under the button it came out of, and the same
+                // width, so the list reads as the button opened out.
+                top: Val::Percent(100.0),
+                left: Val::Px(0.0),
+                width: Val::Px(CONTROL_WIDTH),
+                flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(ink.panel),
+            BorderColor::all(ink.edge),
+        ))
+        .with_children(|list| {
+            for rung in settings::LADDER {
+                let taken = rung == wanted.0.resolution;
+                list.spawn(padded_button(
+                    ink,
+                    MenuButton::PickResolution(rung),
+                    CONTROL_WIDTH,
+                    KEY_ROW_PADDING,
+                ))
+                // Over the idle fill `padded_button` builds in, there being no
+                // room for a second `BackgroundColor` alongside it.
+                .insert(BackgroundColor(if taken {
+                    ink.button.armed
+                } else {
+                    ink.button.idle
+                }))
+                .with_children(|item| {
+                    item.spawn(button_label(ink, &rung.label()));
+                });
+            }
+        });
+    });
+}
+
+/// What the machine is doing, what the screen is set to, and what has come of
+/// the difference so far.
+///
+/// Three resources that are one thought: none of them means anything without
+/// the other two, and the two systems that act on this screen — as against the
+/// ones that only read it back out — want all three.
+#[derive(SystemParam)]
+struct Editing<'w> {
+    settings: ResMut<'w, DisplaySettings>,
+    wanted: ResMut<'w, Wanted>,
+    on_trial: ResMut<'w, OnTrial>,
+}
+
 fn display_actions(
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
     helm: Option<Res<State<Helm>>>,
-    mut settings: ResMut<DisplaySettings>,
+    mut editing: Editing,
+    mut picking: ResMut<Picking>,
     mut next_app: ResMut<NextState<AppState>>,
     mut next_helm: ResMut<NextState<Helm>>,
 ) {
@@ -1659,55 +1944,138 @@ fn display_actions(
             continue;
         }
         match button {
-            MenuButton::ToggleFullscreen => settings.fullscreen = !settings.fullscreen,
-            MenuButton::CycleResolution => settings.resolution = settings.resolution.next(),
-            MenuButton::ToggleShadows => settings.shadows = !settings.shadows,
+            // A trial is one question, and the three rows are not it. There is
+            // nowhere on the screen for a fresh edit to show while one runs —
+            // the caveat line is the trial's and the button reads Keep — and
+            // `run_trial` puts back what is *wanted* along with the settings,
+            // so an edit taken now would be swallowed and then quietly undone.
+            // Better to answer nothing until the change on the table is
+            // settled, which is one press away either way.
+            MenuButton::ToggleFullscreen
+            | MenuButton::ToggleShadows
+            | MenuButton::OpenResolutions
+            | MenuButton::PickResolution(_)
+                if editing.on_trial.0.is_some() => {}
+            MenuButton::ToggleFullscreen => {
+                editing.wanted.0.fullscreen = !editing.wanted.0.fullscreen
+            }
+            MenuButton::ToggleShadows => editing.wanted.0.shadows = !editing.wanted.0.shadows,
+            // Opens, and only opens: the sheet behind an open list covers the
+            // button it dropped from, so the press that shuts it again is a
+            // press on that rather than a second one on this.
+            MenuButton::OpenResolutions => picking.0 = true,
+            MenuButton::PickResolution(rung) => {
+                editing.wanted.0.resolution = *rung;
+                picking.0 = false;
+            }
+            MenuButton::ShutResolutions => picking.0 = false,
+            // The one button, and which of the two things it means follows
+            // from whether there is a trial running: during one there is
+            // nothing else it could mean, and afterwards nothing else it
+            // could be for.
+            MenuButton::ApplyDisplay if editing.on_trial.0.is_some() => editing.on_trial.0 = None,
+            MenuButton::ApplyDisplay if editing.wanted.0 != *editing.settings => {
+                editing.on_trial.0 = Some(Trial::new(*editing.settings));
+                *editing.settings = editing.wanted.0;
+            }
             MenuButton::Back => back_to_options(over_a_world, &mut next_app, &mut next_helm),
             _ => {}
         }
     }
 }
 
-/// Keeps the rows in step with the settings behind them, and says what the
-/// display will really do with the resolution being asked of it.
+/// Counts a trial down and puts the settings back when it runs out — see
+/// [`OnTrial`]. What is *wanted* goes back with them, so the screen the player
+/// is left looking at says what the machine is really doing rather than what
+/// it briefly was.
+fn run_trial(time: Res<Time>, mut editing: Editing) {
+    let Some(trial) = &mut editing.on_trial.0 else {
+        return;
+    };
+    let Some(was) = trial.ran_out(time.delta()) else {
+        return;
+    };
+    *editing.settings = was;
+    editing.wanted.0 = was;
+    editing.on_trial.0 = None;
+}
+
+/// Keeps the rows in step with what is wanted, says what the display will
+/// really do with it, and tells the Apply button which of its two jobs it is
+/// currently doing.
 ///
 /// Every line is compared before it is written rather than guarded by
-/// `is_changed` on the settings, because the caveat depends on something else
-/// as well: the monitors turn up a frame or two into the run, and a screen
+/// `is_changed`, because what a line should say depends on more than the
+/// settings: the monitors turn up a frame or two into the run, and a screen
 /// opened before they did would otherwise keep a caveat it can no longer
-/// justify. Writing only what differs is what keeps that from re-laying out the
-/// panel every frame.
+/// justify. Writing only what differs is what keeps that from re-laying out
+/// the panel every frame.
 fn refresh_display(
     settings: Res<DisplaySettings>,
+    wanted: Res<Wanted>,
+    on_trial: Res<OnTrial>,
     monitors: Query<(Entity, &Monitor, Has<PrimaryMonitor>)>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    mut readouts: Query<(&DisplayText, &mut Text)>,
+    mut readouts: Query<(&DisplayText, &mut Text, &mut TextColor, Option<&Palette>)>,
 ) {
     // The screen this window is on, which on two monitors is not the primary
     // one and is the only one the caveat can honestly be about — see
     // [`settings::showing_on`].
     let monitor =
         settings::showing_on(windows.single().ok(), monitors.iter()).map(|(_, screen)| screen);
-    for (which, mut text) in &mut readouts {
+    let unapplied = wanted.0 != *settings;
+
+    for (which, mut text, mut colour, ink) in &mut readouts {
         let saying = match which {
-            DisplayText::Fullscreen => switch_label(settings.fullscreen).to_string(),
-            DisplayText::Resolution => settings.resolution.label(),
-            DisplayText::Shadows => switch_label(settings.shadows).to_string(),
+            DisplayText::Fullscreen => switch_label(wanted.0.fullscreen).to_string(),
+            DisplayText::Resolution => wanted.0.resolution.label(),
+            DisplayText::Shadows => switch_label(wanted.0.shadows).to_string(),
+            // Three states and a word for each, because a control that says
+            // which way it is set is the rule the switches on this screen
+            // already follow. Counting down in the button rather than beside
+            // it, too: the one control about to act on its own is also the one
+            // saying how long there is to stop it.
+            DisplayText::Apply => match (&on_trial.0, unapplied) {
+                (Some(trial), _) => format!("Keep ({})", trial.seconds_left()),
+                (None, true) => "Apply".to_string(),
+                (None, false) => "Applied".to_string(),
+            },
+            // The line under the rows says what the display will really do,
+            // and a trial takes it over because that is the one thing on the
+            // screen with a clock on it. It does not also carry *not applied
+            // yet* — the button says that, and the caveat a picked rung earns
+            // is worth more before it is applied than after.
+            DisplayText::Caveat if on_trial.0.is_some() => {
+                "put back on its own unless you keep it".to_string()
+            }
             // Only worth a word when the display has no such mode, and only
             // then about the screen it would have filled: windowed, a size is
             // a size and every display can do it.
             DisplayText::Caveat
-                if !settings.fullscreen || settings::available(settings.resolution, monitor) =>
+                if wanted.0.fullscreen && !settings::available(wanted.0.resolution, monitor) =>
             {
-                String::new()
+                format!(
+                    "this screen has no {} mode, so filling it draws every pixel",
+                    wanted.0.resolution.label()
+                )
             }
-            DisplayText::Caveat => format!(
-                "this screen has no {} mode, so filling it draws every pixel",
-                settings.resolution.label()
-            ),
+            DisplayText::Caveat => String::new(),
         };
         if text.0 != saying {
             text.0 = saying;
+        }
+        // Only the Apply button carries its inks, and only it changes colour:
+        // a button with nothing to apply and nothing to keep is drawn dim, so
+        // that it never looks like a press worth making.
+        if let Some(ink) = ink {
+            let wanted_ink = if unapplied || on_trial.0.is_some() {
+                ink.text
+            } else {
+                ink.dim
+            };
+            if colour.0 != wanted_ink {
+                colour.0 = wanted_ink;
+            }
         }
     }
 }
@@ -2231,6 +2599,8 @@ fn spawn_button(
 
 fn highlight_buttons(
     rebinding: Res<Rebinding>,
+    picking: Res<Picking>,
+    wanted: Res<Wanted>,
     mut buttons: Query<
         (&Interaction, &MenuButton, &Highlight, &mut BackgroundColor),
         Changed<Interaction>,
@@ -2239,6 +2609,12 @@ fn highlight_buttons(
     for (interaction, button, ink, mut color) in &mut buttons {
         let idle = match button {
             MenuButton::Rebind(action) if rebinding.0 == Some(*action) => ink.armed,
+            // The two things an open list has to say: that it is open, and
+            // which of its rungs is the one already taken. Both are the same
+            // colour a waiting key row is, which is the menu's one word for
+            // *this is the live one*.
+            MenuButton::OpenResolutions if picking.0 => ink.armed,
+            MenuButton::PickResolution(rung) if wanted.0.resolution == *rung => ink.armed,
             _ => ink.idle,
         };
 
@@ -2285,6 +2661,10 @@ mod tests {
             // Normally the camera plugin's, but entering a world moves the
             // view onto the served spawn — see `settle_dialing`.
             .init_resource::<View>()
+            // Nothing advances it in a headless app, which is what lets a
+            // test run a trial's clock out on its own terms — see
+            // [`run_out_the_trial`].
+            .init_resource::<Time>()
             .add_message::<AppExit>()
             .add_message::<KeyboardInput>();
         app.update();
@@ -3036,8 +3416,90 @@ mod tests {
             .expect("no row for the setting")
     }
 
+    /// What the machine is actually doing.
     fn display(app: &App) -> DisplaySettings {
         *app.world().resource::<DisplaySettings>()
+    }
+
+    /// And what the screen is set to, which until Apply is a different thing.
+    fn wanted(app: &App) -> DisplaySettings {
+        app.world().resource::<Wanted>().0
+    }
+
+    /// What the Apply label is drawn in, which says whether it is offering
+    /// anything as much as its words do.
+    fn apply_ink(app: &mut App) -> Color {
+        app.world_mut()
+            .query::<(&DisplayText, &TextColor)>()
+            .iter(app.world())
+            .find(|(mark, _)| **mark == DisplayText::Apply)
+            .map(|(_, colour)| colour.0)
+            .expect("no Apply label")
+    }
+
+    /// The rungs the open list is offering, which is none at all when it is up.
+    fn listed(app: &mut App) -> Vec<Resolution> {
+        app.world_mut()
+            .query::<&MenuButton>()
+            .iter(app.world())
+            .filter_map(|button| match button {
+                MenuButton::PickResolution(rung) => Some(*rung),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Everything an open list has put on the screen — the list and the sheet
+    /// behind it — counted rather than read, since what matters about the
+    /// sheet is that there is one and that it goes away again.
+    fn dropped(app: &mut App) -> usize {
+        app.world_mut()
+            .query::<&Dropped>()
+            .iter(app.world())
+            .count()
+    }
+
+    /// What a rung of the open list is filled with.
+    fn rung_fill(app: &mut App, rung: Resolution) -> Color {
+        app.world_mut()
+            .query::<(&MenuButton, &BackgroundColor)>()
+            .iter(app.world())
+            .find(|(button, _)| **button == MenuButton::PickResolution(rung))
+            .map(|(_, fill)| fill.0)
+            .expect("no such rung on the list")
+    }
+
+    /// Presses the sheet behind an open list — the real one, rather than a
+    /// stand-in carrying the same button, since the sheet's own existence is
+    /// half of what is being asked about.
+    fn click_the_sheet(app: &mut App) {
+        let sheet = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Dropped>, With<MenuButton>)>()
+            .iter(app.world())
+            .next()
+            .expect("nothing behind the list to click");
+        *app.world_mut()
+            .get_mut::<Interaction>(sheet)
+            .expect("the sheet catches nothing") = Interaction::Pressed;
+        app.update();
+    }
+
+    fn on_trial(app: &App) -> bool {
+        app.world().resource::<OnTrial>().0.is_some()
+    }
+
+    /// Puts time on the clock and gives one frame to see it, which a test
+    /// cannot do by waiting: nothing advances [`Time`] in a headless app, so a
+    /// test owns the whole clock.
+    fn advance(app: &mut App, by: Duration) {
+        app.world_mut().resource_mut::<Time>().advance_by(by);
+        app.update();
+    }
+
+    /// Past the end of a trial, however much of it is left.
+    fn run_out_the_trial(app: &mut App) {
+        advance(app, Duration::from_secs(11));
     }
 
     /// A switch has to say which way it is set, and go on saying it — the row
@@ -3050,25 +3512,276 @@ mod tests {
         assert_eq!(row_says(&mut app, DisplayText::Shadows), "On");
 
         click(&mut app, MenuButton::ToggleFullscreen);
-        assert!(display(&app).fullscreen);
+        assert!(wanted(&app).fullscreen);
         assert_eq!(row_says(&mut app, DisplayText::Fullscreen), "On");
 
         click(&mut app, MenuButton::ToggleShadows);
-        assert!(!display(&app).shadows);
+        assert!(!wanted(&app).shadows);
         assert_eq!(row_says(&mut app, DisplayText::Shadows), "Off");
     }
 
-    /// The resolutions walk down and come round again, so somebody who has
-    /// gone past the one they wanted gets back without a second button.
+    /// The whole point of the screen editing what is *wanted*: a switch thrown
+    /// is a switch thrown on paper, and the machine hears nothing about it.
     #[test]
-    fn the_resolution_button_walks_the_ladder_and_comes_round() {
+    fn nothing_reaches_the_machine_until_apply() {
+        let mut app = test_app(AppState::Display);
+        assert_eq!(
+            apply_ink(&mut app),
+            ON_PAPER.dim,
+            "a button with nothing to apply was drawn as one worth pressing"
+        );
+
+        click(&mut app, MenuButton::ToggleFullscreen);
+        click(&mut app, MenuButton::PickResolution(Resolution::Rows(720)));
+        click(&mut app, MenuButton::ToggleShadows);
+        assert_eq!(
+            display(&app),
+            DisplaySettings::default(),
+            "the window was changed by somebody only reading the screen"
+        );
+        assert_eq!(
+            row_says(&mut app, DisplayText::Apply),
+            "Apply",
+            "the button kept quiet about a change waiting to be made"
+        );
+        assert_eq!(apply_ink(&mut app), ON_PAPER.text);
+
+        click(&mut app, MenuButton::ApplyDisplay);
+        assert_eq!(display(&app), wanted(&app));
+        click(&mut app, MenuButton::ApplyDisplay);
+        assert_eq!(
+            row_says(&mut app, DisplayText::Apply),
+            "Applied",
+            "the button still offered to do something it had already done"
+        );
+        assert_eq!(apply_ink(&mut app), ON_PAPER.dim);
+    }
+
+    /// Every rung is one press from every other, which is the reason the list
+    /// exists: the button it replaced applied four settings to reach the fifth.
+    #[test]
+    fn a_rung_is_one_press_away_whichever_one_is_taken() {
         let mut app = test_app(AppState::Display);
         assert_eq!(row_says(&mut app, DisplayText::Resolution), "Native");
+        assert!(listed(&mut app).is_empty(), "the list was already down");
 
-        for expected in ["2160p", "1440p", "1080p", "720p", "Native"] {
-            click(&mut app, MenuButton::CycleResolution);
-            assert_eq!(row_says(&mut app, DisplayText::Resolution), expected);
+        click(&mut app, MenuButton::OpenResolutions);
+        let rungs = listed(&mut app);
+        assert_eq!(rungs.len(), settings::LADDER.len());
+        for rung in settings::LADDER {
+            assert!(rungs.contains(&rung), "{rung:?} is not on the list");
         }
+
+        click(&mut app, MenuButton::PickResolution(Resolution::Rows(720)));
+        assert_eq!(row_says(&mut app, DisplayText::Resolution), "720p");
+        assert!(
+            listed(&mut app).is_empty(),
+            "the list stayed down after a pick"
+        );
+        assert_eq!(dropped(&mut app), 0, "a pick left the sheet behind");
+
+        // And back up the ladder without walking every rung between.
+        click(&mut app, MenuButton::OpenResolutions);
+        click(&mut app, MenuButton::PickResolution(Resolution::Rows(2160)));
+        assert_eq!(row_says(&mut app, DisplayText::Resolution), "2160p");
+    }
+
+    /// A list is shut by anything that is not a rung — a click on the sheet
+    /// behind it, or Escape, which on this screen means the list before it
+    /// means the screen, or simply leaving.
+    ///
+    /// The sheet is as much of the point as the list. It covers the whole
+    /// window, so a list that came up without one would be a list nothing
+    /// could shut, and one left behind afterwards would be a menu that
+    /// swallows every press aimed at anything under it.
+    #[test]
+    fn a_list_shuts_without_taking_anything_from_it() {
+        let mut app = test_app(AppState::Display);
+
+        click(&mut app, MenuButton::OpenResolutions);
+        assert_eq!(dropped(&mut app), 2, "the list came up without its sheet");
+        click_the_sheet(&mut app);
+        assert!(listed(&mut app).is_empty());
+        assert_eq!(dropped(&mut app), 0, "the sheet outlived the list");
+        assert_eq!(wanted(&app).resolution, Resolution::Native);
+
+        click(&mut app, MenuButton::OpenResolutions);
+        press_key(&mut app, KeyCode::Escape);
+        assert!(listed(&mut app).is_empty(), "Escape left the list down");
+        assert_eq!(dropped(&mut app), 0, "Escape left the sheet over the menu");
+        assert_eq!(
+            state(&app),
+            AppState::Display,
+            "one Escape shut the list and left the screen as well"
+        );
+
+        press_key(&mut app, KeyCode::Escape);
+        // The frame the transition lands on.
+        app.update();
+        assert_eq!(state(&app), AppState::Options);
+
+        // And a list still down when the screen goes takes the sheet with it,
+        // which is the whole reason the sheet hangs from the screen rather
+        // than from the row the list drops out of.
+        go_to(&mut app, AppState::Display);
+        click(&mut app, MenuButton::OpenResolutions);
+        assert_eq!(dropped(&mut app), 2);
+        click(&mut app, MenuButton::Back);
+        assert_eq!(dropped(&mut app), 0, "the sheet outlived the screen");
+    }
+
+    /// The rung already taken is drawn as the taken one from the moment the
+    /// list exists. [`highlight_buttons`] cannot do that job — its
+    /// `Changed<Interaction>` cannot fire until the frame after the spawn — and
+    /// a list that spends its first frame claiming nothing is picked is the
+    /// flicker the whole screen is built out of [`Wanted`] to avoid.
+    #[test]
+    fn the_taken_rung_is_lit_on_the_frame_the_list_appears() {
+        let mut app = test_app(AppState::Display);
+        click(&mut app, MenuButton::PickResolution(Resolution::Rows(1080)));
+
+        // The one frame the press takes to be seen, and no more: another would
+        // let `highlight_buttons` cover for a list that came up wrong.
+        click_once(&mut app, MenuButton::OpenResolutions);
+        assert_eq!(
+            rung_fill(&mut app, Resolution::Rows(1080)),
+            ON_PAPER.button.armed,
+            "the list opened saying nothing was picked"
+        );
+        assert_eq!(
+            rung_fill(&mut app, Resolution::Native),
+            ON_PAPER.button.idle
+        );
+    }
+
+    /// A change is made and then put back on its own, because the setting most
+    /// worth having is the one that can leave the player unable to read the
+    /// screen they would undo it from.
+    #[test]
+    fn an_applied_change_is_put_back_unless_it_is_kept() {
+        let mut app = test_app(AppState::Display);
+
+        click(&mut app, MenuButton::ToggleFullscreen);
+        click(&mut app, MenuButton::ApplyDisplay);
+        assert!(display(&app).fullscreen);
+        assert!(on_trial(&app));
+        assert_eq!(
+            row_says(&mut app, DisplayText::Apply),
+            "Keep (10)",
+            "the button did not say what it had become"
+        );
+
+        // Counted up rather than down to the nearest second, which is the
+        // whole of what the rounding is for: a trial with any time left at all
+        // must never read as none left.
+        advance(&mut app, Duration::from_millis(9_600));
+        assert_eq!(
+            row_says(&mut app, DisplayText::Apply),
+            "Keep (1)",
+            "four hundred milliseconds of trial read as no trial"
+        );
+
+        run_out_the_trial(&mut app);
+        assert!(!display(&app).fullscreen, "the change was never put back");
+        assert!(!on_trial(&app));
+        assert_eq!(
+            wanted(&app),
+            display(&app),
+            "the screen was left saying something the machine was not doing"
+        );
+        assert_eq!(
+            row_says(&mut app, DisplayText::Apply),
+            "Applied",
+            "the button offered to apply what was already back in force"
+        );
+    }
+
+    /// A trial is one question, and the three rows are not it.
+    ///
+    /// There is nowhere on the screen for a fresh edit to show while a trial
+    /// runs — the caveat line is the trial's and the button reads Keep — and
+    /// [`run_trial`] puts back what is *wanted* along with the settings. A row
+    /// that still answered would take an edit nobody could see and then lose
+    /// it without a word.
+    #[test]
+    fn the_rows_say_nothing_while_a_change_is_on_trial() {
+        let mut app = test_app(AppState::Display);
+
+        click(&mut app, MenuButton::ToggleFullscreen);
+        click(&mut app, MenuButton::ApplyDisplay);
+
+        click(&mut app, MenuButton::ToggleShadows);
+        assert!(
+            wanted(&app).shadows,
+            "an edit was taken with nothing on the screen to say it had been"
+        );
+        assert_eq!(row_says(&mut app, DisplayText::Shadows), "On");
+
+        click(&mut app, MenuButton::OpenResolutions);
+        assert!(
+            listed(&mut app).is_empty(),
+            "a list came down that could take nothing"
+        );
+        click(&mut app, MenuButton::PickResolution(Resolution::Rows(720)));
+        assert_eq!(wanted(&app).resolution, Resolution::Native);
+
+        // So the trial ends on its own terms, with nothing of anybody's to
+        // throw away.
+        run_out_the_trial(&mut app);
+        assert!(!display(&app).fullscreen);
+        assert!(
+            display(&app).shadows,
+            "an edit nobody could see reached the window"
+        );
+
+        // And with it settled the rows answer again.
+        click(&mut app, MenuButton::ToggleShadows);
+        assert!(!wanted(&app).shadows, "the rows never came back");
+    }
+
+    /// And stood by when somebody who can evidently still see it says so.
+    #[test]
+    fn keeping_a_change_stands_by_it() {
+        let mut app = test_app(AppState::Display);
+
+        click(&mut app, MenuButton::ToggleFullscreen);
+        click(&mut app, MenuButton::ApplyDisplay);
+        click(&mut app, MenuButton::ApplyDisplay);
+        assert!(!on_trial(&app));
+
+        run_out_the_trial(&mut app);
+        assert!(
+            display(&app).fullscreen,
+            "a kept change was put back anyway"
+        );
+    }
+
+    /// Leaving is the same answer as keeping, and for the same reason: a
+    /// player who found Back has shown they can see. What was never applied
+    /// goes the other way and is dropped.
+    #[test]
+    fn leaving_stands_by_a_trial_and_drops_what_was_never_applied() {
+        let mut app = test_app(AppState::Display);
+
+        click(&mut app, MenuButton::ToggleFullscreen);
+        click(&mut app, MenuButton::ApplyDisplay);
+        click(&mut app, MenuButton::ToggleShadows);
+        click(&mut app, MenuButton::Back);
+        assert!(!on_trial(&app));
+        assert!(
+            display(&app).fullscreen,
+            "an applied change was undone by leaving"
+        );
+        assert!(
+            display(&app).shadows,
+            "a change nobody applied reached the window"
+        );
+
+        // And the screen comes back saying what the machine is doing rather
+        // than what it was last asked for.
+        go_to(&mut app, AppState::Display);
+        assert_eq!(wanted(&app), display(&app));
+        assert_eq!(row_says(&mut app, DisplayText::Shadows), "On");
     }
 
     /// A machine that has reported no monitors cannot promise a resolution
@@ -3082,7 +3795,9 @@ mod tests {
         let mut app = test_app(AppState::Display);
         assert_eq!(row_says(&mut app, DisplayText::Caveat), "");
 
-        click(&mut app, MenuButton::CycleResolution);
+        click(&mut app, MenuButton::PickResolution(Resolution::Rows(2160)));
+        click(&mut app, MenuButton::ApplyDisplay);
+        click(&mut app, MenuButton::ApplyDisplay);
         assert_eq!(
             row_says(&mut app, DisplayText::Caveat),
             "",
@@ -3105,6 +3820,7 @@ mod tests {
         click(&mut app, MenuButton::Display);
 
         click(&mut app, MenuButton::ToggleShadows);
+        click(&mut app, MenuButton::ApplyDisplay);
         assert!(!display(&app).shadows);
         assert_eq!(row_says(&mut app, DisplayText::Shadows), "Off");
         assert_eq!(state(&app), AppState::InWorld);

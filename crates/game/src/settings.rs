@@ -24,11 +24,18 @@
 //!
 //! And "the monitor" means one monitor, the one the window is on, for every
 //! question asked of it here and on the display screen — see [`showing_on`].
+//!
+//! None of it happens the moment a switch is thrown. The screen edits
+//! [`Wanted`] and Apply is what makes that [`DisplaySettings`], which is the
+//! only thing [`dress_the_window`] reads — and an applied change is then put
+//! back on its own unless it is stood by. See [`Wanted`] and [`OnTrial`] for
+//! why a display setting of all things is worth that much ceremony.
 
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::window::{
@@ -69,6 +76,66 @@ impl Default for DisplaySettings {
     }
 }
 
+/// What the display screen is set to, which is not yet what the machine is
+/// doing.
+///
+/// The screen edits this; [`dress_the_window`] reads [`DisplaySettings`]. The
+/// gap between the two is the whole point of an Apply button, and it is the
+/// resolution that earns it: below native in fullscreen a rung is an
+/// *exclusive display mode*, and taking one is a real mode switch — the screen
+/// goes black and the monitor resyncs. A control that applied as it was
+/// touched spent four of those getting from native to 720p, three of them
+/// modes nobody had asked for.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Wanted(pub DisplaySettings);
+
+/// How long an applied change has to be stood by before it is put back.
+///
+/// Ten seconds because the first two or three are not the player's: a mode
+/// switch blacks the monitor out while it resyncs, and only then is there
+/// anything to judge. What is left is enough to read a screen and reach for a
+/// button, and little enough that somebody looking at a display they cannot
+/// read is not looking at it for long.
+const TRIAL: Duration = Duration::from_secs(10);
+
+/// A change that has been applied but not yet stood by.
+///
+/// Why Apply is not the last word: the setting most worth having is also the
+/// one that can leave the player unable to read the screen they would have to
+/// use to undo it — a fullscreen mode the display accepts and then draws
+/// badly, or not at all. So the change is made and then put back on its own,
+/// unless somebody who can evidently still see it says to keep it.
+#[derive(Resource, Default)]
+pub struct OnTrial(pub Option<Trial>);
+
+/// A change under way, and the clock it has to be stood by within.
+pub struct Trial {
+    /// What to go back to.
+    was: DisplaySettings,
+    left: Timer,
+}
+
+impl Trial {
+    pub fn new(was: DisplaySettings) -> Self {
+        Self {
+            was,
+            left: Timer::new(TRIAL, TimerMode::Once),
+        }
+    }
+
+    /// Whole seconds still on the clock, for the button to count down in.
+    /// Rounded up, so a trial with any time left at all never reads as none.
+    pub fn seconds_left(&self) -> u64 {
+        self.left.remaining().as_secs_f32().ceil() as u64
+    }
+
+    /// Ticks the clock, and gives back the settings to return to once it has
+    /// run out — `None` for as long as it has not.
+    pub fn ran_out(&mut self, delta: Duration) -> Option<DisplaySettings> {
+        self.left.tick(delta).is_finished().then_some(self.was)
+    }
+}
+
 /// How tall the picture is drawn, in rows of real pixels.
 ///
 /// Height alone, because the width follows from the shape of the screen and
@@ -84,9 +151,9 @@ pub enum Resolution {
     Rows(u32),
 }
 
-/// The rungs, in the order the button cycles them: down from native, since
-/// that is the direction somebody opening this screen is going.
-const LADDER: [Resolution; 5] = [
+/// The rungs, in the order the screen lists them: down from native, since that
+/// is the direction somebody opening it is going.
+pub const LADDER: [Resolution; 5] = [
     Resolution::Native,
     // 4K is a rung rather than a synonym for native, and on a retina panel it
     // is a long way below one: a 6400x3600 display draws twenty-three million
@@ -105,14 +172,6 @@ impl Resolution {
             Self::Native => "Native".to_string(),
             Self::Rows(rows) => format!("{rows}p"),
         }
-    }
-
-    /// The next rung down, wrapping back to native off the bottom. A rung a
-    /// file named and this build has stopped offering cycles to the top rather
-    /// than nowhere.
-    pub fn next(self) -> Self {
-        let at = LADDER.iter().position(|rung| *rung == self);
-        LADDER[at.map_or(0, |at| (at + 1) % LADDER.len())]
     }
 }
 
@@ -139,12 +198,18 @@ impl Plugin for SettingsPlugin {
         // them: `bin/game.rs` reads them and inserts them over this.
         app.init_resource::<DisplaySettings>()
             .init_resource::<AsOpened>()
+            // What the screen is editing towards, and a change it has made
+            // but not yet been stood by. The screen itself drives both — see
+            // [`crate::menu`], which initialises them for its own tests the
+            // way it does the settings.
+            .init_resource::<Wanted>()
+            .init_resource::<OnTrial>()
             .add_systems(Update, dress_the_window);
         // Noted on the way into the screen that changes them and written on
-        // the way out, which is one write per visit rather than one per press
-        // of a cycling button — and none at all for a visit that changed
-        // nothing, which is what [`load`] promises a file this build cannot
-        // read. Both ways to the screen — see [`crate::menu`].
+        // the way out, which is one write per visit rather than one per Apply
+        // — and none at all for a visit that applied nothing, or applied
+        // something and let it be put back, which is what [`load`] promises a
+        // file this build cannot read. Both ways to the screen.
         app.add_systems(OnEnter(AppState::Display), note_settings)
             .add_systems(OnEnter(Helm::Display), note_settings)
             .add_systems(OnExit(AppState::Display), keep_settings)
@@ -607,22 +672,6 @@ mod tests {
     }
 
     #[test]
-    fn the_ladder_comes_back_round_to_native() {
-        let mut rung = Resolution::Native;
-        let mut seen = vec![rung];
-        for _ in 0..LADDER.len() - 1 {
-            rung = rung.next();
-            assert!(!seen.contains(&rung), "{rung:?} came round twice");
-            seen.push(rung);
-        }
-        assert_eq!(
-            rung.next(),
-            Resolution::Native,
-            "the ladder has no way back"
-        );
-    }
-
-    #[test]
     fn a_resolution_the_display_has_no_mode_for_stays_borderless() {
         // The honest answer to "1080p" from a screen that has never offered
         // 1080p: fill it at its own size rather than force a shape it does not
@@ -886,6 +935,28 @@ mod tests {
         assert!(
             !path.exists(),
             "a file was written by a visit that said nothing"
+        );
+
+        // Nor does a visit that applied something and let it be put back —
+        // what the trial does over in the menu, here as the two writes it
+        // makes. The file is promised a write per change that outlasted the
+        // screen, and this is not one.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Display);
+        app.update();
+        *app.world_mut().resource_mut::<DisplaySettings>() = DisplaySettings {
+            fullscreen: true,
+            ..DisplaySettings::default()
+        };
+        *app.world_mut().resource_mut::<DisplaySettings>() = DisplaySettings::default();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Options);
+        app.update();
+        assert!(
+            !path.exists(),
+            "a file was written by a change that was put back"
         );
 
         // Opening the screen, changing every setting on it and leaving does.
