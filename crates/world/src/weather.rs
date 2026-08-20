@@ -44,6 +44,11 @@ const WEATHER_PACE: f32 = 240.0;
 /// The hardest the wind blows, in metres per second — a near gale, reached
 /// only at the walk's farthest excursions. The shaping in [`wind`] keeps the
 /// middle of the range common and both ends occasional.
+///
+/// A ceiling clients calibrate hulls against, having no other statement of how
+/// hard the weather can get. Lowering it does not break anything here, and can
+/// quietly put a heading or a hull out of a client's reach — worth a look over
+/// the other side before it moves.
 const MAX_WIND: f32 = 16.0;
 
 /// The lightest the sky ever blows, in metres per second — a light air, so
