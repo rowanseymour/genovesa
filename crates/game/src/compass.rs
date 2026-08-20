@@ -72,7 +72,7 @@ use protocol::ground::{CHUNK_METRES, NORTH};
 use crate::camera::{MapCamera, PITCH};
 use crate::chart::Chart;
 use crate::player::PlayerPlace;
-use crate::sea::SeaConditions;
+use crate::sea::{SeaConditions, WIND_NAMED};
 use crate::terrain::Ground;
 use crate::AppState;
 
@@ -163,15 +163,6 @@ const BOW_CORNERS: (f32, f32, f32) = (0.0, 0.16, 0.5);
 /// has nowhere further to go, which is the right lie for an instrument this
 /// size — past a fresh breeze the sea itself is saying the rest.
 const FULL_WIND: f32 = 10.0;
-
-/// Below this, in metres per second, there is no wind worth naming and the
-/// arm goes off the card. A dying wind's bearing is noise — the weather's
-/// calms are its walk passing the origin, where the direction swings freely —
-/// so the arm holds the last bearing it had and simply fades, which reads as
-/// the wind dropping rather than as the instrument spinning. Half a metre a
-/// second, the speed the sea stops re-aiming its waves at, so the card and
-/// the water call a calm at the same moment.
-const CALM: f32 = 0.5;
 
 /// Where the arrow's point comes to rest, as a distance from the middle of the
 /// card in pixels.
@@ -933,7 +924,12 @@ fn point_the_bow(
 }
 
 /// Which way the arm lies on the card under a wind, or `None` when the wind
-/// is too slack to have a bearing at all — see [`CALM`].
+/// is too slack to have a bearing at all — see [`WIND_NAMED`], the bar the
+/// water and the sails share. A wind that slack is the drawn wind easing
+/// through the middle of a veer, and its bearing on the way through is
+/// noise, so the arm holds the last bearing it had and simply fades — see
+/// [`point_the_arm`] — which reads as the wind dropping rather than as the
+/// instrument spinning.
 ///
 /// The card's own up is north, so the arm's angle is the wind's bearing:
 /// clockwise from north, the way a bearing is always taken, and the way
@@ -946,7 +942,7 @@ fn point_the_bow(
 /// time it was looked at, and it has to be read at a glance, over a pennant
 /// and a sea that are both unarguably going the other way.
 fn arm_bearing(wind: Vec2) -> Option<Rot2> {
-    if wind.length() < CALM {
+    if wind.length() < WIND_NAMED {
         return None;
     }
     let east = Vec2::new(-NORTH.y, NORTH.x);
@@ -969,7 +965,7 @@ fn arm_reach(speed: f32) -> (f32, f32) {
     // real wind would be drawn too faint to find. The second is the calm,
     // which takes the arm off the card altogether rather than leaving a stub
     // aimed at a bearing the wind has stopped having.
-    let alpha = (0.45 + 0.55 * hard) * (speed / CALM).clamp(0.0, 1.0);
+    let alpha = (0.45 + 0.55 * hard) * (speed / WIND_NAMED).clamp(0.0, 1.0);
     (length, alpha)
 }
 
@@ -1249,7 +1245,7 @@ mod tests {
         // rotation it had and the ink goes to nothing.
         assert!(arm_bearing(Vec2::new(0.2, -0.1)).is_none());
         assert_eq!(arm_reach(0.0).1, 0.0);
-        assert!(arm_reach(CALM / 2.0).1 < arm_reach(CALM).1);
+        assert!(arm_reach(WIND_NAMED / 2.0).1 < arm_reach(WIND_NAMED).1);
     }
 
     #[test]

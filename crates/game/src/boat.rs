@@ -420,25 +420,18 @@ const NO_GO: f32 = std::f32::consts::FRAC_PI_4;
 const FULL_DRIVE: f32 = std::f32::consts::FRAC_PI_2;
 
 /// The band the wind's strength drives the hull across: the fraction of
-/// [`Hull::speed`] made in a flat calm, and the fraction made once the wind
-/// saturates. The floor keeps a calm from stranding anybody — the world is
-/// crossed by boat and the weather holds its spells for minutes — and the
-/// ceiling is a modest reward for sailing a blow rather than a new top gear.
-/// The angle to the wind is the game; the strength is flavour inside this
-/// band.
+/// [`Hull::speed`] made in the lightest air, and the fraction made once the
+/// wind saturates. The floor keeps the light-air spells the weather calls
+/// calms from being a crawl — the world is crossed by boat and the sky holds
+/// its spells for minutes — and the ceiling is a modest reward for sailing a
+/// blow rather than a new top gear. The angle to the wind is the game; the
+/// strength is flavour inside this band.
 const DRIVE_BAND: (f32, f32) = (0.6, 1.1);
 
 /// The wind at which the drive saturates, in metres per second — a strong
 /// breeze, short of the near-gale the weather tops out at. Above it more
 /// wind is more sea — the swell's business — but no more speed.
 const WIND_SATURATES: f32 = 12.0;
-
-/// Below this, in metres per second, the wind names no direction — the same
-/// bar the compass's arm and the sea's wave trains hold themselves to — so
-/// the no-go zone stands aside and the calm's floor drives on any heading.
-/// Without it a dying air would still park a boat pointed the wrong way,
-/// with nothing on screen left to say which way "wrong" was.
-const WIND_NAMED: f32 = 0.5;
 
 /// How much of the hull's speed set sails can draw at an angle off the wind,
 /// 0..=1. `off_wind` is the unsigned angle between the bow and the eye of
@@ -468,14 +461,30 @@ fn heel_for(hull: &Hull, helm: f32, way: f32) -> f32 {
 /// so the speed a heading earns holds still while the boat gathers way towards
 /// it. The pennant flies the apparent wind and will disagree, which is real
 /// sailing rather than a bug to reconcile.
+///
+/// The no-go zone always stands: there is no wind this can be sailed straight
+/// into. Below [`sea::WIND_NAMED`] — where the screen names no direction —
+/// the drive tapers to nothing on the same ramp the compass fades its arm's
+/// ink on, so the engine and the instrument die together. It used to go the
+/// other way: below the bar the band's floor drove on *any* heading, so a
+/// calm could not park anybody — and a boat could sail dead into a
+/// faintly-drawn wind. The stranding worry is answered at the source now, the
+/// weather never blowing below a light air (see [`protocol::ToClient`]'s
+/// `Weather`), which leaves the bar catching only the drawn wind's sweep
+/// through the middle of a veer and the console's ordered calm — both
+/// honestly airs that drive nothing.
 fn sail_drive(bow: Vec2, wind: Vec2) -> f32 {
     let blowing = wind.length();
-    if blowing < WIND_NAMED {
-        return strength(blowing);
+    if blowing == 0.0 {
+        // No air at all drives nothing — said outright because a zero vector
+        // has no angle to take, and the taper below would only turn the NaN
+        // into another NaN.
+        return 0.0;
     }
+    let named = (blowing / sea::WIND_NAMED).clamp(0.0, 1.0);
     // The angle off the eye of the wind — the bow against where the air is
     // coming *from*, `wind` being where it is going.
-    strength(blowing) * polar(bow.angle_to(-wind).abs())
+    strength(blowing) * polar(bow.angle_to(-wind).abs()) * named
 }
 
 /// The pennant. Hotter and lighter than the hull's timber, which is the only
@@ -1437,7 +1446,7 @@ fn sail_mesh() -> Mesh {
 /// trimmed to the same wind the speed is earned from, so what the eye reads
 /// off it agrees with what the hull does.
 fn sail_trim(bow: Vec2, wind: Vec2) -> f32 {
-    if wind.length() < WIND_NAMED {
+    if wind.length() < sea::WIND_NAMED {
         return 0.0;
     }
     let off = bow.angle_to(-wind);
@@ -3002,8 +3011,8 @@ mod tests {
 
     #[test]
     fn the_wind_drives_within_its_band() {
-        // The floor is what a calm leaves, the ceiling what a blow earns,
-        // and between them more wind is never less speed.
+        // The floor is what the lightest air leaves, the ceiling what a blow
+        // earns, and between them more wind is never less speed.
         assert_eq!(strength(0.0), DRIVE_BAND.0);
         assert_eq!(strength(WIND_SATURATES), DRIVE_BAND.1);
         assert_eq!(strength(WIND_SATURATES * 2.0), DRIVE_BAND.1);
@@ -3016,15 +3025,33 @@ mod tests {
     }
 
     #[test]
-    fn a_calm_refuses_no_heading() {
-        // A wind too slack to have a direction has no eye to be caught in:
-        // the floor of the band drives the boat wherever it points, dead
-        // "upwind" of the last breath of air included.
+    fn no_wind_can_be_sailed_into() {
+        // The rule the whole game hangs off: dead into the eye of any named
+        // wind, set sails carry nothing — there is no wind on screen a boat
+        // can sail straight at.
+        for blowing in [sea::WIND_NAMED, 2.0, 7.0, WIND_SATURATES] {
+            let wind = Vec2::new(0.0, -blowing);
+            assert_eq!(sail_drive(-wind.normalize(), wind), 0.0);
+        }
+    }
+
+    #[test]
+    fn air_too_faint_to_name_drives_nothing_much() {
+        // Below the named bar the screen shows no direction, so the sails may
+        // not act on one either: no drive at all in a dead calm — the console
+        // can still order one — and below the bar only the fading remnant the
+        // compass's ink ramp leaves, on the best point of sail or any other.
+        // The weather itself never blows this softly; see [`sail_drive`].
         for bow in [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::new(0.7, -0.7)] {
-            assert_eq!(sail_drive(bow, Vec2::ZERO), DRIVE_BAND.0);
+            assert_eq!(sail_drive(bow, Vec2::ZERO), 0.0);
         }
         let breath = Vec2::new(0.0, 0.3);
-        assert_eq!(sail_drive(-breath.normalize(), breath), strength(0.3));
+        let running = breath.normalize();
+        assert_eq!(
+            sail_drive(running, breath),
+            strength(0.3) * (0.3 / sea::WIND_NAMED)
+        );
+        assert!(sail_drive(running, breath) < sail_drive(running, Vec2::new(0.0, 0.6)));
     }
 
     #[test]

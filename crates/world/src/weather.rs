@@ -13,9 +13,10 @@
 //! The wind is a point wandering a 2D noise field, read off as a velocity: its
 //! bearing is the point's bearing from the origin, its strength the point's
 //! distance out. So the wind veers smoothly, and every so often the walk passes
-//! near the origin where the strength dies and the bearing swings freely — a
-//! calm, out of which the wind returns from somewhere new. Nothing here decides
-//! "now a storm"; storms are the far excursions of the same walk.
+//! near the origin where the strength falls away and the bearing swings freely
+//! — a calm, out of which the wind returns from somewhere new. But a calm is a
+//! spell of light air, never a dead sky — see [`MIN_WIND`]. Nothing here
+//! decides "now a storm"; storms are the far excursions of the same walk.
 //!
 //! No trigonometry anywhere, and that is a constraint rather than a style:
 //! `sin` and `cos` are not correctly-rounded and drift between platforms,
@@ -45,6 +46,19 @@ const WEATHER_PACE: f32 = 240.0;
 /// middle of the range common and both ends occasional.
 const MAX_WIND: f32 = 16.0;
 
+/// The lightest the sky ever blows, in metres per second — a light air, so
+/// there is always *some* wind and it always names a bearing. The wind is the
+/// only engine a sailing hull has, and a client that honours the no-go zone
+/// has nothing at all to sail on under a dead sky — which the walk used to
+/// deliver freely: strengths ran straight down to zero, and judged across
+/// seeds the sky spent about a minute in seven below half a metre a second,
+/// in spells minutes long. The client's answer then was a floor that drove
+/// the boat on any heading, eye of the wind included, which read as a boat
+/// ignoring the weather; killing the dead sky here is what let that hatch
+/// close. The strength is *rescaled* into `MIN..MAX` rather than clamped, so
+/// a lull still breathes instead of sitting pinned at the floor.
+const MIN_WIND: f32 = 1.5;
+
 /// The wind over the whole world at a moment, as a velocity in metres per
 /// second: its length is the wind's strength, its bearing the way the air is
 /// moving, and a calm is simply a short vector. `elapsed` is seconds since
@@ -60,16 +74,19 @@ pub fn wind(seed: u32, elapsed: f32) -> Vec2 {
 
     // Three octaves of fbm keep the walk mostly within half a cell of the
     // origin, so 0.55 out is a far excursion: strength rises with the square
-    // of the distance — slow to leave a calm, quick through the top of the
+    // of the distance — slow to leave a lull, quick through the top of the
     // range — and is capped where the walk outruns its usual bounds, so the
     // rare wilder wander is a hard blow rather than an impossible one.
     let out = walk.length();
-    let strength = MAX_WIND * (out / 0.55).min(1.0) * (out / 0.55).min(1.0);
+    let reach = (out / 0.55).min(1.0);
+    let strength = MIN_WIND + (MAX_WIND - MIN_WIND) * reach * reach;
 
     if out < 1e-4 {
-        // The walk is passing through the origin: a flat calm, with no
-        // bearing worth inventing — and no division by nearly nothing.
-        return Vec2::ZERO;
+        // The walk is passing through the exact origin, where it has no
+        // bearing to read — and nearly nothing to divide by. A moment of
+        // measure zero: hand the light air an arbitrary fixed bearing and
+        // let the client's easing swallow it.
+        return Vec2::new(0.0, -MIN_WIND);
     }
     walk * (strength / out)
 }
@@ -93,7 +110,7 @@ mod tests {
         });
         let got = digest(floats(samples));
         println!("weather digests to {got:#018X}");
-        assert_eq!(got, 0x8E15_4D11_6D79_9FCD);
+        assert_eq!(got, 0x5805_0321_DF7B_4B27);
     }
 
     #[test]
@@ -115,20 +132,42 @@ mod tests {
 
     #[test]
     fn the_wind_moves_and_rests() {
-        // A sky that never changes, or never calms, is the failure this
+        // A sky that never changes, or never lulls, is the failure this
         // module exists to avoid. Over a few hours of one seed the wind must
-        // visit real weather — spells below a light air and spells above a
-        // fresh breeze — and must not be the same twice in a row when
-        // sampled minutes apart.
+        // visit real weather — spells down near the light-air floor and
+        // spells above a fresh breeze — and must not be the same twice in a
+        // row when sampled minutes apart.
         let over_a_day: Vec<Vec2> = (0..500).map(|i| wind(7, i as f32 * 60.0)).collect();
         let calmest = over_a_day
             .iter()
             .map(|w| w.length())
             .fold(f32::MAX, f32::min);
         let hardest = over_a_day.iter().map(|w| w.length()).fold(0.0, f32::max);
-        assert!(calmest < 2.0, "seed 7's wind never dropped below {calmest}");
+        assert!(
+            calmest < MIN_WIND + 0.5,
+            "seed 7's wind never dropped below {calmest}"
+        );
         assert!(hardest > 8.0, "seed 7's wind never rose above {hardest}");
         assert_ne!(over_a_day[10], over_a_day[11], "the wind froze");
+    }
+
+    #[test]
+    fn the_sky_never_goes_slack() {
+        // The guarantee the client sails on: the weather always names a wind
+        // of at least a light air, at any seed or hour, so a boat that only
+        // moves under canvas is never parked by the sky. The other half of
+        // [`the_wind_stays_inside_the_gale`]'s promise.
+        for seed in [0, 7, 20040112, u32::MAX] {
+            for i in 0..2_000 {
+                let wind = wind(seed, i as f32 * 13.7);
+                assert!(
+                    wind.length() >= MIN_WIND - 1e-3,
+                    "seed {seed} slackens to {} m/s at t={}",
+                    wind.length(),
+                    i as f32 * 13.7
+                );
+            }
+        }
     }
 
     #[test]

@@ -112,6 +112,18 @@ fn amplitude_scale(wind: f32) -> f32 {
 /// quantised updates arriving as weather rather than as steps.
 const SEA_RESPONSE: f32 = 12.0;
 
+/// Below this, in metres per second, a wind is too slack to name a
+/// direction, and everything that reads the drawn wind says so together:
+/// the wave trains hold the heading they had (see [`settle_conditions`]),
+/// the compass takes its arm off the card, and sails carry nothing — one
+/// bar, so the card, the water and the hull never disagree about whether
+/// there is a wind. The weather itself never blows this softly — the
+/// forecast holds a light air even in its calms, see
+/// [`protocol::ToClient::Weather`] — so what the bar actually catches is
+/// the drawn wind sweeping through the middle as the ease crosses a hard
+/// veer, and a console-ordered flat calm.
+pub(crate) const WIND_NAMED: f32 = 0.5;
+
 /// How far the wind may veer, in radians, before a wave slot is re-aimed —
 /// and the fade that re-aiming hides behind, as a time constant in seconds.
 ///
@@ -743,7 +755,7 @@ pub(crate) fn settle_conditions(
         // already at one, and there is nothing on screen worth easing from.
         conditions.assumed = false;
         conditions.wind = told;
-        if told.length() > 0.5 {
+        if told.length() > WIND_NAMED {
             let bearing = told.normalize();
             for (i, slot) in conditions.slots.iter_mut().enumerate() {
                 slot.heading = Vec2::from_angle(WAVES[i].0).rotate(bearing);
@@ -755,9 +767,10 @@ pub(crate) fn settle_conditions(
     let fade = crate::eased(1.0 / REAIM.1, time.delta_secs());
     conditions.wind = conditions.wind.lerp(told, follow);
 
-    // A dying wind names no bearing: below half a metre a second the slots
-    // hold the heading they had, and the calm is carried by the amplitudes.
-    let steady = conditions.wind.length() > 0.5;
+    // A dying wind names no bearing — see [`WIND_NAMED`]: below the bar the
+    // slots hold the heading they had, and the lull is carried by the
+    // amplitudes.
+    let steady = conditions.wind.length() > WIND_NAMED;
     let bearing = if steady {
         conditions.wind.normalize()
     } else {
