@@ -1266,21 +1266,29 @@ fn bearing_on_the_sheet(heading: Vec2) -> f32 {
     f32::atan2(-along.x, along.y)
 }
 
+/// The corners of the reader's mark — the notched arrowhead the player is
+/// drawn as, here and at the middle of the compass card: the point, the two
+/// tail corners and the notch between them, wound anticlockwise from the
+/// point, in the mark's own units about the origin it turns on. One glyph
+/// meaning *you* on every instrument, so neither sheet has to be learned
+/// twice.
+pub(crate) const READERS_MARK: [Vec2; 4] = [
+    Vec2::new(0.0, 7.0),
+    Vec2::new(-4.5, -5.0),
+    Vec2::new(0.0, -2.0),
+    Vec2::new(4.5, -5.0),
+];
+
 /// The reader's own mark: a plain arrowhead, in pixels of paper.
 ///
 /// A drawn ship would be a picture of a ship eight pixels across. What the mark
 /// has to say is *here*, and *this way*, and an arrowhead says both without
 /// pretending to be anything else.
 fn readers_mark() -> Mesh {
-    let points = [
-        Vec2::new(0.0, 7.0),
-        Vec2::new(-4.5, -5.0),
-        Vec2::new(0.0, -2.0),
-        Vec2::new(4.5, -5.0),
-    ];
+    let [point, left, notch, right] = READERS_MARK;
     let mut strokes = Strokes::default();
-    strokes.triangle(points[0], points[1], points[2]);
-    strokes.triangle(points[0], points[2], points[3]);
+    strokes.triangle(point, left, notch);
+    strokes.triangle(point, notch, right);
     strokes.mesh().expect("the mark is never empty")
 }
 
