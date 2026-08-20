@@ -616,6 +616,8 @@ impl Plugin for ChartPlugin {
         // whichever is built first winning — see `MapCameraPlugin`.
         app.init_resource::<ChartView>()
             .init_resource::<KeyBindings>()
+            // Normally `UiPlugin`'s, initialised the same way for the tests.
+            .init_resource::<UiScale>()
             .add_systems(OnEnter(AppState::InWorld), start_a_chart)
             .add_systems(OnExit(AppState::InWorld), stow_the_chart)
             .add_systems(OnExit(Helm::Chart), roll_up)
@@ -2048,6 +2050,17 @@ const FURNITURE_MARGIN: f32 = NEATLINE_INSET + NEATLINE_BAND + 14.0;
 /// in that pass, over the engraving; the world's own instruments are left alone
 /// and simply painted over. The rose in the other corner is pinned the same way
 /// but drawn otherwise — see [`corner_rose`].
+///
+/// Spawned bare and sized in [`rule_the_scale`], every part of it. The
+/// furniture stands on an engraving drawn by a camera that takes no notice of
+/// [`UiScale`], so it is sized in the sheet's own pixels and the UI's scale is
+/// divided back out of every measurement — most of all the bar's width, which
+/// is read against the paper under it and would otherwise be off by exactly
+/// the scale. Divided in one place rather than here as well, because a window
+/// rescaled with the chart already open moves the scale under furniture that
+/// has been laid: a bar of the right length in a frame of the wrong size is
+/// worse than either, and nothing decides which of the two a run is looking at
+/// if the answer depends on which system ran first.
 fn furniture(commands: &mut Commands, sheet: Entity) {
     commands
         .spawn((
@@ -2063,30 +2076,21 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
             DespawnOnExit(Helm::Chart),
         ))
         .with_children(|sheet| {
-            // The scale bar. Its length is set as the sheet is drawn — see
-            // [`rule_the_scale`] — because it is the one piece of furniture that
-            // has to change with the zoom, that being the whole of what it is
-            // for.
+            // The scale bar. Where it stands, how long and how deep it is
+            // drawn and what its label is lettered at are all set the first
+            // frame it is up — see [`rule_the_scale`] — its length because it
+            // is the one piece of furniture that has to change with the zoom,
+            // that being the whole of what it is for, and the rest because
+            // they change with the UI's scale.
             sheet.spawn((
+                ScaleBar,
                 Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Px(FURNITURE_MARGIN),
-                    bottom: Val::Px(FURNITURE_MARGIN),
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(4.0),
                     ..default()
                 },
                 children![
-                    (
-                        ScaleRule,
-                        Node {
-                            width: Val::Px(SCALE_BAR_LEAST),
-                            height: Val::Px(5.0),
-                            border: UiRect::all(Val::Px(1.0)),
-                            ..default()
-                        },
-                        BorderColor::all(INK),
-                    ),
+                    (ScaleRule, Node::default(), BorderColor::all(INK)),
                     (
                         ScaleLabel,
                         Text::new(""),
@@ -2096,7 +2100,6 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
                         // lettered in.
                         TextFont {
                             font: FontSource::Serif,
-                            font_size: FontSize::Px(13.0),
                             ..default()
                         },
                         TextColor(INK),
@@ -2346,32 +2349,54 @@ fn rule_the_edge(
     }
 }
 
-/// The bar of the scale, and its label.
+/// The corner the scale stands in, the bar of it, and its label.
+#[derive(Component)]
+struct ScaleBar;
 #[derive(Component)]
 struct ScaleRule;
 #[derive(Component)]
 struct ScaleLabel;
 
-/// Sets the scale bar to a round distance, and says which.
+/// Sets the scale bar to a round distance, says which, and lays out the corner
+/// it stands in.
 ///
 /// The bar is drawn at whatever length that distance comes to rather than at a
 /// fixed length labelled with an awkward number, because a scale bar is a thing
 /// to lay a finger against: "two kilometres is this far" reads, and "this far
 /// is 1.83 km" does not.
+///
+/// Every size here is in the sheet's own pixels with the UI's scale divided
+/// back out of it — see [`furniture`] — and all of them are written together
+/// on purpose. The bar has to follow the scale, being a measurement; so the
+/// frame around it has to follow the scale too, or a window resized with the
+/// chart open leaves a bar of the right length standing in a margin, above a
+/// label and inside a border that are all of the size the UI was when the
+/// sheet was unrolled.
 fn rule_the_scale(
     view: Res<ChartView>,
-    mut rules: Query<&mut Node, With<ScaleRule>>,
-    mut labels: Query<&mut Text, With<ScaleLabel>>,
+    ui: Res<UiScale>,
+    mut bars: Query<&mut Node, (With<ScaleBar>, Without<ScaleRule>)>,
+    mut rules: Query<&mut Node, (With<ScaleRule>, Without<ScaleBar>)>,
+    mut labels: Query<(&mut Text, &mut TextFont), With<ScaleLabel>>,
 ) {
-    if !view.is_changed() {
+    if !view.is_changed() && !ui.is_changed() {
         return;
     }
+    let scale = ui.0;
     let metres = round_distance(SCALE_BAR_LEAST * view.metres_per_pixel);
-    for mut node in &mut rules {
-        node.width = Val::Px(metres / view.metres_per_pixel);
+    for mut node in &mut bars {
+        node.left = Val::Px(FURNITURE_MARGIN / scale);
+        node.bottom = Val::Px(FURNITURE_MARGIN / scale);
+        node.row_gap = Val::Px(4.0 / scale);
     }
-    for mut text in &mut labels {
+    for mut node in &mut rules {
+        node.width = Val::Px(metres / view.metres_per_pixel / scale);
+        node.height = Val::Px(5.0 / scale);
+        node.border = UiRect::all(Val::Px(1.0 / scale));
+    }
+    for (mut text, mut font) in &mut labels {
         text.0 = distance_label(metres);
+        font.font_size = FontSize::Px(13.0 / scale);
     }
 }
 
@@ -2914,6 +2939,65 @@ mod tests {
         });
         press(&mut app, KeyCode::KeyM);
         assert_eq!(helm(&app), Helm::Chart, "the chart key closed the sheet");
+    }
+
+    /// The bar as it stands on the sheet: how wide it is drawn, in the pixels
+    /// a UI node is written in, and what its label says.
+    fn scale_bar(app: &mut App) -> (f32, String) {
+        let width = app
+            .world_mut()
+            .query_filtered::<&Node, With<ScaleRule>>()
+            .single(app.world())
+            .expect("an open chart has a scale bar")
+            .width;
+        let Val::Px(width) = width else {
+            panic!("the bar is not drawn in pixels");
+        };
+        let said = app
+            .world_mut()
+            .query_filtered::<&Text, With<ScaleLabel>>()
+            .single(app.world())
+            .expect("the bar is labelled")
+            .0
+            .clone();
+        (width, said)
+    }
+
+    /// What a label says, in metres.
+    fn label_metres(said: &str) -> f32 {
+        let (number, unit) = said.split_once(' ').expect("a distance and its unit");
+        let number: f32 = number.parse().expect("a number");
+        match unit {
+            "km" => number * 1000.0,
+            "m" => number,
+            _ => panic!("{said} is not a distance"),
+        }
+    }
+
+    #[test]
+    fn the_scale_bar_is_as_long_as_it_says_at_any_ui_scale() {
+        // The one real measurement on this sheet, and the one thing the UI's
+        // scale can put wrong without looking wrong: the bar is a UI node and
+        // the paper under it is not, so a bar drawn at its face value would
+        // say "2 km" and be one kilometre long on a menu drawn at half size.
+        // A scale bar that lies is worse than no scale bar.
+        for scale in [0.5, 1.0, 2.0] {
+            let mut app = keyed_app();
+            press(&mut app, KeyCode::KeyM);
+            app.world_mut().resource_mut::<UiScale>().0 = scale;
+            let metres_per_pixel = 4.0;
+            app.world_mut().resource_mut::<ChartView>().metres_per_pixel = metres_per_pixel;
+            run_frames(&mut app, 2);
+
+            let (width, said) = scale_bar(&mut app);
+            // A UI pixel is `scale` of the sheet's own, and a sheet pixel is
+            // `metres_per_pixel` metres of water.
+            let reaches = width * scale * metres_per_pixel;
+            assert!(
+                (reaches - label_metres(&said)).abs() < 0.5,
+                "a bar labelled {said} reaches {reaches} m at a UI scale of {scale}"
+            );
+        }
     }
 
     #[test]

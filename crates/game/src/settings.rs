@@ -204,7 +204,12 @@ impl Plugin for SettingsPlugin {
             // way it does the settings.
             .init_resource::<Wanted>()
             .init_resource::<OnTrial>()
-            .add_systems(Update, dress_the_window);
+            // Normally `UiPlugin`'s, initialised here the way the menu does
+            // its shared resources, so the tests have one too.
+            .init_resource::<UiScale>()
+            // Chained so the scale reads the size the window was just asked
+            // for rather than last frame's.
+            .add_systems(Update, (dress_the_window, scale_the_ui).chain());
         // Noted on the way into the screen that changes them and written on
         // the way out, which is one write per visit rather than one per Apply
         // — and none at all for a visit that applied nothing, or applied
@@ -278,6 +283,43 @@ fn dress_the_window(
         window
             .resolution
             .set_physical_resolution(size.x.max(1), size.y.max(1));
+    }
+}
+
+/// How small the UI will let itself be drawn, as a fraction of its laid-out
+/// size. Below half the lettering stops being lettering, so a window shorter
+/// than that gets a UI too big for it instead — which the controls screen, the
+/// one screen that can outgrow a window, answers by scrolling.
+const SMALLEST_UI: f32 = 0.5;
+
+/// Keeps the UI in proportion to the window.
+///
+/// Every menu is laid out in fixed `Val::Px` sizes drawn up to fit
+/// [`crate::WINDOW`] read as *logical* pixels. The resolution setting deals in
+/// physical ones — see the module doc — so on a high-density display a 720p
+/// window is only 360 logical rows, half the room the layouts were drawn for,
+/// and the controls screen runs off both ends of it. Scaling the UI by how
+/// much window there really is makes every screen the same fraction of it
+/// instead: the menu at 720p is the menu at native with fewer pixels, which is
+/// all the setting ever said it changed.
+///
+/// Fitted to whichever way the window is tighter, so a window dragged tall and
+/// narrow shrinks the menus rather than cropping their sides. The scale is the
+/// whole UI's — the compass and the console wear it too — and the two sheets
+/// drawn *under* UI keep themselves in step: the backdrop enlarges its
+/// engraving to match (see [`crate::backdrop`]), and the chart pins its
+/// furniture to its own pixels instead (see [`crate::chart`]).
+fn scale_the_ui(windows: Query<&Window, With<PrimaryWindow>>, mut scale: ResMut<UiScale>) {
+    // A capture run has no window, and draws no UI into its pictures.
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let room = window.resolution.size() / crate::WINDOW.as_vec2();
+    let fitted = room.min_element().max(SMALLEST_UI);
+    // Compared before written: a scale rewritten every frame reads as changed,
+    // and the layout system would lay the whole UI out again for it.
+    if scale.0 != fitted {
+        scale.0 = fitted;
     }
 }
 
@@ -888,6 +930,47 @@ mod tests {
             UVec2::new(1000, 800),
             "the drag was undone"
         );
+    }
+
+    /// Sets a window's size the way the platform reports it: so many physical
+    /// pixels, at so many of them per logical one. What the scale answers to.
+    fn scaled(app: &mut App, window: Entity, physical: UVec2, factor: f32) -> f32 {
+        let mut resolution = WindowResolution::new(physical.x, physical.y);
+        resolution.set_scale_factor_override(Some(factor));
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("a window")
+            .resolution = resolution;
+        app.update();
+        app.world().resource::<UiScale>().0
+    }
+
+    /// The menus were laid out for [`crate::WINDOW`] of *logical* pixels, and
+    /// the resolution setting deals in physical ones — so on a dense display
+    /// the same setting leaves the layouts half the room, and the scale is
+    /// what squares the two.
+    #[test]
+    fn the_ui_is_scaled_to_the_room_the_window_gives_it() {
+        let mut app = App::new();
+        app.init_resource::<UiScale>()
+            .add_systems(Update, scale_the_ui);
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+
+        // The laid-out size itself, and everything in proportion to it.
+        assert_eq!(scaled(&mut app, window, UVec2::new(1280, 720), 1.0), 1.0);
+        assert_eq!(scaled(&mut app, window, UVec2::new(2560, 1440), 1.0), 2.0);
+        // The window the scale exists for: 720 physical rows on a two-to-one
+        // display is 360 logical, and the UI halves with them.
+        assert_eq!(scaled(&mut app, window, UVec2::new(1280, 720), 2.0), 0.5);
+        // A window dragged tall and narrow is fitted to its narrowness rather
+        // than cropped at its sides.
+        assert_eq!(scaled(&mut app, window, UVec2::new(640, 720), 1.0), 0.5);
+        // And below the floor the UI stops shrinking — see [`SMALLEST_UI`].
+        assert_eq!(scaled(&mut app, window, UVec2::new(1280, 180), 1.0), 0.5);
     }
 
     /// The whole point of keeping a file: what was set last time is what the
