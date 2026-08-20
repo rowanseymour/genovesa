@@ -634,6 +634,16 @@ impl SeaConditions {
         self.wind
     }
 
+    /// How big a sea is running, as a factor on the reference breeze's — the
+    /// very number every drawn amplitude is scaled by, so anything reading
+    /// this is reading the water actually on screen rather than a second
+    /// opinion about the weather. A shade over zero in a flat calm and a good
+    /// deal over one in a blow; see [`amplitude_scale`]. What the sound of
+    /// the sea is worked out from.
+    pub fn liveliness(&self) -> f32 {
+        amplitude_scale(self.wind.length())
+    }
+
     /// The shore wave's unbroken height under this wind. The breaking cap is
     /// depth's business, not the weather's — a blow widens the surf simply
     /// by giving the cap more to bite off.
