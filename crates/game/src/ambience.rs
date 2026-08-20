@@ -47,17 +47,26 @@ const WASH: &str = "audio/bow-wash.ogg";
 /// boat in it was going, near enough — which is what makes the boats sound
 /// different sizes without either of them being told to. The ship at her best
 /// makes about this and is heard at full; the rowboat pulled flat out makes
-/// three metres a second and is heard at rather less than half. Normalising
-/// each hull against its *own* top speed was tried first and is what made
-/// them sound identical: a dinghy going as fast as a dinghy can is not a ship.
+/// three metres a second and is heard at a little over half of that in a flat
+/// calm, nearer three-quarters in a blow, the weather lifting everything
+/// under full cry while the ship is at the ceiling whatever the day.
+///
+/// So the gap between the two boats is a modest one, and narrower the harder
+/// it blows. That is the square root's doing, and it is the price of the
+/// property that matters more: a boat barely gathering way has to be audible,
+/// and a curve steep enough at the bottom for that cannot also be steep at
+/// three metres a second. A modest gap is still a gap, though, and it is the
+/// whole of what says which boat this is — normalising each hull against its
+/// *own* top speed was tried first and is what made them sound identical: a
+/// dinghy going as fast as a dinghy can is not a ship.
 const FULL_SPEED: f32 = 10.0;
 
 /// How far the camera may sit from the hull before the *bow wash* begins to
-/// fall away, in metres. Near enough the distance the view opens at, so a
-/// camera nobody has touched hears the whole of it and only pulling back costs
-/// anything — and holding it flat inside this rather than letting the fall
-/// continue means the closest the camera can be shoved is not also the loudest
-/// a boat ever gets.
+/// fall away, in metres. Near enough the distance the view opens at — a couple
+/// of metres inside it, so a camera nobody has touched hears all but a breath
+/// of the wash and only pulling back deliberately costs anything — and holding
+/// it flat inside this rather than letting the fall continue means the closest
+/// the camera can be shoved is not also the loudest a boat ever gets.
 ///
 /// Only the wash. The sea itself is not somewhere the camera can be far from,
 /// so nothing about the range touches the floor the weather sets: walk the
@@ -112,7 +121,18 @@ impl Plugin for AmbiencePlugin {
 /// still being sailed, and a boat does not stop moving water because its
 /// skipper is reading.
 fn heard(state: &AppState, helm: Option<&Helm>) -> bool {
-    *state == AppState::InWorld && matches!(helm, Some(Helm::Sailing | Helm::Console | Helm::Chart))
+    if *state != AppState::InWorld {
+        return false;
+    }
+    // Every helm named, and no arm swallowing the rest: this whole module
+    // works by reading the world afresh so that nothing can be missed, and a
+    // default arm is exactly how the next state added would arrive silent
+    // without anybody deciding that it should. Made a compile error instead.
+    match helm {
+        Some(Helm::Sailing | Helm::Console | Helm::Chart) => true,
+        Some(Helm::Paused | Helm::Options | Helm::Display | Helm::Controls) => false,
+        None => false,
+    }
 }
 
 /// How loud the water should be for a hull making `way` metres a second under
@@ -136,13 +156,36 @@ fn heard(state: &AppState, helm: Option<&Helm>) -> bool {
 /// about as one going ahead.
 ///
 /// Distance is the boat's alone, and falls off as its inverse past
-/// [`EARSHOT`], twice as far being half as loud. The sea's floor is left out
-/// of it — see that constant.
+/// [`EARSHOT`], twice as far leaving half the boat's share of it. The sea's
+/// floor is left out of it — see that constant.
 fn loudness(way: f32, liveliness: f32, range: f32) -> f32 {
     let lying = (LYING * liveliness).min(1.0);
     let speed = (way.abs() / FULL_SPEED).min(1.0).sqrt();
     let near = EARSHOT / range.max(EARSHOT);
     lying + (1.0 - lying) * speed * near
+}
+
+/// The two numbers [`loudness`] wants off the frame: the way this player's
+/// hull is making, and how far the camera is sitting from it.
+///
+/// Split out of [`sound_the_wash`] because it is the only part of that system
+/// with a judgement in it, and the only part reachable from a test — getting
+/// at the system itself means an app with an audio plugin in it, which means
+/// a real device opened in a test process for the sake of a fallback.
+///
+/// The two absences are read apart rather than together, which is not
+/// fussiness: they mean different things. No hull is the ordinary answer
+/// ashore — the `Boat` comes off with the crew, and somebody walking a beach
+/// is still standing next to a sea — and it settles the way at nothing. No
+/// camera is not an answer about the boat at all, only a frame in which the
+/// range is unknown, and a hull under way through one should not be struck
+/// dumb for it. Folded into one fallback they were, and it did exactly that.
+fn way_and_range(hull: Option<(f32, Vec3)>, eye: Option<Vec3>) -> (f32, f32) {
+    let way = hull.map_or(0.0, |(way, _)| way);
+    let range = hull
+        .zip(eye)
+        .map_or(EARSHOT, |((_, at), eye)| at.distance(eye));
+    (way, range)
 }
 
 /// Spawns the wash already paused and silent, and leaves the starting of it to
@@ -188,20 +231,14 @@ fn sound_the_wash(
     // One boat, because one hull is this player's — the same reason the wake
     // keeps one track. Told hulls carry neither way nor canvas across the
     // wire, so a passing stranger is silent until that changes.
-    //
-    // And no boat at all is an ordinary answer rather than a missing one:
-    // ashore the `Boat` comes off the hull with the crew, and somebody
-    // walking a beach is still standing next to a sea. A hull nobody is
-    // steering makes no way, which is all this needs of it.
-    let making = boats
+    let hull = boats
         .iter()
         .next()
-        .zip(cameras.iter().next())
-        .map_or((0.0, EARSHOT), |((hull, boat), eye)| {
-            (boat.way(), hull.translation.distance(eye.translation))
-        });
+        .map(|(at, boat)| (boat.way(), at.translation));
+    let eye = cameras.iter().next().map(|eye| eye.translation);
+    let (way, range) = way_and_range(hull, eye);
     let wanted = if heard(state.get(), helm.as_ref().map(|helm| helm.get())) {
-        loudness(making.0, sea.liveliness(), making.1)
+        loudness(way, sea.liveliness(), range)
     } else {
         0.0
     };
@@ -297,9 +334,18 @@ mod tests {
 
     #[test]
     fn a_dinghy_flat_out_is_no_ship() {
-        let dinghy = loudness(ROWED, CALM, EARSHOT);
-        let ship = loudness(FULL_SPEED, CALM, EARSHOT);
-        assert!(dinghy < ship * 0.6, "{dinghy} is too close to {ship}");
+        // Under every sea, not the one flattering sea: the gap is at its
+        // narrowest in a blow, the weather lifting the dinghy while the ship
+        // is already at the ceiling, and it is the narrowest case that has to
+        // hold for the boats to sound like different sizes at all.
+        for sea in [CALM, BREEZE, BLOW] {
+            let dinghy = loudness(ROWED, sea, EARSHOT);
+            let ship = loudness(FULL_SPEED, sea, EARSHOT);
+            assert!(
+                dinghy < ship * 0.75,
+                "{dinghy} is too close to {ship} under a sea of {sea}"
+            );
+        }
     }
 
     #[test]
@@ -324,12 +370,36 @@ mod tests {
     }
 
     #[test]
-    fn a_beach_a_long_way_from_a_boat_still_sounds_like_a_beach() {
-        // Ashore the hull has no `Boat` on it and the camera has followed the
-        // player off it — which is the case the system hands on as no way and
-        // a distance that no longer means anything.
-        let ashore = loudness(0.0, BREEZE, EARSHOT * 20.0);
-        assert_eq!(ashore, loudness(0.0, BREEZE, EARSHOT));
+    fn a_boat_under_way_is_heard_from_where_the_camera_is() {
+        let (way, range) = way_and_range(Some((4.0, Vec3::ZERO)), Some(Vec3::X * 100.0));
+        assert_eq!(way, 4.0);
+        assert_eq!(range, 100.0);
+    }
+
+    #[test]
+    fn ashore_there_is_no_boat_and_no_penalty_for_it() {
+        // The player has stepped off, so the `Boat` has come off the hull with
+        // them. Nothing under way, and a range that stands at EARSHOT rather
+        // than at whatever the camera happens to be from a hull that is
+        // no longer the point — the sea is not something to be far from.
+        let (way, range) = way_and_range(None, Some(Vec3::X * 1000.0));
+        assert_eq!(way, 0.0);
+        assert_eq!(range, EARSHOT);
+        assert_eq!(loudness(way, BREEZE, range), loudness(0.0, BREEZE, EARSHOT));
+    }
+
+    #[test]
+    fn a_frame_without_a_camera_still_has_a_boat_in_it() {
+        // An unknown range is not a stopped boat: read together, the two
+        // absences made a hull under sail go silent for want of an eye.
+        let (way, range) = way_and_range(Some((4.0, Vec3::ZERO)), None);
+        assert_eq!(way, 4.0);
+        assert_eq!(range, EARSHOT);
+    }
+
+    #[test]
+    fn a_frame_with_neither_is_the_quiet_one() {
+        assert_eq!(way_and_range(None, None), (0.0, EARSHOT));
     }
 
     #[test]

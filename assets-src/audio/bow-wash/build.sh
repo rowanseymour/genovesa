@@ -39,9 +39,11 @@ fi
 # Where the loop is cut from, in seconds: the water is at a steady state from
 # START, and stays that way well past the end of the window.
 START=25
-# How long the loop runs for. Chosen against how long a boat is sailed rather
-# than to fill the window: long enough that a passage never lands on a stretch
-# of water the ear has heard before, and no longer.
+# How long the loop runs for. Chosen against the ear rather than to fill the
+# window: it plays for as long as a boat is under way, so a passage of any
+# length comes round on it over and over, and what has to hold is not that
+# nothing repeats but that the repeat cannot be found. Long enough not to be
+# recognisable, and no longer.
 WINDOW=23
 # How much of the recording either end of the join is spent fading. Long enough
 # to hide the join in water that is never twice the same, short enough that the
