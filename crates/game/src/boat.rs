@@ -60,9 +60,8 @@ const STROKE: usize = 1;
 
 /// Water covered by one turn of the stroke cycle in still air, in metres — a
 /// little more than the hull's own length, which is what a steady pull moves a
-/// dinghy. In a wind it is more or less: the rower keeps their cadence and the
-/// water each pull makes good goes with the drive, which is [`row`]'s job and
-/// the whole of how a headwind reads as work rather than as dawdling.
+/// dinghy. In a wind it is more or less, the ground a pull makes good going
+/// with the drive while the rower holds their [`CADENCE`].
 ///
 /// The figure's stride constant, worn by a boat, and a number here for the
 /// same reason: it is not *in* the file. A clip knows how long it lasts in
@@ -70,6 +69,16 @@ const STROKE: usize = 1;
 /// different stroke and this wants matching, or the blades will slip through
 /// the water.
 const PULL: f32 = 3.5;
+
+/// How fast a rower works, in turns of the stroke a second: [`ROWBOAT`]'s
+/// still-air speed read as a rate rather than as a distance.
+///
+/// A rate is the whole of the wind's bargain with the oars. The air moves the
+/// water a pull makes good and leaves the pace of the arms alone, so a rower
+/// fighting a headwind keeps their stroke and gets less for each one. Turning
+/// the stroke by the water covered instead put the weather straight into the
+/// rower's arms, and a gale read as somebody rowing lazily.
+const CADENCE: f32 = ROWBOAT.speed / PULL;
 
 /// How fast the oars come out and go in again, in e-foldings per second —
 /// see [`eased`]. Brisk on purpose: crossing between the two clips sweeps
@@ -105,14 +114,6 @@ const STIRRING: f32 = 0.001;
 /// Half a pull is far more water than any frame of rowing covers and far
 /// less than any jump worth the name.
 const TELEPORT: f32 = PULL / 2.0;
-
-/// The least water a pull may be reckoned to make good, as a fraction of
-/// [`PULL`] — a floor under [`row`]'s divisor and nothing more. A drive this
-/// near to stalled belongs to a hull that is not going anywhere, so there is
-/// no water to measure a stroke off either: the blades stand where they are,
-/// which is what a rower pinned by a gale looks like and is already what one
-/// leaning on stopped oars against a beach looks like.
-const STALLED_PULL: f32 = 0.05;
 
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —
@@ -470,10 +471,10 @@ const WIND_SATURATES: f32 = 12.0;
 /// the sky tops out at. That is deliberately up among the weather's
 /// occasional excursions rather than in its everyday run — sampled across
 /// seeds the sky blows that hard about one moment in fifty, against a median
-/// nearer three and a half, where the same rule costs a rower a tenth of
-/// their pace and no more. The gain is
-/// deliberately the smaller number: a shove down the run ashore, not a new top
-/// gear, the same judgement [`DRIVE_BAND`]'s ceiling makes for the sails.
+/// nearer three and a half, where the same rule costs a rower a tenth of their
+/// pace and no more. The gain is deliberately the smaller number: a shove down
+/// the run ashore, not a new top gear, the same judgement [`DRIVE_BAND`]'s
+/// ceiling makes for the sails.
 const ROWING_WINDAGE: (f32, f32) = (0.35, 1.15);
 
 /// How much of the hull's speed set sails can draw at an angle off the wind,
@@ -1728,13 +1729,13 @@ fn conduct_the_oars(
     }
 }
 
-/// Rows the oars by the water the hull covers: the stroke seeked to the point
-/// the hull's own movement has pulled it round to, and shown only while there
-/// is a pull asked for or the boat is still going — at rest the oars lie
-/// stowed.
+/// Rows the oars: the stroke seeked round at the rower's own [`CADENCE`] while
+/// a pull is asked for, and by the water going past the blades when it is not
+/// — and shown only while there is a pull asked for or the boat is still going,
+/// at rest the oars lying stowed.
 ///
-/// The walking figure's arrangement exactly, down to *measuring* the movement
-/// rather than being told it: the hull's own place, this frame against last.
+/// Whether it turns at all is *measured*, not taken on trust: the hull's own
+/// place, this frame against last.
 /// Reading [`Boat::way`] is shorter and was what this did — [`steer`] advances
 /// the hull by exactly `way * dt` and zeroes the way it grounds on, so the two
 /// numbers agree on every frame `steer` runs. They part on the frames it does
@@ -1745,9 +1746,11 @@ fn conduct_the_oars(
 /// covered none — which is the whole reason the figure measures too.
 ///
 /// Measuring also buys the hulls this client never steers: a dinghy under
-/// somebody else's oars carries no [`Boat`] at all and is walked across the
-/// water by [`moor`], and it pulls the same stroke off the same arithmetic.
-/// One left at anchor covers nothing and lies with its oars in.
+/// somebody else's oars carries no [`Boat`] to ask what it is doing and is
+/// walked across the water by [`moor`]. Moving, it is taken to be rowed, at
+/// the same cadence and whichever way round its own movement says — that
+/// client has already put its weather into the place it reports. One left at
+/// anchor covers nothing and lies with its oars in.
 ///
 /// Height is thrown away, [`float`] setting the hull to the water's every
 /// frame and a swell being no part of a stroke; a jump is not a stroke either,
@@ -1755,20 +1758,13 @@ fn conduct_the_oars(
 ///
 /// The drive is even *within* a stroke — see [`steer`] — so the hull glides at
 /// one speed while the blades circle; giving the surge to the stroke is the
-/// step not yet taken. It is not even from one heading to the next, the wind
-/// leaning on the oars either way it lies, and that is what the pull's length
-/// below is for: divide the water covered by the water one pull is presently
-/// worth and the wind falls out of the quotient, leaving the cadence where it
-/// belongs. A rower fighting a headwind keeps their stroke and makes less
-/// ground with each one — before this the wind went straight into the cadence
-/// and a gale read as somebody rowing lazily.
+/// step not yet taken.
 ///
 /// Nothing happens until the clip has loaded, which is a frame or two after
 /// the rig — the oars hold the file's rest pose until then.
 fn row(
     time: Res<Time>,
     rowing: Res<Rowing>,
-    conditions: Res<sea::SeaConditions>,
     clips: Res<Assets<AnimationClip>>,
     hulls: Query<(&Transform, Option<&Boat>), With<Vessel>>,
     mut rowers: Query<(&mut Rower, &mut AnimationPlayer)>,
@@ -1788,39 +1784,41 @@ fn row(
         // A jump is not a stroke — see [`TELEPORT`]. The water a hull was set
         // down across is water nobody rowed, so it reads as having covered
         // none of it and the stroke is left exactly where it stood.
-        let step = if step.length() > TELEPORT {
-            Vec2::ZERO
+        let moved = step.length();
+        let covered = if moved > TELEPORT { 0.0 } else { moved };
+        // Backwards through the same cycle when the water goes the other way
+        // past the blades, which is what backing water is and needs no second
+        // clip.
+        let going = if place.forward().xz().dot(step) < 0.0 {
+            -1.0
         } else {
-            step
-        };
-        let covered = step.length();
-        let bow = place.forward().xz().normalize_or_zero();
-
-        // What one pull is worth here and now: [`PULL`] is the still-air
-        // figure, and a wind stretches or shortens it exactly as it stretches
-        // or shortens the hull's speed — see the note above on the cadence.
-        //
-        // Only while the oars are pulling. A hull gliding or backing water is
-        // not driven by [`row_drive`] and takes the plain figure. A told hull
-        // has no [`Boat`] to ask and is taken to be pulling if it is moving at
-        // all — the same guess the pose below falls back on, and wrong only
-        // about somebody else's dinghy backing water in a blow.
-        let pulling = boat.map_or(covered > STIRRING, |boat| boat.sails_set);
-        let stroke_metres = if pulling {
-            PULL * row_drive(bow, conditions.wind())
-        } else {
-            PULL
+            1.0
         };
 
-        // Both terms signed and along the heading, which is what runs the same
-        // cycle the other way round for backing water without a second clip
-        // existing — and what keeps a rower pulling *ahead* while a hard
-        // headwind carries the hull astern turning the stroke forwards, the
-        // water made good and the water a pull is worth having both gone
-        // negative together.
-        if stroke_metres.abs() >= PULL * STALLED_PULL {
-            rower.phase = (rower.phase + bow.dot(step) / stroke_metres).rem_euclid(1.0);
-        }
+        // The cadence, where there is any way on at all. That gate is the
+        // whole of what the measuring above is for: behind the chart [`steer`]
+        // stops and the hull stands still with its last way still written on
+        // it, and a hull pinned against a beach covers nothing either. Both
+        // leave the blades where they stand.
+        let pulled = if covered > STIRRING {
+            CADENCE * dt
+        } else {
+            0.0
+        };
+        let turned = match boat {
+            // Under oars, and flat: whatever the wind is doing it is doing to
+            // the ground the pull makes good, never to the arms. Forwards,
+            // too, so a hull carried astern by a gale reads as rowing into it
+            // rather than as backing away from it.
+            Some(boat) if boat.sails_set => pulled,
+            // Off the pull — gliding on after a furl, or backing water. There
+            // is no cadence to keep, and the water going past the blades is
+            // the whole of what turns them.
+            Some(_) => going * covered / PULL,
+            // And a hull this client does not steer, with no [`Boat`] to ask.
+            None => going * pulled,
+        };
+        rower.phase = (rower.phase + turned).rem_euclid(1.0);
 
         // Out while a pull is asked for or the boat is still going: the glide
         // after the last pull still moves water past the blades, and oars
@@ -2888,17 +2886,23 @@ mod tests {
         (pulling.seek_time(), pulling.weight(), resting.weight())
     }
 
+    /// Frames of holding a pull for the way to be indistinguishable from
+    /// settled — over eight of [`ROWBOAT`]'s way response, at the sixteen
+    /// milliseconds a frame the headless clock steps.
+    const UNDER_WAY: usize = 400;
+
     #[test]
-    fn the_oars_lie_stowed_at_rest_and_pull_by_the_water_covered() {
-        // The whole point of driving the stroke by distance, exactly as the
-        // figure's run is: one pull is PULL metres of water, so the blades
-        // cannot slip under a hull moving at some other speed — and the clip
-        // never advances on its own, pausing it being what leaves the way in
-        // charge.
+    fn the_oars_lie_stowed_at_rest_and_a_settled_pull_covers_its_own_water() {
+        // The no-slip property, which is why the stroke is tuned against a
+        // distance at all: settled, one turn of the cycle is PULL metres of
+        // water, so the blades cannot be seen to skate under the hull. It is
+        // a steady-state reading and only that — coming up to speed the hull
+        // is slower than the pace the rower is already keeping, which is a
+        // boat gathering way and not a fault.
         //
         // Abeam, so PULL is the whole of the pull: a wind with any of itself
-        // along the heading lengthens or shortens what one is worth, which is
-        // the next test's business rather than this one's.
+        // along the heading moves what a turn makes good, which is the next
+        // test's business rather than this one's.
         let (mut app, rower) = rowing_app();
         wind_abeam(&mut app, 7.0);
 
@@ -2906,18 +2910,19 @@ mod tests {
         let (_, pulling, stowed) = oars_of(&mut app, rower);
         assert_eq!((pulling, stowed), (0.0, 1.0), "the oars are out at rest");
 
-        let from = boat(&mut app).translation;
         hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 60);
-
+        run_frames(&mut app, UNDER_WAY);
+        let from = boat(&mut app).translation;
+        let turns = turns_pulled(&mut app, rower, 60);
         let covered = boat(&mut app).translation.xz().distance(from.xz());
-        assert!(covered > 0.5, "not enough water covered to tell");
-        let (seek, pulling, _) = oars_of(&mut app, rower);
+
+        assert!(turns > 0.2, "only {turns:.3} of a turn to measure against");
+        let (_, pulling, _) = oars_of(&mut app, rower);
         assert!(pulling > 0.9, "a hull under oars is only {pulling} pulling");
-        let expected = (covered / PULL).rem_euclid(1.0) * CYCLE;
+        let per_turn = covered / turns;
         assert!(
-            (seek - expected).abs() < 0.01,
-            "{covered:.2} m of water left the stroke at {seek:.3} s, not {expected:.3}"
+            (per_turn - PULL).abs() < 0.05,
+            "{covered:.2} m in {turns:.3} turns is {per_turn:.2} m to a pull, not {PULL}"
         );
         assert!(
             app.world()
@@ -2943,32 +2948,45 @@ mod tests {
         assert_eq!((pulling, stowed), (0.0, 1.0), "the oars were left out");
     }
 
-    /// How far round the stroke has been seeked, in turns of the cycle —
-    /// what the cadence is measured in, a seek time being the same number
-    /// wearing the clip's duration.
-    fn stroke_turns(app: &mut App, rower: Entity) -> f32 {
-        oars_of(app, rower).0 / CYCLE
+    /// Turns of the stroke pulled over the next `frames`, signed, and counted
+    /// frame by frame so a run of more than one turn reads as more than one:
+    /// the seek is a place on a single turn of the cycle, so its difference is
+    /// only a step if the step is taken the shorter way round.
+    fn turns_pulled(app: &mut App, rower: Entity, frames: usize) -> f32 {
+        let mut last = oars_of(app, rower).0 / CYCLE;
+        let mut turns = 0.0;
+        for _ in 0..frames {
+            run_frames(app, 1);
+            let now = oars_of(app, rower).0 / CYCLE;
+            let step = now - last;
+            turns += step - step.round();
+            last = now;
+        }
+        turns
     }
 
     #[test]
     fn a_headwind_shortens_the_pull_and_leaves_the_cadence_alone() {
-        // The lie this is here to catch. The stroke is seeked by the water
-        // covered, so a wind that slowed the hull would slow the blades with
-        // it, and a rower fighting a gale would read as one rowing lazily.
-        // Carrying the wind in the *pull's length* is what answers it: less
-        // water made good, less water to a pull, and the same strokes a
-        // minute either way.
+        // The lie this is here to catch. Turn the stroke by the water covered
+        // and a wind that slows the hull slows the blades with it, so a rower
+        // fighting a gale reads as one rowing lazily. Holding the cadence flat
+        // is what answers it: the same strokes a minute either way, and less
+        // ground for each of them.
+        //
+        // Measured past the ramp, so what the two runs are compared on is the
+        // pace held rather than the seconds before either hull had way on.
         let rowed = |wind: Option<f32>| {
             let (mut app, rower) = rowing_app();
             match wind {
                 Some(speed) => wind_ahead(&mut app, speed),
                 None => wind_abeam(&mut app, 9.0),
             }
-            let from = boat(&mut app).translation;
             hold(&mut app, KeyCode::ArrowUp);
-            run_frames(&mut app, 60);
+            run_frames(&mut app, 120);
+            let from = boat(&mut app).translation;
+            let turns = turns_pulled(&mut app, rower, 120);
             let covered = boat(&mut app).translation.xz().distance(from.xz());
-            (covered, stroke_turns(&mut app, rower))
+            (covered, turns)
         };
 
         let (easy, easy_turns) = rowed(None);
@@ -2985,30 +3003,58 @@ mod tests {
              {hard_turns:.3} into the wind"
         );
         // And really did pull them, rather than both readings being a boat
-        // that never got going.
-        assert!(easy_turns > 0.2, "only {easy_turns:.3} of a turn rowed");
+        // that never got going — more than a whole turn, so the counting
+        // above is being asked to carry past the top of the cycle as well.
+        assert!(easy_turns > 1.0, "only {easy_turns:.3} of a turn rowed");
     }
 
     #[test]
     fn a_hull_carried_astern_still_pulls_its_stroke_ahead() {
         // The far corner of the same rule: in the hardest wind the sky has,
         // dead on the bow, the oars lose and the hull is carried backwards.
-        // The rower is still pulling *ahead* — the water made good and the
-        // water a pull is worth have both gone negative, and the stroke comes
-        // round the way a stroke comes round rather than backing water.
+        // The rower is still pulling *ahead*, the stroke coming round the way
+        // a stroke comes round rather than backing water.
         let (mut app, rower) = rowing_app();
-        wind_ahead(&mut app, 16.0);
-        let from = boat(&mut app).translation;
+
+        // With way already on first, which is the leg that can actually catch
+        // the failure. Rowing up into a headwind from rest, the hull never
+        // goes anywhere but astern and there is no sign to get wrong; take the
+        // wind off a hull already running and the stroke has a whole second of
+        // way it has to keep faith with. Turning the phase by the water made
+        // good over the drive commanded, those two part company for exactly
+        // that second, and the blades span backwards at some multiple of the
+        // cadence while the hull was still surging ahead.
+        wind_astern(&mut app, 12.0);
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 60);
+        assert!(way_on(&mut app) > 2.0, "the boat never got under oars");
 
+        wind_ahead(&mut app, 16.0);
+        let mut surging = 0;
+        for _ in 0..120 {
+            let turned = turns_pulled(&mut app, rower, 1);
+            let way = way_on(&mut app);
+            if way > 0.0 {
+                surging += 1;
+                assert!(
+                    turned >= 0.0,
+                    "the stroke ran {turned:.4} turns backwards on a hull \
+                     still making {way:.2} m/s ahead"
+                );
+            }
+        }
+        assert!(surging > 30, "the way died too fast to prove anything");
+
+        // And settled into being beaten: the hull slides astern and the oars
+        // go on pulling ahead at the pace they always keep.
+        let from = boat(&mut app).translation;
+        let turns = turns_pulled(&mut app, rower, 60);
         let bow = boat(&mut app).forward().xz().normalize();
         let made = bow.dot(boat(&mut app).translation.xz() - from.xz());
         assert!(made < -0.05, "the wind gave up {made:.2} m of ground");
-        let turns = stroke_turns(&mut app, rower);
         assert!(
-            (0.05..0.5).contains(&turns),
-            "the blades turned {turns:.3} — backwards, or not at all"
+            turns > 0.2,
+            "the blades turned {turns:.3} — or barely at all"
         );
     }
 
@@ -3236,9 +3282,12 @@ mod tests {
         assert_eq!(row_drive(bow, bow * 40.0), 1.0 + with);
         assert_eq!(row_drive(bow, -bow * 40.0), 1.0 - against);
 
-        // And the square is what leaves the ordinary run ashore alone: an
-        // everyday breeze takes off a quarter of what a strong one does, so
-        // the landing loop is not taxed a little on every trip.
+        // And the shape of the curve between, which is a calibration rather
+        // than an incidental: squared, an everyday breeze takes off a quarter
+        // of what a strong one does, so the run ashore is not taxed a little
+        // on every trip. This restates the square rather than deriving
+        // anything from it — what it is for is that trading the square for a
+        // gentler curve cannot happen quietly.
         let everyday = 1.0 - row_drive(bow, -bow * (WIND_SATURATES * 0.5));
         let blow = 1.0 - row_drive(bow, -bow * WIND_SATURATES);
         assert!(
