@@ -1754,10 +1754,15 @@ fn spawn_switch_row(
     on: bool,
 ) {
     setting_row(parent, ink, name).with_children(|row| {
-        row.spawn(padded_button(ink, action, CONTROL_WIDTH, KEY_ROW_PADDING))
-            .with_children(|button| {
-                button.spawn((mark, button_label(ink, switch_label(on))));
-            });
+        row.spawn(padded_button(
+            ink,
+            action,
+            CONTROL_WIDTH,
+            ROW_BUTTON_PADDING,
+        ))
+        .with_children(|button| {
+            button.spawn((mark, button_label(ink, switch_label(on))));
+        });
     });
 }
 
@@ -1785,7 +1790,7 @@ fn spawn_resolution_row(
                     ink,
                     MenuButton::OpenResolutions,
                     CONTROL_WIDTH,
-                    KEY_ROW_PADDING,
+                    ROW_BUTTON_PADDING,
                 ))
                 .with_children(|button| {
                     button.spawn((
@@ -1904,7 +1909,7 @@ fn refresh_picker(
                     ink,
                     MenuButton::PickResolution(rung),
                     CONTROL_WIDTH,
-                    KEY_ROW_PADDING,
+                    ROW_BUTTON_PADDING,
                 ))
                 // Over the idle fill `padded_button` builds in, there being no
                 // room for a second `BackgroundColor` alongside it.
@@ -2182,7 +2187,7 @@ fn spawn_key_row(parent: &mut ChildSpawnerCommands, ink: &Palette, action: Actio
                 ink,
                 MenuButton::Rebind(action),
                 170.0,
-                KEY_ROW_PADDING,
+                ROW_BUTTON_PADDING,
             ))
             .with_children(|button| {
                 button.spawn((KeyText(action), button_label(ink, key_name)));
@@ -2570,16 +2575,23 @@ fn button(ink: &Palette, action: MenuButton, width: f32) -> impl Bundle {
     padded_button(ink, action, width, 12.0)
 }
 
-/// How much shorter a key row's button is than a menu's.
+/// How much shorter the button on a row is than a menu's: worn by the controls
+/// screen's key rows, and by the display screen's switches, its resolution
+/// button and every rung of that button's list.
 ///
-/// The controls screen is the one screen whose height follows from how many
-/// things there are to bind, and it has to fit in the window at every count it
-/// is ever going to have — it can scroll, but scrolling at the laid-out size
-/// would be the packing having failed. Taking six pixels off each row's button
-/// buys back two rows and change, which is what got the tenth action in, and a
-/// key row is a wide target that loses nothing by not being a tall one as
-/// well.
-const KEY_ROW_PADDING: f32 = 6.0;
+/// Set by the controls screen, which is the one screen whose height follows
+/// from how many things there are to bind and has to fit in the window at
+/// every count it is ever going to have — it can scroll, but scrolling at the
+/// laid-out size would be the packing having failed. Taking six pixels off
+/// each row's button buys back two rows and change, which is what got the
+/// tenth action in, and a key row is a wide target that loses nothing by not
+/// being a tall one as well.
+///
+/// The display screen is not packed and gains nothing by it, but wears it
+/// anyway: its rows are the same row — a name on the left, a control of the
+/// same width on the right — and two screens one press apart under Options
+/// whose rows stood at different heights would read as two hands.
+const ROW_BUTTON_PADDING: f32 = 6.0;
 
 fn padded_button(ink: &Palette, action: MenuButton, width: f32, pad: f32) -> impl Bundle {
     (
@@ -2626,8 +2638,9 @@ fn spawn_button(
 }
 
 /// What one notch of the wheel moves the controls screen by: about a key row,
-/// so the list walks in the units it is made of. Trackpads report pixels
-/// rather than notches and mean them literally.
+/// so the list walks in the units it is made of. Trackpads report pixels of
+/// screen rather than notches, and are answered in those — see
+/// [`scroll_the_panel`].
 const SCROLL_NOTCH: f32 = 40.0;
 
 /// The wheel, on the one screen that can be taller than the window.
@@ -2636,19 +2649,31 @@ const SCROLL_NOTCH: f32 = 40.0;
 /// scrolling — see [`scrolling_panel`] — so the wheel can only mean it.
 fn scroll_the_panel(
     scroll: Res<AccumulatedMouseScroll>,
-    mut panels: Query<&mut ScrollPosition, With<ScrollingPanel>>,
+    mut panels: Query<(&mut ScrollPosition, &ComputedNode), With<ScrollingPanel>>,
 ) {
     if scroll.delta.y == 0.0 {
         return;
     }
-    let step = match scroll.unit {
-        MouseScrollUnit::Line => SCROLL_NOTCH,
-        MouseScrollUnit::Pixel => 1.0,
-    };
-    for mut position in &mut panels {
-        // Rolled down reads further down the list. Held at the top here; the
-        // layout clamps the far end, knowing how much list there is.
-        position.0.y = (position.0.y - scroll.delta.y * step).max(0.0);
+    for (mut position, panel) in &mut panels {
+        // A scroll position is written in the pixels the UI is laid out in,
+        // and neither unit the wheel arrives in is one of those. A notch is
+        // near enough already, being a key row and a key row being a laid-out
+        // measurement; a trackpad's pixels are the screen's own, as many to a
+        // laid-out one as the display's density and the UI's scale together
+        // make — which is the number the layout has already worked out for
+        // this panel.
+        let step = match scroll.unit {
+            MouseScrollUnit::Line => SCROLL_NOTCH,
+            MouseScrollUnit::Pixel => panel.inverse_scale_factor,
+        };
+        // Rolled down reads further down the list. Both ends are held here,
+        // the far one out of what the layout has just measured: the layout
+        // clamps only the copy it draws from, and leaves this one to run on —
+        // so a list overscrolled at the bottom would pile up travel that had
+        // to be wound back through before anything moved.
+        let last = (panel.content_size.y - panel.size.y + panel.scrollbar_size.y).max(0.0)
+            * panel.inverse_scale_factor;
+        position.0.y = (position.0.y - scroll.delta.y * step).clamp(0.0, last);
     }
 }
 
@@ -2903,23 +2928,77 @@ mod tests {
             .y
     }
 
+    /// Says how much list there is, the way the layout would have written it:
+    /// a panel `shown` screen pixels tall with `stacked` of them of rows in
+    /// it, laid out at `to_a_pixel` screen pixels to each of the UI's own.
+    fn a_list_of(app: &mut App, shown: f32, stacked: f32, to_a_pixel: f32) {
+        let panel = app
+            .world_mut()
+            .query_filtered::<Entity, With<ScrollingPanel>>()
+            .single(app.world())
+            .expect("the controls panel scrolls");
+        let mut panel = app.world_mut().entity_mut(panel);
+        let mut measured = panel
+            .get_mut::<ComputedNode>()
+            .expect("every node is measured");
+        measured.size.y = shown;
+        measured.content_size.y = stacked;
+        measured.inverse_scale_factor = 1.0 / to_a_pixel;
+    }
+
     /// The controls screen's height follows from how many actions there are,
     /// so it is the one screen that can be taller than a short window even at
     /// the UI's smallest — and the wheel is what reaches the rest of it.
     #[test]
-    fn the_controls_screen_scrolls_and_stops_at_the_top() {
+    fn the_controls_screen_scrolls_and_stops_at_both_ends() {
         let mut app = test_app(AppState::Controls);
         assert_eq!(scrolled(&mut app), 0.0, "the screen opened mid-list");
+
+        let over = 2.0 * SCROLL_NOTCH;
+        a_list_of(&mut app, 400.0, 400.0 + over, 1.0);
 
         roll_wheel(&mut app, -1.0);
         assert_eq!(scrolled(&mut app), SCROLL_NOTCH);
 
-        // Nothing clamps the far end here — in a real run the layout does,
-        // knowing how much list there is — but the top is this system's own:
-        // rolled all the way back and further, the list stands at its start
-        // rather than being pulled past it.
+        // Both ends are this system's own. The layout clamps only the copy it
+        // draws from, so a list rolled past its last row here would pile up
+        // travel that had to be wound back through before anything moved —
+        // and rolled all the way back and further, the list stands at its
+        // start rather than being pulled past it.
+        roll_wheel(&mut app, -5.0);
+        assert_eq!(
+            scrolled(&mut app),
+            over,
+            "the list rolled past its last row"
+        );
+
         roll_wheel(&mut app, 5.0);
         assert_eq!(scrolled(&mut app), 0.0);
+    }
+
+    /// A wheel notch is a laid-out measurement — about a key row — and a
+    /// trackpad's pixels are the screen's, so the two cannot both be written
+    /// straight into a scroll position. A finger that dragged the list by an
+    /// inch has to move it by an inch of list.
+    #[test]
+    fn a_trackpad_moves_the_list_by_what_the_finger_moved() {
+        let mut app = test_app(AppState::Controls);
+        // A dense display with the UI drawn small on it: four screen pixels to
+        // each pixel the list is laid out in.
+        a_list_of(&mut app, 1000.0, 9000.0, 4.0);
+
+        app.world_mut().insert_resource(AccumulatedMouseScroll {
+            unit: MouseScrollUnit::Pixel,
+            delta: Vec2::new(0.0, -40.0),
+        });
+        app.update();
+        app.world_mut()
+            .insert_resource(AccumulatedMouseScroll::default());
+
+        // Forty screen pixels of finger, and forty screen pixels of list gone
+        // under the top of the panel — which is ten of the pixels the list is
+        // written in.
+        assert_eq!(scrolled(&mut app), 10.0);
     }
 
     #[test]

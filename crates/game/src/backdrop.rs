@@ -285,12 +285,13 @@ fn drift_the_sheet(time: Res<Time>, mut sheets: Query<&mut Transform, With<Sheet
 /// two agree on in pixels, and a menu that shrank over paper that did not
 /// would put its rule on the sheet's own. So the sheet is drawn in pixels of
 /// the size the menus were laid out for, and the camera shows it enlarged or
-/// reduced exactly as the UI is. Nothing on this paper measures anything, so
-/// nothing is put wrong by that — unlike the chart's own sheet, which holds
-/// its pixels and pins its furniture to them instead.
+/// reduced as the UI is — as far as there is paper to show. Nothing on this
+/// paper measures anything, so nothing is put wrong by that — unlike the
+/// chart's own sheet, which holds its pixels and pins its furniture to them
+/// instead.
 fn rule_the_sheet(
     mut meshes: ResMut<Assets<Mesh>>,
-    mut ruled: Local<Option<Vec2>>,
+    mut ruled: Local<Option<(Vec2, AssetId<Mesh>)>>,
     scale: Res<UiScale>,
     mut cameras: Query<(&Camera, &mut Projection), With<SheetCamera>>,
     edges: Query<&Mesh2d, With<SheetEdge>>,
@@ -303,24 +304,52 @@ fn rule_the_sheet(
     let Some(window) = camera.logical_viewport_size() else {
         return;
     };
-    if let Projection::Orthographic(ortho) = &mut *projection {
-        let wanted = 1.0 / scale.0;
-        if ortho.scale != wanted {
-            ortho.scale = wanted;
+    let (Ok(rules), Ok(cover)) = (edges.single(), masks.single()) else {
+        return;
+    };
+
+    // How much paper the camera shows: the UI's scale, so that the engraving
+    // keeps step with the menus standing on it — but never more of it than was
+    // engraved. Nothing caps how large the UI goes, and a window shaped past
+    // anything a display is (a rotated ultrawide, a sliver dragged tall) asks
+    // to be shown a stretch of paper in one direction that the sheet was never
+    // drawn to reach. Held here rather than answered with a bigger sheet: past
+    // this the menu is very slightly out of proportion to the ruling under it,
+    // which nothing on this paper measures, where the alternative is a chart
+    // with its edge in the middle of the window.
+    let room = (PAPER_EXTENT - Vec2::splat(2.0 * DRIFT_REACH)) / window;
+    let showing = (1.0 / scale.0).min(room.min_element());
+    // Read past change detection and written only where it differs: a `Mut`
+    // counts as changed the moment it is dereferenced, so the comparison alone
+    // would put the camera through its recompute on every frame of every menu.
+    let moved = match projection.bypass_change_detection() {
+        Projection::Orthographic(ortho) if ortho.scale != showing => {
+            ortho.scale = showing;
+            true
         }
+        _ => false,
+    };
+    if moved {
+        projection.set_changed();
     }
+
     // The window in the sheet's pixels, which is what everything below is
     // ruled and cornered in.
-    let size = window / scale.0;
-    if *ruled == Some(size) {
+    let size = window * showing;
+    // Remembered against the meshes as well as the size, because the sheet is
+    // struck and laid again on every visit to a world and the new one's edge
+    // and mask are spawned blank: a memo that only knew the size would find
+    // the window unchanged and leave every sheet after the first with no
+    // neatline, and its ruling and net running out to the window's own edge.
+    if *ruled == Some((size, rules.0.id())) {
         return;
     }
-    *ruled = Some(size);
+    *ruled = Some((size, rules.0.id()));
 
     let window = Rect::from_center_size(Vec2::ZERO, size);
     let (edge, mask) = chart::ruled_edge(window, PAPER_SQUARE / chart::NEATLINE_CELLS);
-    for (drawn, ruled) in [(edges.iter().next(), edge), (masks.iter().next(), mask)] {
-        if let Some(mut slot) = drawn.and_then(|drawn| meshes.get_mut(&drawn.0)) {
+    for (drawn, ruled) in [(rules, edge), (cover, mask)] {
+        if let Some(mut slot) = meshes.get_mut(&drawn.0) {
             *slot = ruled;
         }
     }
@@ -336,6 +365,7 @@ fn rule_the_sheet(
 mod tests {
     use super::*;
     use crate::testing::FRAME;
+    use bevy::camera::primitives::MeshAabb;
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
@@ -380,6 +410,71 @@ mod tests {
             .resource_mut::<NextState<AppState>>()
             .set(state);
         app.update();
+    }
+
+    /// Gives the sheet's camera something to be drawn to, the way the renderer
+    /// would once there is a window: so many physical pixels at so many of
+    /// them to the logical one. Without it a camera can say nothing about how
+    /// big it is, and everything that rules the sheet stands down.
+    fn on_a_window(app: &mut App, logical: Vec2, factor: f32) {
+        let mut cameras = app
+            .world_mut()
+            .query_filtered::<&mut Camera, With<SheetCamera>>();
+        let mut camera = cameras.single_mut(app.world_mut()).expect("a sheet");
+        camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
+            physical_size: (logical * factor).as_uvec2(),
+            scale_factor: factor,
+        });
+    }
+
+    /// How far the neatline reaches across the sheet. A sheet's edge is spawned
+    /// as an empty rectangle and written over once the window is known, so an
+    /// edge that reaches nowhere is an edge that was never ruled.
+    fn neatline(app: &mut App) -> Vec2 {
+        let drawn = app
+            .world_mut()
+            .query_filtered::<&Mesh2d, With<SheetEdge>>()
+            .single(app.world())
+            .expect("a sheet has an edge")
+            .0
+            .clone();
+        app.world()
+            .resource::<Assets<Mesh>>()
+            .get(&drawn)
+            .expect("the edge was drawn out of something")
+            .compute_aabb()
+            .map(|drawn| drawn.half_extents.truncate() * 2.0)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_sheet_laid_again_is_ruled_again() {
+        // The neatline and the paper that masks the engraving outside it are
+        // spawned blank and written when the window is first known — so a
+        // sheet laid a second time, after a world has been in and out, has to
+        // be ruled a second time as well. Remembering only what size the last
+        // one was ruled to, the window would be found unchanged and every menu
+        // after the first world would stand on paper with no edge to it, its
+        // ruling and net running out inside the window.
+        let mut app = menu_app();
+        let window = Vec2::new(1280.0, 720.0);
+        on_a_window(&mut app, window, 1.0);
+        app.update();
+        let ruled = neatline(&mut app);
+        assert!(
+            ruled.cmpgt(window / 2.0).all(),
+            "the first sheet was never ruled"
+        );
+
+        enter(&mut app, AppState::InWorld);
+        enter(&mut app, AppState::MainMenu);
+        on_a_window(&mut app, window, 1.0);
+        app.update();
+        assert_eq!(
+            neatline(&mut app),
+            ruled,
+            "the sheet came back with no edge"
+        );
     }
 
     #[test]
@@ -431,6 +526,20 @@ mod tests {
             .truncate()
     }
 
+    /// How much sheet the camera is showing in one pixel of window.
+    fn showing(app: &mut App) -> f32 {
+        let projection = app
+            .world_mut()
+            .query_filtered::<&Projection, With<SheetCamera>>()
+            .single(app.world())
+            .expect("a menu has a sheet")
+            .clone();
+        match projection {
+            Projection::Orthographic(ortho) => ortho.scale,
+            _ => panic!("the sheet is drawn flat"),
+        }
+    }
+
     #[test]
     fn the_paper_slides_but_never_runs_out() {
         // Two halves of one promise. The sheet moves — a menu left up is a
@@ -444,12 +553,30 @@ mod tests {
         }
         assert_ne!(drifted(&mut app), laid, "the sheet is nailed down");
 
-        let window = Vec2::new(crate::WINDOW.x as f32, crate::WINDOW.y as f32);
-        assert!(
-            PAPER_EXTENT
-                .cmpgt(window + Vec2::splat(2.0 * DRIFT_REACH))
-                .all(),
-            "a drifted sheet can run out inside the window"
-        );
+        // The window is not the measure of that any more: the camera shows the
+        // sheet at the UI's scale, so what has to fit inside the engraving is
+        // whatever the camera has been zoomed out to — see [`rule_the_sheet`],
+        // which is what holds it. Watched over windows shaped past anything a
+        // display is, at scales either side of one, because those are the two
+        // ways the shown stretch grows.
+        for logical in [
+            Vec2::new(1280.0, 720.0),
+            Vec2::new(3440.0, 1440.0),
+            Vec2::new(1440.0, 3440.0),
+            Vec2::new(640.0, 2000.0),
+            Vec2::new(400.0, 300.0),
+        ] {
+            for scale in [0.5, 1.0, 2.0, 3.0] {
+                app.world_mut().resource_mut::<UiScale>().0 = scale;
+                on_a_window(&mut app, logical, 1.0);
+                app.update();
+
+                let shown = logical * showing(&mut app) + Vec2::splat(2.0 * DRIFT_REACH);
+                assert!(
+                    shown.cmple(PAPER_EXTENT).all(),
+                    "a {logical} window at {scale} shows {shown} of a {PAPER_EXTENT} sheet"
+                );
+            }
+        }
     }
 }
