@@ -22,7 +22,7 @@ use bevy::audio::{AudioSinkPlayback, Volume};
 use bevy::prelude::*;
 
 use crate::boat::Boat;
-use crate::camera::MapCamera;
+use crate::camera::{MapCamera, MAX_DISTANCE};
 use crate::sea::SeaConditions;
 use crate::{AppState, Helm};
 
@@ -68,10 +68,27 @@ const FULL_SPEED: f32 = 10.0;
 /// it flat inside this rather than letting the fall continue means the closest
 /// the camera can be shoved is not also the loudest a boat ever gets.
 ///
-/// Only the wash. The sea itself is not somewhere the camera can be far from,
-/// so nothing about the range touches the floor the weather sets: walk the
-/// length of a beach away from a boat and the surf does not go with it.
+/// Only the wash. Standing off from a boat is not standing off from the sea:
+/// walk the length of a beach away from a hull and the surf does not go with
+/// it. What the camera *climbing* does to the sea is [`ALOFT`].
 const EARSHOT: f32 = 40.0;
+
+/// How much of the water is left at the top of the zoom, where the camera is
+/// as far off it as it can get.
+///
+/// [`EARSHOT`] is about standing off from a boat, and takes only the boat's
+/// share. This is about leaving the water altogether: at the far end of the
+/// zoom the camera is most of four hundred metres up, looking down at a sea
+/// it is no longer on, and everything about the water — the bow wash and the
+/// weather both — ought to be that far off. Held apart from the wash's own
+/// falloff rather than folded into it because they are different facts, and
+/// the two compound exactly as they should: a boat pulled right back to a
+/// mountain-sized view is a small white mark on a quiet sea, not a hull
+/// heard from her own deck.
+///
+/// Deliberately not silence. A sea that goes to nothing at the end of the
+/// zoom reads as the sound breaking rather than as a view opening out.
+const ALOFT: f32 = 0.3;
 
 /// How much of the wash a hull lying still is worth under the reference
 /// breeze the sea's amplitudes are written for.
@@ -155,14 +172,24 @@ fn heard(state: &AppState, helm: Option<&Helm>) -> bool {
 /// thrown away on purpose: a hull backing water is pushing the same water
 /// about as one going ahead.
 ///
-/// Distance is the boat's alone, and falls off as its inverse past
-/// [`EARSHOT`], twice as far leaving half the boat's share of it. The sea's
-/// floor is left out of it — see that constant.
+/// Distance does two separate things, and the range is read twice for them.
+/// The wash alone falls off as the inverse of it past [`EARSHOT`], twice as
+/// far leaving half the boat's share — the sea's floor is no part of that,
+/// see that constant. Then the whole of it, floor included, is taken down
+/// towards [`ALOFT`] as the camera climbs away from the water.
+///
+/// That second fall is spread evenly across the zoom's *notches* rather than
+/// across its metres, which is what the logarithm is for: the zoom is
+/// geometric, so linear in metres was flat for most of the scroll and then
+/// dropped away over the last few clicks, and a sea that quietens all at once
+/// sounds like a fault rather than like pulling back.
 fn loudness(way: f32, liveliness: f32, range: f32) -> f32 {
     let lying = (LYING * liveliness).min(1.0);
     let speed = (way.abs() / FULL_SPEED).min(1.0).sqrt();
     let near = EARSHOT / range.max(EARSHOT);
-    lying + (1.0 - lying) * speed * near
+    let climbed = ((range / EARSHOT).max(1.0).ln() / (MAX_DISTANCE / EARSHOT).ln()).min(1.0);
+    let aloft = 1.0 - (1.0 - ALOFT) * climbed;
+    (lying + (1.0 - lying) * speed * near) * aloft
 }
 
 /// The two numbers [`loudness`] wants off the frame: the way this player's
@@ -355,18 +382,51 @@ mod tests {
     }
 
     #[test]
-    fn pulling_the_camera_back_takes_the_boat_and_leaves_the_sea() {
+    fn pulling_the_camera_back_takes_the_boat_faster_than_the_sea() {
         let close = loudness(FULL_SPEED, BREEZE, EARSHOT);
         let far = loudness(FULL_SPEED, BREEZE, EARSHOT * 4.0);
         assert!(far < close, "{far} is not below {close}");
-        // Only the boat's share of it went: what is left is the quarter of
-        // the climb the distance allows, standing on the sea's own floor,
-        // which no camera is ever far from.
-        let floor = loudness(0.0, BREEZE, EARSHOT);
+        // Standing off costs the wash its inverse and costs the sea only the
+        // climb, so what is left at four times the range is a larger share of
+        // sea than it was alongside. Both are scaled by the same climb, which
+        // is why this can be asked as a ratio.
+        let share = |range| loudness(0.0, BREEZE, range) / loudness(FULL_SPEED, BREEZE, range);
         assert!(
-            (far - (floor + (close - floor) / 4.0)).abs() < 1e-6,
-            "{far} is not a quarter of the way from {floor} to {close}"
+            share(EARSHOT * 4.0) > share(EARSHOT),
+            "the wash did not fall off faster than the sea"
         );
+    }
+
+    #[test]
+    fn a_camera_as_high_as_it_goes_takes_the_sea_with_it() {
+        // The far end of the zoom is a view of a whole mountain, and a boat
+        // in it is a mark on the water rather than something being stood on.
+        let alongside = loudness(FULL_SPEED, BREEZE, EARSHOT);
+        let aloft = loudness(FULL_SPEED, BREEZE, MAX_DISTANCE);
+        assert!(aloft < alongside * 0.25, "{aloft} is still too loud");
+        // The sea goes with it and the sea is still there: quiet, not gone.
+        let sea = loudness(0.0, BREEZE, MAX_DISTANCE);
+        assert!(sea > 0.0, "the sea fell silent at the top of the zoom");
+        assert!(sea < loudness(0.0, BREEZE, EARSHOT), "{sea} is not quieter");
+    }
+
+    #[test]
+    fn the_water_quietens_evenly_across_the_zoom() {
+        // Not a level that holds and then drops over the last few clicks:
+        // each notch of a geometric zoom should cost about the same.
+        let step = 1.5;
+        let mut range = EARSHOT;
+        let mut costs = Vec::new();
+        while range * step <= MAX_DISTANCE {
+            let here = loudness(0.0, BREEZE, range);
+            let out = loudness(0.0, BREEZE, range * step);
+            costs.push(here - out);
+            range *= step;
+        }
+        let (least, most) = costs
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(lo, hi), &c| (lo.min(c), hi.max(c)));
+        assert!(most < least * 1.5, "{costs:?} is not an even fall");
     }
 
     #[test]
