@@ -24,25 +24,36 @@
 //! the terrain's occlusion.
 //!
 //! The card carries a second reading: the reader's own mark at the middle of
-//! it, spun to the way the boat is actually pointing.
+//! it, spun to the way the boat is actually pointing. The glyph is the
+//! chart's own [`READERS_MARK`] — one arrowhead meaning *you* on every
+//! instrument — and it is the third shape to stand there: a drawn boat would
+//! be a picture of a ship a few pixels across, and the dart that replaced it
+//! read as a leaf that had to be squinted at for a direction. The chart's
+//! mark had already been through that argument and won it.
 //!
-//! And a third: an arrow lying along the wind. A wind is only ever wanted
-//! *against* something — the way home, the way the boat is pointed — and both
-//! are bearings, so one card holding north, the bow and the wind together
-//! answers "the wind is off my starboard bow" in a glance.
+//! And a third: the wind, a stream of chevrons crossing the whole card
+//! through the middle, flying leeward. A wind is only ever wanted *against*
+//! something — the way home, the way the boat is pointed — and both are
+//! bearings, so one card holding north, the bow and the wind together answers
+//! "the wind is off my starboard bow" in a glance. Its strength is pace and
+//! ink rather than reach — the stream drifts faster and darker as the wind
+//! stiffens. An arm that grew with the wind was tried first: a lone length
+//! has nothing on the card to be read against, so a fresh breeze and a light
+//! air looked alike unless the day happened to offer both.
 //!
-//! Those two have to be told apart at a glance or the card is worse than
-//! nothing, and they were not: with the wind the only arrow on the card it was
-//! read as the heading, an arrow through the middle of a compass being a
-//! heading on every instrument anybody has held. Ink alone would not have
-//! separated them — two arrows differing only in colour is a puzzle with two
-//! pieces — so they differ in what they are anchored to and in whether they
-//! are filled. The bow is solid and owns the centre; the wind is a stroked
-//! arrow that stops short of it and runs back out to windward, so it reads as
-//! weather arriving from outside rather than as something the player is doing.
-//! And because the card is aligned with the world, the bow lies the way the
-//! hull in the picture does — the instrument visibly agreeing with what the
-//! player is already looking at.
+//! Those two readings have to be told apart at a glance or the card is worse
+//! than nothing. An earlier card managed it by anchoring — the wind held off
+//! the middle so the bow could own it — because with both of them still, two
+//! arrows on one card were a puzzle with two pieces however they were inked.
+//! What separates them now is kind: the bow is the one solid, stationary
+//! thing on the card, and the wind is stroked and *moving*, which is what
+//! weather does and nothing a player steers. That difference is what buys the
+//! wind the centre back — a stream can run under the mark without being
+//! mistaken for it, where a second arrow could not — and motion is not the
+//! only channel carrying it, because a screenshot still has to read: the
+//! chevrons point the way they fly. And because the card is aligned with the
+//! world, the bow lies the way the hull in the picture does — the instrument
+//! visibly agreeing with what the player is already looking at.
 //!
 //! And a fourth: a ring of marks round the rim, one arc per stretch of coast
 //! within sight. This camera looks *down*, so land a few hundred metres off can
@@ -63,14 +74,17 @@
 
 use std::f32::consts::TAU;
 
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{Image, ImageSampler};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::text::{FontSize, FontSource};
 use bevy::ui::{UiTransform, Val2};
 
 use protocol::ground::{CHUNK_METRES, NORTH};
 
 use crate::camera::{MapCamera, PITCH};
-use crate::chart::Chart;
+use crate::chart::{Chart, READERS_MARK};
 use crate::player::PlayerPlace;
 use crate::sea::{SeaConditions, WIND_NAMED};
 use crate::terrain::Ground;
@@ -92,8 +106,7 @@ use crate::AppState;
 /// That objection is what [`spawn_bow`] answers. A card with the reader's own
 /// mark standing at its centre has something for the room to be room *for*, so
 /// the width the earlier trial gave back is taken again — and a little more,
-/// to leave the wind somewhere to lie now that it no longer crosses the
-/// middle.
+/// to give the wind's stream a run worth watching either side of the mark.
 const FACE_SIZE: f32 = 176.0;
 /// How far the face sits in from the corner of the window.
 const MARGIN: f32 = 12.0;
@@ -114,84 +127,62 @@ const INSET: f32 = 15.0;
 /// as furniture the bow stands on rather than as part of the bow.
 const CROSS_ARM: (f32, f32) = (26.0, 52.0);
 
-/// The reader's own mark: the side, in pixels, of the square it is cut from.
-///
-/// Its point reaches half a diagonal from the middle and its blunt end half a
-/// side, so the mark is longer ahead of the player than behind them — which is
-/// the whole of how a shape this small says *this way* as well as *here*.
-///
-/// Nineteen was drawn and looked at, and read as a blob with a nib on it: a
-/// mark this small has to be seen out of the corner of an eye, and there was
-/// not enough of it either side of the point for the point to be what the eye
-/// caught. What the size buys is *length* rather than bulk — it is spent
-/// through [`BOW_NARROW`], which takes the width back off again.
-const BOW: f32 = 27.0;
+/// The reader's own mark: how tall it stands on the card, point to tail, in
+/// pixels. About what the dart before it measured, which was the length a
+/// mark this small needed before the eye caught it — see [`spawn_bow`] for
+/// what the mark is now and where its shape lives.
+const BOW_HEIGHT: f32 = 30.0;
 
-/// How much of its own width the bow keeps once it has been squeezed.
+/// Texels across the bow's little texture, drawn once at [`spawn_bow`].
 ///
-/// A corner of a square is a right angle, and a right angle is a *blunt* point
-/// — drawn at this size it read as a lump with a nib on it, and taking the
-/// flanks off square instead only made it a rounded square. What sharpens a
-/// point is narrowing the shape behind it, so the mark is drawn as a square
-/// stood on its corner and then squeezed across. Two thirds was tried and read
-/// as a guitar pick: a right angle taken down to sixty-five degrees is still
-/// blunt, and a mark only half again as long as it is wide has no length for
-/// the eye to run along. Half of it leaves a point near fifty degrees on a
-/// shape twice as long as it is wide, which is a dart.
-///
-/// That squeeze has to happen *between* the two turns — after the eighth that
-/// stands the square on its corner and before the bearing — so it narrows the
-/// mark across its own length rather than across the card. Which is why the
-/// bow is three nested nodes and not one, the same arrangement and the same
-/// reason as the face and the card it sits in.
-const BOW_NARROW: f32 = 0.5;
+/// Generous for the size the mark is laid out at, deliberately: the whole UI
+/// scales up with the window — see [`crate::settings`] — and a texture drawn
+/// for the laid-out size would soften the point on any monitor bigger than
+/// the layouts were drawn for.
+const BOW_TEXELS: u32 = 112;
 
-/// How far each corner of the bow's square is taken off, as a fraction of its
-/// side — point first, then the two flanks it runs back from, then the tail.
-///
-/// The point is left sharp, which is the only one that had to be. The flanks
-/// are barely touched, so the sides run straight back from the point and carry
-/// the direction; the tail is taken right off, which stops the mark reading as
-/// a wedge with a base and lets it read as drawn.
-const BOW_CORNERS: (f32, f32, f32) = (0.0, 0.16, 0.5);
-
-/// The wind the arm is drawn at its full reach for, in metres per second — a
+/// The wind the stream is drawn at its full ink for, in metres per second — a
 /// fresh breeze rather than the hardest wind there is. Where the scale ends
 /// is the client's to pick: the server sends a velocity and has no opinion
 /// about how hard that should look, and a scale that only filled at a rare
-/// gale would spend most of a day reading as a light air. Above this the arm
+/// gale would spend most of a day reading as a light air. Above this the ink
 /// has nowhere further to go, which is the right lie for an instrument this
-/// size — past a fresh breeze the sea itself is saying the rest.
+/// size — past a fresh breeze the sea itself is saying the rest, though the
+/// pace, which costs the card nothing, keeps counting: see [`DRIFT`].
 const FULL_WIND: f32 = 10.0;
 
-/// Where the arrow's point comes to rest, as a distance from the middle of the
-/// card in pixels.
-///
-/// The arm used to start at the centre and fly out from it, and that is what
-/// made the card ambiguous. The point stops short of the bow instead and the
-/// shaft runs *back* from it to windward, so the arrow arrives at the boat out
-/// of the weather and goes past — which is what a wind does, and reads as
-/// nothing the player is steering. The centre belongs to the bow alone.
-const ARM_HEAD: f32 = 24.0;
+/// How far either side of the middle the stream runs, in pixels. Its ends
+/// stop short of the letters — the stream is a reading laid over the rose,
+/// not a hand touching its rim — but between them it crosses the whole card:
+/// a line through the centre reads as *weather over the place*, where the
+/// arm this replaced, hung off one side of the middle, kept being read as a
+/// thing standing at a bearing.
+const TRACK: f32 = 58.0;
 
-/// How far the arm's tail lies from the middle, in pixels: at a calm, and at
-/// [`FULL_WIND`]. The far end stops short of the letters — the arm is a
-/// reading laid over the rose, not a hand touching its rim — and at a calm it
-/// is a stub rather than nothing, so a dying wind shrinks back onto its own
-/// point while the fade takes it.
-///
-/// A stiffening wind therefore grows *outward*, away from the boat, which is
-/// the right way round: the reading lengthens without ever crowding the mark it
-/// is there to be read against.
-const ARM_TAIL: (f32, f32) = (34.0, 58.0);
+/// How many chevrons ride the stream. Their spacing falls out as the track
+/// over the count, so the line stays evenly manned however the two are tuned.
+const CHEVRONS: usize = 8;
 
-/// The arm's thickness, in pixels: heavier than the cross, which is
+/// One chevron of the stream: the length of each of its two bars, in pixels,
+/// and how far off the line of flight each is turned, in radians. A little
+/// wider-set than the barbs of the arrowhead this grew out of: with no shaft
+/// to be read against, the vee is the whole glyph.
+const CHEVRON: (f32, f32) = (9.0, 0.6);
+
+/// The stream's stroke, in pixels: heavier than the cross, which is
 /// furniture, and lighter than a letter.
-const ARM_WIDTH: f32 = 2.0;
+const STROKE: f32 = 2.0;
 
-/// Each barb of the arrowhead: how long it runs, in pixels, and how far off
-/// the shaft it is turned, in radians.
-const BARB: (f32, f32) = (10.0, 0.55);
+/// The pace a wind puts on the stream, in pixels per second for each metre
+/// per second of it. Never clamped, unlike the ink: past [`FULL_WIND`] the
+/// stream has no more darkness to add, but the pace keeps telling the truth.
+const DRIFT: f32 = 4.0;
+
+/// How much of each end of the track is spent easing a chevron in or out, in
+/// pixels. The fade is what hides the wrap: a chevron leaves to leeward
+/// already faded to nothing and is next seen growing in to windward, so the
+/// pool circulates without a mark ever popping into place.
+const END_FADE: f32 = 12.0;
 
 // The same furniture the menus are drawn with — one edge colour, one ink, one
 // dimmed ink — so the instrument reads as a piece of the same chart.
@@ -305,7 +296,7 @@ struct Sighting {
 /// The ring: [`SECTORS`] marks laid round the rim, all blank until
 /// [`mark_the_land`] inks them.
 ///
-/// Children of the *card*, like the wind arm and for the same reason: the card
+/// Children of the *card*, like the wind stream and for the same reason: the card
 /// already carries the turn from the world to the view, so a mark's own
 /// rotation is a bearing and nothing else. And because the card sits inside
 /// the squashed face, a mark lands on the same ellipse the rim is drawn as —
@@ -356,7 +347,7 @@ fn spawn_ring(card: &mut ChildSpawnerCommands) {
 }
 
 /// The bearing of a direction on the card: clockwise from north, the way
-/// [`arm_bearing`] takes one and the way [`UiTransform`] turns.
+/// [`wind_bearing`] takes one and the way [`UiTransform`] turns.
 fn bearing(direction: Vec2) -> f32 {
     let east = Vec2::new(-NORTH.y, NORTH.x);
     f32::atan2(direction.dot(east), direction.dot(NORTH))
@@ -546,7 +537,7 @@ impl Plugin for CompassPlugin {
             .add_systems(
                 Update,
                 (
-                    (turn_card, point_the_arm, point_the_bow),
+                    (turn_card, drive_the_stream, point_the_bow),
                     // The ring reads both, and both come and go with the
                     // world — as the chart's own survey does.
                     mark_the_land
@@ -566,29 +557,38 @@ struct CompassCard;
 struct CompassFace;
 
 /// Marks the bow — the reader's own mark at the middle of the card, spun to
-/// their heading the same way and for the same reason the arm is.
+/// their heading the same way and for the same reason the stream is.
 #[derive(Component)]
 struct Bow;
 
-/// Marks the wind arm — the arrow that spins inside the card, on top of the
-/// card's own spin, so the bearing it shows is the world's and not the view's.
+/// The wind stream — the node that spins inside the card, on top of the
+/// card's own spin, so the bearing it shows is the world's and not the
+/// view's. It carries the drift: how far along the track the pool has been
+/// blown, kept wrapped to a lap by [`drive_the_stream`].
 #[derive(Component)]
-struct WindArm;
+struct WindStream {
+    phase: f32,
+}
 
-/// Marks the arm's shaft, the one piece of it that changes length.
+/// One chevron of the stream, by its place in the pool.
 #[derive(Component)]
-struct WindShaft;
+struct Chevron(usize);
 
-/// Marks every piece the arm is drawn from — shaft and barbs alike — so the
-/// whole arrow can be inked in one pass without naming its parts again.
+/// One bar of a chevron's vee — the pieces that take ink — named by the
+/// chevron it belongs to, so each chevron can carry its own fade.
 #[derive(Component)]
-struct WindInk;
+struct ChevronInk(usize);
 
-fn spawn_compass(mut commands: Commands, mut swept: ResMut<Swept>) {
+fn spawn_compass(
+    mut commands: Commands,
+    mut swept: ResMut<Swept>,
+    mut images: ResMut<Assets<Image>>,
+) {
     // A new world is a new sweep: the ring respawns blank, and a position
     // left over from the last one would hold it that way until the player
     // had moved.
     *swept = Swept::default();
+    let images = &mut *images;
     commands
         .spawn((
             Name::new("Compass"),
@@ -630,12 +630,13 @@ fn spawn_compass(mut commands: Commands, mut swept: ResMut<Swept>) {
             .with_children(|card| {
                 // The card in two halves with the two readings between them:
                 // under the letters rather than over them, because where the
-                // arm reaches its furthest it is nearly touching one, and an
-                // arrowhead drawn across a glyph would cost the letter more
-                // than it bought the arm.
+                // stream reaches its furthest it is nearly touching one, and
+                // a chevron drawn across a glyph would cost the letter more
+                // than it bought the stream. The bow after the stream, so the
+                // chevrons pass under the mark rather than over it.
                 spawn_cross(card);
-                spawn_arm(card);
-                spawn_bow(card);
+                spawn_stream(card);
+                spawn_bow(card, images);
                 spawn_ring(card);
                 spawn_letters(card);
             });
@@ -738,17 +739,22 @@ fn spawn_cross(card: &mut ChildSpawnerCommands) {
     }
 }
 
-/// The wind arm: an arrow lying on the card, spun to the wind's bearing by
-/// [`point_the_arm`].
+/// The wind stream: a fixed pool of chevrons laid along one line through the
+/// middle of the card, spun to the wind's bearing and blown along it by
+/// [`drive_the_stream`].
 ///
 /// A child of the card rather than of the face, which is what makes it a
 /// *bearing* rather than a picture of where the wind is on screen: the card
 /// already carries the turn from the world to the view, so this node's own
 /// rotation is the wind's angle from north and nothing else, and the two
 /// compose the way they do on paper.
-fn spawn_arm(card: &mut ChildSpawnerCommands) {
+///
+/// A pool that wraps rather than chevrons spawned and despawned as they run
+/// off the end — the ring's arrangement, for the ring's reason: churn in the
+/// UI tree for a population that never changes.
+fn spawn_stream(card: &mut ChildSpawnerCommands) {
     card.spawn((
-        WindArm,
+        WindStream { phase: 0.0 },
         Node {
             position_type: PositionType::Absolute,
             width: Val::Percent(100.0),
@@ -759,51 +765,62 @@ fn spawn_arm(card: &mut ChildSpawnerCommands) {
         },
         UiTransform::IDENTITY,
     ))
-    .with_children(|arm| {
-        arm.spawn((
-            WindShaft,
-            WindInk,
-            Node {
-                width: Val::Px(ARM_WIDTH),
-                height: Val::Px(ARM_TAIL.0 - ARM_HEAD),
-                ..default()
-            },
-            BackgroundColor(INK),
-            UiTransform::IDENTITY,
-        ))
-        .with_children(|shaft| {
-            spawn_barb(shaft, 1.0);
-            spawn_barb(shaft, -1.0);
-        });
+    .with_children(|stream| {
+        for place in 0..CHEVRONS {
+            stream
+                .spawn((
+                    Chevron(place),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    UiTransform::IDENTITY,
+                ))
+                .with_children(|spot| {
+                    // A zero-height anchor at the spot's middle: the bars pin
+                    // their upper ends to its top edge, which *is* the
+                    // middle, so the vee's point is the piece the offset
+                    // places and the vee opens back to windward behind it.
+                    spot.spawn(Node {
+                        width: Val::Px(STROKE),
+                        height: Val::Px(0.0),
+                        ..default()
+                    })
+                    .with_children(|anchor| {
+                        spawn_vee_bar(anchor, place, 1.0);
+                        spawn_vee_bar(anchor, place, -1.0);
+                    });
+                });
+        }
     });
 }
 
-/// One barb of the arrowhead, hung off the shaft's point.
-///
-/// A child of the shaft rather than a third thing placed by arithmetic of its
-/// own: the shaft's box *is* the arm, so a barb pinned to its top edge stays
-/// at the point however long the wind makes the shaft, and nothing here has
-/// to be rewritten frame by frame.
+/// One bar of a chevron's vee, hung off its anchor's top edge.
 ///
 /// The bar is drawn straight and turned about its own middle, which swings
 /// the end that was at the point away from it. The translation is what puts
 /// that end back — rotate, then undo the movement of the one end that is
-/// meant to stay still — and it is the reason a barb is a transform rather
+/// meant to stay still — and it is the reason a bar is a transform rather
 /// than a position.
-fn spawn_barb(shaft: &mut ChildSpawnerCommands, side: f32) {
-    let (length, angle) = BARB;
+fn spawn_vee_bar(anchor: &mut ChildSpawnerCommands, chevron: usize, side: f32) {
+    let (length, angle) = CHEVRON;
     let turn = side * angle;
-    shaft.spawn((
-        WindInk,
+    anchor.spawn((
+        ChevronInk(chevron),
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(0.0),
             top: Val::Px(0.0),
-            width: Val::Px(ARM_WIDTH),
+            width: Val::Px(STROKE),
             height: Val::Px(length),
             ..default()
         },
-        BackgroundColor(INK),
+        // Blank until the first frame inks it, like the ring's marks.
+        BackgroundColor(Color::NONE),
         UiTransform {
             rotation: Rot2::radians(turn),
             translation: Val2::px(
@@ -818,21 +835,29 @@ fn spawn_barb(shaft: &mut ChildSpawnerCommands, side: f32) {
 /// The reader's own mark at the middle of the card, spun to their heading by
 /// [`point_the_bow`].
 ///
-/// A child of the card for the arm's reason: the card carries the turn from
+/// A child of the card for the stream's reason: the card carries the turn from
 /// the world to the view already, so this node's own rotation is a bearing and
 /// nothing else.
 ///
-/// Cut from a square, stood on the corner left sharp and squeezed across it —
-/// see [`BOW_NARROW`] for the squeeze and [`BOW_CORNERS`] for what is taken
-/// off the other three. Nothing here is drawn from triangles because a UI node
-/// is a rectangle and there are none to be had; a mesh would want a second
-/// camera over the world for one mark.
+/// The glyph is the chart's [`READERS_MARK`], rasterised here into a little
+/// texture and tinted with the card's ink. A notched arrowhead is concave and
+/// a UI node is a rectangle, so it is nothing a pile of nodes can be: the
+/// dart that used to stand here was the best three of them could do, and it
+/// read as a leaf. A mesh would want a second camera over the world for one
+/// mark; an image is just an asset, and it lets the card wear the exact
+/// glyph the chart does rather than a cousin of it.
 ///
-/// What matters most is not the shape but that it is **solid**, the wind arrow
-/// being strokes. That contrast is doing as much work as the bearing is: it is
-/// what stops the eye having to ask which arrow it is looking at, which is the
-/// question the card used to leave hanging.
-fn spawn_bow(card: &mut ChildSpawnerCommands) {
+/// The texture spans the mark's furthest reach in every direction, so the
+/// origin the glyph turns about on the chart sits at the node's centre and
+/// the one rotation serves both instruments.
+///
+/// What matters most is not the shape but that it is **solid and still**, the
+/// wind being strokes on the move. That contrast is doing as much work as the
+/// bearing is — see the module doc for the card it rescued.
+fn spawn_bow(card: &mut ChildSpawnerCommands, images: &mut Assets<Image>) {
+    // The mark in card pixels: sized by its height, its box by its reach.
+    let (reach, tall) = mark_measure();
+    let span = BOW_HEIGHT / tall * (2.0 * reach);
     card.spawn(Node {
         position_type: PositionType::Absolute,
         width: Val::Percent(100.0),
@@ -842,60 +867,102 @@ fn spawn_bow(card: &mut ChildSpawnerCommands) {
         ..default()
     })
     .with_children(|spot| {
-        // Three nodes, one turn each, innermost first: the square is stood on
-        // its corner, the result is squeezed across, and the whole thing is
-        // laid on the bearing. See [`BOW_NARROW`] for why they cannot be one.
         spot.spawn((
             Bow,
             Node {
-                width: Val::Px(BOW),
-                height: Val::Px(BOW),
+                width: Val::Px(span),
+                height: Val::Px(span),
+                ..default()
+            },
+            ImageNode {
+                image: images.add(bow_image()),
+                color: INK,
                 ..default()
             },
             UiTransform::IDENTITY,
-        ))
-        .with_children(|turned| {
-            turned
-                .spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    UiTransform {
-                        scale: Vec2::new(BOW_NARROW, 1.0),
-                        ..UiTransform::IDENTITY
-                    },
-                ))
-                .with_children(|narrowed| {
-                    narrowed.spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
-                            border_radius: BorderRadius {
-                                top_left: Val::Percent(BOW_CORNERS.0 * 100.0),
-                                top_right: Val::Percent(BOW_CORNERS.1 * 100.0),
-                                bottom_left: Val::Percent(BOW_CORNERS.1 * 100.0),
-                                bottom_right: Val::Percent(BOW_CORNERS.2 * 100.0),
-                            },
-                            ..default()
-                        },
-                        BackgroundColor(INK),
-                        UiTransform {
-                            rotation: Rot2::radians(TAU / 8.0),
-                            ..UiTransform::IDENTITY
-                        },
-                    ));
-                });
-        });
+        ));
     });
 }
 
-/// The turn that lays the bow along a heading.
+/// The mark's measurements in its own units: its furthest reach from the
+/// origin on either axis, and its height point to tail. Taken off the corners
+/// rather than written down again, so the mark cannot quietly outgrow its
+/// texture.
+fn mark_measure() -> (f32, f32) {
+    let reach = READERS_MARK
+        .iter()
+        .map(|corner| corner.x.abs().max(corner.y.abs()))
+        .fold(0.0, f32::max);
+    let (top, bottom) = READERS_MARK
+        .iter()
+        .fold((f32::MIN, f32::MAX), |(top, bottom), corner| {
+            (top.max(corner.y), bottom.min(corner.y))
+        });
+    (reach, top - bottom)
+}
+
+/// The mark drawn into texels: white ink on clear glass, the tint left to the
+/// [`ImageNode`], with the coverage supersampled so the edges stay edges at
+/// any rotation the card puts the glyph through.
+fn bow_image() -> Image {
+    let (reach, _) = mark_measure();
+    const SUB: u32 = 4;
+    let mut texels = Vec::with_capacity((BOW_TEXELS * BOW_TEXELS * 4) as usize);
+    for row in 0..BOW_TEXELS {
+        for column in 0..BOW_TEXELS {
+            let mut hits = 0;
+            for down in 0..SUB {
+                for across in 0..SUB {
+                    let texel = Vec2::new(
+                        column as f32 + (across as f32 + 0.5) / SUB as f32,
+                        row as f32 + (down as f32 + 0.5) / SUB as f32,
+                    );
+                    let sample = (texel / BOW_TEXELS as f32 * 2.0 - 1.0) * reach;
+                    // The texture's y runs down and the mark's runs up.
+                    if covered(Vec2::new(sample.x, -sample.y)) {
+                        hits += 1;
+                    }
+                }
+            }
+            let alpha = (hits * 255 / (SUB * SUB)) as u8;
+            texels.extend_from_slice(&[255, 255, 255, alpha]);
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: BOW_TEXELS,
+            height: BOW_TEXELS,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        texels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::linear();
+    image
+}
+
+/// Whether a point in the mark's own units lies under its ink.
 ///
-/// The bearing and nothing else: the eighth of a turn that brings the square's
-/// sharp corner round to the mark's own point is spent inside [`spawn_bow`],
-/// where the squeeze can be applied after it.
+/// Asked as the two triangles the chart builds the arrowhead from, with the
+/// edges counted in: the pair share the mark's spine, and a strict test would
+/// leave a hairline seam of missed samples down it.
+fn covered(at: Vec2) -> bool {
+    let [point, left, notch, right] = READERS_MARK;
+    in_triangle(at, point, left, notch) || in_triangle(at, point, notch, right)
+}
+
+/// Whether `at` lies in the triangle `abc`, wound anticlockwise: inside is
+/// every edge's cross product coming up positive.
+fn in_triangle(at: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
+    (b - a).perp_dot(at - a) >= 0.0
+        && (c - b).perp_dot(at - b) >= 0.0
+        && (a - c).perp_dot(at - c) >= 0.0
+}
+
+/// The turn that lays the bow along a heading — the bearing and nothing else,
+/// the glyph being drawn point-up in its texture.
 fn bow_rotation(heading: Vec2) -> Rot2 {
     Rot2::radians(bearing(heading))
 }
@@ -923,25 +990,25 @@ fn point_the_bow(
     }
 }
 
-/// Which way the arm lies on the card under a wind, or `None` when the wind
-/// is too slack to have a bearing at all — see [`WIND_NAMED`], the bar the
-/// water and the sails share. The weather never blows that softly; a wind
-/// that slack is one the console ordered, and what is left of it as it dies
-/// has a bearing made of noise. So the arm holds the last bearing it had and
-/// simply fades — see [`point_the_arm`] — which reads as the wind dropping
-/// rather than as the instrument spinning.
+/// Which way the stream lies on the card under a wind, or `None` when the
+/// wind is too slack to have a bearing at all — see [`WIND_NAMED`], the bar
+/// the water and the sails share. The weather never blows that softly; a
+/// wind that slack is one the console ordered, and what is left of it as it
+/// dies has a bearing made of noise. So the stream holds the last bearing it
+/// had and simply fades — see [`drive_the_stream`] — which reads as the wind
+/// dropping rather than as the instrument spinning.
 ///
-/// The card's own up is north, so the arm's angle is the wind's bearing:
+/// The card's own up is north, so the stream's angle is the wind's bearing:
 /// clockwise from north, the way a bearing is always taken, and the way
 /// [`UiTransform`] turns. East is north a quarter turn clockwise on the page,
 /// which for a page with x to the right and y down is `(-n.y, n.x)`.
 ///
-/// The arrow flies *with* the air rather than pointing into the eye of it.
+/// The chevrons fly *with* the air rather than pointing into the eye of it.
 /// A wind is named for where it comes from, so this is the arguable half of
-/// the design — but an arrow that flew backwards would need explaining every
-/// time it was looked at, and it has to be read at a glance, over a pennant
-/// and a sea that are both unarguably going the other way.
-fn arm_bearing(wind: Vec2) -> Option<Rot2> {
+/// the design — but marks that flew backwards would need explaining every
+/// time they were looked at, and they have to be read at a glance, over a
+/// pennant and a sea that are both unarguably going the other way.
+fn wind_bearing(wind: Vec2) -> Option<Rot2> {
     if wind.length() < WIND_NAMED {
         return None;
     }
@@ -949,60 +1016,79 @@ fn arm_bearing(wind: Vec2) -> Option<Rot2> {
     Some(Rot2::radians(f32::atan2(wind.dot(east), wind.dot(NORTH))))
 }
 
-/// How far the arm reaches and how hard it is inked, for a wind speed in
-/// metres per second.
+/// How hard the stream is inked, for a wind speed in metres per second.
 ///
-/// Both run off the one ramp, so a stiffening wind lengthens and darkens the
-/// arm together and neither reading has to be found on its own. There is no
-/// number anywhere and there is not meant to be: the question a player has is
-/// which way and roughly how much, and a card that answered in metres per
-/// second would be the machinery showing through.
-fn arm_reach(speed: f32) -> (f32, f32) {
+/// Two fades multiplied, doing different jobs. The first is the reading — a
+/// light air is a fainter stream than a gale — and it keeps a floor, or a
+/// real wind would be drawn too faint to find. The second is the calm, which
+/// takes the stream off the card altogether rather than leaving marks adrift
+/// on a bearing the wind has stopped having. There is no number anywhere and
+/// there is not meant to be: the question a player has is which way and
+/// roughly how much, and a card that answered in metres per second would be
+/// the machinery showing through.
+fn wind_ink(speed: f32) -> f32 {
     let hard = (speed / FULL_WIND).clamp(0.0, 1.0);
-    let length = ARM_TAIL.0 + (ARM_TAIL.1 - ARM_TAIL.0) * hard - ARM_HEAD;
-    // Two fades multiplied, doing different jobs. The first is the reading —
-    // a light air is a fainter arm than a gale — and it keeps a floor, or a
-    // real wind would be drawn too faint to find. The second is the calm,
-    // which takes the arm off the card altogether rather than leaving a stub
-    // aimed at a bearing the wind has stopped having.
-    let alpha = (0.45 + 0.55 * hard) * (speed / WIND_NAMED).clamp(0.0, 1.0);
-    (length, alpha)
+    (0.45 + 0.55 * hard) * (speed / WIND_NAMED).clamp(0.0, 1.0)
 }
 
-/// Lays the arm along the wind the sea is drawn under.
+/// Where one chevron lies along the track, in pixels from the middle of the
+/// card down the stream's own axis — negative is leeward, the way the node's
+/// up ends up pointing once it is turned to the bearing.
+///
+/// The pool is dealt out evenly and the phase carries every chevron together;
+/// a full lap of it brings each one home, which is what lets
+/// [`drive_the_stream`] keep the phase wrapped rather than counting forever.
+fn chevron_offset(place: usize, phase: f32) -> f32 {
+    let spacing = 2.0 * TRACK / CHEVRONS as f32;
+    TRACK - (place as f32 * spacing + phase).rem_euclid(2.0 * TRACK)
+}
+
+/// How much of its ink a chevron keeps at an offset: all of it along the
+/// middle of the track, easing to nothing over [`END_FADE`] at either end.
+fn end_window(offset: f32) -> f32 {
+    ((TRACK - offset.abs()) / END_FADE).clamp(0.0, 1.0)
+}
+
+/// Blows the stream along the wind the sea is drawn under.
 ///
 /// The drawn wind, not the forecast — [`SeaConditions::wind`] — for the
 /// reason the card reads the camera's eased yaw: an instrument that arrived
 /// at the new weather before the water did would be pointing at a sea that
 /// is not there yet.
-fn point_the_arm(
+///
+/// A calm leaves the rotation alone, so the stream fades out where it last
+/// pointed and comes back wherever the new wind is — and the drift dies with
+/// the ink, so what fades is a stream stopping rather than marks still
+/// marching along a dead bearing.
+fn drive_the_stream(
+    time: Res<Time>,
     conditions: Res<SeaConditions>,
-    mut arms: Query<&mut UiTransform, (With<WindArm>, Without<WindShaft>)>,
-    mut shafts: Query<(&mut Node, &mut UiTransform), With<WindShaft>>,
-    mut ink: Query<&mut BackgroundColor, With<WindInk>>,
+    mut streams: Query<(&mut WindStream, &mut UiTransform)>,
+    mut chevrons: Query<(&Chevron, &mut UiTransform), Without<WindStream>>,
+    mut ink: Query<(&ChevronInk, &mut BackgroundColor)>,
 ) {
     let wind = conditions.wind();
-    let (length, alpha) = arm_reach(wind.length());
+    let speed = wind.length();
+    let alpha = wind_ink(speed);
 
-    // A calm leaves the rotation alone, so the arm fades out where it last
-    // pointed and comes back wherever the new wind is.
-    if let Some(bearing) = arm_bearing(wind) {
-        for mut transform in &mut arms {
+    let mut phase = 0.0;
+    for (mut stream, mut transform) in &mut streams {
+        if let Some(bearing) = wind_bearing(wind) {
             transform.rotation = bearing;
         }
+        stream.phase = (stream.phase + DRIFT * speed * time.delta_secs()).rem_euclid(2.0 * TRACK);
+        phase = stream.phase;
     }
-    for (mut node, mut transform) in &mut shafts {
-        node.height = Val::Px(length);
-        // Pushed *down* its own axis — to windward, the arm having been turned
-        // to the way the air is going — so the shaft lies between [`ARM_HEAD`]
-        // and the tail rather than across the middle. Its top edge is then the
-        // end nearest the bow, which is where the barbs are hung: they open
-        // back towards the tail, so the point is the inner end and the arrow
-        // flies at the boat.
-        transform.translation = Val2::px(0.0, ARM_HEAD + length / 2.0);
+    for (chevron, mut transform) in &mut chevrons {
+        transform.translation = Val2::px(0.0, chevron_offset(chevron.0, phase));
     }
-    for mut colour in &mut ink {
-        *colour = BackgroundColor(INK.with_alpha(alpha));
+    for (chevron, mut colour) in &mut ink {
+        let inked = INK.with_alpha(alpha * end_window(chevron_offset(chevron.0, phase)));
+        // Written only where it differs, the ring's economy: in a calm every
+        // bar holds the nothing it already had.
+        if colour.0 != inked {
+            *colour = BackgroundColor(inked);
+        }
     }
 }
 
@@ -1067,11 +1153,19 @@ mod tests {
     /// already dropped into a match.
     fn test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((TimePlugin, StatesPlugin, MapCameraPlugin, CompassPlugin))
-            .init_state::<AppState>()
-            .add_sub_state::<Helm>()
-            .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<AccumulatedMouseScroll>();
+        app.add_plugins((
+            // Assets because the bow is an image — see `spawn_bow`.
+            bevy::asset::AssetPlugin::default(),
+            TimePlugin,
+            StatesPlugin,
+            MapCameraPlugin,
+            CompassPlugin,
+        ))
+        .init_asset::<Image>()
+        .init_state::<AppState>()
+        .add_sub_state::<Helm>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<AccumulatedMouseScroll>();
         app.update();
 
         app.world_mut()
@@ -1189,12 +1283,12 @@ mod tests {
     }
 
     #[test]
-    fn the_arm_flies_with_the_wind() {
+    fn the_stream_flies_with_the_wind() {
         // East is a quarter turn clockwise from north on the card, and a wind
-        // *blowing* east lays the arrow along it — the reading is where the
+        // *blowing* east lays the stream along it — the reading is where the
         // air is going, not where a sailor would say it came from.
         let east = Vec2::new(-NORTH.y, NORTH.x);
-        let blowing_east = arm_bearing(east * 8.0).expect("a fresh breeze has a bearing");
+        let blowing_east = wind_bearing(east * 8.0).expect("a fresh breeze has a bearing");
         assert!(
             blowing_east
                 .angle_to(Rot2::radians(std::f32::consts::FRAC_PI_2))
@@ -1202,8 +1296,8 @@ mod tests {
                 < 1e-5
         );
 
-        // A northerly is air moving south, so the arm lies down the card.
-        let northerly = arm_bearing(-NORTH * 8.0).expect("a fresh breeze has a bearing");
+        // A northerly is air moving south, so the stream lies down the card.
+        let northerly = wind_bearing(-NORTH * 8.0).expect("a fresh breeze has a bearing");
         assert!(
             northerly
                 .angle_to(Rot2::radians(std::f32::consts::PI))
@@ -1211,70 +1305,108 @@ mod tests {
                 < 1e-4
         );
 
-        // And a wind out of the south points the arm at the N, which is the
-        // reading most likely to have been drawn backwards.
-        let southerly = arm_bearing(NORTH * 8.0).expect("a fresh breeze has a bearing");
+        // And a wind out of the south flies the chevrons at the N, which is
+        // the reading most likely to have been drawn backwards.
+        let southerly = wind_bearing(NORTH * 8.0).expect("a fresh breeze has a bearing");
         assert!(southerly.angle_to(Rot2::IDENTITY).abs() < 1e-5);
     }
 
     #[test]
-    fn the_arm_grows_and_darkens_with_the_wind() {
-        let (light, faint) = arm_reach(2.0);
-        let (fresh, dark) = arm_reach(FULL_WIND);
+    fn the_stream_darkens_with_the_wind_and_the_ink_tops_out() {
         assert!(
-            light < fresh,
-            "a fresh breeze drew no longer than a light air"
-        );
-        assert!(
-            faint < dark,
+            wind_ink(2.0) < wind_ink(FULL_WIND),
             "a fresh breeze drew no darker than a light air"
         );
-        assert!(
-            ARM_HEAD + fresh <= ARM_TAIL.1,
-            "the arm outgrew the room it has"
-        );
-
-        // Past the top of the scale there is nowhere further to go, and a
-        // gale must not run the arrow out through the letters.
-        assert_eq!((fresh, dark), arm_reach(40.0));
+        // Past the top of the scale the ink has nowhere further to go — the
+        // pace is the channel left carrying a gale.
+        assert_eq!(wind_ink(FULL_WIND), wind_ink(40.0));
     }
 
     #[test]
-    fn a_calm_takes_the_arm_off_the_card() {
-        // No bearing worth drawing, and nothing drawn: the arm keeps the
+    fn the_stream_stays_on_its_track_and_wraps() {
+        for place in 0..CHEVRONS {
+            let offset = chevron_offset(place, 17.3);
+            assert!(
+                offset.abs() <= TRACK,
+                "chevron {place} left the track: {offset}"
+            );
+        }
+
+        // A full lap of phase is a round trip, which is what lets the drift
+        // wrap instead of counting forever.
+        let (out, back) = (chevron_offset(3, 5.0), chevron_offset(3, 5.0 + 2.0 * TRACK));
+        assert!((out - back).abs() < 1e-3);
+
+        // The drift runs leeward — a growing phase carries a chevron toward
+        // negative offsets until it wraps to windward again.
+        assert!(chevron_offset(0, 1.0) < chevron_offset(0, 0.5));
+
+        // And both ends ease to nothing, so the wrap can never pop.
+        assert_eq!(end_window(TRACK), 0.0);
+        assert_eq!(end_window(-TRACK), 0.0);
+        assert_eq!(end_window(0.0), 1.0);
+    }
+
+    #[test]
+    fn a_calm_takes_the_stream_off_the_card() {
+        // No bearing worth drawing, and nothing drawn: the stream keeps the
         // rotation it had and the ink goes to nothing.
-        assert!(arm_bearing(Vec2::new(0.2, -0.1)).is_none());
-        assert_eq!(arm_reach(0.0).1, 0.0);
-        assert!(arm_reach(WIND_NAMED / 2.0).1 < arm_reach(WIND_NAMED).1);
+        assert!(wind_bearing(Vec2::new(0.2, -0.1)).is_none());
+        assert_eq!(wind_ink(0.0), 0.0);
+        assert!(wind_ink(WIND_NAMED / 2.0) < wind_ink(WIND_NAMED));
+    }
+
+    /// The glyph the bow is rasterised from: solid where the chart draws ink
+    /// and clear in the notch, which is what separates an arrowhead from a
+    /// triangle.
+    #[test]
+    fn the_bow_wears_the_charts_mark() {
+        let [point, _, notch, _] = READERS_MARK;
+        // On the spine below the tip, where the two triangles meet: a strict
+        // edge test would miss here and seam the mark.
+        assert!(covered((point + notch) / 2.0));
+        // In the notch, between the tails: the cut that makes it an arrow.
+        assert!(!covered(Vec2::new(0.0, notch.y - 1.5)));
+        // And clear off the glyph entirely.
+        assert!(!covered(Vec2::new(notch.x + 6.0, 0.0)));
     }
 
     #[test]
-    fn the_arm_reads_the_sea_it_is_drawn_over() {
+    fn the_stream_reads_the_sea_it_is_drawn_over() {
         // The card is wired to the drawn sea rather than to the forecast, so
-        // the arm and the water are under one wind. Before any weather has
+        // the stream and the water are under one wind. Before any weather has
         // landed that is the assumed day the sea opens on.
         let mut app = test_app();
         app.update();
         let wind = app.world().resource::<SeaConditions>().wind();
-        let arm = app
+        let (stream, transform) = app
             .world_mut()
-            .query_filtered::<&UiTransform, With<WindArm>>()
+            .query::<(&WindStream, &UiTransform)>()
             .single(app.world())
-            .expect("the arm should exist")
-            .rotation;
-        let expected = arm_bearing(wind).expect("the assumed day is not a calm");
-        assert!(arm.angle_to(expected).abs() < 1e-5);
+            .expect("the stream should exist");
+        let expected = wind_bearing(wind).expect("the assumed day is not a calm");
+        assert!(transform.rotation.angle_to(expected).abs() < 1e-5);
 
-        let shaft = app
+        // The whole pool rides the track, each chevron where the shared
+        // phase puts it.
+        let phase = stream.phase;
+        let chevrons: Vec<(usize, Val2)> = app
             .world_mut()
-            .query_filtered::<&Node, With<WindShaft>>()
-            .single(app.world())
-            .expect("the shaft should exist")
-            .height;
-        assert_eq!(shaft, Val::Px(arm_reach(wind.length()).0));
+            .query::<(&Chevron, &UiTransform)>()
+            .iter(app.world())
+            .map(|(chevron, transform)| (chevron.0, transform.translation))
+            .collect();
+        assert_eq!(chevrons.len(), CHEVRONS);
+        for (place, translation) in chevrons {
+            assert_eq!(
+                translation,
+                Val2::px(0.0, chevron_offset(place, phase)),
+                "chevron {place} was off its offset"
+            );
+        }
     }
 
-    /// The sign conventions the ring shares with the arm, checked where they
+    /// The sign conventions the ring shares with the stream, checked where they
     /// are cheap to check: a mark drawn on the wrong side of the card is
     /// exactly the mistake a screenshot would be read straight past.
     #[test]
