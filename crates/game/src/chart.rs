@@ -616,6 +616,8 @@ impl Plugin for ChartPlugin {
         // whichever is built first winning — see `MapCameraPlugin`.
         app.init_resource::<ChartView>()
             .init_resource::<KeyBindings>()
+            // Normally `UiPlugin`'s, initialised the same way for the tests.
+            .init_resource::<UiScale>()
             .add_systems(OnEnter(AppState::InWorld), start_a_chart)
             .add_systems(OnExit(AppState::InWorld), stow_the_chart)
             .add_systems(OnExit(Helm::Chart), roll_up)
@@ -706,6 +708,7 @@ fn unroll(
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<AssetServer>,
     mut view: ResMut<ChartView>,
+    scale: Res<UiScale>,
     place: PlayerPlace,
     mut world_camera: Query<(&mut Camera, &RenderTarget), With<MapCamera>>,
 ) {
@@ -763,7 +766,7 @@ fn unroll(
     sheet_edge(&mut commands, &mut meshes, &inks);
     corner_rose(&mut commands, &mut meshes, &inks);
     commands.insert_resource(inks);
-    furniture(&mut commands, sheet);
+    furniture(&mut commands, sheet, scale.0);
 }
 
 /// Rolls the sheet up and gives the world its camera back.
@@ -2048,7 +2051,16 @@ const FURNITURE_MARGIN: f32 = NEATLINE_INSET + NEATLINE_BAND + 14.0;
 /// in that pass, over the engraving; the world's own instruments are left alone
 /// and simply painted over. The rose in the other corner is pinned the same way
 /// but drawn otherwise — see [`corner_rose`].
-fn furniture(commands: &mut Commands, sheet: Entity) {
+///
+/// Sized in the sheet's own pixels rather than the UI's: the furniture stands
+/// on an engraving drawn by a camera that takes no notice of [`UiScale`], so
+/// the UI's scale is divided back out of everything here — most of all the
+/// bar, whose width is read against the paper under it and would otherwise be
+/// off by exactly the scale. The division is made as the chart is opened; a
+/// window rescaled with the chart up gets the margins right again on the next
+/// opening, while the bar — the one measurement — follows the scale live in
+/// [`rule_the_scale`].
+fn furniture(commands: &mut Commands, sheet: Entity, scale: f32) {
     commands
         .spawn((
             Name::new("Chart furniture"),
@@ -2070,19 +2082,19 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
             sheet.spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Px(FURNITURE_MARGIN),
-                    bottom: Val::Px(FURNITURE_MARGIN),
+                    left: Val::Px(FURNITURE_MARGIN / scale),
+                    bottom: Val::Px(FURNITURE_MARGIN / scale),
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(4.0),
+                    row_gap: Val::Px(4.0 / scale),
                     ..default()
                 },
                 children![
                     (
                         ScaleRule,
                         Node {
-                            width: Val::Px(SCALE_BAR_LEAST),
-                            height: Val::Px(5.0),
-                            border: UiRect::all(Val::Px(1.0)),
+                            width: Val::Px(SCALE_BAR_LEAST / scale),
+                            height: Val::Px(5.0 / scale),
+                            border: UiRect::all(Val::Px(1.0 / scale)),
                             ..default()
                         },
                         BorderColor::all(INK),
@@ -2096,7 +2108,7 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
                         // lettered in.
                         TextFont {
                             font: FontSource::Serif,
-                            font_size: FontSize::Px(13.0),
+                            font_size: FontSize::Px(13.0 / scale),
                             ..default()
                         },
                         TextColor(INK),
@@ -2360,15 +2372,17 @@ struct ScaleLabel;
 /// is 1.83 km" does not.
 fn rule_the_scale(
     view: Res<ChartView>,
+    scale: Res<UiScale>,
     mut rules: Query<&mut Node, With<ScaleRule>>,
     mut labels: Query<&mut Text, With<ScaleLabel>>,
 ) {
-    if !view.is_changed() {
+    if !view.is_changed() && !scale.is_changed() {
         return;
     }
     let metres = round_distance(SCALE_BAR_LEAST * view.metres_per_pixel);
     for mut node in &mut rules {
-        node.width = Val::Px(metres / view.metres_per_pixel);
+        // In the sheet's pixels, not the UI's — see [`furniture`].
+        node.width = Val::Px(metres / view.metres_per_pixel / scale.0);
     }
     for mut text in &mut labels {
         text.0 = distance_label(metres);

@@ -81,7 +81,10 @@ impl Plugin for BackdropPlugin {
         // `--state inworld`, and every run that takes pictures — which would
         // otherwise engrave a whole sheet on their first frame and strike it
         // on their second.
-        app.add_systems(Startup, raise.run_if(not(in_state(AppState::InWorld))))
+        // Normally `UiPlugin`'s, initialised here the way the menu does its
+        // shared resources, so the tests have one too.
+        app.init_resource::<UiScale>()
+            .add_systems(Startup, raise.run_if(not(in_state(AppState::InWorld))))
             .add_systems(OnEnter(AppState::InWorld), strike)
             .add_systems(OnExit(AppState::InWorld), raise)
             .add_systems(
@@ -274,22 +277,41 @@ fn drift_the_sheet(time: Res<Time>, mut sheets: Query<&mut Transform, With<Sheet
     }
 }
 
-/// Re-rules the sheet's edge and re-corners its rose when the window changes.
+/// Re-rules the sheet's edge and re-corners its rose when the window changes —
+/// and keeps the engraving in step with the UI's own scale.
+///
+/// The menus scale to the window — see [`crate::settings`] — and the sheet has
+/// to scale *with* them: the cartouche stands off the neatline by a margin the
+/// two agree on in pixels, and a menu that shrank over paper that did not
+/// would put its rule on the sheet's own. So the sheet is drawn in pixels of
+/// the size the menus were laid out for, and the camera shows it enlarged or
+/// reduced exactly as the UI is. Nothing on this paper measures anything, so
+/// nothing is put wrong by that — unlike the chart's own sheet, which holds
+/// its pixels and pins its furniture to them instead.
 fn rule_the_sheet(
     mut meshes: ResMut<Assets<Mesh>>,
     mut ruled: Local<Option<Vec2>>,
-    cameras: Query<&Camera, With<SheetCamera>>,
+    scale: Res<UiScale>,
+    mut cameras: Query<(&Camera, &mut Projection), With<SheetCamera>>,
     edges: Query<&Mesh2d, With<SheetEdge>>,
     masks: Query<&Mesh2d, With<SheetMask>>,
     mut roses: Query<&mut Transform, With<SheetRose>>,
 ) {
-    let Some(size) = cameras
-        .iter()
-        .next()
-        .and_then(|camera| camera.logical_viewport_size())
-    else {
+    let Ok((camera, mut projection)) = cameras.single_mut() else {
         return;
     };
+    let Some(window) = camera.logical_viewport_size() else {
+        return;
+    };
+    if let Projection::Orthographic(ortho) = &mut *projection {
+        let wanted = 1.0 / scale.0;
+        if ortho.scale != wanted {
+            ortho.scale = wanted;
+        }
+    }
+    // The window in the sheet's pixels, which is what everything below is
+    // ruled and cornered in.
+    let size = window / scale.0;
     if *ruled == Some(size) {
         return;
     }
