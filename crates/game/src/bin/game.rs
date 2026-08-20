@@ -128,8 +128,8 @@ fn run(args: Args, session: Option<Session>) {
         }
     }
 
-    // Not while capturing either: a run that writes pictures and quits has no
-    // menu to sit behind, and would open an audio device for nobody.
+    // Not while capturing either: a run that writes pictures and quits has
+    // nobody listening, and would open an audio device for no one.
     if !args.is_capture() {
         app.add_plugins(AmbiencePlugin);
     }

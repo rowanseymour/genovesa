@@ -1,6 +1,7 @@
 # Assets live at the root of the workspace, next to the crates rather than
-# inside one of them: the sea behind the menu is the game's, but nothing about
-# a sound file belongs to `crates/game` in the way its source does.
+# inside one of them: what the game draws and plays is the game's, but nothing
+# about a model or a sound file belongs to `crates/game` in the way its source
+# does.
 #
 # Bevy looks for `assets/` under `BEVY_ASSET_ROOT`, falling back to
 # `CARGO_MANIFEST_DIR` — which under `cargo run -p game` is `crates/game`, not

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds assets/audio/menu-loop.ogg, the sea heard behind the menu.
+# Builds assets/audio/bow-wash.ogg, the water at a hull's bow.
 #
 # This directory carries the asset's name and holds everything that goes into
 # it: the recording, and this. The name is the asset's and not the file's — the
@@ -7,8 +7,8 @@
 # decodes untold. Nothing here ships — the game reads assets/, and the master is
 # kept only so the loop can be cut again differently.
 #
-#   assets-src/audio/menu-loop/build.sh          # from the master beside it
-#   assets-src/audio/menu-loop/build.sh other    # from a recording of your own
+#   assets-src/audio/bow-wash/build.sh          # from the master beside it
+#   assets-src/audio/bow-wash/build.sh other    # from a recording of your own
 #
 # The master is committed as FLAC rather than as the WAV Freesound serves, which
 # is lossless and on water this quiet about a fifth of the size. It is worth
@@ -39,8 +39,11 @@ fi
 # Where the loop is cut from, in seconds: the water is at a steady state from
 # START, and stays that way well past the end of the window.
 START=25
-# How long the loop runs for. Chosen against the sea it plays under rather than
-# to fill the window: long enough not to be recognisable, and no longer.
+# How long the loop runs for. Chosen against the ear rather than to fill the
+# window: it plays for as long as a boat is under way, so a passage of any
+# length comes round on it over and over, and what has to hold is not that
+# nothing repeats but that the repeat cannot be found. Long enough not to be
+# recognisable, and no longer.
 WINDOW=23
 # How much of the recording either end of the join is spent fading. Long enough
 # to hide the join in water that is never twice the same, short enough that the
@@ -81,9 +84,9 @@ ffmpeg -v error -y -i "$tmp/join.wav" -i "$tmp/mid.wav" \
 
 # sox rather than ffmpeg for the last step: Homebrew's ffmpeg is built without
 # libvorbis, and Vorbis is the one compressed format Bevy decodes untold.
-sox "$tmp/loop.wav" -C 6 "$tmp/menu-loop.ogg"
+sox "$tmp/loop.wav" -C 6 "$tmp/bow-wash.ogg"
 
 # Only once it is whole, so a killed run cannot leave the committed file torn.
-mv "$tmp/menu-loop.ogg" "$root/assets/audio/menu-loop.ogg"
+mv "$tmp/bow-wash.ogg" "$root/assets/audio/bow-wash.ogg"
 
-echo "$me: assets/audio/menu-loop.ogg (${WINDOW}s from ${START}s, ${FADE}s crossfade, $(du -h "$root/assets/audio/menu-loop.ogg" | cut -f1))"
+echo "$me: assets/audio/bow-wash.ogg (${WINDOW}s from ${START}s, ${FADE}s crossfade, $(du -h "$root/assets/audio/bow-wash.ogg" | cut -f1))"
