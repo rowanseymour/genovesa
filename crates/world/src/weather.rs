@@ -52,7 +52,9 @@ const MAX_WIND: f32 = 16.0;
 /// has nothing at all to sail on under a dead sky — which the walk used to
 /// deliver freely: strengths ran straight down to zero, and judged across
 /// seeds the sky spent about a minute in seven below half a metre a second,
-/// in spells minutes long. The client's answer then was a floor that drove
+/// mostly in spells of half a minute, occasionally in ones several minutes
+/// long — long enough to be a spell somebody is stuck inside rather than a
+/// lull they coast through. The client's answer then was a floor that drove
 /// the boat on any heading, eye of the wind included, which read as a boat
 /// ignoring the weather; killing the dead sky here is what let that hatch
 /// close. The strength is *rescaled* into `MIN..MAX` rather than clamped, so
@@ -81,10 +83,17 @@ pub fn wind(seed: u32, elapsed: f32) -> Vec2 {
     let reach = (out / 0.55).min(1.0);
     let strength = MIN_WIND + (MAX_WIND - MIN_WIND) * reach * reach;
 
-    if out < 1e-4 {
-        // The walk is passing through the exact origin, where it has no
-        // bearing to read — and nearly nothing to divide by. A moment of
-        // measure zero: hand the light air an arbitrary fixed bearing and
+    if out == 0.0 {
+        // The walk is standing exactly on the origin, where it has no bearing
+        // to read and nothing at all to divide by. Only the exact zero needs
+        // saying: `length` is a square root, so it comes back either zero or
+        // a good deal larger than the smallest float — there is no denormal
+        // `out` for `strength / out` to overflow through, and every walk that
+        // rounds to a positive length still points somewhere honest. Guarding
+        // a whole neighbourhood instead would snap the bearing due south with
+        // a full light air behind it, a jump of metres a second across a
+        // boundary the walk crosses far more often than it lands on. A moment
+        // of measure zero: hand the light air an arbitrary fixed bearing and
         // let the client's easing swallow it.
         return Vec2::new(0.0, -MIN_WIND);
     }

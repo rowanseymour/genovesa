@@ -419,13 +419,17 @@ const NO_GO: f32 = std::f32::consts::FRAC_PI_4;
 /// of sail one the player is never quite on.
 const FULL_DRIVE: f32 = std::f32::consts::FRAC_PI_2;
 
-/// The band the wind's strength drives the hull across: the fraction of
-/// [`Hull::speed`] made in the lightest air, and the fraction made once the
-/// wind saturates. The floor keeps the light-air spells the weather calls
-/// calms from being a crawl — the world is crossed by boat and the sky holds
-/// its spells for minutes — and the ceiling is a modest reward for sailing a
-/// blow rather than a new top gear. The angle to the wind is the game; the
-/// strength is flavour inside this band.
+/// The band the wind's strength drives the hull across, as fractions of
+/// [`Hull::speed`]: the foot of the ramp and the fraction made once the wind
+/// saturates. The foot is where the line would meet a wind of nothing rather
+/// than a speed anything on the water makes — the lightest air the sky blows
+/// stands a little above it, and under [`sea::WIND_NAMED`] the drive is
+/// tapered away entirely (see [`sail_drive`]). What it buys is that the
+/// light-air spells the weather calls calms are a slow passage rather than a
+/// crawl — the world is crossed by boat and the sky holds its spells for
+/// minutes — and the ceiling is a modest reward for sailing a blow rather
+/// than a new top gear. The angle to the wind is the game; the strength is
+/// flavour inside this band.
 const DRIVE_BAND: (f32, f32) = (0.6, 1.1);
 
 /// The wind at which the drive saturates, in metres per second — a strong
@@ -465,14 +469,17 @@ fn heel_for(hull: &Hull, helm: f32, way: f32) -> f32 {
 /// The no-go zone always stands: there is no wind this can be sailed straight
 /// into. Below [`sea::WIND_NAMED`] — where the screen names no direction —
 /// the drive tapers to nothing on the same ramp the compass fades its arm's
-/// ink on, so the engine and the instrument die together. It used to go the
-/// other way: below the bar the band's floor drove on *any* heading, so a
-/// calm could not park anybody — and a boat could sail dead into a
-/// faintly-drawn wind. The stranding worry is answered at the source now, the
-/// weather never blowing below a light air (see [`protocol::ToClient`]'s
-/// `Weather`), which leaves the bar catching only the drawn wind's sweep
-/// through the middle of a veer and the console's ordered calm — both
-/// honestly airs that drive nothing.
+/// ink on, so the engine and the instrument go out together. The boom is not
+/// on that ramp: it comes amidships at the bar and stays there, having a side
+/// to pick rather than an amount to give up — see [`sail_trim`].
+///
+/// It used to go the other way: below the bar the band's floor drove on *any*
+/// heading, so a calm could not park anybody — and a boat could sail dead
+/// into a faintly-drawn wind. The stranding worry is answered at the source
+/// now, the weather never blowing below a light air (see
+/// [`protocol::ToClient`]'s `Weather`), which leaves the bar catching only a
+/// console-ordered calm and the drawn wind fading into one — honestly airs
+/// that drive nothing.
 fn sail_drive(bow: Vec2, wind: Vec2) -> f32 {
     let blowing = wind.length();
     if blowing == 0.0 {
@@ -3011,8 +3018,9 @@ mod tests {
 
     #[test]
     fn the_wind_drives_within_its_band() {
-        // The floor is what the lightest air leaves, the ceiling what a blow
-        // earns, and between them more wind is never less speed.
+        // The floor is where the ramp would meet a wind of nothing — no air
+        // on the water actually makes it — the ceiling is what a blow earns,
+        // and between them more wind is never less speed.
         assert_eq!(strength(0.0), DRIVE_BAND.0);
         assert_eq!(strength(WIND_SATURATES), DRIVE_BAND.1);
         assert_eq!(strength(WIND_SATURATES * 2.0), DRIVE_BAND.1);

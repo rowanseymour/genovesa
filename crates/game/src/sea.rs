@@ -113,15 +113,19 @@ fn amplitude_scale(wind: f32) -> f32 {
 const SEA_RESPONSE: f32 = 12.0;
 
 /// Below this, in metres per second, a wind is too slack to name a
-/// direction, and everything that reads the drawn wind says so together:
+/// direction, and everything drawn off the true wind says so together:
 /// the wave trains hold the heading they had (see [`settle_conditions`]),
 /// the compass takes its arm off the card, and sails carry nothing — one
 /// bar, so the card, the water and the hull never disagree about whether
-/// there is a wind. The weather itself never blows this softly — the
-/// forecast holds a light air even in its calms, see
-/// [`protocol::ToClient::Weather`] — so what the bar actually catches is
-/// the drawn wind sweeping through the middle as the ease crosses a hard
-/// veer, and a console-ordered flat calm.
+/// there is a wind. The pennant is the deliberate exception: it flies the
+/// *apparent* wind, which is a different wind, and keeps its own lower bar
+/// for hanging limp.
+///
+/// The weather itself never blows this softly — the forecast holds a light
+/// air even in its calms, see [`protocol::ToClient::Weather`] — and the
+/// drawn wind eases by turning rather than by crossing the middle, see
+/// [`veered`], so what the bar actually catches is a console-ordered flat
+/// calm and the tail of the drawn wind dying into one.
 pub(crate) const WIND_NAMED: f32 = 0.5;
 
 /// How far the wind may veer, in radians, before a wave slot is re-aimed —
@@ -765,7 +769,7 @@ pub(crate) fn settle_conditions(
 
     let follow = crate::eased(1.0 / SEA_RESPONSE, time.delta_secs());
     let fade = crate::eased(1.0 / REAIM.1, time.delta_secs());
-    conditions.wind = conditions.wind.lerp(told, follow);
+    conditions.wind = veered(conditions.wind, told, follow);
 
     // A dying wind names no bearing — see [`WIND_NAMED`]: below the bar the
     // slots hold the heading they had, and the lull is carried by the
@@ -810,6 +814,45 @@ pub(crate) fn settle_conditions(
             material.extension.waves = waves;
             material.extension.shore.z = shore_amplitude;
         }
+    }
+}
+
+/// One step of the ease that brings the drawn wind to the told one: the
+/// bearing swung round the card, the strength eased alongside it, both at
+/// `follow` — the same shape a wave slot's re-aim already has.
+///
+/// It was a plain `lerp` of the two vectors, and that is not the small
+/// difference it looks. A straight line between two nearly opposite winds
+/// passes close to the origin, so a hard veer took the drawn wind *down
+/// through the calm* on its way round: over a simulated hour, spells of
+/// seconds under [`WIND_NAMED`] with a true wind that never once dropped
+/// below a light air. Everything downstream believed it, because the drawn
+/// wind is the only wind they can see — the arm left the card, the wave
+/// trains froze their headings, and the sails, which taper to nothing under
+/// the bar, stopped the boat dead in the middle of a veer. Turning the
+/// bearing keeps the drawn strength between the two winds' own, so the floor
+/// the weather promises survives being drawn.
+fn veered(drawn: Vec2, told: Vec2, follow: f32) -> Vec2 {
+    if drawn == told {
+        // Already there, said outright: taking a vector apart into a bearing
+        // and a strength and multiplying it back together is not quite the
+        // identity in floats, and a sea with nothing to follow — a session
+        // still on the assumed day, a wind that has settled — would otherwise
+        // shuffle its last bit for as long as it ran.
+        return drawn;
+    }
+    // Neither end is guaranteed to have a bearing to offer. A told calm —
+    // only the console can order one — is a wind to die *into* rather than
+    // turn towards, so the drawn wind holds the bearing it had and simply
+    // goes out; and a drawn wind already out has nothing to swing from, so
+    // it takes the told bearing whole and grows along it.
+    match (Dir2::new_and_length(drawn), Dir2::new_and_length(told)) {
+        (Ok((from, was)), Ok((to, wants))) => {
+            from.slerp(to, follow) * (was + (wants - was) * follow)
+        }
+        (Ok((from, was)), Err(_)) => from * (was * (1.0 - follow)),
+        (Err(_), Ok((to, wants))) => to * (wants * follow),
+        (Err(_), Err(_)) => Vec2::ZERO,
     }
 }
 
@@ -1313,6 +1356,69 @@ mod tests {
             wind.distance(veered) > 1.0,
             "a later forecast landed as a snap"
         );
+    }
+
+    #[test]
+    fn a_veering_wind_never_dies_on_the_way_round() {
+        // The drawn wind is the only wind anything on screen can see, so the
+        // light-air floor the weather holds has to survive the ease. It did
+        // not while the ease was a lerp of the two vectors: told to reverse,
+        // the drawn wind went round by way of the origin, and for a few
+        // seconds in the middle the arm left the card and the sails — which
+        // taper under the bar — stopped a boat the weather was still blowing
+        // on. Reverse the wind over and over, starting from an exact
+        // about-turn, and watch every frame of it.
+        let mut app = settle_app();
+        let mut told = Vec2::new(0.0, 1.6);
+        tell(&mut app, told);
+        app.update();
+        for turn in 0..8 {
+            told = -Vec2::from_angle(turn as f32 * 0.37).rotate(told);
+            tell(&mut app, told);
+            for _ in 0..400 {
+                app.update();
+                let wind = drawn(&app).0;
+                assert!(
+                    wind.length() > WIND_NAMED,
+                    "the drawn wind fell to {} m/s crossing a veer",
+                    wind.length()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_ordered_calm_dies_without_spinning() {
+        // The console can order a flat calm, and a calm is the one wind with
+        // no bearing to turn towards: the drawn wind holds the one it had and
+        // simply goes out, which is a wind dropping rather than an instrument
+        // spinning — and no NaN heading on the way. Then a wind ordered back
+        // up has to grow out of nothing along the new bearing, the drawn wind
+        // by then having no bearing of its own worth keeping.
+        let mut app = settle_app();
+        tell(&mut app, Vec2::new(0.0, 6.0));
+        app.update();
+
+        tell(&mut app, Vec2::ZERO);
+        for _ in 0..5_000 {
+            app.update();
+            let wind = drawn(&app).0;
+            assert!(wind.is_finite(), "the calm drew {wind}");
+            assert_eq!(wind.x, 0.0, "the wind wandered off its bearing dying");
+            assert!(wind.y >= 0.0, "the wind died through the other side");
+        }
+        assert!(
+            drawn(&app).0.length() < 0.05,
+            "the ordered calm never arrived"
+        );
+
+        let back = Vec2::new(-4.0, 0.0);
+        tell(&mut app, back);
+        for _ in 0..5_000 {
+            app.update();
+        }
+        let wind = drawn(&app).0;
+        assert!(wind.distance(back) < 0.05, "the wind came back as {wind}");
     }
 
     #[test]

@@ -925,11 +925,11 @@ fn point_the_bow(
 
 /// Which way the arm lies on the card under a wind, or `None` when the wind
 /// is too slack to have a bearing at all — see [`WIND_NAMED`], the bar the
-/// water and the sails share. A wind that slack is the drawn wind easing
-/// through the middle of a veer, and its bearing on the way through is
-/// noise, so the arm holds the last bearing it had and simply fades — see
-/// [`point_the_arm`] — which reads as the wind dropping rather than as the
-/// instrument spinning.
+/// water and the sails share. The weather never blows that softly; a wind
+/// that slack is one the console ordered, and what is left of it as it dies
+/// has a bearing made of noise. So the arm holds the last bearing it had and
+/// simply fades — see [`point_the_arm`] — which reads as the wind dropping
+/// rather than as the instrument spinning.
 ///
 /// The card's own up is north, so the arm's angle is the wind's bearing:
 /// clockwise from north, the way a bearing is always taken, and the way
