@@ -580,7 +580,12 @@ pub enum ToClient {
     },
     /// What the weather is doing: the wind over the whole world, as a
     /// velocity — direction and metres per second in one vector, so there is
-    /// no bearing convention to agree on and a calm is simply a short one.
+    /// no bearing convention to agree on. The world's weather never goes
+    /// truly slack: its calms are light airs, so the wind always names a
+    /// bearing and always drives a sail. The format still allows any vector,
+    /// and a client handed one too short to name a bearing — a commanded
+    /// sky, say — should read it as air that drives nothing and draws
+    /// nothing, not as licence to sail any heading.
     ///
     /// Sent once directly after [`ToClient::Welcome`], and again to everyone
     /// whenever it has changed enough to matter. The server is the one

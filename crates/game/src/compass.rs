@@ -86,7 +86,7 @@ use protocol::ground::{CHUNK_METRES, NORTH};
 use crate::camera::{MapCamera, PITCH};
 use crate::chart::{Chart, READERS_MARK};
 use crate::player::PlayerPlace;
-use crate::sea::SeaConditions;
+use crate::sea::{SeaConditions, WIND_NAMED};
 use crate::terrain::Ground;
 use crate::AppState;
 
@@ -150,15 +150,6 @@ const BOW_TEXELS: u32 = 112;
 /// size — past a fresh breeze the sea itself is saying the rest, though the
 /// pace, which costs the card nothing, keeps counting: see [`DRIFT`].
 const FULL_WIND: f32 = 10.0;
-
-/// Below this, in metres per second, there is no wind worth naming and the
-/// stream goes off the card. A dying wind's bearing is noise — the weather's
-/// calms are its walk passing the origin, where the direction swings freely —
-/// so the stream holds the last bearing it had and simply fades, which reads
-/// as the wind dropping rather than as the instrument spinning. Half a metre
-/// a second, the speed the sea stops re-aiming its waves at, so the card and
-/// the water call a calm at the same moment.
-const CALM: f32 = 0.5;
 
 /// How far either side of the middle the stream runs, in pixels. Its ends
 /// stop short of the letters — the stream is a reading laid over the rose,
@@ -1000,7 +991,12 @@ fn point_the_bow(
 }
 
 /// Which way the stream lies on the card under a wind, or `None` when the
-/// wind is too slack to have a bearing at all — see [`CALM`].
+/// wind is too slack to have a bearing at all — see [`WIND_NAMED`], the bar
+/// the water and the sails share. The weather never blows that softly; a
+/// wind that slack is one the console ordered, and what is left of it as it
+/// dies has a bearing made of noise. So the stream holds the last bearing it
+/// had and simply fades — see [`drive_the_stream`] — which reads as the wind
+/// dropping rather than as the instrument spinning.
 ///
 /// The card's own up is north, so the stream's angle is the wind's bearing:
 /// clockwise from north, the way a bearing is always taken, and the way
@@ -1013,7 +1009,7 @@ fn point_the_bow(
 /// time they were looked at, and they have to be read at a glance, over a
 /// pennant and a sea that are both unarguably going the other way.
 fn wind_bearing(wind: Vec2) -> Option<Rot2> {
-    if wind.length() < CALM {
+    if wind.length() < WIND_NAMED {
         return None;
     }
     let east = Vec2::new(-NORTH.y, NORTH.x);
@@ -1032,7 +1028,7 @@ fn wind_bearing(wind: Vec2) -> Option<Rot2> {
 /// the machinery showing through.
 fn wind_ink(speed: f32) -> f32 {
     let hard = (speed / FULL_WIND).clamp(0.0, 1.0);
-    (0.45 + 0.55 * hard) * (speed / CALM).clamp(0.0, 1.0)
+    (0.45 + 0.55 * hard) * (speed / WIND_NAMED).clamp(0.0, 1.0)
 }
 
 /// Where one chevron lies along the track, in pixels from the middle of the
@@ -1357,7 +1353,7 @@ mod tests {
         // rotation it had and the ink goes to nothing.
         assert!(wind_bearing(Vec2::new(0.2, -0.1)).is_none());
         assert_eq!(wind_ink(0.0), 0.0);
-        assert!(wind_ink(CALM / 2.0) < wind_ink(CALM));
+        assert!(wind_ink(WIND_NAMED / 2.0) < wind_ink(WIND_NAMED));
     }
 
     /// The glyph the bow is rasterised from: solid where the chart draws ink
