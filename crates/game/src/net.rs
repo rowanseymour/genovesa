@@ -453,9 +453,10 @@ impl Reach {
 /// the screen asks after it once a frame.
 #[derive(Resource)]
 pub struct Dialing {
-    /// Behind a mutex only because a Bevy resource must be `Sync`; nothing but
-    /// [`Dialing::outcome`] locks it.
-    outcome: Mutex<Receiver<Result<Session, String>>>,
+    /// The channel until the dial has answered on it, and `None` from then
+    /// on — see [`Dialing::outcome`], which is the only thing that touches it.
+    /// (The mutex is only because a Bevy resource must be `Sync`.)
+    outcome: Mutex<Option<Receiver<Result<Session, String>>>>,
     /// What is being dialled, for the one thing that has to name it: a dial
     /// whose thread died says so, and "dialling came to nothing" would leave
     /// the player nothing to check. The screens write their own waiting line
@@ -493,25 +494,37 @@ impl Dialing {
             let _ = outcome.send(dial());
         });
         Self {
-            outcome: Mutex::new(waiting),
+            outcome: Mutex::new(Some(waiting)),
             what,
         }
     }
 
-    /// What came of it, or `None` while it is still ringing. Answers once:
-    /// whoever takes the outcome owns the session, so a screen asks until it
-    /// gets something and then drops this resource.
+    /// What came of it, or `None` while it is still ringing — and `None` ever
+    /// after, once it has answered: whoever takes the outcome owns the
+    /// session, so a screen asks until it gets something and then drops this
+    /// resource.
     pub fn outcome(&self) -> Option<Result<Session, String>> {
-        match self.outcome.lock().expect("no poisoned lock").try_recv() {
-            Ok(outcome) => Some(outcome),
-            Err(TryRecvError::Empty) => None,
+        let mut waiting = self.outcome.lock().expect("no poisoned lock");
+        let outcome = match waiting.as_ref()?.try_recv() {
+            Ok(outcome) => outcome,
+            Err(TryRecvError::Empty) => return None,
             // The thread sends whatever the dial came to, success or failure,
             // so a channel that closed without one is a thread that died —
             // this crate's bug, but a screen that says so can still be left.
             Err(TryRecvError::Disconnected) => {
-                Some(Err(format!("dialling {} came to nothing", self.what)))
+                Err(format!("dialling {} came to nothing", self.what))
             }
-        }
+        };
+        // Letting go of the channel is what makes the answer final, and it has
+        // to be done here rather than left to the caller's dropping the
+        // resource. A channel kept past its answer has no way to tell the
+        // thread's ordinary end from its death: the dial thread drops its
+        // sender when it ends, which is *after* the send, so a second ask read
+        // an answered dial as nothing at all for as long as that took and as a
+        // thread that died with nothing to say from then on. Neither is true,
+        // and which one came back depended on how the threads were scheduled.
+        *waiting = None;
+        Some(outcome)
     }
 }
 
@@ -1265,11 +1278,13 @@ mod tests {
 
     #[test]
     fn a_dial_answers_once() {
+        // An outcome is taken, not read: a second answer would be a second
+        // session for one dial, or a failure reported twice over.
         let dialing = Dialing::to("127.0.0.1:1");
         settle(&dialing).err().expect("nobody home");
         assert!(
-            dialing.outcome().is_some_and(|outcome| outcome.is_err()),
-            "a dial already given up should not report success"
+            dialing.outcome().is_none(),
+            "a dial that has answered answered again"
         );
     }
 
