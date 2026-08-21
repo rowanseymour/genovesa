@@ -476,8 +476,10 @@ type Vessels<'w, 's> = Query<
 /// with the ship's sails as the player left them, making sail being a
 /// deliberate act rather than a side effect of stepping aboard.
 ///
-/// Every crossing asks the hull the player is leaving to be at rest first:
-/// nobody steps off a deck making way.
+/// Every crossing asks the hull the player is leaving to be at rest first —
+/// nobody steps off a deck making way — though "at rest" is settled by
+/// [`Boat::settles_for_crossing`], which forgives the last imperceptible
+/// centimetres a second of a glide rather than refusing in silence.
 #[allow(clippy::too_many_arguments)]
 fn embark_or_land(
     keys: Res<ButtonInput<KeyCode>>,
@@ -508,7 +510,7 @@ fn embark_or_land(
             let Some(mut hull) = sailing else {
                 return;
             };
-            if !hull.at_rest() {
+            if !hull.settles_for_crossing() {
                 return;
             }
 

@@ -409,6 +409,17 @@ const KEEL_PROBES: usize = 4;
 /// rest should be *at rest*: the same spot every frame, nothing moving.
 const WAY_STOPPED: f32 = 0.02;
 
+/// Way below this, the gunwale key treats the hull as stopped: the way is
+/// snapped to zero and the crossing goes ahead. [`WAY_STOPPED`] is where the
+/// glide's own tail snaps, and it is deliberately tiny — but tiny means the
+/// tail takes seconds to reach it, and a furled boat that *reads* as stopped
+/// refused a crossing for way nobody can see is a key that just does nothing.
+/// That was found the hard way: "F is broken" reported at a helm whose glide
+/// had a few imperceptible centimetres a second left to run. Half a metre a
+/// second is a stroll — nobody stepping across a gunwale at it is stepping
+/// off a moving deck.
+const CROSSING_WAY: f32 = 0.5;
+
 /// Within this of the heel the turn is asking for, the hull snaps to it
 /// exactly — the same tail-closing that [`WAY_STOPPED`] does for the way,
 /// and for the same reason: the ease only ever halves the remainder, and a
@@ -694,10 +705,25 @@ impl Boat {
     /// Whether the hull has no way on at all. Exact equality is meaningful
     /// here because [`steer`] snaps the tail of every glide to precisely
     /// zero — see [`WAY_STOPPED`] — so a hull is either making way or it is
-    /// this. What going ashore asks before it lets anybody step off a moving
-    /// deck.
+    /// this. Going ashore asks the forgiving form, [`settles_for_crossing`].
+    ///
+    /// [`settles_for_crossing`]: Boat::settles_for_crossing
     pub fn at_rest(&self) -> bool {
         self.way == 0.0
+    }
+
+    /// Whether the hull is stopped for the purpose of stepping across its
+    /// gunwale — and if it very nearly was, it now is: way under
+    /// [`CROSSING_WAY`] is snapped to zero rather than left to run its glide
+    /// out. The strict version of this gate refused crossings for way nobody
+    /// could see, for the several seconds the glide's tail takes to reach
+    /// [`WAY_STOPPED`] on its own — which read as the key being broken, not
+    /// as a boat being underway.
+    pub fn settles_for_crossing(&mut self) -> bool {
+        if self.way.abs() <= CROSSING_WAY {
+            self.way = 0.0;
+        }
+        self.at_rest()
     }
 
     /// Where somebody aboard stands, in the hull's own frame — see
