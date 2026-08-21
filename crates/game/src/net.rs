@@ -1429,17 +1429,14 @@ mod tests {
     }
 
     #[test]
-    fn a_put_down_moves_the_hull_a_player_is_still_standing_on() {
-        // The two answers to "what carries the player" can disagree, and this
-        // is the one direction they can: `Fleet::told`'s out-of-order defence
-        // gives a helm back without taking the player off the deck they are
-        // standing on, so the fleet's book says this client steers nothing
-        // while the scene graph still says the player is a hull's child. A
-        // put down that trusted the book would have no carrier but the
-        // player, and would write a world coordinate into a *child-local*
-        // transform — the player kilometres off the hull the eye is still
-        // following, and `Unsettled` for good, a walker with a parent being
-        // one `find_footing` never looks at.
+    fn a_helm_taken_out_of_order_stands_the_player_off_the_deck() {
+        // The out-of-order defence in `Fleet::told`: a telling says the hull
+        // we hold the helm of is nobody's, arriving in an order this
+        // client's own disembark would never have made. The helm goes back
+        // to its moorings — and the player has to come off the deck with it.
+        // Left aboard, they would be a passenger on somebody else's boat:
+        // the hull is moored on that same telling's word and `moor` eases it
+        // there, carrying anything parented to it along.
         let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
         let connection = Connection::join(&addr).expect("join");
         let server = socket.recv().expect("the fake server keeps its socket");
@@ -1456,81 +1453,73 @@ mod tests {
         seated(Some(PlayerId(1)))
             .write(&mut &server)
             .expect("the seating");
-        run_until(&mut app, "the helm is taken", |app| {
-            app.world().resource::<crate::boat::Fleet>().helmed == Some(BoatId(4))
+        run_until(&mut app, "the player is aboard", |app| {
+            app.world_mut()
+                .query_filtered::<&ChildOf, With<crate::player::Player>>()
+                .single(app.world())
+                .is_ok()
         });
 
         // And now the helm is nobody's, said out of the order the client's
         // own disembark would have made it in.
         seated(None).write(&mut &server).expect("the hand back");
-        run_until(&mut app, "the helm is given back", |app| {
+        run_until(&mut app, "the player is off the deck", |app| {
+            app.world_mut()
+                .query_filtered::<&ChildOf, With<crate::player::Player>>()
+                .single(app.world())
+                .is_err()
+        });
+        assert!(
             app.world()
                 .resource::<crate::boat::Fleet>()
                 .helmed
-                .is_none()
-        });
-        let standing = app
+                .is_none(),
+            "the helm was not given back"
+        );
+
+        let (standing, unsettled, kept) = app
             .world_mut()
-            .query_filtered::<&Transform, With<crate::player::Player>>()
+            .query_filtered::<(
+                &Transform,
+                Has<crate::player::Unsettled>,
+                Has<DespawnOnExit<crate::AppState>>,
+            ), With<crate::player::Player>>()
             .single(app.world())
-            .copied()
+            .map(|(place, unsettled, kept)| (*place, unsettled, kept))
             .expect("the player");
+        assert!(
+            standing.translation.xz().distance(ashore) < 1.0,
+            "the player was left at {} rather than where the hull lay",
+            standing.translation.xz()
+        );
+        assert_eq!(
+            standing.translation.y, 0.0,
+            "the player kept a height that was the deck's to hold"
+        );
+        assert!(
+            unsettled,
+            "the player was left standing at sea level with no ground to find"
+        );
+        assert!(
+            kept,
+            "the player came off the deck without the despawn the hierarchy \
+             was holding for them"
+        );
+
+        // The hull is the fleet's to moor now, and goes on being eased
+        // towards wherever it is told — with nobody aboard it.
+        run_until(&mut app, "the hull is moored", |app| {
+            app.world_mut()
+                .query_filtered::<&Transform, With<crate::boat::HullId>>()
+                .single(app.world())
+                .is_ok()
+        });
         assert!(
             app.world_mut()
                 .query_filtered::<&ChildOf, With<crate::player::Player>>()
                 .single(app.world())
-                .is_ok(),
-            "the premise is gone: the hand back took the player off the deck"
-        );
-
-        let away = Vec2::new(5_000.0, -5_000.0);
-        (ToClient::PutDown {
-            position: away,
-            heading: None,
-        })
-        .write(&mut &server)
-        .expect("put down");
-        // Waited out on either of them having moved, so that a put down
-        // which went to the wrong one fails on what it did rather than on a
-        // timeout that says only that nothing happened.
-        run_until(&mut app, "somebody is put down", |app| {
-            let hull = app
-                .world_mut()
-                .query_filtered::<&Transform, With<crate::boat::HullId>>()
-                .single(app.world())
-                .is_ok_and(|place| place.translation.xz().distance(away) < 1.0);
-            let rider = app
-                .world_mut()
-                .query_filtered::<&Transform, With<crate::player::Player>>()
-                .single(app.world())
-                .is_ok_and(|place| place.translation.xz().distance(away) < 1.0);
-            hull || rider
-        });
-
-        let (rider, unsettled) = app
-            .world_mut()
-            .query_filtered::<(&Transform, Has<crate::player::Unsettled>), With<crate::player::Player>>()
-            .single(app.world())
-            .map(|(place, unsettled)| (*place, unsettled))
-            .expect("the player");
-        assert_eq!(
-            rider.translation, standing.translation,
-            "a world coordinate was written into the player's own transform, \
-             which is the hull's frame and not the world's"
-        );
-        assert!(
-            !unsettled,
-            "a player on a deck was left owing the ground a footing they can never find"
-        );
-        let lying = app
-            .world_mut()
-            .query_filtered::<&Transform, With<crate::boat::HullId>>()
-            .single(app.world())
-            .expect("the hull");
-        assert!(
-            lying.translation.xz().distance(away) < 1.0,
-            "the hull carrying the player was left at {}",
-            lying.translation.xz()
+                .is_err(),
+            "the player was put back aboard a hull that is not theirs"
         );
     }
 
