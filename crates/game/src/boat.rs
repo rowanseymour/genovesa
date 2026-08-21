@@ -1019,6 +1019,30 @@ impl Fleet {
             // the scene here would be overwritten in the same command queue,
             // the same frame, by the better of the two moorings.
             self.hand_back(commands, hull, None);
+            // And the player off the deck with them. The hull is moored on
+            // the telling's own word at the bottom of this function and
+            // eased there by [`moor`], so a player left parented to it would
+            // go along — drifting about aboard a boat that has stopped being
+            // theirs. Not folded into [`Fleet::hand_back`] itself, whose
+            // other callers must leave the player where they stand: the
+            // grant below hands one helm back in order to take another, and
+            // the player is stepping straight onto the next deck; stepping
+            // ashore in [`crate::player::embark_or_land`] has already set
+            // them down on the beach itself before it calls in, and would
+            // only have that undone.
+            //
+            // Where the hull stands in the scene is the answer to prefer,
+            // that being where the player can be seen to be standing, so
+            // standing them there is no move at all. A hull the top of this
+            // function spawned has no pose there yet — the spawn is a queued
+            // command — and then the telling's own word for where it lies is
+            // exactly as good, being what that hull is about to be moored
+            // on anyway.
+            let lying = poses.get(hull).copied().unwrap_or_else(|_| {
+                Transform::from_xyz(position.x, 0.0, position.y)
+                    .with_rotation(Quat::from_rotation_y(heading))
+            });
+            stand_off(commands, players, &lying);
         }
 
         match occupant {
@@ -1081,9 +1105,10 @@ impl Fleet {
     /// question as the scene graph's and must not be mistaken for it. This
     /// one is written the instant a telling is read; the parentage that goes
     /// with it is a queued command, so within one drain of the wire this is
-    /// the fresher of the two. It is also the one that can go quiet while the
-    /// player is still standing on a deck — see the out-of-order defence in
-    /// [`Fleet::told`] — so it is a fallback rather than an authority.
+    /// the fresher of the two. Fresher is not the same as authoritative: the
+    /// eye and the position reports follow the parentage, so the parentage is
+    /// what a teleport has to move, and this is the answer to reach for only
+    /// where the scene graph has none yet.
     /// [`crate::player::put_down`] is where the two are put in their order.
     pub fn hull(&self) -> Option<Entity> {
         self.helmed.and_then(|held| self.hulls.get(&held)).copied()
@@ -1092,12 +1117,10 @@ impl Fleet {
     /// A boat is out of the world — a tender hoisted back aboard a ship, or
     /// one its keeper left behind and the world took back. The hull
     /// despawns; a player the fleet still believed aboard it — a seating
-    /// telling lost or out of order — is stood on the water where the hull
-    /// was and left [`crate::player::Unsettled`] to find the ground, exactly
-    /// as `net::enter_afoot` puts down a player who enters on their own
-    /// feet. Their pose was the hull's to hold, so leaving them with it
-    /// would drop them at the world origin. Ordinarily nobody is: the wire
-    /// says who is seated where before it says a hull is gone.
+    /// telling lost or out of order — is [`stand_off`]'s to put somewhere
+    /// coherent, their pose having been the hull's to hold. Ordinarily
+    /// nobody is: the wire says who is seated where before it says a hull is
+    /// gone.
     ///
     /// Judged by the fleet's own book rather than the scene graph, whose
     /// parentage from a grant earlier this same frame is still a queued
@@ -1114,29 +1137,82 @@ impl Fleet {
         };
         self.crews.remove(&id);
         if self.helmed.take_if(|held| *held == id).is_some() {
-            if let Ok((player, _)) = players.single() {
-                let mut player = commands.entity(player);
-                player
-                    .remove::<ChildOf>()
-                    .insert(DespawnOnExit(AppState::InWorld));
-                if let Ok(pose) = poses.get(hull) {
-                    // The hull's place, and the way it was pointing — its
-                    // yaw alone, a heeling boat being no reason to stand
-                    // somebody at an angle. Sea level to start with, like
-                    // any other entry afoot: the ground is what settles it.
-                    let at = pose.translation;
-                    let forward = pose.forward();
-                    player.insert((
-                        Transform::from_xyz(at.x, 0.0, at.z).with_rotation(Quat::from_rotation_y(
-                            f32::atan2(-forward.x, -forward.z),
-                        )),
-                        crate::player::Unsettled,
-                    ));
-                }
-            }
+            // Where the hull stands, if the scene has it standing anywhere,
+            // and the world origin if not. Unlike [`Fleet::told`] there is
+            // no second-best worth the name: `BoatGone` carries an id and
+            // nothing else, so the last place the wire spoke of this hull is
+            // not in hand here, and the one case where the scene comes up
+            // empty is a hull spawned in this same drain — one nobody has
+            // ever seen, whose last told pose would be a guess at a boat the
+            // player never boarded. The origin is a poor place to leave
+            // somebody and is chosen anyway, because what goes with it is
+            // [`crate::player::Unsettled`]: the ground claims them as soon
+            // as a chunk arrives and they walk on from wherever that leaves
+            // them, where standing them nowhere at all would strand them
+            // with a deck-local offset and nothing to lift them out of it.
+            // Recoverably wrong beats quietly stuck.
+            let lying = poses.get(hull).copied().unwrap_or_default();
+            stand_off(commands, players, &lying);
         }
         commands.entity(hull).despawn();
     }
+}
+
+/// Takes the player off a deck that has stopped being theirs and stands them
+/// on the water where the hull lies, left [`crate::player::Unsettled`] to
+/// find the ground once it arrives — exactly as `net::enter_afoot` puts down
+/// a player who enters on their own feet. The `DespawnOnExit` they gave up at
+/// the gunwale comes back with them, there being no hierarchy left to take
+/// them down with it.
+///
+/// The hull's place rather than their own, because theirs is a child-local
+/// one and means nothing once the parentage is gone: left with it they would
+/// be dropped at the world origin. Its yaw alone, a heeling boat being no
+/// reason to stand somebody at an angle, and at sea level like any other
+/// arrival afoot.
+///
+/// Where the hull lies is `lying`, and the caller's to resolve rather than
+/// this function's to look up, because the lookup can fail and failing it
+/// quietly is worse than any answer. A hull spawned earlier in this same
+/// drain is still a queued command and stands nowhere in the scene yet; a
+/// player unparented on the strength of that and left with neither a world
+/// transform nor [`crate::player::Unsettled`] keeps their deck-local offset
+/// as though it were a map coordinate and has nothing to tell
+/// `player::find_footing` they are owed ground — stranded a few metres from
+/// the origin, and stranded there for good. So the caller reaches for the
+/// scene first, where the player can be seen to be standing, and names its
+/// own second-best; whatever it names, the two components that make the
+/// leaving coherent always go together.
+///
+/// Both callers reach here off the fleet's own book rather than the scene
+/// graph — see [`Fleet::hull`] — but the player is found by their component,
+/// which no telling this drain can have queued away.
+fn stand_off(commands: &mut Commands, players: &crate::player::Players, lying: &Transform) {
+    let Ok((player, _)) = players.single() else {
+        // Nobody to take off any deck — which is the ordinary case outside a
+        // match, and one real gap besides. Entry aboard is a player who has
+        // never stood anywhere: [`Fleet::told`]'s grant branch spawns them
+        // *as the hull's child*, and that spawn is a queued command like any
+        // other. A telling that takes the same helm away later in the same
+        // drain arrives before the spawn has run, finds no player here, and
+        // leaves the one about to exist parented to a hull the wire has
+        // stopped calling ours — the very state this function was written to
+        // abolish. Closing it means spawning the entry-aboard player
+        // unparented and letting the same command queue add the parentage,
+        // so that there is always an entity for a later telling to find;
+        // left alone because that is a wider change to the entry path than a
+        // doubly-rare interleaving has earned, and written down so that
+        // whoever decides it has earned it knows where to begin.
+        return;
+    };
+    let at = lying.translation;
+    let forward = lying.forward();
+    commands.entity(player).remove::<ChildOf>().insert((
+        Transform::from_xyz(at.x, 0.0, at.z)
+            .with_rotation(Quat::from_rotation_y(f32::atan2(-forward.x, -forward.z))),
+        crate::player::Unsettled,
+        DespawnOnExit(AppState::InWorld),
+    ));
 }
 
 /// What spawning a hull needs in hand — bundled because the telling arrives

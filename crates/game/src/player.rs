@@ -229,19 +229,26 @@ impl PlayerPlace<'_, '_> {
 /// The carrier is [`carrier_of`]'s, which is the whole point: the eye follows
 /// that entity and the position reports are taken off it, so anything else
 /// moved here would be a jump the camera never made and the server never
-/// heard about. The fleet's book comes into it only where the scene graph
-/// cannot answer yet — the telling that seated this player at a helm may have
-/// arrived in the same drain as this one, and the parentage it asked for is
-/// still a queued command, the same case [`Fleet::gone`] reads its own book
-/// for. The two are consulted in that order and never the other way round,
-/// because the direction they can disagree in is the book going quiet while
-/// the parentage stands: [`Fleet::told`]'s out-of-order defence hands a helm
-/// back without taking the player off the deck they are standing on, and a
-/// carrier read out of the book there would be no carrier at all — a world
-/// coordinate written into a *child-local* transform, leaving the player as
-/// far off the hull the camera is still following as the jump was long, and
-/// [`Unsettled`] with it, which [`find_footing`] will not clear for anything
-/// with a parent.
+/// heard about. The scene graph is asked first for that reason and no other —
+/// it is what every system resolving a carrier reads — and the fleet's book
+/// only where the scene graph has no answer yet: the telling that seated this
+/// player at a helm may have arrived in the same drain as this one, and the
+/// parentage it asked for is still a queued command, the same case
+/// [`Fleet::gone`] reads its own book for.
+///
+/// One direction, and never the other — with one window where the parentage
+/// the scene graph answers with is stale, named here rather than denied. A
+/// telling that takes our helm away does take the player off the deck in the
+/// same breath — see [`Fleet::told`]'s out-of-order defence — but the taking
+/// off is a queued command where the book's line through it is written the
+/// instant the telling is read, so until the next sync point the scene graph
+/// still says the player is a hull's child. A put down landing inside that
+/// window moves the hull, and the hull is one the wire has just stopped
+/// calling ours. Left standing on purpose: closing it means changing which of
+/// the two is asked first, which is an argument about carriers in general and
+/// not about this window, and would want its own reasons and its own test.
+/// Set down all the same, because a window nobody has named is one the next
+/// change walks into.
 ///
 /// Moved by a command rather than through a transform of its own for the
 /// queued-parentage case again: what the queue guarantees is order, so a
