@@ -3598,7 +3598,7 @@ fn goto_takes_a_player_to_a_place_in_whatever_can_be_there() {
     client.caught_up();
     let afloat = Vec2::new(anchorage.x, anchorage.y);
     client.say(ToServer::Command {
-        line: format!("goto {},{}", afloat.x, afloat.y),
+        line: format!("goto {} {}", afloat.x, afloat.y),
     });
     let (told, kind, at, _heading, occupant) = client.hear_a_boat_kinded();
     assert_eq!(

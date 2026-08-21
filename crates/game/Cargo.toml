@@ -21,7 +21,6 @@ protocol = { path = "../protocol" }
 # is behind the server, not beside the client.
 server = { path = "../server" }
 # The two-part options the command line takes, shared with `mapgen`.
-args = { path = "../args" }
 # `system_font_discovery` puts the machine's own fonts in reach of a
 # `FontSource::Family` or a generic one like `FontSource::Serif`, which is what
 # the menu's title is set in. Without it Bevy has only the face compiled into

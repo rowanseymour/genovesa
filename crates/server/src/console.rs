@@ -255,17 +255,9 @@ fn goto(shared: &Shared, from: PlayerId, args: &[&str]) -> Served {
     }
 }
 
-/// A place, as two numbers: `goto 480 -1200`, and `goto 480,-1200` for the
-/// same place, the comma being how the game's own debug socket writes a
-/// point at its `focus` verb. Nobody should have to remember which of the
-/// two consoles they are typing into.
+/// A place, as two numbers: `goto 480 -1200`.
 fn point(args: &[&str]) -> Option<Vec2> {
-    let words: Vec<&str> = args
-        .iter()
-        .flat_map(|arg| arg.split(','))
-        .filter(|word| !word.is_empty())
-        .collect();
-    match words.as_slice() {
+    match args {
         [x, z] => Some(Vec2::new(x.parse().ok()?, z.parse().ok()?)),
         _ => None,
     }
@@ -634,16 +626,13 @@ mod tests {
     }
 
     #[test]
-    fn a_place_is_two_numbers_however_it_is_written() {
-        // The console's own spacing, and the game socket's comma — `focus
-        // 98,-317` and `goto 98,-317` name the same point, so nobody has to
-        // remember which console they are typing into.
+    fn a_place_is_two_numbers() {
         let there = Vec2::new(98.0, -317.0);
         assert_eq!(point(&["98", "-317"]), Some(there));
-        assert_eq!(point(&["98,-317"]), Some(there));
-        assert_eq!(point(&["98,", "-317"]), Some(there));
         assert_eq!(point(&["98.5", "-317.25"]), Some(Vec2::new(98.5, -317.25)));
-        // And nothing else is a place.
+        // And nothing else is a place. The comma form went with the socket's
+        // `focus`, which is what it was ever written for.
+        assert_eq!(point(&["98,-317"]), None);
         assert_eq!(point(&[]), None);
         assert_eq!(point(&["98"]), None);
         assert_eq!(point(&["98", "-317", "12"]), None);

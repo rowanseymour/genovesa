@@ -658,7 +658,7 @@ mod tests {
         let mut app = test_app_on_terrain();
         place_player(&mut app, Vec3::ZERO, DEFAULT_DISTANCE, YAW);
 
-        // A jump — a console `goto`, a socket `focus` — moves the carrier
+        // A jump — the console's `goto` — moves the carrier
         // outright, and the eye is on it the same frame rather than sliding
         // there over the next few seconds. It matters beyond the look of it:
         // ground is streamed around the focus, so an eased crossing orders

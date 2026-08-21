@@ -16,11 +16,16 @@
 //!
 //! Everything that wants "where the player is" — the camera, the position
 //! reports, the wildlife deciding whether to mind them — asks [`PlayerPlace`],
-//! and the socket's `focus` asks [`PlayerSweep`]. Both resolve through the
-//! *carrier*: the vehicle the player is aboard, or the player themself on
-//! their own feet. Those systems neither know nor care which it is, and that
-//! is the point: the rowboat changes what the player boards and nothing
-//! about what follows them.
+//! which resolves through the *carrier*: the vehicle the player is aboard, or
+//! the player themself on their own feet. Those systems neither know nor care
+//! which it is, and that is the point: the rowboat changes what the player
+//! boards and nothing about what follows them.
+//!
+//! Moving the player is not among them. That is the world's to do — the
+//! server's `goto`, arriving as [`protocol::ToClient::PutDown`] and landing
+//! in [`put_down`] — and this machine has no business putting itself
+//! anywhere: a hull set down here rather than there could be on a hillside,
+//! which the game itself never does.
 //!
 //! Reading and writing are two params rather than one because Bevy will not
 //! let a system hold `&Transform` and `&mut Transform` at once, and the sweep
@@ -307,28 +312,6 @@ pub fn put_down(
             .entity(carrier)
             .entry::<Boat>()
             .and_modify(|mut boat| *boat = Boat::of(boat.kind()));
-    }
-}
-
-/// The player as a thing the socket's `focus` can move.
-#[derive(SystemParam)]
-pub struct PlayerSweep<'w, 's> {
-    players: Players<'w, 's>,
-    carriers: Query<'w, 's, &'static mut Transform>,
-}
-
-impl PlayerSweep<'_, '_> {
-    /// Moves whatever carries the player — vehicle and rider whole — to a map
-    /// point, leaving the height stale for `float` to settle. Does nothing
-    /// with no player in the world, which is every picture of a menu.
-    pub fn teleport(&mut self, to: Vec2) {
-        let Some(mut place) =
-            carrier_of(&self.players).and_then(|carrier| self.carriers.get_mut(carrier).ok())
-        else {
-            return;
-        };
-        place.translation.x = to.x;
-        place.translation.z = to.y;
     }
 }
 
@@ -1943,30 +1926,5 @@ mod tests {
         let mut world = World::new();
         assert_eq!(place_in(&mut world, |p| p.carrier()), None);
         assert_eq!(place_in(&mut world, |p| p.at()), None);
-    }
-
-    #[test]
-    fn a_sweep_teleports_the_vehicle_and_takes_the_rider_along() {
-        let mut world = World::new();
-        let vehicle = world.spawn(Transform::from_xyz(1.0, 3.0, 2.0)).id();
-        let player = world
-            .spawn((Player, Transform::default(), ChildOf(vehicle)))
-            .id();
-
-        let mut state = SystemState::<PlayerSweep>::new(&mut world);
-        state
-            .get_mut(&mut world)
-            .expect("a query param is always valid")
-            .teleport(Vec2::new(-40.0, 80.0));
-        state.apply(&mut world);
-
-        // The carrier moved on the map and kept its stale height, and the
-        // rider was not lifted out of the boat to do it.
-        let moved = *world.entity(vehicle).get::<Transform>().expect("vehicle");
-        assert_eq!(moved.translation, Vec3::new(-40.0, 3.0, 80.0));
-        assert_eq!(
-            world.entity(player).get::<Transform>().expect("player"),
-            &Transform::default()
-        );
     }
 }

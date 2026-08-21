@@ -864,6 +864,13 @@ fn receive(
                         position,
                         heading,
                     );
+                    // A driver waiting on the line that caused this is not
+                    // waiting for the server's word but for the ground where
+                    // the player now is — see
+                    // [`crate::control::Control::put_down`].
+                    if let Some(control) = told.control.as_mut() {
+                        control.put_down();
+                    }
                 }
             }
             ToClient::Cairn {
