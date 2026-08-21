@@ -112,6 +112,14 @@ pub struct Toggles {
     /// the far edge of the shadows sits in plain sight is where the answer
     /// is.
     pub reach: f32,
+    /// `set resolution` — how tall a picture `shot` writes is, in rows off
+    /// [`crate::settings::LADDER`]; the width follows from
+    /// [`crate::settings::WIDESCREEN`], there being no display to take a
+    /// shape from. `None` in a run that has a window, where a picture is the
+    /// window's own size and there is nothing here to choose — which is why
+    /// it is an `Option` rather than a number a windowed run would carry and
+    /// never read.
+    pub resolution: Option<u32>,
 }
 
 impl Default for Toggles {
@@ -122,6 +130,10 @@ impl Default for Toggles {
             haze: true,
             wireframe: false,
             reach: crate::HAZE_END,
+            // A window until [`crate::control::ControlPlugin`] says
+            // otherwise, that being the only thing in the game that knows
+            // whether this run has one.
+            resolution: None,
         }
     }
 }
@@ -166,10 +178,12 @@ pub const SWITCHES: [Switch; 4] = [
     },
 ];
 
-/// The one variable that is not a switch — metres rather than on and off, so
-/// it is a special case wherever the switches are walked rather than a row
-/// that would have to carry a second kind of value.
+/// The two variables that are not switches — metres, and rows of pixels,
+/// rather than on and off — so each is a special case wherever the switches
+/// are walked rather than a row that would have to carry a second kind of
+/// value.
 pub const REACH: &str = "reach";
+pub const RESOLUTION: &str = "resolution";
 
 impl Toggles {
     /// The boolean switch a name asks for, or `None` where the name is not
@@ -1024,6 +1038,9 @@ mod tests {
             haze: false,
             wireframe: true,
             reach: 225.0,
+            // Not a doctoring of the picture but the size of it, which a
+            // picture cannot hide, so the line never mentions it.
+            resolution: Some(1080),
         };
         assert_eq!(
             all.line().as_deref(),

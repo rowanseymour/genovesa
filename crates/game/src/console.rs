@@ -36,7 +36,7 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::debug::{Toggles, BACKDROP, REACH, SWITCHES, TEXT};
+use crate::debug::{Toggles, BACKDROP, REACH, RESOLUTION, SWITCHES, TEXT};
 use crate::net::Online;
 use crate::Helm;
 
@@ -248,7 +248,7 @@ fn variables() -> Vec<&'static str> {
     SWITCHES
         .iter()
         .map(|switch| switch.name)
-        .chain([REACH])
+        .chain([REACH, RESOLUTION])
         .collect()
 }
 
@@ -282,6 +282,7 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
         }
         [var] => read(var, toggles).unwrap_or_else(|| no_such(var)),
         [var, value] if *var == REACH => reach(value, &mut toggles.reach),
+        [var, value] if *var == RESOLUTION => resolution(value, &mut toggles.resolution),
         [var, value] => match toggles.switch(var) {
             Some(state) => switch(var, value, state),
             None => no_such(var),
@@ -296,6 +297,12 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
 fn read(var: &str, toggles: &mut Toggles) -> Option<String> {
     if var == REACH {
         return Some(format!("{REACH} {:.0}m", toggles.reach));
+    }
+    if var == RESOLUTION {
+        return Some(match toggles.resolution {
+            Some(rows) => format!("{RESOLUTION} {rows}p"),
+            None => format!("{RESOLUTION} the window's own"),
+        });
     }
     toggles.switch(var).map(|on| onoff(var, *on))
 }
@@ -342,6 +349,33 @@ fn reach(value: &str, state: &mut f32) -> String {
             format!("reach {metres:.0}m")
         }
         None => "`reach` is metres — `set reach 450`, or `set reach default`".to_string(),
+    }
+}
+
+/// Sets how big a picture `shot` writes, by the rungs the display screen
+/// offers — `1440` and not `2560x1440`, the width following from the shape a
+/// screen would have had. There is nothing to set in a run with a window: a
+/// picture of a window is the window, whatever is asked for here, and a
+/// number that quietly did nothing would be worse than a refusal.
+fn resolution(value: &str, state: &mut Option<u32>) -> String {
+    let rungs = crate::settings::rungs();
+    let Some(rows) = state.as_mut() else {
+        return "a picture is the size of the window in a run that has one — \
+                `resolution` is for a run without"
+            .to_string();
+    };
+    match value.parse::<u32>().ok().filter(|it| rungs.contains(it)) {
+        Some(chosen) => {
+            *rows = chosen;
+            format!("{RESOLUTION} {chosen}p")
+        }
+        None => {
+            let offered: Vec<String> = rungs.iter().map(|rows| rows.to_string()).collect();
+            format!(
+                "`{RESOLUTION}` is one of {} — `set {RESOLUTION} 1440`",
+                offered.join(", ")
+            )
+        }
     }
 }
 
@@ -549,9 +583,49 @@ mod tests {
         };
         assert_eq!(
             set(&[], &mut toggles),
-            "stats off / shadows on / haze on / wireframe on / reach 900m"
+            "stats off / shadows on / haze on / wireframe on / reach 900m / \
+             resolution the window's own"
         );
         assert_eq!(set(&["haze"], &mut toggles), "haze on");
+    }
+
+    /// A picture is the window in a run that has one, so the variable reads as
+    /// that rather than as a number nothing would draw at.
+    #[test]
+    fn the_picture_size_is_the_windows_until_there_is_no_window() {
+        let mut windowed = Toggles::default();
+        assert_eq!(
+            set(&["resolution"], &mut windowed),
+            "resolution the window's own"
+        );
+        let refused = set(&["resolution", "1080"], &mut windowed);
+        assert!(refused.contains("window"), "unhelpful: {refused}");
+        assert_eq!(windowed.resolution, None, "a refused size took anyway");
+
+        let mut windowless = Toggles {
+            resolution: Some(1440),
+            ..Default::default()
+        };
+        assert_eq!(set(&["resolution"], &mut windowless), "resolution 1440p");
+        assert_eq!(
+            set(&["resolution", "720"], &mut windowless),
+            "resolution 720p"
+        );
+        assert_eq!(windowless.resolution, Some(720));
+
+        // The rungs the display screen offers, and only those: a size off the
+        // ladder has no width to follow from a shape nobody can ask a
+        // windowless run for.
+        for rung in crate::settings::rungs() {
+            assert_eq!(
+                set(&["resolution", &rung.to_string()], &mut windowless),
+                format!("resolution {rung}p")
+            );
+        }
+        let last = crate::settings::rungs().last().copied();
+        let not_a_rung = set(&["resolution", "1234"], &mut windowless);
+        assert!(not_a_rung.contains("1440"), "unhelpful: {not_a_rung}");
+        assert_eq!(windowless.resolution, last, "a refused size took anyway");
     }
 
     #[test]
@@ -798,7 +872,7 @@ mod tests {
         assert!(app
             .world()
             .resource::<Console>()
-            .said("stats  shadows  haze  wireframe  reach"));
+            .said("stats  shadows  haze  wireframe  reach  resolution"));
     }
 
     #[test]

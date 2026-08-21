@@ -93,6 +93,7 @@ use crate::console::{dispatch, Dispatch};
 use crate::debug::Toggles;
 use crate::net::Online;
 use crate::player::PlayerSweep;
+use crate::settings;
 use crate::terrain::{ChunkBuild, Ground};
 
 /// What `help` says about this end of the grammar, before the server's own
@@ -107,6 +108,12 @@ const HELP: &str = "shot <path> — write a PNG of the view, once the ground has
                     hold on|off — stop the clock where it stands, so the light keeps still\n\
                     quit — close the world and stop the game\n\
                     set … — this client's own switches; `set` alone lists them";
+
+/// How tall a picture a windowless run writes until the console says
+/// otherwise, in rows off [`crate::settings::LADDER`]. 1440 matches the shots
+/// already in `screenshots/`, which came off a 1280x720 window on a doubled
+/// display.
+const DEFAULT_ROWS: u32 = 1440;
 
 /// The longest a single `press` will hold a key. A driver that meant to sail
 /// for twenty seconds and typed twenty thousand should get an answer rather
@@ -328,30 +335,20 @@ pub struct ControlPlugin {
     /// Whether this run has a window. Without one the camera has to be
     /// pointed at an image instead.
     pub headless: bool,
-    /// Size of that image, and so of every picture `shot` writes. Ignored in
-    /// a windowed run, where a picture is the size of the window.
-    pub resolution: UVec2,
 }
 
 impl Plugin for ControlPlugin {
     fn build(&self, app: &mut App) {
         if self.headless {
-            let target = app
-                .world_mut()
-                .resource_mut::<Assets<Image>>()
-                .add(offscreen(self.resolution));
-            app.world_mut().resource_mut::<Control>().target = Some(target);
-            // The UI is drawn into these pictures — the readout and the
-            // compass are in every one — and the system that fits it to a
-            // window has no window to read, so it is fitted to the picture
-            // here instead. Once, because unlike a window an image cannot be
-            // dragged to another size.
-            app.insert_resource(UiScale(crate::settings::fitted_to(
-                self.resolution.as_vec2(),
-            )));
-            // After `Startup`, so the camera the map plugin spawns there
-            // exists to be pointed somewhere.
-            app.add_systems(PostStartup, render_off_screen);
+            // The one place in the game that knows a run has no window is the
+            // one that says how big its pictures are — see
+            // [`crate::debug::Toggles::resolution`], where `set resolution`
+            // finds it afterwards. The image itself is not made here: making
+            // it is what [`dress_the_target`] does every time the answer
+            // changes, and doing it once here as well would be the same size
+            // worked out in two places.
+            app.world_mut().resource_mut::<Toggles>().resolution = Some(DEFAULT_ROWS);
+            app.add_systems(Update, dress_the_target);
         }
         // After the input plugin has filled the key state, so that a key this
         // module presses is not cleared by the same frame's real input, and is
@@ -381,18 +378,49 @@ fn offscreen(resolution: UVec2) -> Image {
     image
 }
 
-/// Points the camera at the off-screen image. Runs after the camera has been
-/// spawned rather than as part of spawning it, so that the camera itself
-/// knows nothing about being photographed.
-fn render_off_screen(
-    control: Res<Control>,
+/// Keeps the picture a windowless run draws into agreeing with `set
+/// resolution` — and points the camera at it, there being no window for it to
+/// draw into instead.
+///
+/// Every frame and compared before writing, the way [`crate::settings`]
+/// dresses a window, because the answer can change under it: the console can
+/// name another rung at any point, and a camera can turn up after the image
+/// did. What it compares against is the image's own size rather than a note of
+/// what was last asked for — the target either is the size the console named
+/// or it is not, and nothing else has to be kept true.
+fn dress_the_target(
+    toggles: Res<Toggles>,
+    mut control: ResMut<Control>,
+    mut images: ResMut<Assets<Image>>,
+    mut scale: ResMut<UiScale>,
     mut cameras: Query<&mut RenderTarget, With<MapCamera>>,
 ) {
+    // Only ever `Some` in a run with no window, which is the only kind of run
+    // this system is added to.
+    let Some(rows) = toggles.resolution else {
+        return;
+    };
+    let wanted = UVec2::new(settings::width_for(settings::WIDESCREEN, rows), rows);
+    let already = control
+        .target
+        .as_ref()
+        .and_then(|target| images.get(target))
+        .is_some_and(|image| image.size() == wanted);
+    if !already {
+        control.target = Some(images.add(offscreen(wanted)));
+        // The UI is drawn into these pictures — the readout and the compass
+        // are in every one — and the system that fits it to a window has no
+        // window to read, so it is fitted to the picture here instead.
+        *scale = UiScale(settings::fitted_to(wanted.as_vec2()));
+    }
+
     let Some(target) = &control.target else {
         return;
     };
     for mut camera in &mut cameras {
-        *camera = target.clone().into();
+        if camera.as_image() != Some(target) {
+            *camera = target.clone().into();
+        }
     }
 }
 
