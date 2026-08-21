@@ -469,10 +469,64 @@ const MICRO_SCALE: f32 = 12.0;
 /// How far the undulations lift or drop the ground away from the landform they
 /// are laid over, in metres.
 const DETAIL_RELIEF: f32 = 5.0;
-/// The same for the roughness. Kept small: at [`MICRO_SCALE`] it is only three
-/// mesh vertices across, so any more amplitude turns into facet-to-facet
-/// jitter rather than readable surface roughness.
-const MICRO_RELIEF: f32 = 0.5;
+/// The same for the roughness. Sized to hold the power law the undulations
+/// set — relief halving with wavelength — rather than capped the way it was
+/// at 2 m facets, when this band was only three vertices across and any more
+/// amplitude turned into facet-to-facet jitter. At 1 m facets the band spans
+/// six to twelve vertices and can carry its full spectral share.
+const MICRO_RELIEF: f32 = 1.2;
+/// Wavelength of the facet-scale grain, in metres. Added when the mesh went
+/// from 2 m to 1 m facets: the roughness above bottoms out at half
+/// [`MICRO_SCALE`], so between ~6 m and the facet the field was smooth and the
+/// finer mesh only resampled it — the faceting the look leans on washed out
+/// instead of sharpening. Four metres is the old floor restated for the new
+/// facet: a wavelength a few vertices wide, so neighbouring facets tilt
+/// against each other instead of shading one slope.
+const GRAIN_SCALE: f32 = 4.0;
+/// How far the grain lifts or drops the ground, in metres. The next step of
+/// the same power law [`MICRO_RELIEF`] holds to. It was first tuned alone —
+/// up to a full metre — to be visible over a MICRO still capped for the old
+/// mesh, and a lone loud octave with quiet neighbours read as crumpled paper
+/// rather than ground; the middle band does that work now.
+const GRAIN_RELIEF: f32 = 0.5;
+/// The waterline apron: the altitude band, in landform metres, across which
+/// the whole detail stack fades in from nothing. Below [`APRON_DRY`] the
+/// ground is the bare landform, so the drawn coast is the landform's own
+/// smooth contour; by [`APRON_FULL`] the stack is all there.
+///
+/// Added when the detail grew teeth at the waterline. Grain riding the
+/// shoreline redrew every coast into noise-carved bays and lagoons — coasts a
+/// circumnavigation could no longer close, because their heads receded past
+/// the sight band of a boat sailing by — and re-bumped the nearshore seabed
+/// that keels ground on. The apron pins the waterline back to the landform;
+/// it also subsumes the old underwater fade, reaching zero before the water
+/// does.
+const APRON_DRY: f32 = 0.75;
+/// See [`APRON_DRY`].
+const APRON_FULL: f32 = 2.5;
+
+/// Wavelength of the country's character, in metres: the dial between gentle
+/// and rugged ground that the whole detail stack answers to. A uniform stack
+/// at any amplitude read as one bump map laid over everything — the fix other
+/// generators reach for is a low-frequency control field over the roughness
+/// itself (Minecraft's "erosion" parameter; Quilez's derivative-damped fbm
+/// self-regulates the same way), so the variety is in where the roughness
+/// *is*, not how loud it is. Sized to hold one character across a hillside
+/// while still turning over a few times per big island.
+const RUGGED_SCALE: f32 = 280.0;
+/// Metres of altitude that push the dial one whole step towards rugged, on
+/// top of what the field says. High ground trends to broken rock and low
+/// ground to parkland, which reads as mountains being mountains rather than
+/// as patches of texture landing wherever the noise fell.
+const RUGGED_CLIMB: f32 = 150.0;
+/// How much of the undulations' relief survives in the gentlest country.
+/// Plains still roll — a dead-flat interior reads as unfinished, not calm.
+const RUGGED_SWELL_FLOOR: f32 = 0.35;
+/// The same for the two fine bands, which nearly vanish there: a meadow is
+/// smooth at walking scale, and the contrast against the broken country is
+/// what makes both legible.
+const RUGGED_FINE_FLOOR: f32 = 0.08;
+
 /// Wavelength of the woodland/meadow patchwork, in metres. Field-sized on
 /// purpose: at the default zoom the camera sees ~50 m of ground, so parcels much
 /// bigger than this mean the whole screen is one colour.
@@ -511,8 +565,12 @@ const SHORE_GAIN: f32 = 3.6;
 
 /// Where the shore character field is cut into beach, rocky shore and cliff.
 /// Set off the field's measured distribution, not its nominal range — see
-/// `shore_mix` in the tests, which reports the split these produce.
-const ROCKY_SHORE: f32 = -0.16;
+/// `shore_mix` in the tests, which reports the split these produce. Re-set
+/// when the waterline apron pinned the drawn coast to the landform's own
+/// contour: the character field never moved, but the smoother waterline runs
+/// a different route through it, and the old cut left one seed's coast
+/// under a sixth beach.
+const ROCKY_SHORE: f32 = -0.10;
 const CLIFF_SHORE: f32 = 0.26;
 
 /// How far above sea level the coastal reshaping reaches, in metres — so also
@@ -791,6 +849,7 @@ pub struct TerrainGenerator {
     ridges: Noise,
     warp: Noise,
     detail: Noise,
+    rugged: Noise,
     shore: Noise,
     skerry: Noise,
     /// The three numbers that make a seed's mountains behave like every other
@@ -930,6 +989,7 @@ impl TerrainGenerator {
             ridges: Noise::new(seed.wrapping_add(0x1B87_3593)),
             warp: Noise::new(seed.wrapping_add(0x68E3_1DA4)),
             detail: Noise::new(seed.wrapping_add(0xB547_9AA3)),
+            rugged: Noise::new(seed.wrapping_add(0x7F4A_7C15)),
             shore: Noise::new(seed.wrapping_add(0x2545_F491)),
             skerry: Noise::new(seed.wrapping_add(0xC2B2_AE35)),
             // All three are fitted below, by looking at the map this seed
@@ -1533,10 +1593,30 @@ impl TerrainGenerator {
         let base = self.landform(wx, wz);
         let mut h = base;
 
-        // Surface detail, faded out underwater where it just adds noise.
-        if base > -1.0 {
-            h += self.detail.fbm(wx / DETAIL_SCALE, wz / DETAIL_SCALE, 3) * DETAIL_RELIEF;
-            h += self.detail.fbm(wx / MICRO_SCALE, wz / MICRO_SCALE, 2) * MICRO_RELIEF;
+        // Surface detail, faded out towards the waterline and absent below
+        // it — see [`APRON_DRY`] for why the coast must stay the landform's.
+        let apron = smoothstep(APRON_DRY, APRON_FULL, base);
+        if apron > 0.0 {
+            // Which country this is. The dial suppresses relief rather than
+            // adding any, so every bound counted from the reliefs below —
+            // [`LAKE_RELIEF`] above all — still holds at its old value.
+            let rugged = smoothstep(
+                -0.45,
+                0.5,
+                self.rugged.fbm(wx / RUGGED_SCALE, wz / RUGGED_SCALE, 2) + base / RUGGED_CLIMB,
+            );
+            let swell = self.detail.fbm(wx / DETAIL_SCALE, wz / DETAIL_SCALE, 3) * DETAIL_RELIEF;
+            // The mid band changes shape with the dial, not just size:
+            // gentle country rolls, rugged country breaks into the crests
+            // and gullies only a ridged field draws. Recentred, since ridged
+            // runs 0..1 and the blend has to pivot on the same zero.
+            let roll = self.detail.fbm(wx / MICRO_SCALE, wz / MICRO_SCALE, 2);
+            let crag = self.ridges.ridged(wx / MICRO_SCALE, wz / MICRO_SCALE, 2) * 2.0 - 1.0;
+            let mid = (roll + (crag - roll) * rugged) * MICRO_RELIEF;
+            let grain = self.detail.fbm(wx / GRAIN_SCALE, wz / GRAIN_SCALE, 1) * GRAIN_RELIEF;
+            h += (swell * (RUGGED_SWELL_FLOOR + (1.0 - RUGGED_SWELL_FLOOR) * rugged)
+                + (mid + grain) * (RUGGED_FINE_FLOOR + (1.0 - RUGGED_FINE_FLOOR) * rugged))
+                * apron;
         }
 
         // Keep the detail layer from punching holes below sea level all over the
@@ -2284,7 +2364,7 @@ const LAKE_FREEBOARD: f32 = 0.5;
 /// sea's waterline can still have its bank bent out from under this — which is
 /// what [`LAKE_APRON`] is for: where the guarantee does not hold, what leaks is
 /// a few metres of apron.
-const LAKE_RELIEF: f32 = (DETAIL_RELIEF + MICRO_RELIEF) * 1.125;
+const LAKE_RELIEF: f32 = (DETAIL_RELIEF + MICRO_RELIEF + GRAIN_RELIEF) * 1.125;
 
 /// Standing water above sea level: how high a lake stands over the ground
 /// around it, and how far it holds that ground to the shape it was found in.
@@ -3292,8 +3372,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0xD953_0EBA_7C15_F0BCu64),
-            (99, UVec2::new(3, 2), 0x87AF_C159_4DAB_4155u64),
+            (20_040_112u32, UVec2::new(4, 4), 0xB4AB_5DB0_037E_5906u64),
+            (99, UVec2::new(3, 2), 0xBE7C_00A6_29D1_C09Eu64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -3881,14 +3961,19 @@ mod tests {
         // stopped answering for, so the water ended on a straight grid-aligned
         // edge with no shore on it.
         //
-        // Sampled two metres apart, which is the facet grid: finer than this
-        // is finer than anything gets drawn. The slack is one quantisation
-        // step, for the same reason — the fade is sized off the landform read
-        // on the fitting grid, and between two of its cells the real field is
-        // free to curve a millimetre or two past the straight line the weights
-        // are blended along. Below [`protocol::ground::HEIGHT_STEP`] there is
-        // no ground to be on either side of.
-        let slack = protocol::ground::HEIGHT_STEP;
+        // Sampled at the facet grid: finer than this is finer than anything
+        // gets drawn. The slack is for the fade being sized off the landform
+        // read on the fitting grid — between two of its cells the real field
+        // is free to curve past the straight line the weights are blended
+        // along, and how far follows from the *finest* detail layer: when
+        // that was half [`MICRO_SCALE`] at a hand's width of relief the
+        // curve-past was a millimetre or two, and one quantisation step
+        // covered it. [`GRAIN_SCALE`] carries triple the curvature per metre
+        // (half a metre of relief across four), and measured across these
+        // seeds the worst excursion is now just over two centimetres. Three
+        // steps covers that without hiding a real leak — a broken fade shows
+        // up in decimetres, not centimetres.
+        let slack = 3.0 * protocol::ground::HEIGHT_STEP;
         let step = FACET_METRES;
         let mut wet = 0usize;
         for seed in [20_040_112u32, 1, 7, 99, 808, 2_024, 31_337] {
