@@ -641,23 +641,6 @@ impl Archipelago {
         None
     }
 
-    /// The island nearest a world point, by the distance between the point and
-    /// the island's centre.
-    ///
-    /// Play enters a world by [`spawn`], which ranks coasts rather than
-    /// centres — this ranks centres, which is what anything wanting a picture
-    /// of terrain rather than a place to float asks for: an island is
-    /// photographed from its middle, not from the water off its nearest
-    /// corner. `mapgen world` renders around whatever point it is given and
-    /// falls back to the origin, so nothing but this module's own test calls
-    /// it today; finding land to point a picture at is a question about the
-    /// layout, and this is where the layout is.
-    ///
-    /// [`spawn`]: Archipelago::spawn
-    pub fn nearest_island(&self, near: Vec2) -> Option<IslandSpec> {
-        self.nearest_by(near, IslandSpec::centre)
-    }
-
     /// Where this world is entered: a point of open water [`SPAWN_OFFSHORE`]
     /// metres off the waterline of the island whose *frame* is nearest the
     /// origin, facing it from the origin's side.
@@ -670,11 +653,10 @@ impl Archipelago {
     /// past the haze on every seed's worse days, so a new arrival saw water in
     /// every direction and steered blind.
     ///
-    /// Nearest by frame rather than by centre, as
-    /// [`Archipelago::nearest_island`] ranks, because it is the coast entry
-    /// cares about. And the waterline rather than the frame, the frame being a
-    /// rectangle of map and not of land: a fitted coast can recede hundreds of
-    /// metres inside it. So the shore is found on the terrain itself — the
+    /// Nearest by frame rather than by centre, because the coast is what
+    /// entry cares about. And the waterline rather than the frame, the frame
+    /// being a rectangle of map and not of land: a fitted coast can recede
+    /// hundreds of metres inside it. So the shore is found on the terrain itself — the
     /// island's land nearest the origin, off a half-chunk lattice over the
     /// frame, names the landfall; the line from the origin to it is *sounded*
     /// [`SOUNDING`] metres a step, and the first ground at sea level is the
@@ -696,8 +678,6 @@ impl Archipelago {
     /// sea; callers may fall back to the origin, which [`SPAWN_CLEARING`]
     /// keeps open.
     pub fn spawn(&self) -> Option<Spawn> {
-        // The same widening search `nearest_island` runs, ranking frames from
-        // the origin rather than centres.
         let island = self.nearest_by(Vec2::ZERO, |spec| spec.frame_point(Vec2::ZERO))?;
 
         // The island's land nearest the origin, off a half-chunk lattice
@@ -1032,34 +1012,28 @@ mod tests {
                 );
             }
 
-            // The same question is the same answer, on this machine and by
-            // construction on every other.
-            assert_eq!(ocean.spawn(), Some(spawn));
-            assert_eq!(world(seed).spawn(), Some(spawn));
-
-            let near = ocean
-                .nearest_island(Vec2::ZERO)
-                .unwrap_or_else(|| panic!("seed {seed} has no island near the origin"));
-
             // Nearest means nearest: nothing in a generous window around the
-            // origin stands closer to it.
+            // origin stands a frame closer to it than the island entry took.
+            // The search widens over windows and answers from the first that
+            // holds anything, so an island just past an early window's edge
+            // is exactly what it could overlook.
             let reach = Vec2::splat(LAYERS[0].parcel as f32 * CHUNK_METRES);
             let closest = ocean
                 .islands_within(-reach, reach)
                 .into_iter()
-                .map(|s| s.centre().length())
+                .map(|s| s.frame_point(Vec2::ZERO).length())
                 .fold(f32::INFINITY, f32::min);
+            let taken = spawn.island.frame_point(Vec2::ZERO).length();
             assert!(
-                near.centre().length() <= closest + 1e-3,
-                "seed {seed} passed over an island {closest} m out for one {} m out",
-                near.centre().length()
+                taken <= closest + 1e-3,
+                "seed {seed} passed over an island {closest} m out for one {taken} m out"
             );
 
-            // And the same question twice is the same answer — the search
-            // widens over windows, and a tie broken by iteration order would
-            // make it the machine's answer rather than the seed's.
-            assert_eq!(ocean.nearest_island(Vec2::ZERO), Some(near));
-            assert_eq!(world(seed).nearest_island(Vec2::ZERO), Some(near));
+            // The same question is the same answer, on this machine and by
+            // construction on every other — and a tie broken by iteration
+            // order would make it the machine's answer rather than the seed's.
+            assert_eq!(ocean.spawn(), Some(spawn));
+            assert_eq!(world(seed).spawn(), Some(spawn));
         }
     }
 
