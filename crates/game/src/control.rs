@@ -797,6 +797,15 @@ fn begin(
         // Letting go is done the moment it is said — there is nothing to wait
         // for in handing the hour back to the world. Taking hold is not.
         Some((&"hold", rest)) => match onoff(rest, "hold") {
+            // No world here, and no word from one ever: there is no clock to
+            // hold, and waiting for an hour that is never coming would stand
+            // a scripted run still for the whole of `PATIENCE` before saying
+            // so. A session that has simply not been told the hour *yet* is
+            // the other case, and that one waits — the word is on its way.
+            Ok(true) if hands.online.is_none() && !hands.sky.heard_the_hour() => refuse(
+                "there is no world here whose clock could be held".to_string(),
+                answer,
+            ),
             Ok(true) => Some(Doing::Holding { waited: 0, answer }),
             Ok(false) => {
                 *held.holding = false;
@@ -1142,13 +1151,33 @@ mod tests {
         );
     }
 
-    /// Letting go has nothing to wait for, and says so at once.
+    /// Letting go has nothing to wait for, and says so at once. From a run
+    /// that is actually holding, so that the switch being thrown is something
+    /// this can fail on rather than the state it started in.
     #[test]
     fn letting_go_of_the_clock_is_answered_on_the_spot() {
         let (mut app, orders) = driven_app();
+        app.world_mut().resource_mut::<Control>().holding = true;
+
         let answered = say(&orders, "hold off");
         app.update();
         assert_eq!(answered.try_recv(), Ok("the clock runs again".to_string()));
+        assert!(!app.world().resource::<Control>().holding, "still holding");
+    }
+
+    /// And a run with no world to hold the clock of is told so on the line
+    /// that asked, rather than after half a minute of waiting for a word that
+    /// was never coming — `--debug` with `--state mainmenu` is a run like
+    /// that, and a driver taking pictures of the menus is the one who would
+    /// pay for it.
+    #[test]
+    fn holding_the_clock_of_no_world_is_refused_at_once() {
+        let (mut app, orders) = driven_app();
+        let answered = say(&orders, "hold on");
+        app.update();
+
+        let said = answered.try_recv().expect("answered on the spot");
+        assert!(said.contains("no world"), "unhelpful: {said}");
         assert!(!app.world().resource::<Control>().holding);
     }
 

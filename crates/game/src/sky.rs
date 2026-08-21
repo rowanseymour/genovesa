@@ -70,7 +70,7 @@ const CATCH_UP: f32 = 2.0;
 ///
 /// It cannot be nothing: [`CATCH_UP`] closes the gap by e-foldings, so the
 /// last of one is never quite arrived at. Half a thousandth of a day is 0.3 s
-/// of the ten-minute day, about a fifth of what the sun crosses between two
+/// of the ten-minute day, about a third of what the sun crosses between two
 /// tellings, and nothing the eye holds between two pictures.
 const CAUGHT_UP: f32 = 0.0005;
 
@@ -293,6 +293,16 @@ impl Sky {
             self.phase = phase;
         }
         self.told = Some(phase);
+    }
+
+    /// Whether a server has ever said what hour it is.
+    ///
+    /// Not the same question as [`Sky::caught_up`], and the difference is
+    /// what lets `hold` tell a wait from a refusal: a run that has heard a
+    /// word and not yet arrived at it is on its way, and one that has heard
+    /// none may have no world to hear from at all.
+    pub fn heard_the_hour(&self) -> bool {
+        self.told.is_some()
     }
 
     /// Whether the drawn hour has closed on the hour the server last named.
