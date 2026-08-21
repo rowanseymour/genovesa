@@ -1176,10 +1176,12 @@ mod tests {
 
     /// Waits for a dial to land. It crosses real sockets and a thread, so a
     /// moment of patience is legitimate — five seconds of it is a failure.
+    ///
+    /// The quarantining is the caller's, done before the dial is started: a
+    /// dial's handshake reads the data directory for its papers, and by the
+    /// time there is a dial to wait on, the thread that will read it is
+    /// already running.
     fn settle(dialing: &Dialing) -> Result<Session, String> {
-        // Every dial's handshake reads the data directory for its papers,
-        // and a test's must not be the player's.
-        crate::testing::quarantine_data_dir();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if let Some(outcome) = dialing.outcome() {
@@ -1197,6 +1199,7 @@ mod tests {
         // the loopback on a port of the machine's choosing, which is what
         // `Reach::Alone` is — a test run cannot collide with a real server on
         // this machine, and neither can a player.
+        crate::testing::quarantine_data_dir();
         let dialing = Dialing::opening(
             WorldConfig { seed: 77 },
             Reach::Alone,
@@ -1216,6 +1219,7 @@ mod tests {
 
     #[test]
     fn the_seed_asked_for_is_the_world_that_opens() {
+        crate::testing::quarantine_data_dir();
         let first = settle(&Dialing::opening(
             WorldConfig { seed: 77 },
             Reach::Alone,
@@ -1247,6 +1251,7 @@ mod tests {
         // The point of sharing: the world the host is standing in is reachable
         // from outside, and whoever arrives is somebody else in the same
         // world rather than the host again.
+        crate::testing::quarantine_data_dir();
         let dialing = Dialing::opening(
             WorldConfig { seed: 3 },
             Reach::Alone,
@@ -1268,6 +1273,7 @@ mod tests {
     fn a_dial_that_finds_nobody_reports_it() {
         // Port 1, where nothing has ever listened. The failure has to come
         // back as an outcome the screen can show, not as a hang.
+        crate::testing::quarantine_data_dir();
         let dialing = Dialing::to("127.0.0.1:1");
         let error = settle(&dialing).err().expect("nobody home");
         assert!(
@@ -1280,6 +1286,7 @@ mod tests {
     fn a_dial_answers_once() {
         // An outcome is taken, not read: a second answer would be a second
         // session for one dial, or a failure reported twice over.
+        crate::testing::quarantine_data_dir();
         let dialing = Dialing::to("127.0.0.1:1");
         settle(&dialing).err().expect("nobody home");
         assert!(

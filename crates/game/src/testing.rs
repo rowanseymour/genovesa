@@ -11,6 +11,7 @@
 //! conditions, so the reader that checks them is written once — a second copy
 //! would be a second opinion about what the format says.
 
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,18 +38,31 @@ use crate::{AppState, Helm};
 /// frame and the tests get the ramp a player would.
 pub const FRAME: Duration = Duration::from_millis(16);
 
-/// Points `GENOVESA_DATA` at a directory of this test process's own, once,
-/// so nothing a test keeps — a world file, a logbook — lands among the
-/// player's real ones. Called by every test helper whose app could reach
-/// the data directory; idempotent, and the directory is shared by the whole
+/// Points the data directory at one of this test process's own, so nothing a
+/// test keeps — a world file, a logbook, a settings file — lands among the
+/// player's real ones. Idempotent, and the directory is shared by the whole
 /// process, exactly as the real one would be.
+///
+/// Call it *before* starting anything that could go looking: the directory is
+/// answered once per process — see `server::data_dir` — so whoever asks first
+/// decides for every test in the binary, and a dial already on its thread is
+/// something that could be asking while this runs. That is what the panic
+/// below catches. It used to be an environment variable set at whatever
+/// moment suited the test, which had no such moment to catch: a test that
+/// left it late lost to the player's real directory in silence, and setting
+/// it at all raced every other thread reading its own environment.
 pub fn quarantine_data_dir() {
-    use std::sync::OnceLock;
     static QUARANTINE: OnceLock<std::path::PathBuf> = OnceLock::new();
     let dir = QUARANTINE.get_or_init(|| {
         std::env::temp_dir().join(format!("genovesa-test-data-{}", std::process::id()))
     });
-    std::env::set_var("GENOVESA_DATA", dir);
+    if !server::keep_data_in(dir.clone()) {
+        assert_eq!(
+            server::data_dir().as_ref(),
+            Some(dir),
+            "something asked where the data directory is before a test quarantined it"
+        );
+    }
 }
 
 /// A headless app already in a match, with the boat and player systems
