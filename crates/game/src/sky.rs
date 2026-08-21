@@ -573,14 +573,16 @@ fn waiting_out_the_night(
 }
 
 /// Whether the boat is lying still. A hull with way on is one being sailed,
-/// and a player sailing has not turned in for the night — the same test
-/// `player::embark_or_land` makes before it lets anybody step off a deck.
+/// and a player sailing has not turned in for the night — the same reading
+/// `player::embark_or_land` takes before it lets anybody step off a deck,
+/// forgiveness and all: a glide's last imperceptible tail must not withhold
+/// the night any more than it may refuse the shore.
 ///
 /// There is one boat in a world, so this is a question about *the* boat: no
 /// boat at all is a world still being entered, which has no night to offer
 /// yet.
 fn at_anchor(boats: &Query<&Boat>) -> bool {
-    boats.single().is_ok_and(Boat::at_rest)
+    boats.single().is_ok_and(Boat::reads_as_stopped)
 }
 
 /// The line the night puts on the screen, spawned hidden and left to

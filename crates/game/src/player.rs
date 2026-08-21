@@ -477,9 +477,12 @@ type Vessels<'w, 's> = Query<
 /// deliberate act rather than a side effect of stepping aboard.
 ///
 /// Every crossing asks the hull the player is leaving to be at rest first —
-/// nobody steps off a deck making way — though "at rest" is settled by
-/// [`Boat::settles_for_crossing`], which forgives the last imperceptible
-/// centimetres a second of a glide rather than refusing in silence.
+/// nobody steps off a deck making way — though "at rest" is read by
+/// [`Boat::reads_as_stopped`], which forgives a glide too slow to matter
+/// rather than refusing in silence (see the constant it reads for the line
+/// it draws), and the crossing that is granted stops the hull as it goes.
+/// A crossing that is *refused* — no footing, nothing in reach — leaves the
+/// glide untouched: the key that does nothing must do nothing.
 #[allow(clippy::too_many_arguments)]
 fn embark_or_land(
     keys: Res<ButtonInput<KeyCode>>,
@@ -510,14 +513,17 @@ fn embark_or_land(
             let Some(mut hull) = sailing else {
                 return;
             };
-            if !hull.settles_for_crossing() {
+            if !hull.reads_as_stopped() {
                 return;
             }
 
             if hull.kind() == BoatKind::Sloop {
                 // The crew furls as the skipper steps down into the boat —
                 // whichever end of the exchange settles the seat, the ship
-                // is left at anchor with its canvas in.
+                // is left at anchor with its canvas in — and the last of the
+                // glide is taken off with it, so the ship lies where the
+                // gate read it as lying.
+                hull.comes_to_rest();
                 hull.furl();
                 let (berth, heading) = tender_berth(&hull_place, ground);
                 match &online {
@@ -588,6 +594,17 @@ fn embark_or_land(
             let Some((spot, height)) = landing(ground, &hull_place) else {
                 return;
             };
+            // The boat is left as an anchorage leaves a ship: stopped, oars
+            // in. Stopping is the commit the gate's reading deferred, and
+            // shipping the oars keeps [`Boat::furl`]'s promise that nothing
+            // is ever left sailing unmanned — a served world hands the hull
+            // back and forgets its trim, but a lone one keeps this very
+            // component for whoever boards it next. Fetched afresh because
+            // the ship search above needed the query back.
+            if let Ok((.., Some(mut left), _, _)) = vessels.get_mut(hull_entity) {
+                left.comes_to_rest();
+                left.furl();
+            }
             let stepped = (spot - hull_place.translation.xz()).normalize_or_zero();
             commands.entity(player).remove::<ChildOf>().insert((
                 Transform::from_xyz(spot.x, height, spot.y)
@@ -850,6 +867,37 @@ mod tests {
         )
     }
 
+    /// The way the one hull of a kind is making, in metres a second — what
+    /// the crossing gate reads, read the same way.
+    fn way_of(app: &mut App, kind: BoatKind) -> f32 {
+        let hull = hull_rigged(app, kind);
+        app.world()
+            .get::<Boat>(hull)
+            .expect("a rigged hull sails")
+            .way()
+    }
+
+    /// Runs the world until the hull's glide dips inside the crossing gate's
+    /// forgiveness while still visibly moving — the window the strict gate
+    /// refused — and fails the test if the glide dies before it is caught.
+    fn run_into_the_glides_tail(app: &mut App, kind: BoatKind) {
+        for _ in 0..2_000 {
+            let way = way_of(app, kind);
+            let hull = hull_rigged(app, kind);
+            let read = app
+                .world()
+                .get::<Boat>(hull)
+                .expect("a rigged hull sails")
+                .reads_as_stopped();
+            if read && way != 0.0 {
+                return;
+            }
+            assert!(way != 0.0, "the glide ran out before the gate's window");
+            run_frames(app, 1);
+        }
+        panic!("the glide never entered the gate's window");
+    }
+
     /// The one hull of a kind in the match — most tests hold a ship and, once
     /// the boat is down, a rowboat, and mean one of them by name.
     fn hull_rigged(app: &mut App, kind: BoatKind) -> Entity {
@@ -1039,6 +1087,22 @@ mod tests {
         set_wind(&mut app, Vec2::new(-7.0, 0.0));
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 6);
+        // The fixture has to mean what the name says: the deck is making way
+        // by the gate's own reading, not by a margin that a tweak to the
+        // wind or the frame count could quietly erase.
+        assert!(
+            way_of(&mut app, BoatKind::Sloop) > 0.0,
+            "six frames of canvas made no way"
+        );
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        assert!(
+            !app.world()
+                .get::<Boat>(ship)
+                .expect("a rigged hull sails")
+                .reads_as_stopped(),
+            "the fixture's way fell inside the gate's forgiveness — it no \
+             longer tests a deck making way"
+        );
         press_board(&mut app);
         assert_eq!(
             aboard_kind(&mut app),
@@ -1059,6 +1123,67 @@ mod tests {
             aboard_kind(&mut app),
             Some(BoatKind::Rowboat),
             "the boat never went in once the ship had stopped"
+        );
+    }
+
+    #[test]
+    fn a_dying_glide_is_let_across_and_stopped_by_the_crossing() {
+        // The forgiving half of the gate: furled and gliding at way nobody
+        // watching could see, the key works — refusing here read as the key
+        // being broken — and the crossing itself is what stops the ship, so
+        // the deck stepped off is as still as the gate read it.
+        let mut app = shore_app();
+        set_wind(&mut app, Vec2::new(-7.0, 0.0));
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 30);
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(KeyCode::ArrowUp);
+        keys.press(KeyCode::ArrowDown);
+        run_frames(&mut app, 1);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowDown);
+
+        run_into_the_glides_tail(&mut app, BoatKind::Sloop);
+        press_board(&mut app);
+        assert_eq!(
+            aboard_kind(&mut app),
+            Some(BoatKind::Rowboat),
+            "a glide too slow to see refused the crossing"
+        );
+        assert_eq!(
+            way_of(&mut app, BoatKind::Sloop),
+            0.0,
+            "the crossing left the abandoned ship gliding"
+        );
+    }
+
+    #[test]
+    fn a_refused_crossing_leaves_the_glide_alone() {
+        // The other half of the same bargain: over deep water the key finds
+        // nothing and does nothing — including to the way. A gate that
+        // stopped the boat while refusing the crossing would be a brake
+        // nobody asked for, wearing a key that claims to have done nothing.
+        let mut app = world_app();
+        app.insert_resource(test_shore());
+        place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
+
+        press_board(&mut app);
+        assert_eq!(aboard_kind(&mut app), Some(BoatKind::Rowboat));
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 250);
+        tap(&mut app, KeyCode::ArrowDown);
+
+        run_into_the_glides_tail(&mut app, BoatKind::Rowboat);
+        press_board(&mut app);
+        assert_eq!(
+            aboard_kind(&mut app),
+            Some(BoatKind::Rowboat),
+            "the player was put over the side in open ocean"
+        );
+        assert!(
+            way_of(&mut app, BoatKind::Rowboat) != 0.0,
+            "a refused crossing stopped the boat dead"
         );
     }
 
