@@ -986,7 +986,7 @@ impl Fleet {
         &mut self,
         commands: &mut Commands,
         kit: &mut HullKit,
-        players: &Query<Entity, With<Player>>,
+        players: &crate::player::Players,
         poses: &Query<&Transform, With<Vessel>>,
         me: PlayerId,
         id: BoatId,
@@ -1033,7 +1033,7 @@ impl Fleet {
                 // held until now goes back to its moorings where it lies; its
                 // own telling follows on the wire, the grant being sent first
                 // exactly so that no client holds two helms between them.
-                if let Some(former) = self.former_hull() {
+                if let Some(former) = self.hull() {
                     let pose = poses.get(former).ok().copied();
                     self.hand_back(commands, former, pose.as_ref());
                 }
@@ -1048,7 +1048,7 @@ impl Fleet {
                     Transform::from_xyz(position.x, 0.0, position.y)
                         .with_rotation(Quat::from_rotation_y(heading)),
                 ));
-                if let Ok(player) = players.single() {
+                if let Ok((player, _)) = players.single() {
                     commands
                         .entity(player)
                         .remove::<DespawnOnExit<AppState>>()
@@ -1076,7 +1076,16 @@ impl Fleet {
 
     /// The entity of the hull we hold the helm of, if any — see
     /// [`Fleet::helmed`].
-    fn former_hull(&self) -> Option<Entity> {
+    ///
+    /// The book's answer to what carries the player, which is not the same
+    /// question as the scene graph's and must not be mistaken for it. This
+    /// one is written the instant a telling is read; the parentage that goes
+    /// with it is a queued command, so within one drain of the wire this is
+    /// the fresher of the two. It is also the one that can go quiet while the
+    /// player is still standing on a deck — see the out-of-order defence in
+    /// [`Fleet::told`] — so it is a fallback rather than an authority.
+    /// [`crate::player::put_down`] is where the two are put in their order.
+    pub fn hull(&self) -> Option<Entity> {
         self.helmed.and_then(|held| self.hulls.get(&held)).copied()
     }
 
@@ -1096,7 +1105,7 @@ impl Fleet {
     pub fn gone(
         &mut self,
         commands: &mut Commands,
-        players: &Query<Entity, With<Player>>,
+        players: &crate::player::Players,
         poses: &Query<&Transform, With<Vessel>>,
         id: BoatId,
     ) {
@@ -1105,7 +1114,7 @@ impl Fleet {
         };
         self.crews.remove(&id);
         if self.helmed.take_if(|held| *held == id).is_some() {
-            if let Ok(player) = players.single() {
+            if let Ok((player, _)) = players.single() {
                 let mut player = commands.entity(player);
                 player
                     .remove::<ChildOf>()

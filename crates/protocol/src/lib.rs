@@ -676,6 +676,45 @@ pub enum ToClient {
         heading: f32,
         occupant: Option<PlayerId>,
     },
+    /// This player is *here* now, whatever they thought: the world has moved
+    /// them, and whatever carries them — the hull they hold the helm of, or
+    /// their own feet — belongs at this point, pointed this way, on the
+    /// frame this arrives rather than eased towards over the next few.
+    ///
+    /// The one word that overrules a client about its own place, and
+    /// deliberately the only one. Every other position on the wire runs the
+    /// other way: a client reports where it has got to ([`ToServer::Move`],
+    /// [`ToServer::Helm`]) and the server relays that to everyone else, so
+    /// no `Boat` telling about a hull its hearer is steering means anything
+    /// — a client's own simulation is the authority on its own hull. That
+    /// rule leaves the world with no way to say "you are somewhere else
+    /// now", which is exactly what a console `goto` is, so this is that way
+    /// and it is a different message rather than a special case of an
+    /// existing one.
+    ///
+    /// `heading` is a yaw about the vertical, as [`ToClient::Boat`]'s is,
+    /// and `None` is the world declining to have an opinion: turn a hull to
+    /// face the shore it has been anchored off, and leave a walker facing
+    /// however they were facing. It has to be sayable, because a walker's
+    /// bearing never crosses the wire in the first place — [`ToServer::Move`]
+    /// carries a position and nothing else — so a heading of zero here would
+    /// be the world spinning somebody north for no reason.
+    ///
+    /// A hull put down this way arrives *at rest*: way off, sails furled,
+    /// as a world is entered. The point of saying so on the wire rather than
+    /// leaving it to each client is that the alternative is not a matter of
+    /// taste — a ship anchored off a beach to be looked at, still carrying
+    /// the way it had when its helmsman typed, closes that beach in seconds
+    /// and runs itself aground. Nobody was sailing; they were taken.
+    ///
+    /// A client that has just been seated at a helm by a `Boat` telling in
+    /// the same breath applies this to *that* hull: the seating is read
+    /// first, so the carrier is whatever the wire has most recently said it
+    /// is.
+    PutDown {
+        position: Vec2,
+        heading: Option<f32>,
+    },
     /// A boat is out of the world: a rowing boat hoisted back aboard the
     /// ship whose boarding it carried — see [`ToServer::Board`] — or the one
     /// its keeper left floating somewhere when they lowered another, see
@@ -998,6 +1037,17 @@ impl ToClient {
                 payload.push(16);
                 put_u64(&mut payload, id.0);
             }
+            Self::PutDown { position, heading } => {
+                payload.push(17);
+                put_vec2(&mut payload, *position);
+                match heading {
+                    None => payload.push(0),
+                    Some(heading) => {
+                        payload.push(1);
+                        put_f32(&mut payload, *heading);
+                    }
+                }
+            }
             Self::Reply { text } => {
                 payload.push(10);
                 put_str(&mut payload, text);
@@ -1161,6 +1211,14 @@ impl ToClient {
             },
             16 => Self::BoatGone {
                 id: BoatId(payload.u64()?),
+            },
+            17 => Self::PutDown {
+                position: payload.vec2()?,
+                heading: match payload.u8()? {
+                    0 => None,
+                    1 => Some(payload.f32()?),
+                    flag => return Err(corrupt(format!("a put down flagged {flag}"))),
+                },
             },
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
@@ -1522,6 +1580,14 @@ mod tests {
                 occupant: Some(PlayerId(3)),
             },
             ToClient::BoatGone { id: BoatId(14) },
+            ToClient::PutDown {
+                position: at,
+                heading: Some(-0.5),
+            },
+            ToClient::PutDown {
+                position: at,
+                heading: None,
+            },
             ToClient::Joined {
                 id: PlayerId(1),
                 position: at,
@@ -1861,6 +1927,33 @@ mod tests {
                 9, 0,  // length
                 16, // tag
                 8, 7, 6, 5, 4, 3, 2, 1, // the boat retired, LE
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::PutDown {
+                position: Vec2::new(1.5, -2.0),
+                heading: Some(0.75),
+            }),
+            [
+                14, 0,  // length
+                17, // tag
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // z = -2.0
+                1,    // a heading is said
+                0, 0, 0x40, 0x3F, // heading = 0.75
+            ],
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::PutDown {
+                position: Vec2::new(1.5, -2.0),
+                heading: None,
+            }),
+            [
+                10, 0,  // length
+                17, // tag
+                0, 0, 0xC0, 0x3F, // x = 1.5
+                0, 0, 0, 0xC0, // z = -2.0
+                0,    // and no opinion about which way to face
             ],
         );
         assert_eq!(

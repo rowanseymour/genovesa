@@ -2062,11 +2062,38 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 // so the roster must not already be held here. Anyone in the
                 // world may command — a session is a game among people who
                 // chose each other — and the host's log says who asked what.
-                let reply = console::interpret(&shared, id, &line);
+                let served = console::interpret(&shared, id, &line);
                 (shared.report)(&format!("{id}: {line}"));
-                let players = shared.players.held();
-                if let Some(player) = players.get(&id) {
-                    post(player, ToClient::Reply { text: reply });
+                {
+                    let players = shared.players.held();
+                    if let Some(player) = players.get(&id) {
+                        post(player, ToClient::Reply { text: served.reply });
+                    }
+                }
+                // A line that moved them moved them somewhere the survey has
+                // never been, and the way there is not a voyage: the wake
+                // reopens where they now stand, exactly as it does for
+                // somebody coming through the door, and the ground within
+                // sight of the new place is theirs on the spot. Followed to
+                // itself for the same reason entry follows a way that goes
+                // nowhere.
+                //
+                // A `Move` or a `Helm` this client had already put on the
+                // wire from the old place arrives after all this and is
+                // believed — nothing here can tell a stale report from a
+                // fresh one, and inventing a sequence number to tell them
+                // apart would be a wire change to fix a debugging command.
+                // So the roster rewinds, the hull with it, and the wake is
+                // charged one run back the way it came. Known, and it
+                // settles itself: the client is drawing from the put down by
+                // then, so its next report is from the new place and puts
+                // everything back. What it costs meanwhile is bounded by
+                // [`SURVEY_SWEEP`] — one sweep of ground surveyed towards
+                // somewhere nobody is, and the first honest report finding
+                // it already charted.
+                if let Some(put) = served.put {
+                    wake = Wake::opening(put);
+                    follow_the_way(&shared, id, &mut wake, put);
                 }
             }
             Ok(ToServer::WantChunk { chunk }) if in_the_world(chunk) => {
