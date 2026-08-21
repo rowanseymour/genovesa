@@ -715,7 +715,7 @@ fn unroll(
 
     // Wherever the world is being drawn, the chart is drawn over it — which is
     // usually the window, and is an off-screen image in a run that is taking
-    // pictures. Copied rather than defaulted so that `--state chart --shot`
+    // pictures. Copied rather than defaulted so that a `shot` of the chart
     // photographs a chart rather than an empty sheet.
     let mut target = RenderTarget::default();
     for (mut camera, world_target) in &mut world_camera {

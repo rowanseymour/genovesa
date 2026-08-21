@@ -13,8 +13,8 @@
 //! ground it is still waiting on. The last line reads the world and the view
 //! back in the terms the command line takes them —
 //! `--seed`, `--focus`, `--yaw`, `--zoom` — so a screenshot of the overlay is
-//! the whole of what it takes to stand here again, in a `--shot` run or
-//! otherwise.
+//! the whole of what it takes to stand here again — the three words the
+//! socket takes to put a view back where this one was.
 //!
 //! The switches are [`Toggles`], and they are set from the console — see
 //! [`crate::console`], whose `set` lines are their only writer. They used to
@@ -591,10 +591,10 @@ fn overlay_text(
     lines.join("\n")
 }
 
-/// The world and the view in the terms `--seed`, `--focus`, `--yaw` and
-/// `--zoom` take them back in: a seed, then metres, degrees and metres. The
-/// yaw runs unbounded on the camera — easing never wants to wrap — so it is
-/// folded to a bearing here.
+/// The world and the view in the terms that take them back in: `--seed` on
+/// the command line, and then the socket's own `focus`, `yaw` and `zoom` —
+/// metres, degrees and metres. The yaw runs unbounded on the camera — easing
+/// never wants to wrap — so it is folded to a bearing here.
 ///
 /// The seed leads because it is the part that cannot be guessed from the
 /// picture, and it is absent in somebody else's world: a guest can say where

@@ -668,6 +668,9 @@ struct Told<'w> {
     /// Optional where the rest are not: the sheet exists only inside a world,
     /// and the lean tests of this module run without one.
     chart: Option<ResMut<'w, crate::chart::Chart>>,
+    /// Optional for a different reason: the control socket exists only in a
+    /// run that was asked for one, and most runs are not.
+    control: Option<ResMut<'w, crate::control::Control>>,
 }
 
 /// Applies what the server said since last frame: players joining, moving
@@ -807,7 +810,17 @@ fn receive(
             // Whatever the server said to a console line, said where it was
             // typed. Only ever sent asked-for, so a quiet session pays
             // nothing here.
-            ToClient::Reply { text } => told.console.say(&text),
+            ToClient::Reply { text } => {
+                told.console.say(&text);
+                // And to the socket, if that is where the line came from. A
+                // reply is fire-and-forget both ways, so there is nothing to
+                // match it against but who is waiting — see
+                // [`crate::control::Control::answered`], which drops one
+                // nobody is.
+                if let Some(control) = told.control.as_mut() {
+                    control.answered(&text);
+                }
+            }
             // The server's verbs, for tab at the console — see
             // [`crate::console`], which owns what completion means and
             // still sends every line verbatim.

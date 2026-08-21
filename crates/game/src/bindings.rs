@@ -55,6 +55,32 @@ impl Action {
         Action::Claim,
     ];
 
+    /// The action's name in a typed line — what `press` takes, over in
+    /// [`crate::control`]. One word, because a line is split on spaces, and
+    /// short because it is meant to be typed: `press forward 20`.
+    ///
+    /// Separate from [`Action::label`] rather than derived from it. A label is
+    /// prose for the settings screen — "Forward / make sail" — and naming the
+    /// two halves of a control is exactly what a label is for and exactly what
+    /// a parser cannot have. The view keeps the `view-` prefix its label
+    /// spells out, for the reason the label does: steering left and turning
+    /// the view left are different controls and a bare `left` would be a
+    /// coin toss.
+    pub fn name(self) -> &'static str {
+        match self {
+            Action::MoveForward => "forward",
+            Action::MoveBack => "back",
+            Action::SteerLeft => "left",
+            Action::SteerRight => "right",
+            Action::Board => "board",
+            Action::WaitOutNight => "wait",
+            Action::TurnLeft => "view-left",
+            Action::TurnRight => "view-right",
+            Action::Chart => "chart",
+            Action::Claim => "claim",
+        }
+    }
+
     /// How the settings screen names the action. The last two say "view"
     /// because steering left and turning left are different keys doing
     /// different things, and a list that read "Steer left … Turn left" would
@@ -271,6 +297,23 @@ pub fn typed_label(logical: &Key) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A control is named to be typed — see [`crate::control`] — so two
+    /// sharing a name would make one of them unreachable, and a name with a
+    /// space in it would be read as two words.
+    #[test]
+    fn every_control_has_its_own_one_word_name() {
+        let mut seen = std::collections::HashSet::new();
+        for action in Action::ALL {
+            let name = action.name();
+            assert!(!name.is_empty(), "{action:?} has no name");
+            assert!(
+                name.split_whitespace().nth(1).is_none(),
+                "`{name}` is more than one word"
+            );
+            assert!(seen.insert(name), "two controls are called `{name}`");
+        }
+    }
 
     #[test]
     fn every_action_indexes_to_its_own_slot() {

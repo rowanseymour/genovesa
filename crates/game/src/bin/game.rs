@@ -3,8 +3,9 @@
 //! What `cargo run` runs, being the crate's `default-run`. The other binary,
 //! `mapgen`, draws the same terrain from above without opening a window.
 //!
-//! `game --help` lists what it can be asked for. Given `--shot` it renders
-//! pictures off screen and quits instead of opening a window at all.
+//! `game --help` lists what it can be asked for, which is not much on
+//! purpose: how a run *behaves* is said down the debug socket rather than on
+//! the command line — see `game::control`.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -19,11 +20,11 @@ use game::beasts::BeastsPlugin;
 use game::boat::BoatPlugin;
 use game::cairn::CairnPlugin;
 use game::camera::MapCameraPlugin;
-use game::capture::CapturePlugin;
 use game::chart::ChartPlugin;
 use game::cli::{self, Args};
 use game::compass::CompassPlugin;
 use game::console::ConsolePlugin;
+use game::control::{self, ControlPlugin};
 use game::debug::DebugOverlayPlugin;
 use game::logbook::{self, LogbookPlugin};
 use game::menu::MenuPlugin;
@@ -70,7 +71,7 @@ fn main() -> ExitCode {
         (None, AppState::InWorld) => Some(Session::open(
             args.config,
             Reach::Alone,
-            args.opening,
+            server::OPENING,
             false,
         )),
         (None, _) => None,
@@ -86,18 +87,31 @@ fn main() -> ExitCode {
         args.opened_on(session.connection.spawn, session.connection.facing);
     }
 
-    run(args, session);
+    // Before the app, for the reason the session is: a port already in use is
+    // a plain failure to start, and finding that out from inside a running
+    // game would mean a window opening on a run that cannot be driven.
+    let control = match args.debug.map(control::open).transpose() {
+        Ok(control) => control,
+        Err(message) => {
+            eprintln!("game: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    run(args, session, control);
     ExitCode::SUCCESS
 }
 
-fn run(args: Args, session: Option<Session>) {
+fn run(args: Args, session: Option<Session>, control: Option<control::Control>) {
     let mut app = App::new();
+    let headless = args.is_headless();
+    let resolution = args.resolution;
 
     // Read off the file before the window is built, because the window is
-    // built out of it — see [`settings::opening`]. A capture run reads
+    // built out of it — see [`settings::opening`]. A windowless run reads
     // nothing: a picture asked for by the command line has to come out the
     // same on any machine, and the settings are this machine's.
-    let display = if args.is_capture() {
+    let display = if args.is_headless() {
         DisplaySettings::default()
     } else {
         settings::load()
@@ -110,27 +124,30 @@ fn run(args: Args, session: Option<Session>) {
             .set(asset_plugin()),
     );
 
-    // Capturing has no window, so nothing drives the frame loop — winit's
-    // runner has no events to wait on. Run frames back to back instead, as
-    // fast as they render, and let the capture quit when it is done.
-    if args.is_capture() {
-        app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::ZERO));
+    // A windowless run has nothing driving the frame loop — winit's runner has
+    // no events to wait on — so it runs its own, paced like a game rather than
+    // spun as fast as the machine goes. It is a game being played by something
+    // that is not a person, and everything it is asked to do is timed in
+    // seconds: a press held for twenty of them wants twenty seconds of world,
+    // not as many frames as a core can be burned producing.
+    if args.is_headless() {
+        app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )));
     }
 
-    // Not while capturing: the UI renders to the captured image, so the
-    // readout — or a console left open — would be baked into every shot. In
-    // every windowed run the console is present and the readout with it,
-    // hidden until `set stats on`; `--debug` just starts with it showing.
-    if !args.is_capture() {
-        app.add_plugins((DebugOverlayPlugin, ConsolePlugin));
-        if args.debug {
-            app.world_mut().resource_mut::<game::debug::Toggles>().stats = true;
-        }
-    }
+    // Both in every run, windowed or not. The readout starts hidden and the
+    // console starts closed, so neither costs a run that never asks for them —
+    // and a run being driven down the socket can ask: `set stats on` puts the
+    // readout up, which is how the frame rate and the chunk counts get into a
+    // picture at all. There used to be a `--debug` flag that turned it on from
+    // the command line, and it is gone for the reason the rest of them are:
+    // the socket says it, and can also say it back off again.
+    app.add_plugins((DebugOverlayPlugin, ConsolePlugin));
 
-    // Not while capturing either: a run that writes pictures and quits has
-    // nobody listening, and would open an audio device for no one.
-    if !args.is_capture() {
+    // Not in a windowless run either: nobody is at a run with no window, and
+    // it would open an audio device for no one.
+    if !args.is_headless() {
         app.add_plugins(AmbiencePlugin);
     }
 
@@ -189,11 +206,17 @@ fn run(args: Args, session: Option<Session>) {
             // process does not. Paired only because a plugin tuple holds
             // fifteen.
             (NetPlugin, StoppingPlugin),
-            CapturePlugin {
-                resolution: args.resolution,
-                shots: args.shots,
-            },
         ));
+
+    // Last, and only when asked for: the socket is a mouth on everything above
+    // rather than a part of any of it, and a run without one should be the run
+    // it would have been before this existed.
+    if let Some(control) = control {
+        app.insert_resource(control).add_plugins(ControlPlugin {
+            headless,
+            resolution,
+        });
+    }
 
     app.run();
 }
@@ -238,10 +261,10 @@ fn bundled_assets() -> Option<String> {
     Some(assets.to_string_lossy().into_owned())
 }
 
-/// A window to play in, or none at all when the run is only here to write
-/// pictures.
+/// A window to play in, or none at all when the run is here to be driven down
+/// a socket and looked at through the pictures it writes.
 fn window_plugin(args: &Args, display: &DisplaySettings) -> WindowPlugin {
-    if args.is_capture() {
+    if args.is_headless() {
         return WindowPlugin {
             primary_window: None,
             // Nothing to close, so closing cannot be what ends the run.

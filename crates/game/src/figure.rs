@@ -74,7 +74,7 @@ const SETTLING: f32 = 9.0;
 
 /// How big a step has to be, in metres, before it is not a step at all.
 /// Boarding a boat puts the player from wherever they stood onto its deck,
-/// and a capture sweep's teleport is a jump in the same transform this reads
+/// and the socket's `focus` teleport is a jump in the same transform this reads
 /// — without this, the arithmetic below would take a hundred metres of either
 /// for a hundred metres of walking and spin the legs through a dozen strides.
 ///
