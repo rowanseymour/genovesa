@@ -105,7 +105,6 @@ fn main() -> ExitCode {
 fn run(args: Args, session: Option<Session>, control: Option<control::Control>) {
     let mut app = App::new();
     let headless = args.is_headless();
-    let resolution = args.resolution;
 
     // Read off the file before the window is built, because the window is
     // built out of it — see [`settings::opening`]. A windowless run reads
@@ -212,10 +211,8 @@ fn run(args: Args, session: Option<Session>, control: Option<control::Control>) 
     // rather than a part of any of it, and a run without one should be the run
     // it would have been before this existed.
     if let Some(control) = control {
-        app.insert_resource(control).add_plugins(ControlPlugin {
-            headless,
-            resolution,
-        });
+        app.insert_resource(control)
+            .add_plugins(ControlPlugin { headless });
     }
 
     app.run();

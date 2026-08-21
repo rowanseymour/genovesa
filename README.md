@@ -358,7 +358,8 @@ printf 'weather gale\npress forward 20\nshot gale.png\nquit\n' | nc 127.0.0.1 77
 
 `--headless` drops the window and draws off screen, which is what an unattended
 run wants; without it the run opens a window as usual and can be watched while
-it is driven. `--resolution` sizes the pictures a windowless run writes.
+it is driven. `set resolution 1080` sizes the pictures a windowless run writes,
+by the same rungs the display screen offers.
 
 The stats readout — frame rate, geometry counts, the chunk tallies and the view
 in the terms `focus`, `zoom` and `yaw` take — is `set stats on`, so it can be

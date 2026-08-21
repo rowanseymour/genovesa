@@ -151,6 +151,11 @@ pub enum Resolution {
     Rows(u32),
 }
 
+/// The shape a width is worked out on when there is no screen to ask — before
+/// winit has reported a monitor, and in a run with no window at all, where
+/// there is never going to be one. Widescreen because everything is.
+pub(crate) const WIDESCREEN: UVec2 = UVec2::new(16, 9);
+
 /// The rungs, in the order the screen lists them: down from native, since that
 /// is the direction somebody opening it is going.
 pub const LADDER: [Resolution; 5] = [
@@ -163,6 +168,19 @@ pub const LADDER: [Resolution; 5] = [
     Resolution::Rows(1080),
     Resolution::Rows(720),
 ];
+
+/// The rungs as plain rows of pixels, in the order [`LADDER`] lists them —
+/// what the console's `set resolution` takes, native being no answer in a run
+/// with no display to be native to.
+pub(crate) fn rungs() -> Vec<u32> {
+    LADDER
+        .iter()
+        .filter_map(|rung| match rung {
+            Resolution::Native => None,
+            Resolution::Rows(rows) => Some(*rows),
+        })
+        .collect()
+}
 
 impl Resolution {
     /// What the button reads. A switch has to say which way it is set, not
@@ -178,7 +196,7 @@ impl Resolution {
 /// How wide a picture `rows` tall is on a screen of `shape` — the aspect ratio
 /// the display has, so a resolution is a *count* of pixels and never a change
 /// of shape. Even, because a video mode is.
-fn width_for(shape: UVec2, rows: u32) -> u32 {
+pub(crate) fn width_for(shape: UVec2, rows: u32) -> u32 {
     let wide = (rows as f32 * shape.x.max(1) as f32 / shape.y.max(1) as f32).round() as u32;
     wide.max(2) & !1
 }
@@ -273,7 +291,7 @@ fn dress_the_window(
     // A shape to work a width out of, and 16:9 until there is a screen to ask
     // — the same guess [`opening`] makes, and replaced by the real one on the
     // frame a monitor arrives.
-    let shape = monitor.map_or(UVec2::new(16, 9), |(_, screen)| screen.physical_size());
+    let shape = monitor.map_or(WIDESCREEN, |(_, screen)| screen.physical_size());
     let size = match settings.resolution {
         Resolution::Native => crate::WINDOW,
         Resolution::Rows(rows) => UVec2::new(width_for(shape, rows), rows),
@@ -420,7 +438,7 @@ pub fn opening(settings: &DisplaySettings) -> (WindowMode, UVec2) {
     };
     let size = match settings.resolution {
         Resolution::Native => crate::WINDOW,
-        Resolution::Rows(rows) => UVec2::new(width_for(UVec2::new(16, 9), rows), rows),
+        Resolution::Rows(rows) => UVec2::new(width_for(WIDESCREEN, rows), rows),
     };
     (mode, size)
 }

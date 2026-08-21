@@ -15,21 +15,15 @@
 //! a subset.
 //!
 //! What is left is what a socket cannot say, because it is settled before
-//! there is a game to say it to: the world, the screen, and the port the
-//! socket itself listens on.
+//! there is a game to say it to: the world, the screen, whether there is a
+//! window at all, and the port the socket itself listens on.
 
-use args::pair;
-use bevy::math::{UVec2, Vec2, Vec3};
+use bevy::math::{Vec2, Vec3};
 use protocol::DEFAULT_PORT;
 
 use crate::camera::View;
 use crate::{AppState, Helm};
 use server::{random_seed, WorldConfig};
-
-/// Size of a picture the socket's `shot` writes in a run with no window.
-/// Matches the shots already in `screenshots/`, which came off a 1280x720
-/// window on a doubled display.
-const DEFAULT_RESOLUTION: UVec2 = UVec2::new(2560, 1440);
 
 /// What the command line asked for.
 pub struct Args {
@@ -52,9 +46,6 @@ pub struct Args {
     /// Whether a debugged run does without a window. Meaningless on its own: a
     /// run nobody can drive has nothing to be windowless *for*.
     pub headless: bool,
-    /// Size of each picture the socket writes. Ignored in a windowed run,
-    /// where a picture is the size of the window.
-    pub resolution: UVec2,
     /// Where the camera opens. Not settable here any more — it is whatever the
     /// welcome says, and moving it afterwards is the socket's `focus`, `zoom`
     /// and `yaw`.
@@ -133,17 +124,14 @@ Debugging:
                     the whole vocabulary
   --headless        no window: draw off screen and be driven down the socket
                     alone
-  --resolution <WxH>  size of the pictures `shot` writes in a run with no
-                    window [default: {}x{}]
 
-The view, the weather, the clock and the controls are reached down the socket
-and nowhere else — an option could only ever say them once, and before
-anything existed:
+The view, the weather, the clock, the controls and the size of the pictures are
+reached down the socket and nowhere else — an option could only ever say them
+once, and before anything existed:
 
   game --seed 7 --debug 7777 --headless
-  printf 'focus 98,-317\\nzoom 120\\nshot near.png\\nquit\\n' | nc 127.0.0.1 7777
-",
-        DEFAULT_RESOLUTION.x, DEFAULT_RESOLUTION.y,
+  printf 'set resolution 1080\\nfocus 98,-317\\nshot near.png\\nquit\\n' | nc 127.0.0.1 7777
+"
     )
 }
 
@@ -168,7 +156,6 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         seed_given: false,
         debug: None,
         headless: false,
-        resolution: DEFAULT_RESOLUTION,
         view: View::default(),
     };
     let mut state_given = false;
@@ -197,7 +184,6 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                 args.seed_given = true;
             }
             "--join" => args.join = Some(value.clone()),
-            "--resolution" => args.resolution = resolution(value)?,
             "--debug" => {
                 args.debug = Some(
                     value
@@ -276,17 +262,6 @@ fn state(value: &str) -> Result<(AppState, Helm), String> {
         "chart" => Ok((AppState::InWorld, Helm::Chart)),
         other => Err(format!("`{other}` is not a screen\n\n{}", usage())),
     }
-}
-
-/// A size in pixels, as `WxH`.
-fn resolution(value: &str) -> Result<UVec2, String> {
-    let (w, h) = pair(
-        value,
-        'x',
-        |s| s.parse::<u32>().ok().filter(|v| *v > 0),
-        "a size in pixels, e.g. 2560x1440",
-    )?;
-    Ok(UVec2::new(w, h))
 }
 
 #[cfg(test)]
@@ -434,6 +409,7 @@ mod tests {
             "--zoom 120",
             "--yaw 45",
             "--time 6",
+            "--resolution 2560x1440",
         ] {
             assert!(
                 parse_args(line).is_err(),
@@ -449,7 +425,5 @@ mod tests {
         assert!(parse_args("--seed twelve").is_err());
         assert!(parse_args("--state elsewhere").is_err());
         assert!(parse_args("--debug eleven").is_err());
-        assert!(parse_args("--resolution 2560").is_err());
-        assert!(parse_args("--resolution 0x1440").is_err());
     }
 }
