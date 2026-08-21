@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use protocol::DEFAULT_PORT;
 
-use crate::{random_seed, WorldConfig, OPENING};
+use crate::{random_seed, WorldConfig};
 
 /// What the command line asked for.
 pub struct Args {
@@ -17,12 +17,6 @@ pub struct Args {
     /// The file to keep the world in — reopened if it exists, begun if not.
     /// Without it the world lives exactly as long as the process.
     pub world: Option<PathBuf>,
-    /// What time of day the world opens at, as a phase of the day — see
-    /// `protocol::ToClient::Daylight`. `None` is nothing asked: a fresh
-    /// world opens in the morning, and a reopened one where its clock
-    /// stands — so the default cannot be a number here without winding
-    /// every kept world to it.
-    pub opening: Option<f32>,
 }
 
 /// Built rather than written out so the defaults it quotes are read from the
@@ -42,18 +36,16 @@ Options:
                  same islands, the clock and the players where they were —
                  and begun if not [default: the world lasts as long as the
                  process]
-  --time <h>     the hour the world opens at, from 0 to 24 [default: {opens},
-                 a morning — or, reopening a kept world, wherever its clock
-                 stands; given anyway, the clock winds forward to that hour]
 
 The world is generated here and handed out a chunk at a time. Clients need
 know nothing about it — not the seed, not the layout — which is why the seed
 is named on this side of the wire and nowhere else.
 
 A day turns in {day:.0} seconds, and the hour is the server's: every client in
-the world is under the same sun, however long the world has been up.
+the world is under the same sun, however long the world has been up. Which
+hour it is, is the console's `time` — said from inside the world by anyone in
+it, at any point, rather than fixed here before there is a world to say it to.
 ",
-        opens = OPENING * 24.0,
         day = protocol::DAY_SECONDS,
     )
 }
@@ -76,7 +68,6 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         },
         seed_chosen: false,
         world: None,
-        opening: None,
     };
 
     let mut rest = argv.iter();
@@ -97,29 +88,10 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                 args.seed_chosen = true;
             }
             "--world" => args.world = Some(PathBuf::from(value)),
-            "--time" => args.opening = Some(hour(value)?),
             other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
         }
     }
     Ok(args)
-}
-
-/// An hour of the world's day, as a phase of it: `0` and `24` are both
-/// midnight, `6` dawn, `18` dusk. Hours rather than the fraction the wire
-/// carries, because an hour is what somebody deciding when a world should
-/// open thinks in — even where the day itself is ten minutes long.
-///
-/// Public because both command lines take a `--time` and it is the same
-/// hour: a game opening a world for itself is opening the world a server
-/// would have.
-pub fn hour(value: &str) -> Result<f32, String> {
-    let hours: f32 = value
-        .parse()
-        .map_err(|_| format!("`{value}` is not an hour"))?;
-    if !(0.0..=24.0).contains(&hours) {
-        return Err(format!("`{value}` is not an hour of the day"));
-    }
-    Ok((hours / 24.0).rem_euclid(1.0))
 }
 
 #[cfg(test)]
@@ -160,21 +132,17 @@ mod tests {
         assert_eq!(parse_args("").expect("should parse").world, None);
     }
 
+    /// The hour is the console's `time`, said from inside the world, and an
+    /// option that quietly did nothing would be worse than one that is
+    /// refused.
     #[test]
-    fn a_world_can_be_opened_at_any_hour() {
-        // Midnight either end, and noon in the middle: the hour is a phase of
-        // the day by the time anything else sees it. And no `--time` is no
-        // opinion — a kept world's own clock must not be overruled by a
-        // default.
-        let opened_at = |line: &str| parse_args(line).expect("should parse").opening;
-        assert_eq!(opened_at("--time 0"), Some(0.0));
-        assert_eq!(opened_at("--time 12"), Some(0.5));
-        assert_eq!(opened_at("--time 24"), Some(0.0));
-        assert_eq!(opened_at(""), None);
-
-        assert!(parse_args("--time midnight").is_err());
-        assert!(parse_args("--time 25").is_err(), "not an hour of any day");
-        assert!(parse_args("--time -1").is_err());
+    fn the_hour_is_not_asked_for_here() {
+        for line in ["--time 6", "--time 6:30"] {
+            assert!(
+                parse_args(line).is_err(),
+                "`{line}` should be refused — it is said down the console now"
+            );
+        }
     }
 
     #[test]

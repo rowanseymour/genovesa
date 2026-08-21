@@ -1,10 +1,12 @@
 //! The server binary: hosts one world until it is asked to stop.
 //!
-//! `server --help` lists what little it takes. There is no window and no
-//! rendering — the world is generated here and handed to clients a chunk at
-//! a time. Given `--world` the world outlives the process: killed and
-//! started again on the same file, it is the same world, aged exactly as
-//! much as it was up.
+//! `server --help` lists what little it takes: a port, a world, and a file to
+//! keep it in. Nothing about what the world *does* once it is up — the hour
+//! included, which is the console's `time`, said from inside the world by
+//! anyone in it. There is no window and no rendering — the world is generated
+//! here and handed to clients a chunk at a time. Given `--world` the world
+//! outlives the process: killed and started again on the same file, it is the
+//! same world, aged exactly as much as it was up.
 //!
 //! Being asked to stop is a signal — Ctrl-C, or whatever an init system sends
 //! — and it is the same end of a session a player leaving a world they hosted
@@ -54,13 +56,6 @@ fn main() -> ExitCode {
     // The library keeps quiet about sessions; a server run from a terminal is
     // exactly the caller that wants to see them.
     server = server.reporting_to(|line| println!("{line}"));
-    if let Some(phase) = args.opening {
-        server = server.opening_at(phase);
-    }
-    // The clock set before the world is first written, so a `--time` asked
-    // for at a kept world's birth is in its file from the very first save —
-    // killed thirty seconds in, it must still reopen at the hour it was
-    // given.
     if let Some(path) = begin_at {
         server = match server.keeping_at(path) {
             Ok(server) => server,
