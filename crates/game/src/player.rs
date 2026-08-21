@@ -159,8 +159,10 @@ fn find_footing(mut commands: Commands, ground: Option<Res<Ground>>, mut walkers
     }
 }
 
-/// The player and whatever they are aboard, as a query.
-type Players<'w, 's> = Query<'w, 's, (Entity, Option<&'static ChildOf>), With<Player>>;
+/// The player and whatever they are aboard, as a query. The one shape every
+/// system that has to answer "what is carrying the player" reads it in —
+/// [`crate::net::receive`] included, which passes it on to the fleet.
+pub type Players<'w, 's> = Query<'w, 's, (Entity, Option<&'static ChildOf>), With<Player>>;
 
 /// The entity carrying the player through the world: the vehicle they are
 /// aboard, or the player themself on their own feet. This is the entity to
@@ -217,6 +219,87 @@ impl PlayerPlace<'_, '_> {
         let carrier = self.carrier()?;
         let forward = self.carriers.get(carrier).ok()?.forward().xz();
         forward.try_normalize()
+    }
+}
+
+/// Puts the player down where the world says they are, hull and all — the
+/// client's half of [`protocol::ToClient::PutDown`], which is the one word
+/// that overrules this machine about its own carrier.
+///
+/// The carrier is [`carrier_of`]'s, which is the whole point: the eye follows
+/// that entity and the position reports are taken off it, so anything else
+/// moved here would be a jump the camera never made and the server never
+/// heard about. The fleet's book comes into it only where the scene graph
+/// cannot answer yet — the telling that seated this player at a helm may have
+/// arrived in the same drain as this one, and the parentage it asked for is
+/// still a queued command, the same case [`Fleet::gone`] reads its own book
+/// for. The two are consulted in that order and never the other way round,
+/// because the direction they can disagree in is the book going quiet while
+/// the parentage stands: [`Fleet::told`]'s out-of-order defence hands a helm
+/// back without taking the player off the deck they are standing on, and a
+/// carrier read out of the book there would be no carrier at all — a world
+/// coordinate written into a *child-local* transform, leaving the player as
+/// far off the hull the camera is still following as the jump was long, and
+/// [`Unsettled`] with it, which [`find_footing`] will not clear for anything
+/// with a parent.
+///
+/// Moved by a command rather than through a transform of its own for the
+/// queued-parentage case again: what the queue guarantees is order, so a
+/// seating's transform is written first and this one is the last word about
+/// where the hull is.
+///
+/// A hull is put down at rest. You were taken there; you did not sail there,
+/// and a jump that left the sails drawing would deliver a ship to an
+/// anchorage already making for the beach it was brought to look at. At rest
+/// is also the state a world is entered in — see [`Boat::of`] — so this is
+/// arriving, and arriving has never come with way on.
+///
+/// A walker is put down at sea level and left [`Unsettled`], exactly as
+/// [`crate::net::enter_afoot`] puts down somebody entering on their own feet:
+/// the ground at the far end of a jump has not arrived yet, and their old
+/// island's height is no better a guess than the waterline.
+pub fn put_down(
+    commands: &mut Commands,
+    fleet: &Fleet,
+    players: &Players,
+    at: Vec2,
+    facing: Option<f32>,
+) {
+    let seated = players.single().ok();
+    let hull = seated
+        .and_then(|(_, aboard)| aboard.map(ChildOf::parent))
+        .or_else(|| fleet.hull());
+    let Some(carrier) = hull.or(seated.map(|(player, _)| player)) else {
+        return;
+    };
+    let afoot = hull.is_none();
+    commands
+        .entity(carrier)
+        .entry::<Transform>()
+        .and_modify(move |mut place| {
+            place.translation.x = at.x;
+            place.translation.z = at.y;
+            if afoot {
+                place.translation.y = 0.0;
+            }
+            if let Some(facing) = facing {
+                place.rotation = Quat::from_rotation_y(facing);
+            }
+        });
+    if afoot {
+        commands.entity(carrier).insert(Unsettled);
+    } else {
+        // Way off, sails furled, heel and pitch back to nothing. Written as
+        // a whole boat rather than as a furl and a stop because that is what
+        // "at rest" already is here, and the two would drift apart the day
+        // something else is added to a hull's motion. Through the entry for
+        // the reason the transform goes that way: a hull seated in this same
+        // drain has no `Boat` yet to modify, and the entry lands after the
+        // seating's own insert.
+        commands
+            .entity(carrier)
+            .entry::<Boat>()
+            .and_modify(|mut boat| *boat = Boat::of(boat.kind()));
     }
 }
 

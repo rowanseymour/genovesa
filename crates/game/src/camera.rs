@@ -110,6 +110,13 @@ impl View {
     }
 }
 
+/// How far the focus may be from the player, in metres, and still be
+/// something the world did rather than something that was done to it. A hull
+/// makes ten metres a second and the eye follows within a twelfth of one, so
+/// ordinary sailing keeps the two within a metre of each other; nothing in
+/// the world crosses this in a frame, and nothing that jumps stays under it.
+const A_JUMP: f32 = 64.0;
+
 /// The camera's ground-level target. The camera itself sits back and above it.
 #[derive(Component)]
 pub struct MapCamera {
@@ -288,6 +295,20 @@ fn follow_player(
 
     for mut camera in &mut cameras {
         camera.target_focus = Vec3::new(place.x, surface.unwrap_or(place.y), place.z);
+
+        // A carrier further away than any hull could have sailed in a frame
+        // has been put down somewhere else — the console's `goto`, the
+        // socket's `focus` — and the eye goes with it outright rather than
+        // easing across the world. Not for the look of it: chunks are
+        // streamed around the camera's own focus, so an ease over a
+        // kilometre of ocean orders in every chunk on the line as it passes,
+        // which is the whole map the jump was for not looking at. Ungrounded
+        // with it, so the height is put down again the moment the ground at
+        // the far end can answer, exactly as it was on arriving.
+        if camera.focus.xz().distance(camera.target_focus.xz()) > A_JUMP {
+            camera.focus = camera.target_focus;
+            camera.grounded = false;
+        }
 
         if camera.grounded || surface.is_none() {
             continue;
@@ -629,6 +650,51 @@ mod tests {
             (start.y - ground(&app, start.x, start.z)).abs() < 1e-3,
             "camera started at {} rather than on the ground",
             start.y
+        );
+    }
+
+    #[test]
+    fn the_eye_goes_with_a_carrier_that_was_put_down_elsewhere() {
+        let mut app = test_app_on_terrain();
+        place_player(&mut app, Vec3::ZERO, DEFAULT_DISTANCE, YAW);
+
+        // A jump — a console `goto`, a socket `focus` — moves the carrier
+        // outright, and the eye is on it the same frame rather than sliding
+        // there over the next few seconds. It matters beyond the look of it:
+        // ground is streamed around the focus, so an eased crossing orders
+        // in every chunk on the line.
+        let away = Vec3::new(4_000.0, 0.0, -2_500.0);
+        let mut players = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<Player>>();
+        players
+            .single_mut(app.world_mut())
+            .expect("player should exist")
+            .translation = away;
+        app.update();
+
+        let focus = read(&mut app, |c| c.focus);
+        assert_eq!(
+            Vec2::new(focus.x, focus.z),
+            Vec2::new(away.x, away.z),
+            "the eye is still crossing the world on its own"
+        );
+
+        // And an ordinary stride is still eased after, or every step would
+        // be a cut.
+        let stride = away + Vec3::new(2.0, 0.0, 0.0);
+        let mut players = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<Player>>();
+        players
+            .single_mut(app.world_mut())
+            .expect("player should exist")
+            .translation = stride;
+        app.update();
+        let eased = read(&mut app, |c| c.focus);
+        assert!(
+            eased.x > away.x && eased.x < stride.x,
+            "a stride was cut to rather than eased: the eye is at {eased}"
         );
     }
 

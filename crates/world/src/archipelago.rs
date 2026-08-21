@@ -159,11 +159,13 @@ pub const SPAWN_OFFSHORE: f32 = 48.0;
 /// then means the layout is broken, not that the sea is wide.
 const SPANS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
 
-/// Metres between soundings when [`Archipelago::spawn`] walks in from the
-/// sea looking for the waterline. Fine enough not to step over a beach
-/// (coasts the generator draws are hundreds of metres long), coarse enough
-/// that the walk costs a few hundred height samples at worst.
-const SOUNDING: f32 = 4.0;
+/// Metres between soundings when a walk over the heights goes looking for
+/// the waterline — [`Archipelago::spawn`]'s walk in from the sea, and the
+/// server console's outward from a point somebody asked to be taken to.
+/// Fine enough not to step over a beach (coasts the generator draws are
+/// hundreds of metres long), coarse enough that a walk costs a few hundred
+/// height samples at worst.
+pub const SOUNDING: f32 = 4.0;
 
 /// Skews a uniform draw towards zero, so that island sizes come out mostly
 /// small: the median lands in the lower quarter of its layer's range and the

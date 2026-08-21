@@ -480,6 +480,51 @@ impl Client {
         }
     }
 
+    /// The next word putting this player down somewhere, with nothing said
+    /// about any boat on the way to it.
+    ///
+    /// The two are one reading because the order is what makes them one
+    /// question. A jump at a helm moves a hull whose own client is the
+    /// authority on it, so the world tells everybody *but* the asker — and a
+    /// telling that wrongly went to the asker too would go out *before* the
+    /// put down, since the broadcast comes first. Read for the put down
+    /// alone, as [`Client::hear_put_down`] does, and the mistake would
+    /// already have been skipped past by the time anything looked.
+    fn hear_put_down_alone(&self) -> (Vec2, Option<f32>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match ToClient::read(&mut &self.0).expect("read") {
+                ToClient::PutDown { position, heading } => return (position, heading),
+                ToClient::Boat { id, .. } => {
+                    panic!("the world told this client where its own {id:?} is")
+                }
+                _ => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ten seconds and nobody was put down anywhere"
+            );
+        }
+    }
+
+    /// The next word putting this player down somewhere, ignoring everything
+    /// else — bounded like the boats' reader, a session going on about
+    /// ground and beasts around a jump.
+    fn hear_put_down(&self) -> (Vec2, Option<f32>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let ToClient::PutDown { position, heading } =
+                ToClient::read(&mut &self.0).expect("read")
+            {
+                return (position, heading);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ten seconds and nobody was put down anywhere"
+            );
+        }
+    }
+
     /// The next answer to a console line, ignoring everything else — the
     /// session goes on introducing players and telling the sky around a
     /// command, and none of that is what a reply is about.
@@ -3498,4 +3543,138 @@ fn a_summons_can_raise_a_crowd_worth_timing_the_client_with() {
             pods.len()
         );
     }
+}
+
+#[test]
+fn goto_takes_a_player_to_a_place_in_whatever_can_be_there() {
+    // Entry is aboard a ship, so the first jump is a ship's: asked for the
+    // middle of an island, which is the one place a hull cannot be.
+    let addr = host(7);
+    let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a world is entered at a helm");
+    let world = behind_the_curtain(7);
+    let inland = world.spawn().expect("a world has islands").island.centre();
+    assert!(
+        world.height(inland.x, inland.y) >= 0.0,
+        "the middle of an island should be land for this to be about anything"
+    );
+    // The welcome introduces this player to their own ship among the rest of
+    // the joining chatter, and everything after here reads on the
+    // understanding that a word about a boat is a word this jump caused.
+    client.caught_up();
+
+    client.say(ToServer::Command {
+        line: format!("goto {} {}", inland.x, inland.y),
+    });
+    // Nothing about the ship on the way to it: this client's own simulation
+    // is the authority on the hull it steers, and a jump that told it where
+    // its own hull was would be the world overruling it twice — once with
+    // the put down, which it is entitled to, and once with a `Boat` telling,
+    // which it is not. Everybody else hears that telling.
+    let (anchorage, heading) = client.hear_put_down_alone();
+    assert!(
+        world.height(anchorage.x, anchorage.y) < 0.0,
+        "the ship was put down on dry land at {anchorage}"
+    );
+    let bow = heading.expect("a hull anchored off a shore is turned to face it");
+    let towards = f32::atan2(-(inland - anchorage).x, -(inland - anchorage).y);
+    assert!(
+        (bow - towards).abs() < 1e-3,
+        "the ship lies on {bow} rad with the island it was brought to see on {towards}"
+    );
+    let reply = client.hear_reply();
+    assert!(
+        reply.starts_with("the shore is") && reply.contains("m off the bow"),
+        "the jump was answered: {reply}"
+    );
+
+    // Ashore on their own feet, where the ship cannot follow — and a jump
+    // out to sea from there is a jump the ship makes with them, because
+    // there is no swimming in this world. The same ship: one they are
+    // keeping and nobody is aboard comes to them rather than a new one being
+    // conjured, which is what keeps an evening of this from filling the
+    // world with abandoned hulls.
+    client.say(ToServer::Disembark { position: inland });
+    client.caught_up();
+    let afloat = Vec2::new(anchorage.x, anchorage.y);
+    client.say(ToServer::Command {
+        line: format!("goto {},{}", afloat.x, afloat.y),
+    });
+    let (told, kind, at, _heading, occupant) = client.hear_a_boat_kinded();
+    assert_eq!(
+        told, ship,
+        "a second ship was conjured for a player who had one"
+    );
+    assert_eq!(kind, BoatKind::Sloop, "a walker was put to sea in a dinghy");
+    assert_eq!(occupant, Some(id), "the hull came without its helm");
+    assert_eq!(at, afloat, "the hull came to somewhere else");
+    let (put, _) = client.hear_put_down();
+    assert_eq!(put, afloat, "the water asked for is the water arrived at");
+    let reply = client.hear_reply();
+    assert!(reply.starts_with("your ship is here"), "answered: {reply}");
+
+    // At a helm now, and asked for open water: the plainest of the four, the
+    // hull simply going where it was sent with its crew aboard. Somewhere
+    // well clear of everywhere this session has been, so that what the
+    // survey says about it cannot be ground charted earlier — sixteen
+    // hundred metres is five times `SIGHT_RADIUS`, and nothing between here
+    // and there was sailed past, every leg of this test being a jump.
+    let open_sea = (1..64)
+        .map(|out| inland + Vec2::new(out as f32 * 250.0, 0.0))
+        .find(|at| {
+            world.height(at.x, at.y) < 0.0
+                && [spawn, anchorage, inland]
+                    .iter()
+                    .all(|been| at.distance(*been) > 1_600.0)
+        })
+        .expect("open water somewhere east of the island");
+    client.say(ToServer::Command {
+        line: format!("goto {} {}", open_sea.x, open_sea.y),
+    });
+    let (sailed, bearing) = client.hear_put_down_alone();
+    assert_eq!(sailed, open_sea, "the hull went somewhere else");
+    assert!(
+        bearing.is_some(),
+        "a hull left to lie where it was put was given no bearing to lie on"
+    );
+    let reply = client.hear_reply();
+    assert!(
+        reply.starts_with("you are at"),
+        "water at a helm was answered as though it were a shore: {reply}"
+    );
+
+    // And the ground of the new place arrives with them, which is the whole
+    // reason this command lives on the server rather than in the client's
+    // own debug socket: a jump is not a voyage, so the wake reopens where
+    // they now are and the survey is theirs on the spot. None of this was
+    // sailed to, so a survey that came from anywhere but the reopening would
+    // have nothing to say about these chunks at all — a wake left where it
+    // was fails this by never sending them, which is the reader's own
+    // twenty-second bound rather than an assertion of ours.
+    let wanted = in_sight_of(open_sea);
+    client.hear_the_survey(HashMap::new(), |charted| {
+        wanted.iter().all(|chunk| charted.contains_key(chunk))
+    });
+
+    // And a walker asked for land is simply stood on it: the point itself,
+    // not an offing, and no hull follows them inland. The ship stays out
+    // here, which is what walking away from a boat has always done.
+    client.say(ToServer::Disembark { position: open_sea });
+    client.caught_up();
+    client.say(ToServer::Command {
+        line: format!("goto {} {}", inland.x, inland.y),
+    });
+    let (standing, facing) = client.hear_put_down_alone();
+    assert_eq!(
+        standing, inland,
+        "a walker was moved off the point they named"
+    );
+    assert_eq!(
+        facing, None,
+        "the world had an opinion about a walker's bearing"
+    );
+    assert!(
+        client.nothing_was_said_about_a_boat(),
+        "a hull followed a walker up the beach"
+    );
 }
