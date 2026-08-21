@@ -409,6 +409,17 @@ const KEEL_PROBES: usize = 4;
 /// rest should be *at rest*: the same spot every frame, nothing moving.
 const WAY_STOPPED: f32 = 0.02;
 
+/// Way below this, the gunwale key treats the hull as stopped: the way is
+/// snapped to zero and the crossing goes ahead. [`WAY_STOPPED`] is where the
+/// glide's own tail snaps, and it is deliberately tiny — but tiny means the
+/// tail takes seconds to reach it, and a furled boat that *reads* as stopped
+/// refused a crossing for way nobody can see is a key that just does nothing.
+/// That was found the hard way: "F is broken" reported at a helm whose glide
+/// had a few imperceptible centimetres a second left to run. Half a metre a
+/// second is a stroll — nobody stepping across a gunwale at it is stepping
+/// off a moving deck.
+const CROSSING_WAY: f32 = 0.5;
+
 /// Within this of the heel the turn is asking for, the hull snaps to it
 /// exactly — the same tail-closing that [`WAY_STOPPED`] does for the way,
 /// and for the same reason: the ease only ever halves the remainder, and a
@@ -694,10 +705,39 @@ impl Boat {
     /// Whether the hull has no way on at all. Exact equality is meaningful
     /// here because [`steer`] snaps the tail of every glide to precisely
     /// zero — see [`WAY_STOPPED`] — so a hull is either making way or it is
-    /// this. What going ashore asks before it lets anybody step off a moving
-    /// deck.
+    /// this. Crossings ask the forgiving form, [`reads_as_stopped`].
+    ///
+    /// [`reads_as_stopped`]: Boat::reads_as_stopped
     pub fn at_rest(&self) -> bool {
         self.way == 0.0
+    }
+
+    /// Whether the hull reads as stopped at a gunwale: within
+    /// [`CROSSING_WAY`] of rest. The strict gate refused crossings for way
+    /// nobody could see, for the several seconds the glide's tail takes to
+    /// reach [`WAY_STOPPED`] on its own — which read as the key being
+    /// broken, not as a boat being underway.
+    ///
+    /// A pure question, deliberately: a gate that answers it may still
+    /// refuse the crossing for its own reasons — no footing, nothing in
+    /// reach — and a refusal must leave the glide it read exactly as it
+    /// found it. The crossing that is granted stops the hull with
+    /// [`comes_to_rest`], and the night's offer reads this through a query
+    /// that could not write if it wanted to.
+    ///
+    /// [`comes_to_rest`]: Boat::comes_to_rest
+    pub fn reads_as_stopped(&self) -> bool {
+        self.way.abs() < CROSSING_WAY
+    }
+
+    /// Stops the hull where it lies — the commit half of
+    /// [`reads_as_stopped`], called by a crossing that was actually granted,
+    /// so the deck being stepped off is exactly as still as the gate read
+    /// it. The same tail-closing every ease here gets — see [`settled`].
+    ///
+    /// [`reads_as_stopped`]: Boat::reads_as_stopped
+    pub fn comes_to_rest(&mut self) {
+        self.way = settled(self.way, 0.0, CROSSING_WAY);
     }
 
     /// Where somebody aboard stands, in the hull's own frame — see
