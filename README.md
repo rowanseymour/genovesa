@@ -250,10 +250,11 @@ server, hangs up on whoever is still in the world and writes it down before the
 process goes, so the file is current and not as of some save half a minute
 ago. Asked twice, a server stops where it stands.
 
-Worlds open in the morning, and a kept world reopens at the hour it closed
-on; a dedicated server's `--time` opens a new world at any hour instead, or
-winds a kept one forward to it. In the game the hour is asked for from inside
-the world rather than on the way in — see [Debugging](#debugging).
+Worlds open in the morning, and a kept world reopens at the hour it closed on.
+Any other hour is asked for from inside the world rather than on the way in —
+the console's `time`, which winds the day forward for everyone in the session,
+and is the only way in whether the world is the game's own or a dedicated
+server's. See [Debugging](#debugging).
 
 Everyone enters a world for the first time in the same place — afloat just
 off the coast of the same island, at the helm of a boat the world provides —

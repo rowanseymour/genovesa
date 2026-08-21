@@ -762,8 +762,8 @@ impl Server {
 
     /// What time of day the world opens at, as a phase — see
     /// [`ToClient::Daylight`]. Worlds open in the morning unless somebody
-    /// asks for otherwise, which is what `--time` and the tests of the night
-    /// do.
+    /// asks for otherwise, which is what the tests of the night do — and the
+    /// menu, opening a world the game is hosting for itself.
     ///
     /// On a *reopened* world this winds the clock forward to the next
     /// occurrence of that hour rather than setting it, exactly as the

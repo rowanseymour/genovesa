@@ -29,7 +29,11 @@
 //! - `focus`, `zoom`, `yaw` — the view, which used to be three options that
 //!   could each be said once.
 //! - `hold` — the clock, stopped, so that two pictures of one place differ in
-//!   what they were taken to show and not in what hour it had got to.
+//!   what they were taken to show and not in what hour it had got to. It
+//!   waits for the sky to reach the hour the world is at before freezing it,
+//!   for the reason everything here waits: `time` moves the *world's* clock,
+//!   and the sky eases onto that rather than jumping, so a hold thrown on the
+//!   frame `time` was answered would pin the hour the light was leaving.
 //! - `quit` — the way out. A run that is hosting writes its world down as it
 //!   goes (see [`crate::stopping`]), so a driver that ends by killing the
 //!   process loses the last of the world it was making.
@@ -197,6 +201,12 @@ enum Doing {
         stage: Stage,
         waited: u32,
         patience: u32,
+        answer: SyncSender<String>,
+    },
+    /// `hold on`, waiting for the drawn hour to catch up with the world's
+    /// before it freezes anything — see [`crate::sky::Sky::caught_up`].
+    Holding {
+        waited: u32,
         answer: SyncSender<String>,
     },
     /// A line has gone to the server; waiting for what it says back. The
@@ -466,6 +476,9 @@ struct Hands<'w, 's> {
     /// Absent until a world is joined, and on the menu screens.
     online: Option<Res<'w, Online>>,
     view: ResMut<'w, View>,
+    /// Read only to know whether it has caught up with the world's clock —
+    /// `hold` is the one line that waits on the light rather than the ground.
+    sky: Res<'w, crate::sky::Sky>,
     cameras: Query<'w, 's, &'static mut MapCamera>,
     player: PlayerSweep<'w, 's>,
     ground: GroundArriving<'w, 's>,
@@ -516,8 +529,25 @@ fn serve_orders(
     time: Res<Time>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    // Copied out and written back so that serving the line can borrow the
+    // rest of the resource — the handle it photographs into, and the switch
+    // `hold` throws. Both halves need it: a line in hand can be a `hold` that
+    // has been waiting for the sky since the frame it arrived.
+    let target = control.target.clone();
+    let mut holding = control.holding;
+
     if let Some(doing) = control.doing.take() {
-        control.doing = advance(doing, &mut commands, &mut hands, &time);
+        control.doing = advance(
+            doing,
+            &mut commands,
+            &mut hands,
+            &time,
+            Held {
+                target,
+                holding: &mut holding,
+            },
+        );
+        control.holding = holding;
         return;
     }
 
@@ -538,11 +568,6 @@ fn serve_orders(
         order
     };
 
-    // Copied out and written back so that serving the line can borrow the
-    // rest of the resource — the handle it photographs into, and the switch
-    // `hold` throws.
-    let target = control.target.clone();
-    let mut holding = control.holding;
     control.doing = begin(
         order,
         &mut hands,
@@ -564,7 +589,13 @@ struct Held<'a> {
 
 /// Carries a line that could not be finished at once one frame further, or
 /// answers it and has done.
-fn advance(doing: Doing, commands: &mut Commands, hands: &mut Hands, time: &Time) -> Option<Doing> {
+fn advance(
+    doing: Doing,
+    commands: &mut Commands,
+    hands: &mut Hands,
+    time: &Time,
+    held: Held,
+) -> Option<Doing> {
     match doing {
         Doing::Pressing {
             key,
@@ -652,6 +683,24 @@ fn advance(doing: Doing, commands: &mut Commands, hands: &mut Hands, time: &Time
                 stage,
                 waited,
                 patience: patience + 1,
+                answer,
+            })
+        }
+        Doing::Holding { waited, answer } => {
+            if hands.sky.caught_up() {
+                *held.holding = true;
+                let _ = answer.send("the clock is held where it stands".to_string());
+                return None;
+            }
+            if waited >= PATIENCE {
+                // Nothing is held: a driver told the clock was stopped, when
+                // it is running and at an hour nobody asked for, would take
+                // every picture after this one on trust.
+                let _ = answer.send("the sky never caught up with the world's clock".to_string());
+                return None;
+            }
+            Some(Doing::Holding {
+                waited: waited + 1,
                 answer,
             })
         }
@@ -745,14 +794,22 @@ fn begin(
             }
             Err(why) => refuse(why, answer),
         },
+        // Letting go is done the moment it is said — there is nothing to wait
+        // for in handing the hour back to the world. Taking hold is not.
         Some((&"hold", rest)) => match onoff(rest, "hold") {
-            Ok(on) => {
-                *held.holding = on;
-                let _ = answer.send(if on {
-                    "the clock is held where it stands".to_string()
-                } else {
-                    "the clock runs again".to_string()
-                });
+            // No world here, and no word from one ever: there is no clock to
+            // hold, and waiting for an hour that is never coming would stand
+            // a scripted run still for the whole of `PATIENCE` before saying
+            // so. A session that has simply not been told the hour *yet* is
+            // the other case, and that one waits — the word is on its way.
+            Ok(true) if hands.online.is_none() && !hands.sky.heard_the_hour() => refuse(
+                "there is no world here whose clock could be held".to_string(),
+                answer,
+            ),
+            Ok(true) => Some(Doing::Holding { waited: 0, answer }),
+            Ok(false) => {
+                *held.holding = false;
+                let _ = answer.send("the clock runs again".to_string());
                 None
             }
             Err(why) => refuse(why, answer),
@@ -996,6 +1053,10 @@ mod tests {
                 holding: false,
             })
             .init_resource::<Toggles>()
+            // The hour, which `hold` waits on. A default one has heard
+            // nothing from a server yet, which is exactly the state a run is
+            // in for its first frames.
+            .init_resource::<crate::sky::Sky>()
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<KeyBindings>()
             .init_resource::<View>()
@@ -1029,6 +1090,95 @@ mod tests {
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .clear();
+    }
+
+    /// The bug this waiting exists for: `time` moves the world's clock and
+    /// the sky *eases* onto the new hour, so a hold thrown on the frame the
+    /// `time` was answered used to pin the hour the light was leaving — and
+    /// pin it for good, since nothing revisits a hold once it has latched. A
+    /// driver taking two comparable pictures of one place got both of them at
+    /// an hour they had explicitly moved off.
+    #[test]
+    fn a_hold_waits_for_the_sky_to_reach_the_hour_before_freezing_it() {
+        let (mut app, orders) = driven_app();
+        // The real pair: the ease that closes on the server's hour, and the
+        // system that freezes what it arrives at.
+        app.add_systems(Update, (crate::sky::advance_the_day, hold_the_sky));
+
+        // A world at one hour, and a server that has just named a very
+        // different one — the shape `time 23:00` leaves behind.
+        let mut sky = app.world_mut().resource_mut::<crate::sky::Sky>();
+        sky.told(0.35);
+        sky.told(0.95);
+        assert!(
+            !sky.caught_up(),
+            "the sky arrived at the new hour without crossing to it"
+        );
+
+        let answered = say(&orders, "hold on");
+        app.update();
+        assert!(
+            answered.try_recv().is_err(),
+            "answered while the sky was still on its way"
+        );
+        assert!(
+            !app.world().resource::<Control>().holding,
+            "froze the hour the sky was leaving"
+        );
+
+        // Let it get there. The ease is exponential, so this is a few
+        // seconds of frames rather than one.
+        run_until(&mut app, "the sky has caught up", |app| {
+            app.world().resource::<crate::sky::Sky>().caught_up()
+        });
+        app.update();
+
+        assert_eq!(
+            answered.try_recv(),
+            Ok("the clock is held where it stands".to_string())
+        );
+        assert!(app.world().resource::<Control>().holding);
+
+        // And what it froze is the hour that was asked for, not the one it
+        // started from.
+        let held = app.world().resource::<crate::sky::Sky>().phase();
+        assert!(
+            (held - 0.95)
+                .rem_euclid(1.0)
+                .min((0.95 - held).rem_euclid(1.0))
+                < 0.01,
+            "held {held} rather than the hour the world had run on to"
+        );
+    }
+
+    /// Letting go has nothing to wait for, and says so at once. From a run
+    /// that is actually holding, so that the switch being thrown is something
+    /// this can fail on rather than the state it started in.
+    #[test]
+    fn letting_go_of_the_clock_is_answered_on_the_spot() {
+        let (mut app, orders) = driven_app();
+        app.world_mut().resource_mut::<Control>().holding = true;
+
+        let answered = say(&orders, "hold off");
+        app.update();
+        assert_eq!(answered.try_recv(), Ok("the clock runs again".to_string()));
+        assert!(!app.world().resource::<Control>().holding, "still holding");
+    }
+
+    /// And a run with no world to hold the clock of is told so on the line
+    /// that asked, rather than after half a minute of waiting for a word that
+    /// was never coming — `--debug` with `--state mainmenu` is a run like
+    /// that, and a driver taking pictures of the menus is the one who would
+    /// pay for it.
+    #[test]
+    fn holding_the_clock_of_no_world_is_refused_at_once() {
+        let (mut app, orders) = driven_app();
+        let answered = say(&orders, "hold on");
+        app.update();
+
+        let said = answered.try_recv().expect("answered on the spot");
+        assert!(said.contains("no world"), "unhelpful: {said}");
+        assert!(!app.world().resource::<Control>().holding);
     }
 
     /// A tap is one frame of the key being down, which is the whole of what a
