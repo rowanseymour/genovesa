@@ -214,7 +214,7 @@ impl Console {
 /// Where a line goes, decided by [`dispatch`]: answered here, or sent to the
 /// server whose world it is about.
 #[derive(Debug, PartialEq)]
-enum Dispatch {
+pub(crate) enum Dispatch {
     /// A `set` line: it ran against [`Toggles`], and this is its answer.
     Local(String),
     /// Anything else: the server's to interpret, verbatim.
@@ -224,7 +224,13 @@ enum Dispatch {
 /// Runs a line's local half, or says it is not local at all. The one place
 /// the grammar's rule lives: `set` never leaves the machine, nothing else
 /// ever stays on it.
-fn dispatch(line: &str, toggles: &mut Toggles) -> Dispatch {
+///
+/// Reached by the keyboard through [`submit`] and by the control socket
+/// through [`crate::control`], which is the point of it being a function of a
+/// line rather than of what is on screen: one grammar, whichever mouth speaks
+/// it, so a `set` variable is not something the socket has to be taught
+/// separately.
+pub(crate) fn dispatch(line: &str, toggles: &mut Toggles) -> Dispatch {
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.split_first() {
         Some((&"set", rest)) => Dispatch::Local(set(rest, toggles)),

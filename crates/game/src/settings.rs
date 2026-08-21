@@ -247,8 +247,8 @@ fn dress_the_window(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut asked_for: Local<Option<UVec2>>,
 ) {
-    // A capture run has no window at all, and asks for its size on the command
-    // line instead — see [`crate::capture`].
+    // A windowless run has no window to dress, and asks for the size of its
+    // pictures on the command line instead — see [`crate::control`].
     let Ok(mut window) = windows.single_mut() else {
         return;
     };
@@ -310,17 +310,30 @@ const SMALLEST_UI: f32 = 0.5;
 /// engraving to match (see [`crate::backdrop`]), and the chart pins its
 /// furniture to its own pixels instead (see [`crate::chart`]).
 fn scale_the_ui(windows: Query<&Window, With<PrimaryWindow>>, mut scale: ResMut<UiScale>) {
-    // A capture run has no window, and draws no UI into its pictures.
+    // A windowless run has no window to read, and fits the UI to the picture
+    // it is drawing into instead — see [`crate::control`], which sets the
+    // scale once from the same [`fitted_to`] this uses.
     let Ok(window) = windows.single() else {
         return;
     };
-    let room = window.resolution.size() / crate::WINDOW.as_vec2();
-    let fitted = room.min_element().max(SMALLEST_UI);
+    let fitted = fitted_to(window.resolution.size());
     // Compared before written: a scale rewritten every frame reads as changed,
     // and the layout system would lay the whole UI out again for it.
     if scale.0 != fitted {
         scale.0 = fitted;
     }
+}
+
+/// The scale the UI wears when it is being drawn at `size` physical pixels.
+///
+/// Split out because a run with no window draws UI all the same — the readout
+/// and the compass are in every picture it writes — and has to fit it to the
+/// image it draws into. Two spellings of this would be two opinions about how
+/// big a menu is, and the windowless one is the half nobody would be looking
+/// at while it drifted.
+pub(crate) fn fitted_to(size: Vec2) -> f32 {
+    let room = size / crate::WINDOW.as_vec2();
+    room.min_element().max(SMALLEST_UI)
 }
 
 /// The monitor a window is on, named by the entity that carries it.

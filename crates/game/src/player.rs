@@ -16,7 +16,7 @@
 //!
 //! Everything that wants "where the player is" — the camera, the position
 //! reports, the wildlife deciding whether to mind them — asks [`PlayerPlace`],
-//! and a `--shot`'s teleport asks [`PlayerSweep`]. Both resolve through the
+//! and the socket's `focus` asks [`PlayerSweep`]. Both resolve through the
 //! *carrier*: the vehicle the player is aboard, or the player themself on
 //! their own feet. Those systems neither know nor care which it is, and that
 //! is the point: the rowboat changes what the player boards and nothing
@@ -220,7 +220,7 @@ impl PlayerPlace<'_, '_> {
     }
 }
 
-/// The player as a thing a capture sweep can move.
+/// The player as a thing the socket's `focus` can move.
 #[derive(SystemParam)]
 pub struct PlayerSweep<'w, 's> {
     players: Players<'w, 's>,
@@ -230,7 +230,7 @@ pub struct PlayerSweep<'w, 's> {
 impl PlayerSweep<'_, '_> {
     /// Moves whatever carries the player — vehicle and rider whole — to a map
     /// point, leaving the height stale for `float` to settle. Does nothing
-    /// with no player in the world, which is every shot of a menu.
+    /// with no player in the world, which is every picture of a menu.
     pub fn teleport(&mut self, to: Vec2) {
         let Some(mut place) =
             carrier_of(&self.players).and_then(|carrier| self.carriers.get_mut(carrier).ok())

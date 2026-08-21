@@ -251,8 +251,9 @@ process goes, so the file is current and not as of some save half a minute
 ago. Asked twice, a server stops where it stands.
 
 Worlds open in the morning, and a kept world reopens at the hour it closed
-on; `--time` opens a new world at any hour instead — or winds a kept one
-forward to it — on either binary.
+on; a dedicated server's `--time` opens a new world at any hour instead, or
+winds a kept one forward to it. In the game the hour is asked for from inside
+the world rather than on the way in — see [Debugging](#debugging).
 
 Everyone enters a world for the first time in the same place — afloat just
 off the coast of the same island, at the helm of a boat the world provides —
@@ -317,30 +318,52 @@ keeping the one you like is just running it again:
 tools/readme-collage.sh 7
 ```
 
-## Development helpers
+## Debugging
 
-The app takes options too — `--state` to open on a given screen, `--seed` to
-pick the world, `--time` to open it at a chosen hour of its day, and
-`--focus`, `--zoom` and `--yaw` to say where the player is put down and how
-the view opens on them. Run `cargo run -- --help` for the
-details. Without `--seed` the run
-picks a world of its own and prints which, so a place worth going back to can
-be asked for by name.
+The command line is short on purpose: `--state` to open on a given screen,
+`--seed` to pick the world, `--join` to play in somebody else's. Without
+`--seed` the run picks a world of its own and prints which, so a place worth
+going back to can be asked for by name. Run `cargo run -- --help` for the rest.
 
-`--shot` writes a PNG of the view instead of waiting to be looked at. It can be
-given as many times as you like: the view options are read left to right, so
-each shot is the view as the options before it have left it.
+Everything about how a run *behaves* is said down a socket instead. `--debug`
+takes a port, and the run stays up on it, taking the lines the console takes —
+`set` for what this client draws, anything else for the server — plus the words
+a keyboard never needed: `shot`, `press`, `focus`, `zoom`, `yaw`, `hold` and
+`quit`. `help` lists the lot, both sides of the wire.
 
 ```bash
-cargo run -- --seed 7 --focus 98,-317 --yaw 45 \
-  --zoom 120 --shot near.png \
-  --zoom 340 --shot far.png \
-  --yaw 225 --shot behind.png
+cargo run -- --seed 7 --debug 7777 --headless
 ```
 
-That is one process and one world, so the pictures are all of the same place
-and worth comparing against each other. Shots are rendered off screen — no
-window opens, and the run quits when the last one is written.
+```bash
+printf 'focus 98,-317\nzoom 120\nshot near.png\nzoom 340\nshot far.png\nquit\n' \
+  | nc 127.0.0.1 7777
+```
+
+**Every line is answered when its work is done, and not before.** `press
+forward 20` answers twenty seconds later; `focus` answers once the ground at
+the new place has arrived and the picture has stopped moving; `shot` answers
+when the file is on disk. So a pipe of lines is a script rather than a race,
+and the two pictures above are of one world from one process, worth comparing
+against each other.
+
+That is the whole reason the socket replaced a row of options rather than
+sitting beside them. An option can only say what a run should do *before* it
+starts, so a view was as far as one could reach; a socket can sail somewhere
+first. This is how the game is driven by something that is not a person:
+
+```bash
+printf 'weather gale\npress forward 20\nshot gale.png\nquit\n' | nc 127.0.0.1 7777
+```
+
+`--headless` drops the window and draws off screen, which is what an unattended
+run wants; without it the run opens a window as usual and can be watched while
+it is driven. `--resolution` sizes the pictures a windowless run writes.
+
+The stats readout — frame rate, geometry counts, the chunk tallies and the view
+in the terms `focus`, `zoom` and `yaw` take — is `set stats on`, so it can be
+put up for one picture and taken down for the next. The same console is on the
+key left of 1 for anyone at a window.
 
 Four `#[ignore]`-d tests measure rather than draw, run like:
 
