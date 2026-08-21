@@ -30,6 +30,7 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
+use protocol::ground::FACET_METRES;
 use protocol::{BoatId, BoatKind, PlayerId};
 
 use crate::bindings::{Action, KeyBindings};
@@ -240,6 +241,31 @@ impl Hull {
         self.draft - KEEL_BITE
     }
 
+    /// How many points along this keel are asked about the bottom. Spread
+    /// from the forefoot to the heel inclusive, derived so the gap between
+    /// them never exceeds [`FACET_METRES`]: no facet of the height field can
+    /// lie wholly between two probes, so ground that rises across a facet is
+    /// read on the way up rather than stepped over. Derived rather than
+    /// picked, because the constant this used to be was tuned to a 2 m facet
+    /// and quietly stopped holding when the mesh went to 1 m.
+    ///
+    /// That is less than "nothing gets past". A crest only one lattice line
+    /// wide is *not* seen — the field is linear between its corners, so two
+    /// probes either side read its flanks and the hull sails through a rock
+    /// at the waterline. Coasts are safe by being coasts: the bottom
+    /// shelves, so the ground under the keel is near enough monotone. What
+    /// is exposed is the isolated skerry, and sailing through one is the
+    /// smaller wrong, paid off from the other end by giving skerries width.
+    ///
+    /// The sides are not probed: a hull here is a shallow V, drawing its
+    /// full draft on the centreline and nothing at the beam. That is a
+    /// standing condition on the model — a hull remodelled with a flat
+    /// bottom carried out to the beam would need probes out there too.
+    fn keel_probes(&self) -> usize {
+        let keel = self.heel_station - self.forefoot_station;
+        (keel / FACET_METRES).ceil() as usize + 1
+    }
+
     /// Where somebody aboard stands, in the hull's own frame — see
     /// [`Hull::helm_deck`].
     fn helm(&self) -> Vec3 {
@@ -378,30 +404,6 @@ const ROWBOAT: Hull = Hull {
 /// threshold cannot chatter. One constant for every hull — what it answers to
 /// is the quantisation, not the boat.
 const KEEL_BITE: f32 = 0.2;
-
-/// How many points along the keel are asked about the bottom. Spread from the
-/// forefoot to the heel inclusive, so the gap between them comes out under
-/// the two metres the ground is sampled at — an invariant each hull's keel
-/// length has to keep, and `the_keel_is_probed_as_closely_as_the_ground_is_
-/// sampled` pins: no facet of the height field can lie wholly between two
-/// probes, so ground that rises across a facet is read on the way up rather
-/// than stepped over.
-///
-/// That is less than "nothing gets past". A crest only one lattice line wide is
-/// *not* seen — the field is linear between its corners, so two probes either
-/// side read its flanks and the hull sails through a rock at the waterline.
-/// Coasts are safe by being coasts: the bottom shelves, so the ground under the
-/// keel is near enough monotone. What is exposed is the isolated skerry, and
-/// seeing one reliably would mean probing at a fraction of a metre on every
-/// frame at both poses, to buy a rock in open water. Sailing through a skerry
-/// is the smaller wrong, and can be paid off from the other end by giving the
-/// skerries some width.
-///
-/// The sides are not probed: a hull here is a shallow V, drawing its full draft
-/// on the centreline and nothing at the beam. That is a standing condition on
-/// the model — a hull remodelled with a flat bottom carried out to the beam
-/// would need probes out there too.
-const KEEL_PROBES: usize = 4;
 
 /// Way below this, with no drive asked for, is stopped, and [`steer`] snaps
 /// it to exactly zero. The ease only ever halves the remainder — left alone
@@ -2042,9 +2044,10 @@ fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32
     };
 
     let keel = hull.heel_station - hull.forefoot_station;
-    (0..KEEL_PROBES)
+    let probes = hull.keel_probes();
+    (0..probes)
         .filter_map(|i| {
-            let station = hull.forefoot_station + keel * i as f32 / (KEEL_PROBES - 1) as f32;
+            let station = hull.forefoot_station + keel * i as f32 / (probes - 1) as f32;
             let at = transform.transform_point(Vec3::new(0.0, 0.0, station));
             Some(ground.height(at.x, at.z)? + hull.grounding_draft())
         })
@@ -4287,17 +4290,22 @@ mod tests {
 
     #[test]
     fn the_keel_is_probed_as_closely_as_the_ground_is_sampled() {
-        // What a handful of points along the keel does buy: no facet of the
-        // height field fits between two probes, so ground rising across a facet
-        // is read on the way up. Not the same as seeing everything the field can
-        // draw — a crest narrower than a facet is read off its flanks and
-        // missed, which no spacing at this scale fixes; [`KEEL_PROBES`] carries
-        // the argument for wearing that rather than probing the keel to death.
-        let spacing = (SHIP.heel_station - SHIP.forefoot_station) / (KEEL_PROBES - 1) as f32;
-        assert!(
-            spacing <= FACET_METRES,
-            "{spacing} m between probes leaves room for a {FACET_METRES} m facet to hide in"
-        );
+        // What a handful of points along the keel buys: no facet of the
+        // height field fits between two probes, so ground rising across a
+        // facet is read on the way up. Not the same as seeing everything the
+        // field can draw — a crest narrower than a facet is read off its
+        // flanks and missed, which no spacing at this scale fixes;
+        // [`Hull::keel_probes`] carries the argument for wearing that rather
+        // than probing the keel to death. The count is derived from the facet
+        // now, so what this pins is the derivation staying honest.
+        for hull in [&SHIP, &ROWBOAT] {
+            let spacing =
+                (hull.heel_station - hull.forefoot_station) / (hull.keel_probes() - 1) as f32;
+            assert!(
+                spacing <= FACET_METRES,
+                "{spacing} m between probes leaves room for a {FACET_METRES} m facet to hide in"
+            );
+        }
     }
 
     #[test]

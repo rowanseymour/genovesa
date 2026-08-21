@@ -113,8 +113,10 @@ instrument for sailing and goes dark once the player steps ashore, there being
 nothing it could point at from a beach that the island is not already showing.
 
 The look is flat-shaded facets in a small fixed palette — no textures and no
-gradients anywhere. The mesh is built in 128 m chunks, drawn coarser than the
-height field is sampled, so the facets read as deliberate shapes.
+gradients anywhere. The mesh is built in 128 m chunks on a metre grid, fine
+enough to carry the ground's own character: rugged country breaks into crests
+and gullies, meadows and beaches lie calm, and the difference is the terrain's
+rather than the mesh's.
 
 A bigger island means more landscape, not stretched landscape: wavelengths
 are fixed in metres, so a large island holds more ranges, more coast and more

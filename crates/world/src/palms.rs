@@ -230,9 +230,9 @@ mod tests {
         // — run with --nocapture and the new values are printed. If you did
         // not, a platform has stopped agreeing about what a seed means.
         let recorded = [
-            (20_040_112u32, 0x147B_AE48_8CE3_ACCAu64),
-            (1, 0x5501_6EE0_96D1_75CE),
-            (7, 0xEDC1_5B4D_2DB6_3C72),
+            (20_040_112u32, 0x43CD_58C0_FA53_41F7u64),
+            (1, 0x4814_F4F0_2E1F_C1DC),
+            (7, 0x1AC0_0B7B_05CF_A21D),
         ];
         // Every seed digested before any is judged, so a re-recording run
         // prints all three rather than stopping at the first that moved.

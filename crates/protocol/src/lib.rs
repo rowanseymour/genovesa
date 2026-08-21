@@ -144,7 +144,7 @@ pub fn island_name(raw: &str) -> Option<String> {
 /// except a console line, which is as long as whatever was typed and gets the
 /// room a sentence needs. The ceiling exists so that a corrupt length prefix
 /// reads as corruption instead of as a request to buffer megabytes.
-const MAX_CLIENT_FRAME: u16 = 512;
+const MAX_CLIENT_FRAME: u32 = 512;
 
 /// How many bytes of survey one [`ToClient::Surveyed`] carries.
 ///
@@ -189,7 +189,7 @@ pub fn surveyed_bytes(found: &survey::Soundings) -> usize {
 /// Derived rather than picked, so that a message which outgrew it fails to
 /// send here instead of arriving as garbage — and so that "how much can one
 /// answer cost" has one answer, written down.
-const MAX_SERVER_FRAME: u16 = {
+const MAX_SERVER_FRAME: u32 = {
     let ground = 1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS);
     let batch = if SURVEY_BATCH_BYTES > 8 + survey::SOUNDINGS_BYTES {
         SURVEY_BATCH_BYTES
@@ -197,7 +197,9 @@ const MAX_SERVER_FRAME: u16 = {
         8 + survey::SOUNDINGS_BYTES
     };
     let surveyed = 1 + 2 + batch;
-    (if ground > surveyed { ground } else { surveyed }) as u16
+    let widest = if ground > surveyed { ground } else { surveyed };
+    assert!(widest <= u32::MAX as usize);
+    widest as u32
 };
 
 /// A player, as the server counts them: dealt out in joining order, never
@@ -1171,18 +1173,18 @@ impl ToClient {
 
 // --- The encoding ------------------------------------------------------------
 //
-// A frame is a little-endian u16 length followed by that many bytes: a tag
+// A frame is a little-endian u32 length followed by that many bytes: a tag
 // byte, then the message's fields, little-endian, floats as their IEEE 754
 // bits. Nothing self-describing — the tag says what fields follow, and both
 // ends are built from this file.
 
 /// Frames a payload and writes it in one call, so a frame reaches the socket
 /// whole and small messages travel as single packets.
-fn write_frame(to: &mut impl Write, payload: &[u8], limit: u16) -> io::Result<()> {
+fn write_frame(to: &mut impl Write, payload: &[u8], limit: u32) -> io::Result<()> {
     // Unreachable for the messages defined above, whose fields were counted
     // against their direction's ceiling; the check is for the message added
     // after this line was last read. Refusing to send beats a length prefix
-    // that quietly wrapped in the `as u16` below, which would frame the whole
+    // that quietly wrapped in the `as u32` below, which would frame the whole
     // rest of the session as garbage — and only in release builds, where an
     // assertion is not there to say so.
     if payload.len() > limit as usize {
@@ -1191,17 +1193,17 @@ fn write_frame(to: &mut impl Write, payload: &[u8], limit: u16) -> io::Result<()
             payload.len()
         )));
     }
-    let mut frame = Vec::with_capacity(2 + payload.len());
-    put_u16(&mut frame, payload.len() as u16);
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    put_u32(&mut frame, payload.len() as u32);
     frame.extend_from_slice(payload);
     to.write_all(&frame)
 }
 
 /// Reads one frame's payload, blocking until all of it has arrived.
-fn read_frame(from: &mut impl Read, limit: u16) -> io::Result<Vec<u8>> {
-    let mut length = [0u8; 2];
+fn read_frame(from: &mut impl Read, limit: u32) -> io::Result<Vec<u8>> {
+    let mut length = [0u8; 4];
     from.read_exact(&mut length)?;
-    let length = u16::from_le_bytes(length);
+    let length = u32::from_le_bytes(length);
     if length > limit {
         return Err(corrupt(format!(
             "a {length}-byte frame can only be garbage"
@@ -1621,7 +1623,7 @@ mod tests {
         // that matters, so a pair of axes that swapped places would show.
         assert_eq!(
             bytes_of_client(&ToServer::Hello { version: 3 }),
-            [3, 0, 0, 3, 0],
+            [3, 0, 0, 0, 0, 3, 0],
             "hello: length 3, tag 0, version LE"
         );
         assert_eq!(
@@ -1629,7 +1631,7 @@ mod tests {
                 position: Vec2::new(1.5, -2.0),
             }),
             [
-                9, 0, // length
+                9, 0, 0, 0, // length
                 1, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // y = -2.0
@@ -1640,7 +1642,7 @@ mod tests {
                 chunk: IVec2::new(5, -3),
             }),
             [
-                9, 0, // length
+                9, 0, 0, 0, // length
                 2, // tag
                 5, 0, 0, 0, // x = 5
                 0xFD, 0xFF, 0xFF, 0xFF, // z = -3, two's complement LE
@@ -1648,7 +1650,7 @@ mod tests {
         );
         assert_eq!(
             bytes_of_client(&ToServer::WantDawn),
-            [1, 0, 3],
+            [1, 0, 0, 0, 3],
             "want dawn: length 1, tag 3, and nothing to say"
         );
         assert_eq!(
@@ -1656,7 +1658,7 @@ mod tests {
                 line: "hi".to_string(),
             }),
             [
-                5, 0, // length
+                5, 0, 0, 0, // length
                 4, // tag
                 2, 0, // the line's own byte count, LE
                 0x68, 0x69, // "hi", as the UTF-8 it already was
@@ -1664,7 +1666,7 @@ mod tests {
         );
         assert_eq!(
             bytes_of_client(&ToServer::Papers { token: None }),
-            [2, 0, 5, 0],
+            [2, 0, 0, 0, 5, 0],
             "empty papers: length 2, tag 5, and the flag saying so"
         );
         assert_eq!(
@@ -1672,7 +1674,7 @@ mod tests {
                 token: Some(Token(0x0102_0304_0506_0708)),
             }),
             [
-                10, 0, // length
+                10, 0, 0, 0, // length
                 5, // tag
                 1, // a token follows
                 8, 7, 6, 5, 4, 3, 2, 1, // the token, LE
@@ -1684,7 +1686,7 @@ mod tests {
                 heading: 0.75,
             }),
             [
-                13, 0, // length
+                13, 0, 0, 0, // length
                 6, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // y = -2.0
@@ -1696,7 +1698,7 @@ mod tests {
                 boat: BoatId(0x0102_0304_0506_0708),
             }),
             [
-                9, 0, // length
+                9, 0, 0, 0, // length
                 7, // tag
                 8, 7, 6, 5, 4, 3, 2, 1, // the boat, LE
             ],
@@ -1706,7 +1708,7 @@ mod tests {
                 position: Vec2::new(1.5, -2.0),
             }),
             [
-                9, 0, // length
+                9, 0, 0, 0, // length
                 8, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // y = -2.0
@@ -1717,7 +1719,7 @@ mod tests {
                 island: IVec2::new(5, -3),
             }),
             [
-                9, 0, // length
+                9, 0, 0, 0, // length
                 9, // tag
                 5, 0, 0, 0, // x = 5
                 0xFD, 0xFF, 0xFF, 0xFF, // z = -3, two's complement LE
@@ -1729,7 +1731,7 @@ mod tests {
                 name: "hi".to_string(),
             }),
             [
-                13, 0,  // length
+                13, 0, 0, 0,  // length
                 10, // tag
                 5, 0, 0, 0, // x = 5
                 0xFD, 0xFF, 0xFF, 0xFF, // z = -3
@@ -1743,7 +1745,7 @@ mod tests {
                 heading: 0.75,
             }),
             [
-                13, 0,  // length
+                13, 0, 0, 0,  // length
                 11, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // y = -2.0
@@ -1760,7 +1762,7 @@ mod tests {
                 aboard: Some(BoatId(0x0807_0605_0403_0201)),
             }),
             [
-                38, 0, // length
+                38, 0, 0, 0, // length
                 0, // tag
                 7, 0, 0, 0, // id
                 0, 0, 0xC0, 0x3F, // spawn x = 1.5
@@ -1782,14 +1784,14 @@ mod tests {
                 aboard: None,
             })[..],
             [
-                &[30u8, 0][..],
+                &[30u8, 0, 0, 0][..],
                 &bytes_of_server(&ToClient::Welcome {
                     id: PlayerId(7),
                     spawn: Vec2::new(1.5, -2.0),
                     facing: Vec2::new(-2.0, 1.5),
                     token: Token(0x0102_0304_0506_0708),
                     aboard: Some(BoatId(0x0807_0605_0403_0201)),
-                })[2..31],
+                })[4..33],
                 &[0u8][..],
             ]
             .concat()[..],
@@ -1799,7 +1801,7 @@ mod tests {
                 id: WorldId(0x0807_0605_0403_0201),
             }),
             [
-                9, 0,  // length
+                9, 0, 0, 0,  // length
                 12, // tag
                 1, 2, 3, 4, 5, 6, 7, 8, // the id, LE
             ],
@@ -1813,7 +1815,7 @@ mod tests {
                 occupant: Some(PlayerId(9)),
             }),
             [
-                27, 0,  // length
+                27, 0, 0, 0,  // length
                 13, // tag
                 7, 0, 0, 0, 0, 0, 0, 0, // the boat, LE
                 0, // kind: sloop
@@ -1839,9 +1841,9 @@ mod tests {
             heading: 0.75,
             occupant: None,
         });
-        assert_eq!(empty[..2], [23, 0], "an empty boat is shorter by its hand");
-        assert_eq!(empty[2..24], occupied[2..24], "emptiness moved the fields");
-        assert_eq!(empty[24], 0, "nobody at the helm is flag 0");
+        assert_eq!(empty[..4], [23, 0, 0, 0], "an empty boat is shorter by its hand");
+        assert_eq!(empty[4..26], occupied[4..26], "emptiness moved the fields");
+        assert_eq!(empty[26], 0, "nobody at the helm is flag 0");
         // A rowing boat differs in exactly the kind byte.
         let rowboat = bytes_of_server(&ToClient::Boat {
             id: BoatId(7),
@@ -1850,22 +1852,22 @@ mod tests {
             heading: 0.75,
             occupant: Some(PlayerId(9)),
         });
-        assert_eq!(rowboat[11], 1, "a rowboat is kind byte 1");
-        assert_eq!(rowboat[..11], occupied[..11], "the kind moved the fields");
-        assert_eq!(rowboat[12..], occupied[12..], "the kind moved the fields");
+        assert_eq!(rowboat[13], 1, "a rowboat is kind byte 1");
+        assert_eq!(rowboat[..13], occupied[..13], "the kind moved the fields");
+        assert_eq!(rowboat[14..], occupied[14..], "the kind moved the fields");
         assert_eq!(
             bytes_of_server(&ToClient::BoatGone {
                 id: BoatId(0x0102_0304_0506_0708),
             }),
             [
-                9, 0,  // length
+                9, 0, 0, 0,  // length
                 16, // tag
                 8, 7, 6, 5, 4, 3, 2, 1, // the boat retired, LE
             ],
         );
         assert_eq!(
             bytes_of_server(&ToClient::Refused { version: 9 }),
-            [3, 0, 1, 9, 0],
+            [3, 0, 0, 0, 1, 9, 0],
             "refused: length 3, tag 1, version LE"
         );
         assert_eq!(
@@ -1874,7 +1876,7 @@ mod tests {
                 position: Vec2::new(1.5, -2.0),
             }),
             [
-                13, 0, // length
+                13, 0, 0, 0, // length
                 2, // tag
                 7, 0, 0, 0, // id
                 0, 0, 0xC0, 0x3F, // x = 1.5
@@ -1887,7 +1889,7 @@ mod tests {
                 position: Vec2::new(1.5, -2.0),
             }),
             [
-                13, 0, // length
+                13, 0, 0, 0, // length
                 3, // tag — Joined's twin, and only the tag tells them apart
                 7, 0, 0, 0, // id
                 0, 0, 0xC0, 0x3F, // x = 1.5
@@ -1897,7 +1899,7 @@ mod tests {
         assert_eq!(
             bytes_of_server(&ToClient::Left { id: PlayerId(7) }),
             [
-                5, 0, // length
+                5, 0, 0, 0, // length
                 4, // tag
                 7, 0, 0, 0, // id
             ],
@@ -1907,7 +1909,7 @@ mod tests {
                 wind: Vec2::new(1.5, -2.0),
             }),
             [
-                9, 0, // length
+                9, 0, 0, 0, // length
                 6, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // y = -2.0
@@ -1916,7 +1918,7 @@ mod tests {
         assert_eq!(
             bytes_of_server(&ToClient::Daylight { phase: 0.75 }),
             [
-                5, 0, // length
+                5, 0, 0, 0, // length
                 7, // tag
                 0, 0, 0x40, 0x3F, // phase = 0.75, sunset
             ],
@@ -1930,7 +1932,7 @@ mod tests {
                 surfaced: true,
             }),
             [
-                23, 0, // length
+                23, 0, 0, 0, // length
                 8, // tag
                 7, 0, 0, 0, // id
                 0, // kind: shark
@@ -1959,9 +1961,9 @@ mod tests {
                 velocity: Vec2::new(-2.0, 1.5),
                 surfaced: true,
             });
-            assert_eq!(told[7], byte, "{kind:?} is not kind byte {byte}");
-            assert_eq!(told[..7], shark[..7], "{kind:?} moved the head");
-            assert_eq!(told[8..], shark[8..], "{kind:?} moved the fields");
+            assert_eq!(told[9], byte, "{kind:?} is not kind byte {byte}");
+            assert_eq!(told[..9], shark[..9], "{kind:?} moved the head");
+            assert_eq!(told[10..], shark[10..], "{kind:?} moved the fields");
         }
         let sounded = bytes_of_server(&ToClient::Beast {
             id: BeastId(7),
@@ -1970,13 +1972,13 @@ mod tests {
             velocity: Vec2::new(-2.0, 1.5),
             surfaced: false,
         });
-        assert_eq!(sounded[8], 0, "a sounded beast is not flagged 0");
-        assert_eq!(sounded[..8], shark[..8], "sounding moved the head");
-        assert_eq!(sounded[9..], shark[9..], "sounding moved the fields");
+        assert_eq!(sounded[10], 0, "a sounded beast is not flagged 0");
+        assert_eq!(sounded[..10], shark[..10], "sounding moved the head");
+        assert_eq!(sounded[11..], shark[11..], "sounding moved the fields");
         assert_eq!(
             bytes_of_server(&ToClient::BeastGone { id: BeastId(7) }),
             [
-                5, 0, // length
+                5, 0, 0, 0, // length
                 9, // tag
                 7, 0, 0, 0, // id
             ],
@@ -1986,7 +1988,7 @@ mod tests {
                 text: "hi".to_string(),
             }),
             [
-                5, 0,  // length
+                5, 0, 0, 0,  // length
                 10, // tag
                 2, 0, // the text's own byte count, LE
                 0x68, 0x69, // "hi"
@@ -1997,7 +1999,7 @@ mod tests {
                 verbs: vec!["hi".to_string(), "yo".to_string()],
             }),
             [
-                10, 0,  // length
+                10, 0, 0, 0,  // length
                 11, // tag
                 2,  // two verbs
                 2, 0, 0x68, 0x69, // "hi", counted then spelled
@@ -2012,7 +2014,7 @@ mod tests {
                 yours: true,
             }),
             [
-                22, 0,  // length
+                22, 0, 0, 0,  // length
                 15, // tag
                 5, 0, 0, 0, // the island's x = 5
                 0xFD, 0xFF, 0xFF, 0xFF, // and z = -3
@@ -2037,13 +2039,13 @@ mod tests {
             yours: false,
         });
         assert_eq!(
-            theirs[..2],
-            [20, 0],
+            theirs[..4],
+            [20, 0, 0, 0],
             "a nameless cairn is shorter by a name"
         );
-        assert_eq!(theirs[2..19], mine[2..19], "whose it is moved the fields");
-        assert_eq!(theirs[19], 0, "somebody else's cairn is not flagged 0");
-        assert_eq!(theirs[20..], [0, 0], "an unchristened cairn says nothing");
+        assert_eq!(theirs[4..21], mine[4..21], "whose it is moved the fields");
+        assert_eq!(theirs[21], 0, "somebody else's cairn is not flagged 0");
+        assert_eq!(theirs[22..], [0, 0], "an unchristened cairn says nothing");
 
         // A survey: two chunks, one with a single open run on its waterline
         // and one surveyed and blank. Written out whole, since between them
@@ -2065,7 +2067,7 @@ mod tests {
                 ],
             }),
             [
-                34, 0,  // length
+                34, 0, 0, 0,  // length
                 14, // tag
                 2, 0, // two chunks
                 5, 0, 0, 0, // x = 5
@@ -2089,7 +2091,7 @@ mod tests {
                 ground: None,
             }),
             [
-                10, 0, // length
+                10, 0, 0, 0, // length
                 5, // tag
                 5, 0, 0, 0, // x = 5
                 0xFD, 0xFF, 0xFF, 0xFF, // z = -3
@@ -2106,13 +2108,15 @@ mod tests {
             ground: Some(a_chunk()),
         });
         let framed = 1 + 8 + 1 + 1 + ground::PAYLOAD_BYTES;
-        assert_eq!(ground.len(), 2 + framed);
+        assert_eq!(ground.len(), 4 + framed);
         assert_eq!(
-            ground[..11],
+            ground[..13],
             [
                 (framed & 0xFF) as u8,
-                (framed >> 8) as u8, // length
-                5,                   // tag
+                ((framed >> 8) & 0xFF) as u8,
+                ((framed >> 16) & 0xFF) as u8,
+                ((framed >> 24) & 0xFF) as u8, // length
+                5,                             // tag
                 5,
                 0,
                 0,
@@ -2124,17 +2128,17 @@ mod tests {
             ],
             "the head of a ground answer"
         );
-        assert_eq!(ground[11], 1, "the flag says there is dry ground");
-        assert_eq!(ground[12], 0, "and the count says nothing grows on it");
+        assert_eq!(ground[13], 1, "the flag says there is dry ground");
+        assert_eq!(ground[14], 0, "and the count says nothing grows on it");
 
-        // Heights start at 13. Corner 0 is 0, corner 1 is 601, corner 2 is
+        // Heights start at 15. Corner 0 is 0, corner 1 is 601, corner 2 is
         // 1202 — little-endian pairs.
-        assert_eq!(ground[13..19], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
+        assert_eq!(ground[15..21], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
 
         // Surfaces start once the heights are done. The first is Seabed dark
         // — tone 0 in the high bits, shade 0 in the low two — and the second
         // Sand plain: tone 2, shade 1.
-        let surfaces = 13 + FACET_VERTS * FACET_VERTS * 2;
+        let surfaces = 15 + FACET_VERTS * FACET_VERTS * 2;
         assert_eq!(
             ground[surfaces..surfaces + 3],
             [0b0000_0000, 0b0000_1001, 0b0001_0010],
@@ -2151,21 +2155,26 @@ mod tests {
             ground: Some(a_chunk_with_a_lake()),
         });
         let wet = 1 + 8 + 1 + 1 + ground::payload_bytes(true, 0);
-        assert_eq!(lake.len(), 2 + wet);
+        assert_eq!(lake.len(), 4 + wet);
         assert_eq!(
-            lake[..2],
-            [(wet & 0xFF) as u8, (wet >> 8) as u8],
+            lake[..4],
+            [
+                (wet & 0xFF) as u8,
+                ((wet >> 8) & 0xFF) as u8,
+                ((wet >> 16) & 0xFF) as u8,
+                ((wet >> 24) & 0xFF) as u8,
+            ],
             "a watered chunk is longer by exactly its water grid"
         );
         assert_eq!(
-            lake[2..11],
-            ground[2..11],
+            lake[4..13],
+            ground[4..13],
             "the head is the same either way"
         );
-        assert_eq!(lake[11], 2, "the flag says there is water on this ground");
+        assert_eq!(lake[13], 2, "the flag says there is water on this ground");
         assert_eq!(
-            lake[12..surfaces + FACET_TRIS],
-            ground[12..surfaces + FACET_TRIS],
+            lake[14..surfaces + FACET_TRIS],
+            ground[14..surfaces + FACET_TRIS],
             "the water moved the heights or the surfaces"
         );
 
@@ -2192,8 +2201,8 @@ mod tests {
             ground: Some(planted),
         });
         assert_eq!(stand.len(), ground.len() + ground::PLANT_BYTES);
-        assert_eq!(stand[12], 1, "the count says one thing grows on it");
-        let plant = 13 + ground::PAYLOAD_BYTES;
+        assert_eq!(stand[14], 1, "the count says one thing grows on it");
+        let plant = 15 + ground::PAYLOAD_BYTES;
         assert_eq!(
             stand[plant..plant + ground::PLANT_BYTES],
             [
@@ -2259,8 +2268,8 @@ mod tests {
         // and as many plants as one may carry — fits, and so does a batch of
         // survey filled to its budget with the most torn chunk there could
         // be on the end of it, which is what the ceiling actually stands at.
-        assert!(usize::from(MAX_SERVER_FRAME) >= 3 + SURVEY_BATCH_BYTES);
-        assert!(usize::from(MAX_SERVER_FRAME) >= 3 + 8 + survey::SOUNDINGS_BYTES);
+        assert!(MAX_SERVER_FRAME as usize >= 3 + SURVEY_BATCH_BYTES);
+        assert!(MAX_SERVER_FRAME as usize >= 3 + 8 + survey::SOUNDINGS_BYTES);
 
         let mut most = a_chunk_with_a_lake();
         most.plants = vec![
@@ -2277,11 +2286,11 @@ mod tests {
             ground: Some(most),
         });
         assert_eq!(
-            biggest.len() - 2,
+            biggest.len() - 4,
             1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS),
             "a watered chunk under a full stand of plants costs what it costs"
         );
-        assert!(biggest.len() - 2 <= MAX_SERVER_FRAME as usize);
+        assert!(biggest.len() - 4 <= MAX_SERVER_FRAME as usize);
         let lake = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
             ground: Some(a_chunk_with_a_lake()),
@@ -2310,7 +2319,7 @@ mod tests {
         let bytes = bytes_of_server(&ToClient::Surveyed { found });
         assert_eq!(
             bytes.len(),
-            2 + 1 + 2 + spent,
+            4 + 1 + 2 + spent,
             "the length and the count part"
         );
     }
@@ -2322,7 +2331,7 @@ mod tests {
         // to say. A length that would be perfectly legal coming the other way
         // is corruption coming this way.
         let mut wire = Vec::new();
-        put_u16(&mut wire, MAX_CLIENT_FRAME + 1);
+        put_u32(&mut wire, MAX_CLIENT_FRAME + 1);
         wire.extend(std::iter::repeat_n(0, MAX_CLIENT_FRAME as usize + 1));
         assert!(ToServer::read(&mut wire.as_slice()).is_err());
     }
@@ -2379,29 +2388,29 @@ mod tests {
     #[test]
     fn garbage_is_refused_not_believed() {
         // A length past the ceiling is corruption, however patient the reader.
-        let oversized = [0xFF, 0xFF];
+        let oversized = [0xFF, 0xFF, 0xFF, 0xFF];
         assert!(ToServer::read(&mut oversized.as_slice()).is_err());
 
         // An unknown tag, in an otherwise well-formed frame.
-        let unknown = [1, 0, 200];
+        let unknown = [1, 0, 0, 0, 200];
         assert!(ToServer::read(&mut unknown.as_slice()).is_err());
         assert!(ToClient::read(&mut unknown.as_slice()).is_err());
 
         // A frame that ends mid-field, and one that runs past its meaning.
-        let short = [2, 0, 0, 1];
+        let short = [2, 0, 0, 0, 0, 1];
         assert!(ToServer::read(&mut short.as_slice()).is_err());
-        let long = [4, 0, 0, 1, 0, 99];
+        let long = [4, 0, 0, 0, 0, 1, 0, 99];
         assert!(ToServer::read(&mut long.as_slice()).is_err());
 
         // A beast of a kind this build has never heard of, in an otherwise
         // well-formed frame — a kind is meaning, not framing, and both ends
         // of a session speak one version.
-        let mut unknown_beast = vec![22, 0, 8, 7, 0, 0, 0, 200];
+        let mut unknown_beast = vec![22, 0, 0, 0, 8, 7, 0, 0, 0, 200];
         unknown_beast.extend([0; 16]);
         assert!(ToClient::read(&mut unknown_beast.as_slice()).is_err());
 
         // Papers whose flag byte is neither kind of answer.
-        let bad_papers = [10, 0, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+        let bad_papers = [10, 0, 0, 0, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0];
         assert!(ToServer::read(&mut bad_papers.as_slice()).is_err());
 
         // A chunk whose flag byte is none of the three kinds of answer.
