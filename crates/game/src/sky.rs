@@ -65,6 +65,15 @@ const ASSUMED: f32 = 0.35;
 /// crossing smoothly, slow enough that no single telling reads as a jump.
 const CATCH_UP: f32 = 2.0;
 
+/// How near the server's hour the drawn one has to get before it counts as
+/// having caught up — see [`Sky::caught_up`].
+///
+/// It cannot be nothing: [`CATCH_UP`] closes the gap by e-foldings, so the
+/// last of one is never quite arrived at. Half a thousandth of a day is 0.3 s
+/// of the ten-minute day, about a fifth of what the sun crosses between two
+/// tellings, and nothing the eye holds between two pictures.
+const CAUGHT_UP: f32 = 0.0005;
+
 /// How far the sun's arc leans from straight overhead, in radians — a little
 /// over twenty degrees, which puts noon short of the zenith.
 ///
@@ -286,6 +295,20 @@ impl Sky {
         self.told = Some(phase);
     }
 
+    /// Whether the drawn hour has closed on the hour the server last named.
+    ///
+    /// What `hold` waits for. The gap is eased across rather than jumped —
+    /// see [`advance_the_day`] — so on the frame a `time` is answered the sky
+    /// is still leaving the hour it was at, and freezing it there would pin
+    /// the hour the driver had just moved off. `false` before the first word,
+    /// there being no hour yet to have caught up with.
+    pub fn caught_up(&self) -> bool {
+        self.told.is_some_and(|told| {
+            let ahead = (told - self.phase).rem_euclid(1.0);
+            ahead.min(1.0 - ahead) <= CAUGHT_UP
+        })
+    }
+
     /// Holds the sky still at the hour it stands at, once there is a true
     /// one to hold — see [`crate::control`]'s `hold`, which is the whole
     /// reason this exists. Before the first word from the server there is nothing worth
@@ -458,6 +481,10 @@ fn hang_the_light(mut commands: Commands) {
 
 /// Runs the clock, and closes whatever gap the server's last word left.
 ///
+/// Reachable from [`crate::control`]'s tests, which drive a `hold` against
+/// the real ease rather than against a phase moved by hand — the gap this
+/// closes is the whole of what that line waits for.
+///
 /// Both halves matter. Running it here is what makes the sun move smoothly
 /// between tellings a second apart; easing onto the telling is what keeps
 /// this machine's day the same day as everyone else's — and it is the whole
@@ -475,7 +502,7 @@ fn hang_the_light(mut commands: Commands) {
 /// reached daybreak and goes on sending `WantDawn`. Harmless: the server tests
 /// `is_night` before it runs anything off, and on screen it reads as the tail
 /// of the night it is.
-fn advance_the_day(time: Res<Time>, mut sky: ResMut<Sky>) {
+pub(crate) fn advance_the_day(time: Res<Time>, mut sky: ResMut<Sky>) {
     let step = time.delta_secs() / protocol::DAY_SECONDS;
     sky.phase = (sky.phase + step).rem_euclid(1.0);
 
