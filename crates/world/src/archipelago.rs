@@ -645,10 +645,13 @@ impl Archipelago {
     /// the island's centre.
     ///
     /// Play enters a world by [`spawn`], which ranks coasts rather than
-    /// centres — this is for anything that wants a picture of terrain rather
-    /// than a place to float: a capture run with no `--focus` has to go and
-    /// find some land to photograph, and an island is photographed from its
-    /// middle, not from the water off its nearest corner.
+    /// centres — this ranks centres, which is what anything wanting a picture
+    /// of terrain rather than a place to float asks for: an island is
+    /// photographed from its middle, not from the water off its nearest
+    /// corner. `mapgen world` renders around whatever point it is given and
+    /// falls back to the origin, so nothing but this module's own test calls
+    /// it today; finding land to point a picture at is a question about the
+    /// layout, and this is where the layout is.
     ///
     /// [`spawn`]: Archipelago::spawn
     pub fn nearest_island(&self, near: Vec2) -> Option<IslandSpec> {

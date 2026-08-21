@@ -1214,7 +1214,8 @@ fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
 
     // Said out loud for the same reason a run without a seed says which world
     // it picked: a placeholder nobody can find is indistinguishable from one
-    // that never spawned, and `--focus` takes exactly these two numbers.
+    // that never spawned, and the socket's `focus` takes exactly these two
+    // numbers.
     info!("boat launched at {}, {}", view.focus.x, view.focus.z);
 }
 
@@ -2082,7 +2083,7 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
 /// allowed a pose that floats, since `here` at or under zero makes the second
 /// clause imply the first, so a boat under way halts still afloat with at most
 /// [`KEEL_BITE`] in the mud. What the second clause is for is the pose the boat
-/// did not sail into — a `--focus` inland, or ground arriving under a hull
+/// did not sail into — a `focus` inland, or ground arriving under a hull
 /// already sitting there — out of which every way down to the sea is downhill
 /// and every way further in is refused like any other climb. Which is why the
 /// comparison carries no tolerance: a hair a frame is a metre a second up a
@@ -4218,7 +4219,7 @@ mod tests {
         app
     }
 
-    /// Puts the boat down at a spot, pointing a way — a `--focus` in little.
+    /// Puts the boat down at a spot, pointing a way — a `focus` in little.
     fn place(app: &mut App, at: Vec2, facing: Vec2) {
         let mut transform = app
             .world_mut()
@@ -4370,7 +4371,7 @@ mod tests {
 
     #[test]
     fn a_boat_put_down_inland_drives_back_to_the_sea() {
-        // What `--focus` on an island leaves behind, and the case that says
+        // What a `focus` on an island leaves behind, and the case that says
         // the ground holds a boat without ever trapping one.
         let mut app = island_app();
         let ashore = Vec2::new(TEST_ISLAND_REACH * 0.5, 0.0);

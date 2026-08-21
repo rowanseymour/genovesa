@@ -40,7 +40,7 @@
 //! later; `focus` answers once the ground at the new place has arrived and
 //! the picture has stopped moving; `shot` answers when the file is on disk.
 //! So a pipe of lines is a script rather than a race — each one starts from
-//! where the last left the world — and the settling a capture run used to do
+//! where the last left the world — and the settling that used to happen
 //! silently, in frames nobody could see, is now the thing an answer means.
 //!
 //! Answers are line-based and end with a blank line, which is what makes the
@@ -63,14 +63,18 @@
 //! game unbuildable on a platform that only ever wanted to compile it. A port
 //! on `127.0.0.1` is reachable by anything else on this machine, which is the
 //! same footing the console already stands on: anyone in a session may
-//! command it. It is a development instrument and is off unless asked for.
+//! command it. In one respect it is a wider door than the console ever was,
+//! and it is worth saying plainly rather than leaving to be discovered:
+//! `shot <path>` unlinks the file it is about to write (see [`shot`]), so
+//! whatever can reach the port can delete any file this run's user can. It is
+//! a development instrument and is off unless asked for.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 
 use args::{metres, pair};
@@ -217,19 +221,37 @@ impl Control {
     /// may well be answering a line somebody typed at the console instead —
     /// so a reply arriving while nothing is waiting is dropped here and
     /// printed there, rather than being anybody's answer.
+    ///
+    /// Whoever is waiting, not whoever asked: replies carry nothing to match
+    /// them against, so a reply that arrives after its own line gave up
+    /// waiting ([`ASK_FRAMES`]) is handed to the *next* line instead, and the
+    /// driver reads it one answer late. Correlating properly would mean a
+    /// token on the wire in both directions for the sake of a case that only
+    /// arises when the server has already been declared silent, so this is
+    /// written down rather than fixed.
     pub fn answered(&mut self, text: &str) {
-        if !matches!(self.doing, Some(Doing::Asking { .. })) {
-            return;
+        // Taken and put back rather than matched through a reference: sending
+        // consumes the channel, and anything else in hand is another line
+        // still being served, which this reply is none of.
+        match self.doing.take() {
+            Some(Doing::Asking { prefix, answer, .. }) => {
+                let _ = answer.send(both_halves(&prefix, text));
+            }
+            otherwise => self.doing = otherwise,
         }
-        let Some(Doing::Asking { prefix, answer, .. }) = self.doing.take() else {
-            return;
-        };
-        let reply = if prefix.is_empty() {
-            text.to_string()
-        } else {
-            format!("{prefix}\n{text}")
-        };
-        let _ = answer.send(reply);
+    }
+}
+
+/// This end's half of an answer and the far end's, as one reply.
+///
+/// Only `help` has a half of its own; every other forwarded line has nothing
+/// to add, and an empty prefix must not become a leading blank line, which
+/// would end the answer where it started — see [`serve`].
+fn both_halves(prefix: &str, text: &str) -> String {
+    if prefix.is_empty() {
+        text.to_string()
+    } else {
+        format!("{prefix}\n{text}")
     }
 }
 
@@ -239,6 +261,15 @@ impl Control {
 pub fn open(port: u16) -> Result<Control, String> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .map_err(|why| format!("cannot listen on port {port}: {why}"))?;
+    // Said out loud for the reason a run without a seed says which world it
+    // picked. `--debug 0` asks the operating system for whatever port is free,
+    // which is the sane thing for a driver starting several runs at once to
+    // ask, and there would otherwise be no way of learning which it got — an
+    // undriveable run with nothing said about why. A named port is worth
+    // confirming for the same money.
+    if let Ok(at) = listener.local_addr() {
+        println!("debug socket on {at}");
+    }
     let (orders, waiting) = channel();
     thread::spawn(move || listen(&listener, &orders));
     Ok(Control {
@@ -322,14 +353,10 @@ impl Plugin for ControlPlugin {
             // exists to be pointed somewhere.
             app.add_systems(PostStartup, render_off_screen);
         }
-        // The console's own switches, which `set` lines write. Initialised
-        // here as well as by the console, each plugin standing up what it
-        // reads.
-        app.init_resource::<Toggles>()
-            // After the input plugin has filled the key state, so that a key
-            // this module presses is not cleared by the same frame's real
-            // input, and is seen by every system that reads it in `Update`.
-            .add_systems(PreUpdate, serve_orders.after(InputSystems))
+        // After the input plugin has filled the key state, so that a key this
+        // module presses is not cleared by the same frame's real input, and is
+        // seen by every system that reads it in `Update`.
+        app.add_systems(PreUpdate, serve_orders.after(InputSystems))
             .add_systems(Update, hold_the_sky);
     }
 }
@@ -467,9 +494,16 @@ fn serve_orders(
     }
 
     let order = {
-        let Ok(orders) = control.orders.lock() else {
-            return;
-        };
+        // A poisoned lock is taken anyway. Nothing under it can be left half
+        // written — it is a [`Receiver`] and the panic would have to have
+        // happened inside the channel — whereas declining would make every
+        // frame after the panic return here in silence, and a driver would
+        // wait out the rest of the run for an answer that is no longer coming
+        // with nothing said about why.
+        let orders = control
+            .orders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let Ok(order) = orders.try_recv() else {
             return;
         };
@@ -599,13 +633,7 @@ fn advance(doing: Doing, commands: &mut Commands, hands: &mut Hands, time: &Time
             answer,
         } => {
             if waited >= ASK_FRAMES {
-                let unanswered = "the server said nothing back";
-                let reply = if prefix.is_empty() {
-                    unanswered.to_string()
-                } else {
-                    format!("{prefix}\n{unanswered}")
-                };
-                let _ = answer.send(reply);
+                let _ = answer.send(both_halves(&prefix, "the server said nothing back"));
                 return None;
             }
             Some(Doing::Asking {
@@ -628,7 +656,7 @@ fn begin(
     let Order { line, answer } = order;
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.split_first() {
-        Some((&"shot", rest)) => match shot(rest) {
+        Some((&"shot", _)) => match shot(after_verb(&line)) {
             Ok(path) => Some(Doing::Shooting {
                 path,
                 target: held.target,
@@ -738,9 +766,14 @@ fn settling(said: String, answer: SyncSender<String>) -> Option<Doing> {
 }
 
 /// Puts a line on the wire and waits for what the server says back.
+///
+/// With no server there is still this end's half to give. It matters for one
+/// line in particular: `help` down a socket that has not joined a world is
+/// exactly when a driver most needs the words this module adds, and answering
+/// only that nobody is serving would throw them away.
 fn forward(line: &str, prefix: String, hands: &Hands, answer: SyncSender<String>) -> Option<Doing> {
     let Some(online) = &hands.online else {
-        let _ = answer.send("nobody is serving this world".to_string());
+        let _ = answer.send(both_halves(&prefix, "nobody is serving this world"));
         return None;
     };
     online.connection.command(line.to_string());
@@ -805,15 +838,44 @@ fn yaw(value: &str) -> Result<f32, String> {
     Ok(degrees.to_radians())
 }
 
+/// Everything after the first word of a line, trimmed at both ends and
+/// otherwise left exactly as it was typed. Only `shot` reads a line this way,
+/// and only because a path is not a word: `shot /My Pictures/near.png` names
+/// one file, and splitting it would refuse a perfectly good path for having a
+/// space in a directory name somebody else chose.
+fn after_verb(line: &str) -> &str {
+    line.trim()
+        .split_once(char::is_whitespace)
+        .map_or("", |(_, rest)| rest.trim())
+}
+
 /// `shot <path>`: where the picture goes.
 ///
 /// The file is removed first, so that its appearing is the proof this picture
 /// was written and not the last one that happened to have the name.
-fn shot(args: &[&str]) -> Result<PathBuf, String> {
-    let [path] = args else {
+///
+/// The directory it goes in has to exist already; nothing here makes one. That
+/// is checked now rather than left to fail later because a picture is not
+/// written by this module — it is asked for, and the failure comes back as the
+/// file never appearing, which is indistinguishable from a slow one. A typo in
+/// a path would spend the whole of [`PATIENCE`] before saying so, when what it
+/// wants is to be refused on the line that carried it.
+fn shot(path: &str) -> Result<PathBuf, String> {
+    if path.is_empty() {
         return Err("`shot` wants one path — `shot near.png`".to_string());
-    };
+    }
     let path = PathBuf::from(path);
+    // A bare name has a parent of `""`, which is this directory and always
+    // there — only a path that names one is worth looking for.
+    if let Some(parent) = path.parent().filter(|it| !it.as_os_str().is_empty()) {
+        if !parent.is_dir() {
+            return Err(format!(
+                "cannot write {}: there is no directory {}",
+                path.display(),
+                parent.display()
+            ));
+        }
+    }
     if let Err(why) = fs::remove_file(&path) {
         if why.kind() != std::io::ErrorKind::NotFound {
             return Err(format!("cannot write {}: {why}", path.display()));
@@ -880,7 +942,171 @@ fn actions() -> String {
 
 #[cfg(test)]
 mod tests {
+    use bevy::time::{TimePlugin, TimeUpdateStrategy};
+
     use super::*;
+    use crate::testing::{run_frames, run_until, FRAME};
+
+    /// The socket's own end of an order channel, and a headless app with the
+    /// system that serves it.
+    ///
+    /// Built by hand rather than by adding [`ControlPlugin`]: what is under
+    /// test is the state machine, and the plugin's other half points a camera
+    /// at an off-screen image, which wants a render app there is none of here.
+    /// The channel is the real one — a driver's line reaches [`serve_orders`]
+    /// exactly this way, and its answer comes back down the same rendezvous
+    /// [`serve`] blocks on, so a test reads what a driver would read.
+    fn driven_app() -> (App, Sender<Order>) {
+        let (orders, waiting) = channel();
+        let mut app = App::new();
+        app.add_plugins(TimePlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+            .insert_resource(Control {
+                orders: Mutex::new(waiting),
+                doing: None,
+                target: None,
+                holding: false,
+            })
+            .init_resource::<Toggles>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<KeyBindings>()
+            .init_resource::<View>()
+            .add_systems(PreUpdate, serve_orders);
+        (app, orders)
+    }
+
+    /// Sends a line the way the listening thread does, and hands back the end
+    /// a driver reads its answer off. Nothing waits on it: whether a line has
+    /// been answered *yet* is most of what these tests are asking.
+    fn say(orders: &Sender<Order>, line: &str) -> Receiver<String> {
+        let (answer, answered) = sync_channel(1);
+        orders
+            .send(Order {
+                line: line.to_string(),
+                answer,
+            })
+            .expect("the app is holding the other end");
+        answered
+    }
+
+    fn keys(app: &App) -> &ButtonInput<KeyCode> {
+        app.world().resource::<ButtonInput<KeyCode>>()
+    }
+
+    /// Clears the just-pressed flags the way the input plugin does at the top
+    /// of every frame, so a key left down reads as held rather than as pressed
+    /// afresh. Called between frames rather than before them only so that a
+    /// test can look at the edge the frame just made.
+    fn between_frames(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+    }
+
+    /// A tap is one frame of the key being down, which is the whole of what a
+    /// control reading an edge ever sees. Nothing else in the game presses a
+    /// key, so if this drifted the only sign would be `press chart` quietly
+    /// doing nothing.
+    #[test]
+    fn a_tap_is_down_for_exactly_one_frame() {
+        let (mut app, orders) = driven_app();
+        let key = app.world().resource::<KeyBindings>().key(Action::Chart);
+        let answered = say(&orders, "press chart");
+
+        app.update();
+        assert!(keys(&app).just_pressed(key), "the tap never went down");
+        assert!(
+            answered.try_recv().is_err(),
+            "answered before the press was over"
+        );
+        between_frames(&mut app);
+
+        app.update();
+        assert!(!keys(&app).pressed(key), "the tap was never let go");
+        assert_eq!(answered.try_recv(), Ok("chart tapped".to_string()));
+    }
+
+    /// A timed press stays down across frames and comes up when the time is
+    /// spent — and the answer is what says so, which is how a script of
+    /// presses reads as one move after another rather than as a race.
+    #[test]
+    fn a_timed_press_is_held_until_its_time_is_spent() {
+        let (mut app, orders) = driven_app();
+        let key = app
+            .world()
+            .resource::<KeyBindings>()
+            .key(Action::MoveForward);
+        let answered = say(&orders, "press forward 0.32");
+
+        // Well inside the time asked for, so what this catches is the hold
+        // itself and not the frame it happened to end on.
+        for _ in 0..10 {
+            app.update();
+            assert!(keys(&app).pressed(key), "the press was let go early");
+            assert!(answered.try_recv().is_err(), "answered mid-press");
+            between_frames(&mut app);
+        }
+
+        run_until(&mut app, "the press is over", |app| {
+            between_frames(app);
+            !app.world().resource::<ButtonInput<KeyCode>>().pressed(key)
+        });
+        assert_eq!(
+            answered.try_recv(),
+            Ok("forward held 0.32 seconds".to_string())
+        );
+    }
+
+    /// `focus` answers when the world has caught up with the view and not
+    /// before. This is the load-bearing claim of the module, and it fails
+    /// silently: a line answered early still answers, only with a world under
+    /// it that has not finished arriving.
+    #[test]
+    fn a_focus_waits_for_the_ground_and_then_answers() {
+        let (mut app, orders) = driven_app();
+        // Ground delivered and not yet handed to a mesh builder, which is
+        // exactly what [`Ground::settled`] is false for.
+        app.insert_resource(crate::testing::test_ground());
+        let answered = say(&orders, "focus 98,-317");
+
+        run_frames(&mut app, SETTLE_FRAMES as usize * 3);
+        assert!(
+            answered.try_recv().is_err(),
+            "answered with the ground still arriving"
+        );
+        assert!(
+            matches!(
+                app.world().resource::<Control>().doing,
+                Some(Doing::Settling { waited: 0, .. })
+            ),
+            "the settling ran while the ground was still coming, so the frames \
+             it counted were not settling frames"
+        );
+
+        // The last of it lands, and only now do the settling frames count.
+        app.insert_resource(Ground::default());
+        run_until(&mut app, "the focus is answered", |app| {
+            app.world().resource::<Control>().doing.is_none()
+        });
+        assert_eq!(answered.try_recv(), Ok("focus 98,-317".to_string()));
+    }
+
+    /// `help` down a socket that has not joined a world still lists the words
+    /// this module adds. That is when a driver most needs them — a run held on
+    /// a menu screen has nothing else to ask — and they are this end's to give
+    /// whether or not anything is serving.
+    #[test]
+    fn help_gives_this_end_of_it_with_no_server_to_ask() {
+        let (mut app, orders) = driven_app();
+        let answered = say(&orders, "help");
+
+        app.update();
+        let reply = answered.try_recv().expect("nothing to wait for");
+        assert!(reply.contains("shot <path>"), "{reply}");
+        assert!(reply.contains("press <action>"), "{reply}");
+        assert!(reply.contains("quit —"), "{reply}");
+        assert!(reply.contains("nobody is serving this world"), "{reply}");
+    }
 
     /// The grammar of a press, which is the one line here with anything much
     /// to get wrong: most of what this module takes it hands straight to the
@@ -958,6 +1184,36 @@ mod tests {
         assert!(why.contains("`zoom` wants one value"), "{why}");
         assert!(why.contains("zoom <metres>"), "{why}");
         assert!(one(&["1", "2"], "zoom", "<metres>", zoom).is_err());
+    }
+
+    /// A path is whatever is left of the line, and a directory that is not
+    /// there is refused on the spot. Both are about the same thing: a driver
+    /// down a socket has no other way of being told it typed the path wrong,
+    /// and the alternative is [`PATIENCE`] frames of waiting followed by
+    /// "nothing was written", which reads like a broken game.
+    #[test]
+    fn a_shot_takes_the_whole_of_the_rest_of_the_line() {
+        assert_eq!(
+            after_verb("shot /My Pictures/near.png"),
+            "/My Pictures/near.png"
+        );
+        assert_eq!(after_verb("shot"), "", "a verb on its own leaves nothing");
+
+        let dir = std::env::temp_dir().join(format!("genovesa shots {}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("somewhere to pretend to write");
+        let spaced = dir.join("near shore.png");
+        assert_eq!(
+            shot(spaced.to_str().expect("a path this test just made")),
+            Ok(spaced.clone()),
+            "a space in a directory name is not a second argument"
+        );
+
+        let missing = dir.join("nowhere").join("near.png");
+        let why = shot(missing.to_str().expect("likewise")).expect_err("no such directory");
+        assert!(why.contains("there is no directory"), "{why}");
+        assert!(shot("").is_err(), "`shot` alone names no file");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

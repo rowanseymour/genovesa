@@ -296,23 +296,24 @@ pub fn typed_label(logical: &Key) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// A control is named to be typed — see [`crate::control`] — so two
     /// sharing a name would make one of them unreachable, and a name with a
     /// space in it would be read as two words.
     #[test]
     fn every_control_has_its_own_one_word_name() {
         let mut seen = std::collections::HashSet::new();
-        for action in super::Action::ALL {
+        for action in Action::ALL {
             let name = action.name();
             assert!(!name.is_empty(), "{action:?} has no name");
             assert!(
-                !name.split_whitespace().nth(1).is_some(),
+                name.split_whitespace().nth(1).is_none(),
                 "`{name}` is more than one word"
             );
             assert!(seen.insert(name), "two controls are called `{name}`");
         }
     }
-    use super::*;
 
     #[test]
     fn every_action_indexes_to_its_own_slot() {

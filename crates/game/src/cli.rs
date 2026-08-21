@@ -68,8 +68,13 @@ impl Args {
     /// What hangs off it is everything a window would have been for — the
     /// display settings, the audio device, and the frame loop, which winit
     /// drives for a window and nothing drives without one.
+    ///
+    /// The flag alone, without a second look at `--debug`: [`parse`] refuses
+    /// windowless without a socket outright, so a run that gets this far and
+    /// says it is windowless has one. Asking again here would be a second
+    /// place the rule lived, and the two could disagree.
     pub fn is_headless(&self) -> bool {
-        self.debug.is_some() && self.headless
+        self.headless
     }
 
     /// Where the camera opens on.
