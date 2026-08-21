@@ -236,10 +236,19 @@ impl PlayerPlace<'_, '_> {
 /// parentage it asked for is still a queued command, the same case
 /// [`Fleet::gone`] reads its own book for.
 ///
-/// One direction, and never the other. The book is never asked to stand in
-/// for a parentage that is merely stale, because there is no such parentage
-/// to stand in for: a telling that takes our helm away takes the player off
-/// the deck in the same breath — see [`Fleet::told`]'s out-of-order defence.
+/// One direction, and never the other — with one window where the parentage
+/// the scene graph answers with is stale, named here rather than denied. A
+/// telling that takes our helm away does take the player off the deck in the
+/// same breath — see [`Fleet::told`]'s out-of-order defence — but the taking
+/// off is a queued command where the book's line through it is written the
+/// instant the telling is read, so until the next sync point the scene graph
+/// still says the player is a hull's child. A put down landing inside that
+/// window moves the hull, and the hull is one the wire has just stopped
+/// calling ours. Left standing on purpose: closing it means changing which of
+/// the two is asked first, which is an argument about carriers in general and
+/// not about this window, and would want its own reasons and its own test.
+/// Set down all the same, because a window nobody has named is one the next
+/// change walks into.
 ///
 /// Moved by a command rather than through a transform of its own for the
 /// queued-parentage case again: what the queue guarantees is order, so a

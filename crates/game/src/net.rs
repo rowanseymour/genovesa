@@ -1505,21 +1505,104 @@ mod tests {
             "the player came off the deck without the despawn the hierarchy \
              was holding for them"
         );
+    }
 
-        // The hull is the fleet's to moor now, and goes on being eased
-        // towards wherever it is told — with nobody aboard it.
-        run_until(&mut app, "the hull is moored", |app| {
-            app.world_mut()
-                .query_filtered::<&Transform, With<crate::boat::HullId>>()
-                .single(app.world())
-                .is_ok()
-        });
-        assert!(
+    #[test]
+    fn a_helm_given_and_taken_in_one_breath_stands_the_player_where_it_was_told() {
+        // The same standing off, in the drain where the scene graph has
+        // nothing to offer it. A grant seats us in a boat this client has
+        // never seen — so the hull is spawned by that very telling, and its
+        // spawn is a queued command with no pose in the scene yet — and the
+        // telling that takes the helm away again lands in the same drain,
+        // before anything has flushed. Reading the hull's place off the
+        // scene comes up empty, and the player must not be let go with
+        // nothing for it: unparented while still carrying the deck-local
+        // offset the helm gave them, that offset is read as a map coordinate
+        // and stands them a stride from the world origin, and without
+        // `Unsettled` no ground will ever come to claim them. The telling's
+        // own word for where the hull lies is the answer instead, which is
+        // the same word the hull is about to be moored on.
+        //
+        // Driven through the systems rather than over the socket for the
+        // reason `a_seating_and_a_put_down_in_one_breath_move_the_hull_just_seated`
+        // is: a wire cannot be asked to deliver two words in one frame, and a
+        // test that hoped for it would quietly pass on the easy case.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+
+        // A player in the world first, standing at a helm we were granted in
+        // the ordinary way. Their own entity has to exist before the drain
+        // under test, entry aboard being the one case that spawns it — see
+        // the early return in `boat::stand_off`.
+        (ToClient::Boat {
+            id: BoatId(4),
+            kind: protocol::BoatKind::Sloop,
+            position: Vec2::new(-20.0, 15.0),
+            heading: 0.0,
+            occupant: Some(PlayerId(1)),
+        })
+        .write(&mut &server)
+        .expect("the seating");
+        run_until(&mut app, "the player is aboard", |app| {
             app.world_mut()
                 .query_filtered::<&ChildOf, With<crate::player::Player>>()
                 .single(app.world())
-                .is_err(),
-            "the player was put back aboard a hull that is not theirs"
+                .is_ok()
+        });
+
+        let afloat = Vec2::new(120.0, -40.0);
+        let mut once = false;
+        app.add_systems(
+            Update,
+            move |mut commands: Commands,
+                  mut kit: crate::boat::HullKit,
+                  mut fleet: ResMut<crate::boat::Fleet>,
+                  players: crate::player::Players,
+                  poses: Query<&Transform, With<crate::boat::Vessel>>| {
+                if std::mem::replace(&mut once, true) {
+                    return;
+                }
+                for occupant in [Some(PlayerId(1)), None] {
+                    fleet.told(
+                        &mut commands,
+                        &mut kit,
+                        &players,
+                        &poses,
+                        PlayerId(1),
+                        BoatId(7),
+                        protocol::BoatKind::Sloop,
+                        afloat,
+                        0.0,
+                        occupant,
+                    );
+                }
+            },
+        );
+        run_until(&mut app, "the player is off the deck", |app| {
+            app.world_mut()
+                .query_filtered::<&ChildOf, With<crate::player::Player>>()
+                .single(app.world())
+                .is_err()
+        });
+
+        let (standing, unsettled) = app
+            .world_mut()
+            .query_filtered::<(&Transform, Has<crate::player::Unsettled>), With<crate::player::Player>>()
+            .single(app.world())
+            .map(|(place, unsettled)| (*place, unsettled))
+            .expect("the player");
+        assert!(
+            standing.translation.xz().distance(afloat) < 1.0,
+            "the player was left at {} rather than where the telling said the \
+             hull lay — a deck-local offset read as a map coordinate",
+            standing.translation.xz()
+        );
+        assert!(
+            unsettled,
+            "the player was unparented owing the ground a footing they will \
+             never be asked to find"
         );
     }
 
