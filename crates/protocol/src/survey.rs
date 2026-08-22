@@ -104,7 +104,7 @@ const _: () = assert!(SIGHT_RADIUS * SIGHT_RADIUS >= 2.0 * CHUNK_METRES * CHUNK_
 /// more than a coast's shape needs; this is what most of them are thrown away
 /// against. Three metres is the chart's own coarseness, not the mesh's: the
 /// ground is drawn every metre now, so a survey deliberately keeps less than
-/// a facet could say — ink on a sea chart, not a tracing of the terrain.
+/// a cell could say — ink on a sea chart, not a tracing of the terrain.
 pub const TOLERANCE: f32 = 3.0;
 
 /// The depth whose edge is worth recording alongside the waterline, in metres.
@@ -120,7 +120,7 @@ pub const SHOAL_DEPTH: f32 = -3.0;
 /// encloses, in metres.
 ///
 /// A height field crossing the waterline leaves a scatter of one- and two-cell
-/// rings around any coast — rocks awash, and the odd hummock of sand a facet
+/// rings around any coast — rocks awash, and the odd hummock of sand a cell
 /// wide. Every one is honest ground, and drawn they read as dirt on the paper
 /// rather than as anything anybody could steer by. Six metres keeps a real
 /// skerry and loses the speckle.
@@ -150,7 +150,7 @@ pub const LEAST_ISLAND: f32 = 100.0;
 /// One point of a surveyed coastline, in chunk-local steps.
 ///
 /// Two bytes, and the whole reason an infinite world's survey fits: a step is
-/// [`CHUNK_METRES`] over 255, about half a metre — half a facet, and far
+/// [`CHUNK_METRES`] over 255, about half a metre — half a cell, and far
 /// finer than [`TOLERANCE`] has already thrown away.
 ///
 /// A step also lands the ends of a stroke *exactly* on the chunk boundary — 0
@@ -318,16 +318,16 @@ pub fn in_sight_along(chunk: IVec2, from: Vec2, to: Vec2) -> bool {
 /// — see [`crate::ToClient::Surveyed`] — and what it has to promise is that
 /// one chunk's ink always fits one message, however torn its coast.
 ///
-/// A level's contour runs along the edges of the facet grid, and every
+/// A level's contour runs along the edges of the cell grid, and every
 /// crossing belongs to exactly one run, so a level's marks are at most the
-/// edges there are: [`CELLS`] × [`CORNERS`] of them each way. A run
-/// that is kept holds at least two marks, so the runs are at most half that
-/// again, and the worst case is where both bounds are tight at once. Two
-/// levels of it, and the two counts on the front.
+/// edges there are: [`CELLS`] × [`CORNERS`] of them each way. A run that is
+/// kept holds at least two marks, so the runs are at most half that again,
+/// and the worst case is where both bounds are tight at once. Two levels of
+/// it, and the two counts on the front.
 ///
 /// It comes to a great deal more than any real coast: a chunk of ordinary
 /// shore is a few dozen bytes, and this is what a chunk would cost whose
-/// ground crossed the waterline at every facet of it. That is the point — a
+/// ground crossed the waterline at every cell of it. That is the point — a
 /// ceiling that only holds for plausible ground is not a ceiling.
 pub const SOUNDINGS_BYTES: usize = {
     let crossings = CELLS * CORNERS * 2;
@@ -943,7 +943,7 @@ fn is_above(height: f32, level: f32) -> bool {
     height >= level
 }
 
-/// The directed contour segments crossing one cell of the facet grid.
+/// The directed contour segments crossing one cell of the ground grid.
 ///
 /// Every segment is emitted with the **land on its left**, which is the one
 /// convention the rest of this module leans on. It is what hangs a shore's

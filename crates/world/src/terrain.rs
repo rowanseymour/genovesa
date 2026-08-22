@@ -10,14 +10,14 @@
 //!
 //! The tile is the map's unit of ground, not the picture's: the height field is
 //! continuous, and it is drawn every [`protocol::ground::CELL_METRES`]. See
-//! [`TerrainGenerator::surface`] for why the palette is what it is — the ground
-//! is flat shaded in a fixed set of colours, and both the facets and the colour
-//! bands want to be large enough to read as deliberate shapes.
+//! [`TerrainGenerator::material`] for why the palette is what it is — the
+//! ground is flat shaded in a fixed set of colours, and both the cells and the
+//! colour bands want to be large enough to read as deliberate shapes.
 //!
-//! The colours themselves are not here. A surface is *named* — see
-//! [`protocol::ground::Material`] — because what a facet is painted has to cross
-//! the wire, and a name is a byte where three floats are twelve. This module
-//! decides which name; the protocol says what each one looks like.
+//! The colours themselves are not here. Ground is *named* — see
+//! [`protocol::ground::Material`] — because what a square metre is made of has
+//! to cross the wire, and a name is a byte where three floats are twelve. This
+//! module decides which name; the protocol says what each one looks like.
 
 use glam::{UVec2, Vec2, Vec3};
 use protocol::ground::{
@@ -1910,9 +1910,12 @@ impl TerrainGenerator {
             .fbm(wx / PATCH_SCALE + 11.0, wz / PATCH_SCALE - 7.0, 3);
         let mottle = self.detail.fbm(wx / MOTTLE_SCALE, wz / MOTTLE_SCALE, 2);
         let field = patch + MOTTLE_WEIGHT * mottle;
-        // Thresholds are set off the noise's measured distribution, not off its
-        // nominal range, so all five actually get used — this field sits inside
-        // roughly ±0.65 but four fifths of it is inside ±0.17.
+        // Thresholds are set off the summed field's measured distribution,
+        // not off its nominal range, so all five actually get used: it reaches
+        // about ±0.7, but four fifths of it is inside ±0.24, which leaves the
+        // two outer parcels a quarter of it between them. Measured on the
+        // total rather than on [`PATCH_SCALE`]'s field alone — the mottle
+        // widens it, a little.
         let bucket = if field < -0.20 {
             0
         } else if field < -0.07 {

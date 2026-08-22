@@ -183,7 +183,7 @@ pub fn surveyed_bytes(found: &survey::Soundings) -> usize {
 /// that one chunk's soundings are never split across two messages, so a chunk
 /// more torn than the whole budget still has to travel whole. That is what
 /// [`survey::SOUNDINGS_BYTES`] is for, and it is the term that wins: the
-/// ceiling stands where a coast crossing every facet of a chunk would put it,
+/// ceiling stands where a coast crossing every cell of a chunk would put it,
 /// rather than where a real coast happens to.
 ///
 /// Derived rather than picked, so that a message which outgrew it fails to

@@ -422,12 +422,80 @@ impl Ground {
     }
 }
 
-/// The height of one point inside a chunk, interpolated across the very facet
-/// the mesh draws there.
+/// A cell's four corners, in the order everything here names them.
 ///
-/// Which triangle a point falls in has to be worked out the same way the mesh
-/// splits its quads — see [`facets`] — or a hull crossing a quad would step
-/// where the picture slopes. `local` is metres from the chunk's own corner.
+/// Not an enum: these are indices into the four-corner arrays either side of
+/// this, and into the four vertices [`chunk_mesh`] pushes per cell, so what
+/// they have to be is small numbers that agree.
+const SW: usize = 0;
+const SE: usize = 1;
+const NW: usize = 2;
+const NE: usize = 3;
+
+/// Where a cell's corners sit inside it, in cell widths from its own lower
+/// corner — the frame [`height_at`] does its arithmetic in.
+const CORNER_AT: [Vec2; 4] = [
+    Vec2::new(0.0, 0.0),
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.0, 1.0),
+    Vec2::new(1.0, 1.0),
+];
+
+/// The two triangles cell `(ix, iz)` is drawn as, each named by three of the
+/// cell's own four corners and wound counter-clockwise seen from above.
+///
+/// **The one place the cut is decided.** Two things read it and they have to
+/// agree: [`chunk_mesh`] draws these triangles, and [`height_at`] interpolates
+/// across them to say where the ground is underfoot. A quad is not planar, so
+/// the two diagonals give genuinely different heights down the middle of a
+/// cell — pick different ones and a hull crossing a quad steps where the
+/// picture slopes. This used to be a walk in `protocol`, which the wire no
+/// longer carries; written here once rather than twice, it cannot drift.
+///
+/// Which diagonal alternates like a checkerboard. Cutting every cell the same
+/// way lines them up into an obvious herringbone across open ground, and
+/// alternating breaks that up for nothing. The parity runs off the cell's
+/// index within the chunk, and [`CELLS`] is even, so the pattern carries
+/// across a chunk boundary without a phase step.
+const fn split(ix: usize, iz: usize) -> [[usize; 3]; 2] {
+    if (ix + iz).is_multiple_of(2) {
+        [[SW, NW, SE], [SE, NW, NE]]
+    } else {
+        [[SW, NW, NE], [SW, NE, SE]]
+    }
+}
+
+/// Where the plane of `tri` stands over `at`, and whether `at` is on it —
+/// `None` for a point outside the triangle.
+///
+/// Barycentric rather than a case for each diagonal: the weights are what say
+/// *both* whether the point is inside and what the height there is, so the
+/// two answers cannot disagree about which triangle is being talked about.
+/// The triangles are half unit squares, so the determinant is ±1 and there is
+/// no degenerate case to guard.
+fn on_triangle(tri: [usize; 3], heights: [f32; 4], at: Vec2) -> Option<f32> {
+    let [a, b, c] = tri.map(|corner| CORNER_AT[corner]);
+    let cross = |p: Vec2, q: Vec2| p.x * q.y - p.y * q.x;
+
+    let area = cross(b - a, c - a);
+    let v = cross(at - a, c - a) / area;
+    let w = cross(b - a, at - a) / area;
+    let u = 1.0 - v - w;
+
+    // A point on the shared edge belongs to both, and both answer the same —
+    // the plane is continuous across the cut — so the tolerance only decides
+    // which of two equal answers is given, never whether one is given.
+    (u >= -1.0e-6 && v >= -1.0e-6 && w >= -1.0e-6)
+        .then(|| u * heights[tri[0]] + v * heights[tri[1]] + w * heights[tri[2]])
+}
+
+/// The height of one point inside a chunk, interpolated across the very
+/// triangle the mesh draws there.
+///
+/// Which triangle a point falls in comes from [`split`], which is also what
+/// [`chunk_mesh`] builds from — so the ground underfoot is the ground on
+/// screen by construction rather than by two functions happening to agree.
+/// `local` is metres from the chunk's own corner.
 fn height_at(heights: &[f32], local: Vec2) -> f32 {
     let cell = local / CELL_METRES;
     // Clamped rather than trusted: a point exactly on a chunk's far edge
@@ -435,27 +503,26 @@ fn height_at(heights: &[f32], local: Vec2) -> f32 {
     // is entitled to land on the boundary itself.
     let ix = (cell.x.floor().max(0.0) as usize).min(CELLS - 1);
     let iz = (cell.y.floor().max(0.0) as usize).min(CELLS - 1);
-    let u = (cell.x - ix as f32).clamp(0.0, 1.0);
-    let v = (cell.y - iz as f32).clamp(0.0, 1.0);
+    let at = Vec2::new(
+        (cell.x - ix as f32).clamp(0.0, 1.0),
+        (cell.y - iz as f32).clamp(0.0, 1.0),
+    );
 
     let corner = |cx: usize, cz: usize| heights[cz * CORNERS + cx];
-    let (tl, tr) = (corner(ix, iz), corner(ix + 1, iz));
-    let (bl, br) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
+    let corners = [
+        corner(ix, iz),
+        corner(ix + 1, iz),
+        corner(ix, iz + 1),
+        corner(ix + 1, iz + 1),
+    ];
 
-    if (ix + iz).is_multiple_of(2) {
-        // Split along the anti-diagonal, from the near-far corner to the
-        // far-near one.
-        if u + v <= 1.0 {
-            tl + u * (tr - tl) + v * (bl - tl)
-        } else {
-            br + (1.0 - u) * (bl - br) + (1.0 - v) * (tr - br)
-        }
-    } else if v >= u {
-        // Split along the main diagonal.
-        tl + v * (bl - tl) + u * (br - bl)
-    } else {
-        tl + u * (tr - tl) + v * (br - tr)
-    }
+    let [first, second] = split(ix, iz);
+    on_triangle(first, corners, at)
+        .or_else(|| on_triangle(second, corners, at))
+        // The two triangles cover the cell and `at` is clamped inside it, so
+        // this is unreachable by anything but arithmetic that has already gone
+        // wrong. Answering with the cell's mean beats a panic under a boat.
+        .unwrap_or_else(|| corners.iter().sum::<f32>() / 4.0)
 }
 
 /// Marks a terrain chunk entity, and records which world chunk it is.
@@ -569,6 +636,8 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
             // No UVs: nothing binds a texture to the ground, and at sixty-odd
             // thousand vertices a chunk an attribute carried "for later" is
             // half a megabyte of dead weight on every copy.
+            // Pushed in [`SW`], [`SE`], [`NW`], [`NE`] order, which is what
+            // [`split`]'s corner numbers index.
             let first = positions.len() as u32;
             for vertex in [sw, se, nw, ne] {
                 positions.push([vertex.x, vertex.y, vertex.z]);
@@ -576,19 +645,14 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
                 colors.push(color);
             }
 
-            // Wound counter-clockwise seen from above, which is what puts the
-            // face normals upwards. Which diagonal the cell is cut on
-            // alternates like a checkerboard: cutting every cell the same way
-            // lines them up into an obvious herringbone across open ground,
-            // and alternating breaks that up for nothing. The parity runs off
-            // the cell's index within the chunk, and [`CELLS`] is even, so the
-            // pattern carries across a chunk boundary without a phase step.
-            let (sw, se, nw, ne) = (first, first + 1, first + 2, first + 3);
-            indices.extend(if (ix + iz).is_multiple_of(2) {
-                [sw, nw, se, se, nw, ne]
-            } else {
-                [sw, nw, ne, sw, ne, se]
-            });
+            // Cut the way [`split`] says, which is also the way [`height_at`]
+            // reads the ground underfoot.
+            indices.extend(
+                split(ix, iz)
+                    .into_iter()
+                    .flatten()
+                    .map(|corner| first + corner as u32),
+            );
         }
     }
 
@@ -607,7 +671,7 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
 /// Builds the surface of one chunk's standing water, or `None` where the
 /// chunk carries none — see [`ChunkPayload::water`].
 ///
-/// One flat quad per facet quad, at the level the payload gives it, plus
+/// One flat quad per cell, at the level the payload gives it, plus
 /// [`OFF_LATTICE`] — a lake's level is quantised on the same lattice its bed is,
 /// so a shore flat at exactly the lake's height would otherwise be coplanar
 /// with the sheet standing on it. No colour, because water is one colour and
@@ -1231,6 +1295,123 @@ mod tests {
         assert!(
             (got - mean).abs() < 1.0e-3,
             "{got} m across a facet, not {mean}"
+        );
+    }
+
+    /// Ground with a saddle in every cell: the two diagonals of a quad give
+    /// genuinely different heights down its middle, so anything that reads a
+    /// cell across the wrong one is off by a measurable amount.
+    ///
+    /// `a_slope()` cannot do this job — a plane is planar within each quad
+    /// either way it is cut, so it reads the same across both diagonals and
+    /// would pass whatever the split rule said.
+    fn a_saddle() -> Vec<f32> {
+        (0..CORNERS * CORNERS)
+            .map(|i| {
+                let (ix, iz) = (i % CORNERS, i / CORNERS);
+                // Alternating high and low corners, so each cell is a col
+                // between two ridges rather than a slope.
+                if (ix + iz).is_multiple_of(2) {
+                    4.0
+                } else {
+                    -4.0
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_ground_underfoot_is_read_off_the_triangle_that_is_drawn() {
+        // [`height_at`] and [`chunk_mesh`] both build from [`split`], and this
+        // is what holds them to it: the height reported inside a cell has to
+        // lie on the plane of whichever triangle the mesh actually drew over
+        // that spot. On a saddle the two diagonals disagree by metres down the
+        // middle of every cell, so a rule written twice and changed once would
+        // fail here loudly.
+        let heights = a_saddle();
+        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("three floats each");
+        let indices: Vec<usize> = mesh
+            .indices()
+            .expect("a cell shares its corners")
+            .iter()
+            .collect();
+
+        // Both parities, and not only the first cell of each.
+        let cells = [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+            (7, 4),
+            (CELLS - 1, CELLS - 1),
+        ];
+        // Points spread across the cell, deliberately including both sides of
+        // either diagonal and the middle, where the two disagree most.
+        let spots = [
+            Vec2::new(0.25, 0.25),
+            Vec2::new(0.75, 0.25),
+            Vec2::new(0.25, 0.75),
+            Vec2::new(0.75, 0.75),
+            Vec2::new(0.5, 0.5),
+            Vec2::new(0.1, 0.6),
+        ];
+
+        let mut checked = 0;
+        for (ix, iz) in cells {
+            let cell = iz * CELLS + ix;
+            for spot in spots {
+                let local = (Vec2::new(ix as f32, iz as f32) + spot) * CELL_METRES;
+                let got = height_at(&heights, local);
+
+                // Whichever of the cell's two drawn triangles covers the spot,
+                // read straight off the mesh's own vertices.
+                let mut drawn = None;
+                for triangle in 0..2 {
+                    let corners: Vec<Vec2> = (0..3)
+                        .map(|k| {
+                            let at = positions[indices[cell * 6 + triangle * 3 + k]];
+                            Vec2::new(at[0], at[2])
+                        })
+                        .collect();
+                    let ys: Vec<f32> = (0..3)
+                        .map(|k| positions[indices[cell * 6 + triangle * 3 + k]][1])
+                        .collect();
+                    let cross = |p: Vec2, q: Vec2| p.x * q.y - p.y * q.x;
+                    let (a, b, c) = (corners[0], corners[1], corners[2]);
+                    let area = cross(b - a, c - a);
+                    let v = cross(local - a, c - a) / area;
+                    let w = cross(b - a, local - a) / area;
+                    let u = 1.0 - v - w;
+                    if u >= -1.0e-6 && v >= -1.0e-6 && w >= -1.0e-6 {
+                        drawn = Some(u * ys[0] + v * ys[1] + w * ys[2]);
+                        break;
+                    }
+                }
+
+                let drawn = drawn.expect("the cell's two triangles cover the cell");
+                assert!(
+                    (got - drawn).abs() < 1.0e-3,
+                    "cell ({ix}, {iz}) at {spot:?}: underfoot says {got} m, \
+                     the mesh draws {drawn} m"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, cells.len() * spots.len());
+
+        // And the saddle really does disagree across its diagonals, or the
+        // whole test would be vacuous — the middle of a cell is one ridge or
+        // the other, never the mean.
+        let middle = height_at(&heights, Vec2::splat(0.5 * CELL_METRES));
+        assert!(
+            middle.abs() > 1.0,
+            "{middle} m in the middle of a saddle cell — this ground is too \
+             flat to tell the two diagonals apart"
         );
     }
 
