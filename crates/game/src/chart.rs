@@ -699,9 +699,8 @@ fn no_sheet_yet(sheets: Query<(), With<ChartSheet>>) -> bool {
 /// the world has to be told the chart is up. The world's camera is switched off
 /// behind it, a scene drawn to be painted over being a scene drawn for nobody.
 ///
-/// Run on the first frame the chart is up rather than as the state is entered,
-/// because it needs the world's camera to already exist: a run started with
-/// `--state chart` enters the state before `Startup` has spawned anything.
+/// Run on the first frame the chart is up rather than as the state is
+/// entered, because it needs the world's camera to already exist.
 fn unroll(
     mut commands: Commands,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -801,9 +800,10 @@ fn centre_on(view: &mut ChartView, reader: Option<Vec2>) {
 
 /// The same, a frame or more later.
 ///
-/// A chart opened before there is anybody to centre it on — which is what
-/// `--state chart` does — would otherwise open on the world's origin and stay
-/// there, [`unroll`]'s centring having had its one chance.
+/// A chart opened before there is anybody to centre it on would otherwise
+/// open on the world's origin and stay there, [`unroll`]'s centring having
+/// had its one chance. The socket can do it: `press chart` on the first
+/// frames of a world arrives before the welcome has put anybody down.
 fn find_the_reader(mut view: ResMut<ChartView>, place: PlayerPlace) {
     if view.opened {
         return;

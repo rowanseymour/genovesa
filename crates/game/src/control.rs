@@ -824,7 +824,7 @@ fn begin(
                 Some(Doing::Pressing {
                     key,
                     left,
-                    said: pressed(&pressing, left),
+                    said: pressed(pressing, left),
                     answer,
                 })
             }
@@ -1093,7 +1093,7 @@ fn press(args: &[&str]) -> Result<(Pressing, f32), String> {
         }
     };
     if let Some(key) = bindings::reserved_key(named) {
-        return Ok((Pressing::Reserved(key, named.to_string()), seconds));
+        return Ok((Pressing::Reserved(key), seconds));
     }
     let Some(action) = Action::ALL.into_iter().find(|it| it.name() == named) else {
         return Err(format!("no control called `{named}`\n{}", actions()));
@@ -1101,33 +1101,32 @@ fn press(args: &[&str]) -> Result<(Pressing, f32), String> {
     Ok((Pressing::Control(action), seconds))
 }
 
-/// What a `press` line named.
-///
-/// Two kinds because there are two: a control, which is pressed at whatever
-/// key it is *bound* to so that a rebound one is found where the player put
-/// it, and a key that is nobody's control and so has nothing to be bound to —
-/// see [`crate::bindings::reserved_key`].
-#[derive(Clone, PartialEq, Debug)]
+/// What a `press` line named: a control, pressed at whatever key it is
+/// *bound* to so a rebound one is found where the player put it, or a key
+/// that is nobody's control and so has nothing to be bound to.
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Pressing {
     Control(Action),
-    Reserved(KeyCode, String),
+    Reserved(KeyCode),
 }
 
 impl Pressing {
-    /// The key to hold down. The bindings are asked for a control and not for
-    /// a reserved key, which is the whole difference between them.
-    fn key(&self, bindings: &KeyBindings) -> KeyCode {
+    fn key(self, bindings: &KeyBindings) -> KeyCode {
         match self {
-            Self::Control(action) => bindings.key(*action),
-            Self::Reserved(key, _) => *key,
+            Self::Control(action) => bindings.key(action),
+            Self::Reserved(key) => key,
         }
     }
 
-    /// What it is called in an answer — the word that was typed.
-    fn name(&self) -> &str {
+    /// What it is called in an answer, which is the word that was typed —
+    /// both arms derive it from what they hold rather than carrying it.
+    fn name(self) -> &'static str {
         match self {
             Self::Control(action) => action.name(),
-            Self::Reserved(_, named) => named,
+            Self::Reserved(key) => bindings::NAMED
+                .iter()
+                .find(|(_, named)| *named == key)
+                .map_or("that key", |(name, _)| name),
         }
     }
 }
@@ -1135,7 +1134,7 @@ impl Pressing {
 /// What a press answers with when it is over. A tap and a hold are told apart
 /// because a driver that meant to sail and forgot the seconds gets a boat
 /// that has not moved, and the answer is the only place that shows.
-fn pressed(pressing: &Pressing, seconds: f32) -> String {
+fn pressed(pressing: Pressing, seconds: f32) -> String {
     if seconds > 0.0 {
         format!("{} held {seconds} seconds", pressing.name())
     } else {
@@ -1144,11 +1143,14 @@ fn pressed(pressing: &Pressing, seconds: f32) -> String {
 }
 
 /// The controls a `press` will take, as one line — read off [`Action::ALL`]
-/// so a control added to the game is offered here without being listed twice,
-/// with the one key that is nobody's control named after them.
+/// and [`bindings::NAMED`] so neither is listed twice.
 fn actions() -> String {
-    let names: Vec<&str> = Action::ALL.iter().map(|it| it.name()).collect();
-    format!("controls: {}, escape", names.join(", "))
+    let names = Action::ALL
+        .iter()
+        .map(|it| it.name())
+        .chain(bindings::NAMED.iter().map(|(name, _)| *name))
+        .collect::<Vec<_>>();
+    format!("controls: {}", names.join(", "))
 }
 
 #[cfg(test)]
@@ -1294,9 +1296,8 @@ mod tests {
 
     /// And a run with no world to hold the clock of is told so on the line
     /// that asked, rather than after half a minute of waiting for a word that
-    /// was never coming — `--debug` with `--state mainmenu` is a run like
-    /// that, and a driver taking pictures of the menus is the one who would
-    /// pay for it.
+    /// was never coming. A run given no seed is on the menu, and a driver
+    /// taking pictures of the menus is the one who would pay for it.
     #[test]
     fn holding_the_clock_of_no_world_is_refused_at_once() {
         let (mut app, orders) = driven_app();
@@ -1317,10 +1318,7 @@ mod tests {
     fn escape_is_pressable_though_it_is_nobodys_control() {
         assert_eq!(
             press(&["escape"]),
-            Ok((
-                Pressing::Reserved(KeyCode::Escape, "escape".to_string()),
-                0.0
-            ))
+            Ok((Pressing::Reserved(KeyCode::Escape), 0.0))
         );
         assert_eq!(
             press(&["escape", "0.5"]).map(|(_, seconds)| seconds),
@@ -1452,7 +1450,7 @@ mod tests {
     /// reads it — so this is what holds the two to agreement, the way
     /// `server::console`'s `VERBS` is held to `interpret`.
     ///
-    /// The four that carry something are given one here. A button that grew
+    /// The five that carry something are given one here. A button that grew
     /// an argument and did not say so would show up as its bare name failing
     /// to parse.
     #[test]
@@ -1720,11 +1718,11 @@ mod tests {
     #[test]
     fn a_press_says_which_kind_it_was() {
         assert_eq!(
-            pressed(&Pressing::Control(Action::MoveForward), 20.0),
+            pressed(Pressing::Control(Action::MoveForward), 20.0),
             "forward held 20 seconds"
         );
         assert_eq!(
-            pressed(&Pressing::Control(Action::Chart), 0.0),
+            pressed(Pressing::Control(Action::Chart), 0.0),
             "chart tapped"
         );
     }

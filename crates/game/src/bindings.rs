@@ -131,27 +131,29 @@ impl Action {
     }
 }
 
+/// The reserved keys a typed line may name, for the socket's `press`.
+///
+/// Only Escape needs one: being reserved is what leaves it bound to no
+/// [`Action`] for a press to find it by, and without this the pause menu is
+/// reachable by a hand at a keyboard and by nothing else. The arrows are a
+/// second set of the movement controls, which `press forward` already says,
+/// and the backquote opens the console a socket line arrived down.
+pub const NAMED: [(&str, KeyCode); 1] = [("escape", KeyCode::Escape)];
+
+/// The key one of those names, if it names one.
+pub fn reserved_key(name: &str) -> Option<KeyCode> {
+    NAMED
+        .iter()
+        .find(|(named, _)| *named == name)
+        .map(|(_, key)| *key)
+}
+
 /// Keys the player may not take, because taking them would leave no way back.
 /// The arrows are a permanent second set of movement keys, so however
 /// thoroughly the rest is rebound the player can always get about; Escape is
 /// the one step back from wherever the player is — into the pause menu, out of
 /// it again, and out of setting a key; and the backquote is the way into and
 /// out of the debug console — see `crate::console`.
-/// The reserved key a typed line names, for the socket's `press` — see
-/// [`crate::control`]. Only Escape has a name, and the other five do not
-/// because they do not need one: the arrows are a second set of the movement
-/// controls, which `press forward` already says, and the backquote opens the
-/// console a socket line arrived down.
-///
-/// Escape does need one. It is the one step back from wherever the player is
-/// — into the pause menu and out again — and being reserved is exactly what
-/// leaves it with no [`Action`] for a `press` to find it by, so without this
-/// the pause menu and the three screens under it are reachable by a hand at a
-/// keyboard and by nothing else.
-pub fn reserved_key(name: &str) -> Option<KeyCode> {
-    (name == "escape").then_some(KeyCode::Escape)
-}
-
 pub const RESERVED: [KeyCode; 6] = [
     KeyCode::Escape,
     KeyCode::ArrowUp,
@@ -374,8 +376,8 @@ mod tests {
     #[test]
     fn binding_a_taken_key_trades_it_for_the_old_one() {
         let mut bindings = KeyBindings::default();
-        // Pan forward takes the key that turns left, so turning left gets the
-        // key panning forward gave up.
+        // Forward takes the key that turns left, so turning left gets the key
+        // forward gave up.
         bindings.bind(Action::MoveForward, KeyCode::KeyQ, None);
 
         assert_eq!(bindings.key(Action::MoveForward), KeyCode::KeyQ);
@@ -397,7 +399,7 @@ mod tests {
     fn no_two_actions_ever_share_a_key() {
         let mut bindings = KeyBindings::default();
         // Walk one key through every action in turn. Each hand-off has to leave
-        // the six actions on six distinct keys.
+        // every action on a key of its own.
         for action in Action::ALL {
             bindings.bind(action, KeyCode::KeyZ, None);
 
@@ -461,10 +463,18 @@ mod tests {
 
     #[test]
     fn reserved_keys_are_not_the_players_to_take() {
-        for key in RESERVED {
-            assert!(!is_bindable(key), "{key:?} should be reserved");
-        }
         assert!(is_bindable(KeyCode::KeyM));
+        assert!(!is_bindable(KeyCode::Escape));
+
+        // The half that can actually drift: a key `press` will name has to be
+        // one the player cannot take, or the two lists disagree about which
+        // keys are nobody's control.
+        for (name, key) in NAMED {
+            assert!(
+                RESERVED.contains(&key),
+                "`{name}` names a key anyone may bind"
+            );
+        }
     }
 
     #[test]
