@@ -313,6 +313,13 @@ impl Sky {
         }
     }
 
+    /// Lets a held sky go again — the inverse of [`Sky::hold`]. The clock
+    /// kept running underneath, so what comes back is the world's own hour,
+    /// not the one the hold began at.
+    pub fn release(&mut self) {
+        self.commanded = None;
+    }
+
     /// Whether it is night as drawn — which is what decides whether there is
     /// a night to offer to wait out, and, in [`crate::clouds`], whether the
     /// light is carrying any weather. One answer for both: the clouds may
@@ -878,6 +885,30 @@ mod tests {
             "the drift has aimed the light at {} rather than down {}",
             light.forward().as_vec3(),
             -light_from(phase)
+        );
+    }
+
+    #[test]
+    fn a_sky_let_go_returns_to_the_worlds_own_hour() {
+        // The clock keeps running under a hold, so letting go must hand back
+        // the world's hour and not the one the hold began at — a released
+        // sky that stayed pinned made every picture after the first `hold`
+        // a picture of the same morning.
+        let mut app = sky_app();
+        app.world_mut().resource_mut::<Sky>().told(0.40);
+        app.world_mut().resource_mut::<Sky>().hold();
+        run_frames(&mut app, 300);
+        assert!(
+            (phase(&app) - 0.40).abs() < 1e-4,
+            "the held sky moved to {}",
+            phase(&app)
+        );
+
+        app.world_mut().resource_mut::<Sky>().release();
+        assert!(
+            phase(&app) > 0.402,
+            "letting go returned the hour the hold began at: {}",
+            phase(&app)
         );
     }
 

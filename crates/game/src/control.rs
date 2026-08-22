@@ -459,6 +459,12 @@ fn dress_the_target(
 fn hold_the_sky(control: Res<Control>, mut sky: ResMut<crate::sky::Sky>) {
     if control.holding {
         sky.hold();
+    } else {
+        // And lets it go the frame the hold is lifted. The hold is the only
+        // thing that commands an hour, so releasing here is what makes
+        // `hold off` mean what it says — the sky used to stay pinned at the
+        // first held hour for the rest of the run.
+        sky.release();
     }
 }
 
