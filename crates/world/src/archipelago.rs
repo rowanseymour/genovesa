@@ -48,8 +48,8 @@ use protocol::ground::{quantize, ChunkPayload, Material};
 
 use crate::noise::smoothstep;
 use crate::terrain::{
-    cell_materials, corner_heights, corner_water, normal_at, MapConfig, TerrainGenerator,
-    CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
+    cell_materials, corner_heights, corner_water, normal_at, working_heights, MapConfig,
+    TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
 };
 
 pub use protocol::ground::{chunk_at, CHUNK_METRES};
@@ -811,13 +811,14 @@ impl Archipelago {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
 
-        let heights = corner_heights(base, |wx, wz| island.height(wx, wz));
+        let working = working_heights(base, |wx, wz| island.height(wx, wz));
+        let heights = corner_heights(&working);
         if heights.iter().all(|h| *h == -OCEAN_DEPTH) {
             return None;
         }
 
         Some(ChunkPayload {
-            materials: cell_materials(base, &heights, |wx, wz, height, normal| {
+            materials: cell_materials(base, &working, |wx, wz, height, normal| {
                 island.material(wx, wz, height, normal)
             }),
             heights: heights.iter().copied().map(quantize).collect(),
@@ -844,7 +845,7 @@ impl Archipelago {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
 
-        let heights = corner_heights(base, |wx, wz| island.height(wx, wz));
+        let heights = corner_heights(&working_heights(base, |wx, wz| island.height(wx, wz)));
         if heights.iter().all(|h| *h == -OCEAN_DEPTH) {
             return None;
         }
@@ -1359,7 +1360,7 @@ mod tests {
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0xD15B_BF89_88DF_E229, "the ground changed");
         assert_eq!(
-            sent, 0x9129_7941_6200_F15E,
+            sent, 0x8ADD_175F_FE7C_E49E,
             "what a client would be sent changed"
         );
     }

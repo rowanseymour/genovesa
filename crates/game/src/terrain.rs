@@ -38,8 +38,8 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, ChunkPayload, Material, Plant, CELLS, CELL_COUNT, CELL_METRES,
-    CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
+    chunk_at, dequantize, material_index, ChunkPayload, Material, Plant, CELLS, CELL_COUNT,
+    CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
 };
 
 use crate::camera::{MapCamera, View};
@@ -530,41 +530,50 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
         )
     };
 
-    for (cell, material) in materials.iter().enumerate() {
-        let (ix, iz) = (cell % CELLS, cell / CELLS);
-        let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
-        let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
+    // The chunk's own cells only. The payload's grid reaches a cell further
+    // out on every side — see [`ChunkPayload::materials`] — and that ring
+    // belongs to the neighbouring chunks, which draw it themselves. Drawing
+    // it here would lay a one-metre skirt of duplicate ground over every
+    // boundary in the world.
+    for iz in 0..CELLS {
+        for ix in 0..CELLS {
+            let material = materials[material_index(ix as i32, iz as i32)
+                .expect("a cell of the chunk is on its own material grid")];
+            let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
+            let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
 
-        // Counter-clockwise seen from above, which is what puts the face
-        // normals upwards.
-        let split = if (ix + iz).is_multiple_of(2) {
-            [[sw, nw, se], [se, nw, ne]]
-        } else {
-            [[sw, nw, ne], [sw, ne, se]]
-        };
+            // Counter-clockwise seen from above, which is what puts the face
+            // normals upwards.
+            let split = if (ix + iz).is_multiple_of(2) {
+                [[sw, nw, se], [se, nw, ne]]
+            } else {
+                [[sw, nw, ne], [sw, ne, se]]
+            };
 
-        // The square's own normal, not each triangle's. The generator
-        // classified the cell by this same normal — the mean slope of its four
-        // corners — so lighting it this way is what makes a crag look as steep
-        // as the palette says it is. It also stops a cell whose diagonal folds
-        // reading as two facets of different brightness.
-        let along = (se.y + ne.y - sw.y - nw.y) / (2.0 * CELL_METRES);
-        let across = (nw.y + ne.y - sw.y - se.y) / (2.0 * CELL_METRES);
-        let normal = Vec3::new(-along, 1.0, -across).normalize();
+            // The square's own normal, not each triangle's. The generator
+            // classified the cell by this same normal — the mean slope of its
+            // four corners — so lighting it this way is what makes a crag
+            // look as steep as the palette says it is. It also stops a cell
+            // whose diagonal folds reading as two facets of different
+            // brightness.
+            let along = (se.y + ne.y - sw.y - nw.y) / (2.0 * CELL_METRES);
+            let across = (nw.y + ne.y - sw.y - se.y) / (2.0 * CELL_METRES);
+            let normal = Vec3::new(-along, 1.0, -across).normalize();
 
-        // Vertex colours are consumed in linear space by the PBR shader; the
-        // reference palette is authored in sRGB.
-        let srgb = material.color();
-        let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
-        let color = [linear.red, linear.green, linear.blue, 1.0];
+            // Vertex colours are consumed in linear space by the PBR shader;
+            // the reference palette is authored in sRGB.
+            let srgb = material.color();
+            let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
+            let color = [linear.red, linear.green, linear.blue, 1.0];
 
-        // No UVs: nothing binds a texture to the ground, and at a hundred
-        // thousand vertices a chunk an attribute carried "for later" is
-        // three-quarters of a megabyte of dead weight on every copy.
-        for vertex in split.into_iter().flatten() {
-            positions.push([vertex.x, vertex.y, vertex.z]);
-            normals.push([normal.x, normal.y, normal.z]);
-            colors.push(color);
+            // No UVs: nothing binds a texture to the ground, and at a hundred
+            // thousand vertices a chunk an attribute carried "for later" is
+            // three-quarters of a megabyte of dead weight on every copy.
+            for vertex in split.into_iter().flatten() {
+                positions.push([vertex.x, vertex.y, vertex.z]);
+                normals.push([normal.x, normal.y, normal.z]);
+                colors.push(color);
+            }
         }
     }
 
@@ -1001,7 +1010,7 @@ fn within(chunk: IVec2, focus: Vec2, radius: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::ground::quantize;
+    use protocol::ground::{quantize, MATERIAL_COUNT};
 
     /// A payload of ground with a distinctive shape: a plane tilted along both
     /// axes, so that every corner has a different height and any transposed or
@@ -1015,7 +1024,7 @@ mod tests {
                     quantize(ix as f32 + 10.0 * iz as f32)
                 })
                 .collect(),
-            materials: vec![Material::Grass; CELL_COUNT],
+            materials: vec![Material::Grass; MATERIAL_COUNT],
             water: None,
             plants: Vec::new(),
         }
@@ -1075,7 +1084,7 @@ mod tests {
         let heights: Vec<f32> = (0..CORNERS * CORNERS)
             .map(|i| (i % CORNERS) as f32)
             .collect();
-        let mesh = chunk_mesh(&heights, &vec![Material::Grass; CELL_COUNT]);
+        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
@@ -1116,7 +1125,7 @@ mod tests {
     #[test]
     fn chunk_positions_are_local_so_the_transform_places_them() {
         let heights = vec![3.5f32; CORNERS * CORNERS];
-        let materials = vec![Material::Sand; CELL_COUNT];
+        let materials = vec![Material::Sand; MATERIAL_COUNT];
         let mesh = chunk_mesh(&heights, &materials);
 
         let positions = mesh

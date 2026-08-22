@@ -1423,7 +1423,7 @@ impl<'a> Payload<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::ground::{Material, CELL_COUNT, CORNERS};
+    use super::ground::{Material, CORNERS, MATERIAL_COUNT};
     use super::survey::{Coast, Mark, Soundings};
     use super::*;
 
@@ -1469,7 +1469,7 @@ mod tests {
             heights: (0..CORNERS * CORNERS)
                 .map(|i| (i * 601 % 65_521) as u16)
                 .collect(),
-            materials: (0..CELL_COUNT)
+            materials: (0..MATERIAL_COUNT)
                 .map(|i| {
                     [
                         Material::Seabed,
@@ -2280,15 +2280,15 @@ mod tests {
         );
         assert_eq!(lake[13], 2, "the flag says there is water on this ground");
         assert_eq!(
-            lake[14..materials + CELL_COUNT],
-            ground[14..materials + CELL_COUNT],
+            lake[14..materials + MATERIAL_COUNT],
+            ground[14..materials + MATERIAL_COUNT],
             "the water moved the heights or the materials"
         );
 
         // The water grid starts once the materials are done, little-endian
         // pairs like the heights: level 0 is 0, level 1 is 907, level 2 is
         // 1814.
-        let water = materials + CELL_COUNT;
+        let water = materials + MATERIAL_COUNT;
         assert_eq!(lake[water..water + 6], [0, 0, 0x8B, 0x03, 0x16, 0x07]);
 
         // And a plant, which goes on the end of everything else: its kind

@@ -88,6 +88,16 @@ pub const CORNERS: usize = CELLS + 1;
 /// world.
 pub const CELL_COUNT: usize = CELLS * CELLS;
 
+/// Cells of overhang the material grid carries on every side — see
+/// [`ChunkPayload::materials`] and [`MATERIAL_CELLS`].
+pub const APRON: usize = 1;
+
+/// Cells along one edge of the material grid, apron included.
+pub const MATERIAL_CELLS: usize = CELLS + 2 * APRON;
+
+/// Materials in one chunk's grid, apron and all.
+pub const MATERIAL_COUNT: usize = MATERIAL_CELLS * MATERIAL_CELLS;
+
 // --- Heights ----------------------------------------------------------------
 
 /// The height a stored zero means, in metres. Well below the deepest sea bed
@@ -285,10 +295,10 @@ impl Material {
 ///
 /// Everything a renderer needs and nothing else. The corners are a
 /// [`CORNERS`]-square grid sampled from the chunk's lower corner outwards
-/// at [`CELL_METRES`] spacing, row-major; the materials are one per cell on the
-/// [`CELLS`]-square grid those corners bound, also row-major. The two
-/// grids are offset half a cell from each other, which is simply what it means
-/// for corners to bound cells.
+/// at [`CELL_METRES`] spacing, row-major; the materials are one per cell on
+/// the grid those corners bound, also row-major, and reaching one cell past
+/// the chunk on every side. The two grids are offset half a cell from each
+/// other, which is simply what it means for corners to bound cells.
 ///
 /// A chunk of open ocean has no payload at all — see
 /// [`crate::ToClient::Chunk`]. What arrives here is ground worth drawing.
@@ -297,8 +307,31 @@ pub struct ChunkPayload {
     /// `CORNERS * CORNERS` corner heights, quantised — see
     /// [`quantize`].
     pub heights: Vec<u16>,
-    /// [`CELL_COUNT`] materials, one per cell, row-major from the chunk's lower
-    /// corner.
+    /// [`MATERIAL_COUNT`] materials, row-major, covering the chunk's own
+    /// [`CELLS`]-square grid *plus [`APRON`] cells of its neighbours on every
+    /// side* — so cell `(-1, -1)` is first and cell `(CELLS, CELLS)` is last.
+    /// [`ChunkPayload::material`] does the indexing.
+    ///
+    /// The overhang is what keeps a chunk drawable on its own. A renderer
+    /// that decides how to paint a cell by looking at what is *next* to it —
+    /// anything blending or tiling across a material boundary, which is most
+    /// ways of drawing ground that are not flat colour — needs its
+    /// neighbours' materials, and a chunk at the edge of what has arrived has
+    /// no neighbours yet. Without the apron such a client either leaves a
+    /// wrong-looking seam around every chunk until the next one lands, or
+    /// keeps chunk state and rebuilds meshes when it does; with it, a chunk
+    /// answers for its own edges the moment it arrives, which is the property
+    /// every other part of this payload already has.
+    ///
+    /// One cell is exactly what that needs and no more: a cell's four corners
+    /// are each shared with three neighbouring cells, so the widest reach is
+    /// from corner `(0, 0)` to cell `(-1, -1)`. It costs 516 bytes on a
+    /// payload of some fifty thousand.
+    ///
+    /// The apron is genuinely the neighbour's own answer, not an
+    /// extrapolation — a generator samples the same field a cell further out,
+    /// so two chunks agree about the cells they both describe. That is what
+    /// `the_apron_is_the_neighbours_own_ground` holds them to.
     pub materials: Vec<Material>,
     /// Where standing water above sea level covers this chunk, and how high
     /// it stands: one quantised level per corner on the same grid as
@@ -512,11 +545,11 @@ impl Plant {
 pub const NO_WATER: u16 = 0;
 
 /// Bytes a chunk's heights and materials occupy on the wire: two per corner
-/// height, one per cell. Nothing is compressed — see the module docs on the
-/// grid being the format, and note that delta-coding the heights and
-/// run-coding the materials would take most of this back if the wire ever needs
-/// it to.
-pub const PAYLOAD_BYTES: usize = CORNERS * CORNERS * 2 + CELL_COUNT;
+/// height, one per cell of the material grid. Nothing is compressed — see the
+/// module docs on the grid being the format, and note that delta-coding the
+/// heights and run-coding the materials would take most of this back if the
+/// wire ever needs it to.
+pub const PAYLOAD_BYTES: usize = CORNERS * CORNERS * 2 + MATERIAL_COUNT;
 
 /// Bytes a chunk's water grid adds when it carries one — two per corner,
 /// like the heights it is compared against.
@@ -531,14 +564,36 @@ pub const fn payload_bytes(water: bool, plants: usize) -> usize {
     PAYLOAD_BYTES + if water { WATER_BYTES } else { 0 } + plants * PLANT_BYTES
 }
 
+/// Where cell `(ix, iz)` sits in a payload's material grid, or `None` for a
+/// cell the grid does not reach — anything outside `-APRON ..= CELLS - 1 +
+/// APRON` on either axis.
+///
+/// Coordinates are the chunk's own, so `(0, 0)` is its lower corner cell and
+/// the apron is at `-1` and [`CELLS`]. Written once here because both ends
+/// index the same grid and neither should be restating the arithmetic.
+pub const fn material_index(ix: i32, iz: i32) -> Option<usize> {
+    let reach = APRON as i32;
+    let last = CELLS as i32 - 1 + reach;
+    if ix < -reach || ix > last || iz < -reach || iz > last {
+        return None;
+    }
+    Some((iz + reach) as usize * MATERIAL_CELLS + (ix + reach) as usize)
+}
+
 impl ChunkPayload {
+    /// What cell `(ix, iz)` of this chunk is made of, in the chunk's own cell
+    /// coordinates — `None` past the apron. See [`material_index`].
+    pub fn material(&self, ix: i32, iz: i32) -> Option<Material> {
+        material_index(ix, iz).map(|at| self.materials[at])
+    }
+
     /// Whether this is a payload of the shape the grid says it should be.
     /// What a reader checks before believing a frame, and what a builder can
     /// assert against.
     pub fn well_formed(&self) -> bool {
         let corners = CORNERS * CORNERS;
         self.heights.len() == corners
-            && self.materials.len() == CELL_COUNT
+            && self.materials.len() == MATERIAL_COUNT
             && self
                 .water
                 .as_ref()
@@ -592,7 +647,7 @@ impl ChunkPayload {
                 .collect::<Vec<u16>>()
         };
         let (heights, rest) = bytes.split_at(CORNERS * CORNERS * 2);
-        let (materials, rest) = rest.split_at(CELL_COUNT);
+        let (materials, rest) = rest.split_at(MATERIAL_COUNT);
         let (water, plants) = rest.split_at(rest.len() - plants * PLANT_BYTES);
         Some(Self {
             heights: levels(heights),
@@ -618,7 +673,9 @@ mod tests {
         assert_eq!(CELLS as f32 * CELL_METRES, CHUNK_METRES);
         assert_eq!(CORNERS, 129);
         assert_eq!(CELL_COUNT, 16_384);
-        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_384);
+        assert_eq!(MATERIAL_CELLS, 130);
+        assert_eq!(MATERIAL_COUNT, 16_900);
+        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_900);
         assert_eq!(WATER_BYTES, 129 * 129 * 2);
         assert_eq!(payload_bytes(false, 0), PAYLOAD_BYTES);
         assert_eq!(payload_bytes(true, 0), PAYLOAD_BYTES + WATER_BYTES);
@@ -626,6 +683,58 @@ mod tests {
             payload_bytes(true, 3),
             PAYLOAD_BYTES + WATER_BYTES + 3 * PLANT_BYTES
         );
+    }
+
+    #[test]
+    fn the_apron_reaches_one_cell_and_costs_what_it_says() {
+        // What the overhang is *for* is that a corner of the chunk has four
+        // cells around it and one of them lies outside — so one cell of reach
+        // is the whole requirement, and a second would be carried for nothing.
+        assert_eq!(APRON, 1);
+        assert_eq!(MATERIAL_CELLS, CELLS + 2);
+
+        // And what it costs, said out loud so that widening it is a decision
+        // somebody makes rather than one that happens.
+        assert_eq!(MATERIAL_COUNT - CELL_COUNT, 516);
+    }
+
+    #[test]
+    fn a_cell_indexes_to_its_own_place_on_the_material_grid() {
+        // Corners first: the lowest cell the grid reaches and the highest.
+        assert_eq!(material_index(-1, -1), Some(0));
+        assert_eq!(
+            material_index(CELLS as i32, CELLS as i32),
+            Some(MATERIAL_COUNT - 1)
+        );
+        // The chunk's own first cell sits one row and one column in.
+        assert_eq!(material_index(0, 0), Some(MATERIAL_CELLS + 1));
+
+        // Row-major, so a step along x moves one and a step along z moves a
+        // whole row. Written as two separate checks because the failure that
+        // matters here is a transpose, which a symmetric one would pass.
+        assert_eq!(material_index(1, 0), material_index(0, 0).map(|at| at + 1));
+        assert_eq!(
+            material_index(0, 1),
+            material_index(0, 0).map(|at| at + MATERIAL_CELLS)
+        );
+
+        // And nothing past the apron, on either axis or either side.
+        assert_eq!(material_index(-2, 0), None);
+        assert_eq!(material_index(0, -2), None);
+        assert_eq!(material_index(CELLS as i32 + 1, 0), None);
+        assert_eq!(material_index(0, CELLS as i32 + 1), None);
+
+        // Every place on the grid is some cell's, and no two share one.
+        let mut seen = std::collections::BTreeSet::new();
+        for iz in -(APRON as i32)..=(CELLS as i32) {
+            for ix in -(APRON as i32)..=(CELLS as i32) {
+                assert!(
+                    seen.insert(material_index(ix, iz).expect("a cell on the grid")),
+                    "({ix}, {iz}) landed on a place already taken"
+                );
+            }
+        }
+        assert_eq!(seen.len(), MATERIAL_COUNT);
     }
 
     #[test]
@@ -731,7 +840,7 @@ mod tests {
             heights: (0..CORNERS * CORNERS)
                 .map(|i| (i * 7 % 65_535) as u16)
                 .collect(),
-            materials: (0..CELL_COUNT)
+            materials: (0..MATERIAL_COUNT)
                 .map(|i| Material::from_byte((i % PALETTE.len()) as u8).expect("a material"))
                 .collect(),
             water: water.then(|| {

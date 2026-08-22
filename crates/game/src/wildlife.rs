@@ -730,7 +730,9 @@ mod tests {
 
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
-    use protocol::ground::{quantize, ChunkPayload, Material, CELL_COUNT, CELL_METRES, CORNERS};
+    use protocol::ground::{
+        quantize, ChunkPayload, Material, CELL_METRES, CORNERS, MATERIAL_COUNT,
+    };
 
     use crate::testing::{
         assert_model_draws, assert_model_is_painted, creature_named_by, span, test_ground,
@@ -755,7 +757,7 @@ mod tests {
                     quantize((height - (dx * dx + dz * dz).sqrt()).max(1.0))
                 })
                 .collect(),
-            materials: vec![Material::Grass; CELL_COUNT],
+            materials: vec![Material::Grass; MATERIAL_COUNT],
             water: None,
             plants: Vec::new(),
         }
@@ -772,7 +774,7 @@ mod tests {
                     IVec2::new(cx, cz),
                     Some(ChunkPayload {
                         heights: vec![quantize(-depth); CORNERS * CORNERS],
-                        materials: vec![Material::Sand; CELL_COUNT],
+                        materials: vec![Material::Sand; MATERIAL_COUNT],
                         water: None,
                         plants: Vec::new(),
                     }),
