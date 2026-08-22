@@ -25,6 +25,50 @@
 //! height nothing local decides, so it cannot be a plane anyone draws
 //! unprompted — it arrives with its chunk, as a second grid of levels, and
 //! gets a second mesh, in fresh water rather than in the sea's.
+//!
+//! # How a square metre becomes triangles
+//!
+//! Every drawn cell is split in two and the pair flat-shaded: both triangles
+//! carry the cell's own colour and the normal of the square they came from, so
+//! a cell reads as one flat lozenge rather than as two triangles that happen
+//! to match. A corner therefore belongs to one cell, and the same point of
+//! ground is four different vertices where four cells meet — the price of the
+//! look, paid in vertices rather than in the texture and gradient machinery
+//! the look exists to refuse. It also means chunks need no border samples to
+//! meet cleanly, there being no shared normals to disagree about.
+//!
+//! *Within* a cell the two triangles agree about everything, so a cell is four
+//! vertices and six indices rather than six vertices. That is a third off the
+//! vertex count, and the shadow pass — which rasterises this geometry once per
+//! cascade it falls into and does nothing per vertex but transform it — is the
+//! half of the frame that feels it. It only became possible when the colour
+//! moved from the triangle to the cell: while each triangle had its own
+//! palette entry the two halves disagreed, and an index buffer would have been
+//! 0, 1, 2, 3, … and saved nothing.
+//!
+//! # Drawing the same ground at different densities
+//!
+//! How finely a chunk is *drawn* is this end's alone: the wire says what a
+//! square metre is made of and holds no opinion about triangles. So a
+//! [`Detail`] is never a request for anything, only a decision to throw away
+//! samples already in hand — nothing is fetched again and nothing new is held.
+//!
+//! Two rules make the coarse cuts safe to hand out.
+//!
+//! Corners are **decimated, not averaged**: a drawn corner is every S-th
+//! corner the payload sent, so it is a height the ground actually has. Coarse
+//! and fine sheets then touch exactly wherever they share a corner, the last
+//! corner lands on the chunk's own edge however coarse the cut, and the error
+//! between the two is bounded on *both* sides. Averaging, or taking the
+//! tallest of each block, would put the whole sheet off the ground in one
+//! direction — for a shadow caster that is a hillside systematically wrongly
+//! lit, where a two-sided error is a hairline at the ridges that the depth
+//! bias already covers.
+//!
+//! And [`height_at`] never sees a [`Detail`] at all. Everything physical —
+//! the waterline a hull rides, the ground a walker is held to — reads the
+//! payload's own grid whatever is drawn over it, or a hull would rise and
+//! settle as the camera pulled back.
 
 use std::sync::Arc;
 
@@ -38,8 +82,8 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, material_index, ChunkPayload, Material, Plant, CELLS, CELL_COUNT,
-    CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
+    chunk_at, dequantize, material_index, ChunkPayload, Material, Plant, CELLS, CELL_METRES,
+    CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
 };
 
 use crate::camera::{MapCamera, View};
@@ -441,22 +485,63 @@ const CORNER_AT: [Vec2; 4] = [
     Vec2::new(1.0, 1.0),
 ];
 
+/// How coarsely a chunk is drawn: a halving of the payload's own grid at each
+/// level, so [`Detail::FINEST`] draws every cell the wire sent and level two
+/// lays one drawn cell over sixteen of them. See the module header for what a
+/// level does and does not mean.
+///
+/// A level rather than a stride, so that every value is one the grid can
+/// actually be cut on — a stride that did not divide [`CELLS`] would leave a
+/// ragged row along two sides of every chunk.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Detail(u32);
+
+impl Detail {
+    /// Every cell the payload carries, drawn. What the ground has always been
+    /// drawn at, and what anything physical is still read off.
+    pub const FINEST: Self = Self(0);
+
+    /// The coarsest cut leaving an *even* number of cells to a chunk's edge,
+    /// which is what [`split`]'s checkerboard needs. Two cells, far past
+    /// anything worth drawing: the bound is here to make the parity a fact
+    /// about the type rather than a thing to remember.
+    pub const COARSEST: Self = Self(CELLS.trailing_zeros() - 1);
+
+    /// The level `steps` halvings coarser than the finest, held inside what
+    /// the grid can be cut on. Clamped rather than refused: a selector asking
+    /// for more than the grid has is asking for the coarsest there is.
+    pub fn new(steps: u32) -> Self {
+        Self(steps.min(Self::COARSEST.0))
+    }
+
+    /// Cells of the payload's own grid that go into one drawn cell, along each
+    /// edge.
+    pub fn stride(self) -> usize {
+        1 << self.0
+    }
+
+    /// Drawn cells along a chunk's edge.
+    pub fn cells(self) -> usize {
+        CELLS >> self.0
+    }
+
+    /// Metres along a drawn cell's edge.
+    pub fn metres(self) -> f32 {
+        self.stride() as f32 * CELL_METRES
+    }
+}
+
 /// The two triangles cell `(ix, iz)` is drawn as, each named by three of the
 /// cell's own four corners and wound counter-clockwise seen from above.
 ///
-/// **The one place the cut is decided.** Two things read it and they have to
-/// agree: [`chunk_mesh`] draws these triangles, and [`height_at`] interpolates
-/// across them to say where the ground is underfoot. A quad is not planar, so
-/// the two diagonals give genuinely different heights down the middle of a
-/// cell — pick different ones and a hull crossing a quad steps where the
-/// picture slopes. This used to be a walk in `protocol`, which the wire no
-/// longer carries; written here once rather than twice, it cannot drift.
+/// **The one place the cut is decided**, in the indices of whichever grid is
+/// being drawn: a quad is not planar, so [`chunk_mesh`] and [`height_at`]
+/// reading different diagonals is a hull stepping where the picture slopes.
 ///
-/// Which diagonal alternates like a checkerboard. Cutting every cell the same
-/// way lines them up into an obvious herringbone across open ground, and
-/// alternating breaks that up for nothing. The parity runs off the cell's
-/// index within the chunk, and [`CELLS`] is even, so the pattern carries
-/// across a chunk boundary without a phase step.
+/// Which diagonal alternates like a checkerboard, one cut everywhere lining
+/// cells into a herringbone. The parity runs off the drawn cell's index, and
+/// every [`Detail`] leaves an even number of them, so it carries across a
+/// chunk boundary without a phase step.
 const fn split(ix: usize, iz: usize) -> [[usize; 3]; 2] {
     if (ix + iz).is_multiple_of(2) {
         [[SW, NW, SE], [SE, NW, NE]]
@@ -489,13 +574,13 @@ fn on_triangle(tri: [usize; 3], heights: [f32; 4], at: Vec2) -> Option<f32> {
         .then(|| u * heights[tri[0]] + v * heights[tri[1]] + w * heights[tri[2]])
 }
 
-/// The height of one point inside a chunk, interpolated across the very
-/// triangle the mesh draws there.
+/// The height of one point inside a chunk, interpolated across the triangle
+/// the payload's own grid puts there.
 ///
+/// The payload's own grid whatever is drawn over it — see the module header.
 /// Which triangle a point falls in comes from [`split`], which is also what
-/// [`chunk_mesh`] builds from — so the ground underfoot is the ground on
-/// screen by construction rather than by two functions happening to agree.
-/// `local` is metres from the chunk's own corner.
+/// [`chunk_mesh`] builds from, so the two agree by construction where they
+/// read the same grid. `local` is metres from the chunk's own corner.
 fn height_at(heights: &[f32], local: Vec2) -> f32 {
     let cell = local / CELL_METRES;
     // Clamped rather than trusted: a point exactly on a chunk's far edge
@@ -560,42 +645,29 @@ struct Sea;
 #[derive(Component)]
 struct OceanFloor;
 
-/// Builds one chunk's mesh from what the server sent about it.
-///
-/// The wire hands over a height per corner and a material per cell, and stops
-/// there — how a square metre of ground becomes triangles is this client's
-/// decision and nobody else's. This one splits every cell in two and
-/// flat-shades the pair: both triangles carry the cell's own colour and the
-/// normal of the square they came from, so a cell reads as one flat lozenge
-/// of ground rather than as two triangles that happen to match.
-///
-/// A cell's four corners are shared between its own two triangles and with
-/// nothing else. Flat shading means a corner carries the normal and the colour
-/// of the cell it belongs to, so the same point of ground is four different
-/// vertices where four cells meet — that much is the price of the look, paid
-/// in vertices rather than in the texture and gradient machinery the look
-/// exists to refuse. It also means chunks need no border samples to meet
-/// cleanly, there being no shared normals to disagree about.
-///
-/// *Within* a cell, though, the two triangles agree about everything, so the
-/// cell is four vertices and six indices rather than six vertices. That is a
-/// third off the vertex count, and the shadow pass — which rasterises this
-/// geometry once per cascade it falls into, and does nothing per vertex but
-/// transform it — is the half of the frame that feels it. It only became
-/// possible when the colour moved from the triangle to the cell: while each
-/// triangle had its own palette entry the two halves disagreed, and an index
-/// buffer would have been 0, 1, 2, 3, … and saved nothing.
-fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
-    let mut positions = Vec::with_capacity(CELL_COUNT * 4);
-    let mut normals = Vec::with_capacity(CELL_COUNT * 4);
-    let mut colors = Vec::with_capacity(CELL_COUNT * 4);
-    let mut indices = Vec::with_capacity(CELL_COUNT * 6);
+/// Builds one chunk's mesh from what the server sent about it, at the density
+/// asked for: four vertices and six indices to a drawn cell, flat-shaded, with
+/// corners taken from the payload by [`Detail`]'s stride. The module header
+/// argues both halves of that.
+fn chunk_mesh(heights: &[f32], materials: &[Material], detail: Detail) -> Mesh {
+    let (cells, stride, step) = (detail.cells(), detail.stride(), detail.metres());
+    let count = cells * cells;
 
+    let mut positions = Vec::with_capacity(count * 4);
+    let mut normals = Vec::with_capacity(count * 4);
+    let mut colors = Vec::with_capacity(count * 4);
+    let mut indices = Vec::with_capacity(count * 6);
+
+    // Named in the payload's own corners, so the last one lands on [`CELLS`]
+    // exactly however coarse the cut: two chunks side by side agree along
+    // their shared edge whenever they are drawn at the same detail, with
+    // nothing to reconcile.
     let corner = |cx: usize, cz: usize| {
+        let (fx, fz) = (cx * stride, cz * stride);
         Vec3::new(
-            cx as f32 * CELL_METRES,
-            heights[cz * CORNERS + cx],
-            cz as f32 * CELL_METRES,
+            fx as f32 * CELL_METRES,
+            heights[fz * CORNERS + fx],
+            fz as f32 * CELL_METRES,
         )
     };
 
@@ -604,9 +676,16 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
     // belongs to the neighbouring chunks, which draw it themselves. Drawing
     // it here would lay a one-metre skirt of duplicate ground over every
     // boundary in the world.
-    for iz in 0..CELLS {
-        for ix in 0..CELLS {
-            let material = materials[material_index(ix as i32, iz as i32)
+    for iz in 0..cells {
+        for ix in 0..cells {
+            // The material nearest the middle of what this cell covers. A
+            // coarse cell spans several of the payload's, which will want a
+            // dominance order over the palette the day two materials have to
+            // be blended across a boundary; point-sampling until then keeps
+            // the colour taken from the same place the corners are, and is
+            // exactly the payload's own cell at [`Detail::FINEST`].
+            let (mx, mz) = (ix * stride + stride / 2, iz * stride + stride / 2);
+            let material = materials[material_index(mx as i32, mz as i32)
                 .expect("a cell of the chunk is on its own material grid")];
             let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
             let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
@@ -617,8 +696,8 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
             // look as steep as the palette says it is. It also stops a cell
             // whose diagonal folds reading as two facets of different
             // brightness.
-            let along = (se.y + ne.y - sw.y - nw.y) / (2.0 * CELL_METRES);
-            let across = (nw.y + ne.y - sw.y - se.y) / (2.0 * CELL_METRES);
+            let along = (se.y + ne.y - sw.y - nw.y) / (2.0 * step);
+            let across = (nw.y + ne.y - sw.y - se.y) / (2.0 * step);
             let normal = Vec3::new(-along, 1.0, -across).normalize();
 
             // Vertex colours are consumed in linear space by the PBR shader;
@@ -657,8 +736,10 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-    // Thirty-two bit, and not by preference: a chunk is 65,536 vertices, which
-    // is one past what sixteen bits can name.
+    // Thirty-two bit, and not by preference: a chunk at [`Detail::FINEST`] is
+    // 65,536 vertices, which is one past what sixteen bits can name. Coarser
+    // cuts would fit in sixteen and are given the same buffer, one kind of
+    // mesh being worth more than the bytes.
     .with_inserted_indices(Indices::U32(indices))
 }
 
@@ -732,7 +813,7 @@ struct ChunkMeshes {
 
 fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
     ChunkMeshes {
-        ground: chunk_mesh(&arrival.heights, &arrival.materials),
+        ground: chunk_mesh(&arrival.heights, &arrival.materials, Detail::FINEST),
         water: arrival.water.as_ref().and_then(|water| water_mesh(water)),
     }
 }
@@ -1110,13 +1191,14 @@ mod tests {
     fn a_chunk_mesh_is_one_flat_lozenge_per_cell() {
         let payload = a_slope();
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
-        let mesh = chunk_mesh(&heights, &payload.materials);
+        let mesh = chunk_mesh(&heights, &payload.materials, Detail::FINEST);
 
         // Four vertices to a cell and six indices, not six vertices: the two
         // triangles of a cell agree about everything, so they share corners.
-        assert_eq!(mesh.count_vertices(), CELL_COUNT * 4);
+        let count = CELLS * CELLS;
+        assert_eq!(mesh.count_vertices(), count * 4);
         let indices = mesh.indices().expect("a cell shares its corners");
-        assert_eq!(indices.len(), CELL_COUNT * 6);
+        assert_eq!(indices.len(), count * 6);
 
         let normals = mesh
             .attribute(Mesh::ATTRIBUTE_NORMAL)
@@ -1131,7 +1213,7 @@ mod tests {
         // All four agree — which is the whole point of the cell being the
         // unit. A cell lit as two triangles would show the diagonal the wire
         // deliberately stopped carrying.
-        for cell in 0..CELL_COUNT {
+        for cell in 0..count {
             let i = cell * 4;
             for vertex in 1..4 {
                 assert_eq!(
@@ -1175,14 +1257,12 @@ mod tests {
         // it shows. A cell's six indices name its four corners either way;
         // which corner is named *twice* says which diagonal was cut, and it
         // has to alternate or the ground grows a herringbone.
+        //
+        // Asked of a coarse cut as well, the parity there running off the
+        // *drawn* cell's index and not the payload's: a herringbone is a thing
+        // the eye finds in the facets it can see.
         let heights: Vec<f32> = (0..CORNERS * CORNERS)
             .map(|i| (i % CORNERS) as f32)
-            .collect();
-        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
-        let indices: Vec<usize> = mesh
-            .indices()
-            .expect("a cell shares its corners")
-            .iter()
             .collect();
 
         // The order the corners are pushed in, which the indices are relative
@@ -1192,29 +1272,173 @@ mod tests {
         const NW: usize = 2;
         const NE: usize = 3;
 
-        for (ix, iz) in [(0, 0), (1, 0), (0, 1), (1, 1), (CELLS - 1, 0)] {
-            let cell = iz * CELLS + ix;
-            let mut counts = std::collections::BTreeMap::new();
-            for at in &indices[cell * 6..cell * 6 + 6] {
-                *counts.entry(at - cell * 4).or_insert(0) += 1;
-            }
-            assert_eq!(
-                counts.len(),
-                4,
-                "cell ({ix}, {iz}) used something other than its four corners"
-            );
-            let shared: Vec<usize> = counts
+        for detail in [Detail::FINEST, Detail::new(2), Detail::COARSEST] {
+            let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT], detail);
+            let indices: Vec<usize> = mesh
+                .indices()
+                .expect("a cell shares its corners")
                 .iter()
-                .filter(|(_, n)| **n == 2)
-                .map(|(corner, _)| *corner)
                 .collect();
-            let cut = if (ix + iz).is_multiple_of(2) {
-                // The south-west/north-east cut shares the other two.
-                vec![SE, NW]
-            } else {
-                vec![SW, NE]
-            };
-            assert_eq!(shared, cut, "cell ({ix}, {iz}) was cut the wrong way");
+            let across = detail.cells();
+
+            for (ix, iz) in [(0, 0), (1, 0), (0, 1), (1, 1), (across - 1, 0)] {
+                let cell = iz * across + ix;
+                let mut counts = std::collections::BTreeMap::new();
+                for at in &indices[cell * 6..cell * 6 + 6] {
+                    *counts.entry(at - cell * 4).or_insert(0) += 1;
+                }
+                assert_eq!(
+                    counts.len(),
+                    4,
+                    "{detail:?} cell ({ix}, {iz}) used something other than its four corners"
+                );
+                let shared: Vec<usize> = counts
+                    .iter()
+                    .filter(|(_, n)| **n == 2)
+                    .map(|(corner, _)| *corner)
+                    .collect();
+                let cut = if (ix + iz).is_multiple_of(2) {
+                    // The south-west/north-east cut shares the other two.
+                    vec![SE, NW]
+                } else {
+                    vec![SW, NE]
+                };
+                assert_eq!(
+                    shared, cut,
+                    "{detail:?} cell ({ix}, {iz}) was cut the wrong way"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_detail_is_a_cut_the_chunk_grid_can_actually_take() {
+        // The bound is the point of the type: every level has to leave whole
+        // cells, and an even number of them, or the checkerboard steps phase
+        // at a chunk boundary and the ground grows the herringbone [`split`]
+        // exists to break up.
+        for steps in 0..=Detail::COARSEST.0 + 4 {
+            let detail = Detail::new(steps);
+            assert_eq!(
+                CELLS % detail.stride(),
+                0,
+                "{detail:?} leaves a ragged row along two sides of the chunk"
+            );
+            assert!(
+                detail.cells() >= 2 && detail.cells().is_multiple_of(2),
+                "{detail:?} leaves {} cells, which cannot carry the parity",
+                detail.cells()
+            );
+        }
+        // Asked for more than the grid has, a selector gets the coarsest there
+        // is rather than an error it would have to have a plan for.
+        assert_eq!(Detail::new(99), Detail::COARSEST);
+        assert_eq!(Detail::FINEST.cells(), CELLS);
+        assert_eq!(Detail::FINEST.metres(), CELL_METRES);
+    }
+
+    #[test]
+    fn a_coarse_cut_is_the_same_ground_with_fewer_facets() {
+        let payload = a_slope();
+        let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
+
+        for steps in 0..=3 {
+            let detail = Detail::new(steps);
+            let mesh = chunk_mesh(&heights, &payload.materials, detail);
+            let across = detail.cells();
+
+            assert_eq!(mesh.count_vertices(), across * across * 4);
+            assert_eq!(
+                mesh.indices().expect("a cell shares its corners").len(),
+                across * across * 6
+            );
+
+            // Fewer facets over the same ground, not less ground: the far
+            // corner still lands on the chunk's own edge, so two neighbours
+            // cut the same way meet with nothing to reconcile.
+            let positions = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .expect("positions")
+                .as_float3()
+                .expect("three floats each");
+            let span = positions
+                .iter()
+                .fold(f32::MIN, |far, point| far.max(point[0].max(point[2])));
+            assert_eq!(span, CHUNK_METRES, "{detail:?} stops short of its chunk");
+        }
+    }
+
+    #[test]
+    fn a_coarse_corner_is_a_corner_the_ground_actually_has() {
+        // Decimated and not averaged — see [`chunk_mesh`]. Every drawn corner
+        // is a height the payload sent, so a coarse sheet touches the fine one
+        // wherever they share a corner and its error between them is bounded
+        // both ways. An averaged or maximised corner would put the whole sheet
+        // off the ground in one direction, which for a shadow caster is a
+        // hillside wrongly lit rather than a hairline at a ridge.
+        let payload = a_slope();
+        let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
+
+        for steps in 1..=3 {
+            let detail = Detail::new(steps);
+            let mesh = chunk_mesh(&heights, &payload.materials, detail);
+            let positions = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .expect("positions")
+                .as_float3()
+                .expect("three floats each");
+
+            for point in positions {
+                let (fx, fz) = (
+                    (point[0] / CELL_METRES).round() as usize,
+                    (point[2] / CELL_METRES).round() as usize,
+                );
+                assert_eq!(
+                    point[1],
+                    heights[fz * CORNERS + fx],
+                    "{detail:?} invented a height at ({fx}, {fz})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ground_underfoot_does_not_move_with_the_detail_drawn_over_it() {
+        // The whole promise of level of detail here: it is a decision about
+        // triangles, so a chunk laid out in coarser facets is still ridden and
+        // walked on at the density the wire sent. Were it not, a hull's
+        // waterline would step as the camera pulled back.
+        //
+        // The saddle makes the two sheets as unalike as ground gets. Its
+        // corners alternate high and low, and every second one is high — so
+        // decimating it lands on the high corners alone and the coarse cut is
+        // a dead flat lid eight metres over the bottom of every col. Anything
+        // reading the drawn sheet instead of the payload's own grid would be
+        // out by the whole of that.
+        let heights = a_saddle();
+        let coarse = chunk_mesh(
+            &heights,
+            &vec![Material::Grass; MATERIAL_COUNT],
+            Detail::new(1),
+        );
+        let lid = coarse
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("three floats each");
+        assert!(
+            lid.iter().all(|point| point[1] == 4.0),
+            "the fixture is not the flat lid this test argues against"
+        );
+
+        // Underfoot, the col is still a col.
+        for (ix, iz) in [(1, 0), (0, 1), (3, 2), (CELLS - 1, CELLS - 2)] {
+            let at = Vec2::new(ix as f32 * CELL_METRES, iz as f32 * CELL_METRES);
+            assert_eq!(
+                height_at(&heights, at),
+                -4.0,
+                "({ix}, {iz}) was read off the sheet drawn over it, not the ground"
+            );
         }
     }
 
@@ -1222,7 +1446,7 @@ mod tests {
     fn chunk_positions_are_local_so_the_transform_places_them() {
         let heights = vec![3.5f32; CORNERS * CORNERS];
         let materials = vec![Material::Sand; MATERIAL_COUNT];
-        let mesh = chunk_mesh(&heights, &materials);
+        let mesh = chunk_mesh(&heights, &materials, Detail::FINEST);
 
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1322,8 +1546,17 @@ mod tests {
         // that spot. On a saddle the two diagonals disagree by metres down the
         // middle of every cell, so a rule written twice and changed once would
         // fail here loudly.
+        //
+        // At [`Detail::FINEST`], which is the grid [`height_at`] always reads
+        // — a coarser cut is a different sheet on purpose, and
+        // `the_ground_underfoot_does_not_move_with_the_detail_drawn_over_it`
+        // is where that is said.
         let heights = a_saddle();
-        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
+        let mesh = chunk_mesh(
+            &heights,
+            &vec![Material::Grass; MATERIAL_COUNT],
+            Detail::FINEST,
+        );
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
