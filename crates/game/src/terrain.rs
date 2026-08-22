@@ -29,12 +29,11 @@
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::light::{
-    CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver,
-};
 use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
+use bevy::render::render_resource::AsBindGroup;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
@@ -151,25 +150,36 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<SeaMaterial>::default())
-            .init_resource::<sea::Forecast>()
-            .init_resource::<sea::SeaConditions>()
-            .add_systems(OnEnter(AppState::InWorld), enter_world)
-            .add_systems(OnExit(AppState::InWorld), leave_world)
-            .add_systems(
-                Update,
-                (
-                    ask_for_ground,
-                    spawn_arrivals,
-                    receive_chunks,
-                    stream_out,
-                    follow_camera,
-                    sea::refresh_depth,
-                    sea::settle_conditions,
-                )
-                    .chain()
-                    .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Ground>)),
-            );
+        app.add_plugins((
+            MaterialPlugin::<SeaMaterial>::default(),
+            MaterialPlugin::<ShadedMaterial>::default(),
+        ))
+        .init_resource::<sea::Forecast>()
+        .init_resource::<sea::SeaConditions>()
+        .add_systems(OnEnter(AppState::InWorld), enter_world)
+        .add_systems(OnExit(AppState::InWorld), leave_world)
+        .add_systems(
+            Update,
+            (
+                ask_for_ground,
+                spawn_arrivals,
+                receive_chunks,
+                stream_out,
+                follow_camera,
+                sea::refresh_depth,
+                sea::settle_conditions,
+            )
+                .chain()
+                .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Ground>)),
+        )
+        // After the sky has settled the drawn hour, so the shadows on the
+        // ground answer to the same instant as the light over it.
+        .add_systems(
+            Update,
+            shade_the_ground
+                .after(crate::sky::advance_the_day)
+                .run_if(in_state(AppState::InWorld)),
+        );
     }
 }
 
@@ -202,6 +212,9 @@ struct Arrival {
     chunk: IVec2,
     heights: Arc<[f32]>,
     materials: Vec<Material>,
+    /// When each corner sees the sun, exactly as sent — turned into the mesh
+    /// attribute the shader reads by [`chunk_mesh`].
+    lit: Vec<[u8; 2]>,
     /// The chunk's standing water, still quantised: it is only ever compared
     /// against [`NO_WATER`] and turned into a height once per quad drawn, so
     /// there is nothing to be gained by dequantising a whole grid of it the
@@ -292,6 +305,7 @@ impl Ground {
                     chunk,
                     heights,
                     materials: payload.materials,
+                    lit: payload.lit,
                     water: payload.water,
                     plants: payload.plants,
                 });
@@ -541,7 +555,7 @@ pub(crate) struct ChunkBuild(Task<ChunkMeshes>);
 /// The one material every chunk shares, so they still batch into a single draw
 /// call each.
 #[derive(Resource)]
-struct GroundMaterial(Handle<StandardMaterial>);
+struct GroundMaterial(Handle<ShadedMaterial>);
 
 /// The one material every lake shares, so that all the standing water in a
 /// view still batches into a single draw call however many chunks it crosses.
@@ -550,7 +564,73 @@ struct GroundMaterial(Handle<StandardMaterial>);
 /// its material and never asked for again. This is kept because a lake arrives
 /// with its chunk and has to be given the water it is made of at that moment.
 #[derive(Resource)]
-struct LakeMaterial(Handle<StandardMaterial>);
+struct LakeMaterial(Handle<ShadedMaterial>);
+
+/// What the ground and the lakes are drawn in: the standard matte underneath,
+/// with the terrain's own baked shadows applied on top by
+/// `assets/shaders/ground.wgsl` — see [`Daylight`].
+type ShadedMaterial = ExtendedMaterial<StandardMaterial, Daylight>;
+
+/// How wide the moment of gaining or losing the sun is drawn, in phase either
+/// side of a vertex's own threshold — a step and a half of the wire's 256, a
+/// few seconds of the ten-minute day. Wide enough that the terminator sweeps
+/// rather than snapping, and that the interval's quantisation stays
+/// unreadable; narrow enough that a shadow's edge is still an edge.
+const SHADE_EDGE: f32 = 1.5 / 256.0;
+
+/// What the ground's shader needs beyond the standard material: the hour, to
+/// hold against the lit interval every vertex carries in its UV channel —
+/// see [`chunk_mesh`] for how it gets there, and
+/// [`protocol::ground::ChunkPayload::lit`] for what it means.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+struct Daylight {
+    /// `x` is the phase to ask the intervals about: the drawn hour by day
+    /// and its mirror by night, when the moon rides the same arc half a day
+    /// out of phase — the same swap the sky makes of the light itself.
+    /// Written every frame by [`shade_the_ground`]. `y` is [`SHADE_EDGE`],
+    /// `zw` padding.
+    #[uniform(100)]
+    hour: Vec4,
+}
+
+impl Default for Daylight {
+    fn default() -> Self {
+        Self {
+            // Noon, for the frame before the sky first speaks — the same
+            // assumption the menus light by.
+            hour: Vec4::new(0.5, SHADE_EDGE, 0.0, 0.0),
+        }
+    }
+}
+
+impl MaterialExtension for Daylight {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        "shaders/ground.wgsl".into()
+    }
+}
+
+/// Carries the drawn hour into the materials the baked shadows are drawn by,
+/// mirrored onto the moon's half of the day when the moon is the body up —
+/// see [`Daylight::hour`].
+fn shade_the_ground(
+    sky: Res<crate::sky::Sky>,
+    ground: Option<Res<GroundMaterial>>,
+    lake: Option<Res<LakeMaterial>>,
+    mut materials: ResMut<Assets<ShadedMaterial>>,
+) {
+    let phase = sky.phase();
+    let hour = if protocol::is_night(phase) {
+        (phase + 0.5).rem_euclid(1.0)
+    } else {
+        phase
+    };
+    let handles = [ground.map(|it| it.0.clone()), lake.map(|it| it.0.clone())];
+    for handle in handles.into_iter().flatten() {
+        if let Some(mut material) = materials.get_mut(&handle) {
+            material.extension.hour.x = hour;
+        }
+    }
+}
 
 /// Marks the sea plane, which travels with the camera.
 #[derive(Component)]
@@ -585,10 +665,11 @@ struct OceanFloor;
 /// possible when the colour moved from the triangle to the cell: while each
 /// triangle had its own palette entry the two halves disagreed, and an index
 /// buffer would have been 0, 1, 2, 3, … and saved nothing.
-fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
+fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]]) -> Mesh {
     let mut positions = Vec::with_capacity(CELL_COUNT * 4);
     let mut normals = Vec::with_capacity(CELL_COUNT * 4);
     let mut colors = Vec::with_capacity(CELL_COUNT * 4);
+    let mut uvs = Vec::with_capacity(CELL_COUNT * 4);
     let mut indices = Vec::with_capacity(CELL_COUNT * 6);
 
     let corner = |cx: usize, cz: usize| {
@@ -598,6 +679,7 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
             cz as f32 * CELL_METRES,
         )
     };
+    let daylight = |cx: usize, cz: usize| lit_uv(lit[cz * CORNERS + cx]);
 
     // The chunk's own cells only. The payload's grid reaches a cell further
     // out on every side — see [`ChunkPayload::materials`] — and that ring
@@ -627,16 +709,21 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
             let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
             let color = [linear.red, linear.green, linear.blue, 1.0];
 
-            // No UVs: nothing binds a texture to the ground, and at sixty-odd
-            // thousand vertices a chunk an attribute carried "for later" is
-            // half a megabyte of dead weight on every copy.
+            // The UV channel carries no texture coordinates — nothing binds a
+            // texture to the ground — it carries each corner's lit interval,
+            // as phases of the day. Free spatial interpolation is the point:
+            // the thresholds vary across a cell exactly as heights do, so the
+            // shadow's edge lands *inside* cells and sweeps smoothly over the
+            // ground as the hour turns. See `assets/shaders/ground.wgsl`.
             // Pushed in [`SW`], [`SE`], [`NW`], [`NE`] order, which is what
             // [`split`]'s corner numbers index.
             let first = positions.len() as u32;
-            for vertex in [sw, se, nw, ne] {
+            let corners = [(ix, iz), (ix + 1, iz), (ix, iz + 1), (ix + 1, iz + 1)];
+            for (vertex, (cx, cz)) in [sw, se, nw, ne].into_iter().zip(corners) {
                 positions.push([vertex.x, vertex.y, vertex.z]);
                 normals.push([normal.x, normal.y, normal.z]);
                 colors.push(color);
+                uvs.push(daylight(cx, cz));
             }
 
             // Cut the way [`split`] says, which is also the way [`height_at`]
@@ -657,9 +744,19 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     // Thirty-two bit, and not by preference: a chunk is 65,536 vertices, which
     // is one past what sixteen bits can name.
     .with_inserted_indices(Indices::U32(indices))
+}
+
+/// A corner's lit interval as the mesh carries it: the two phase thresholds
+/// as fractions of the day, which is the domain [`Daylight::hour`] is in.
+fn lit_uv(pair: [u8; 2]) -> [f32; 2] {
+    [
+        protocol::dequantize_phase(pair[0]),
+        protocol::dequantize_phase(pair[1]),
+    ]
 }
 
 /// Builds the surface of one chunk's standing water, or `None` where the
@@ -679,9 +776,10 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
 /// mesh hides the part that has gone underground. The waterline the player sees
 /// is therefore the true intersection of the two surfaces, exactly as the sea
 /// already meets every coast.
-fn water_mesh(water: &[u16]) -> Option<Mesh> {
+fn water_mesh(water: &[u16], lit: &[[u8; 2]]) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
 
     for iz in 0..CELLS {
         for ix in 0..CELLS {
@@ -708,6 +806,10 @@ fn water_mesh(water: &[u16]) -> Option<Mesh> {
                 // nothing for the light to pick out — which is what makes a
                 // lake read as a sheet of water rather than as ground.
                 normals.push([0.0, 1.0, 0.0]);
+                // The sheet wears the same baked daylight as the ground —
+                // see [`chunk_mesh`] — so a cliff's shadow falls on the
+                // water as well as on the bed under it.
+                uvs.push(lit_uv(lit[cz * CORNERS + cx]));
             }
         }
     }
@@ -719,6 +821,7 @@ fn water_mesh(water: &[u16]) -> Option<Mesh> {
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     })
 }
 
@@ -732,8 +835,11 @@ struct ChunkMeshes {
 
 fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
     ChunkMeshes {
-        ground: chunk_mesh(&arrival.heights, &arrival.materials),
-        water: arrival.water.as_ref().and_then(|water| water_mesh(water)),
+        ground: chunk_mesh(&arrival.heights, &arrival.materials, &arrival.lit),
+        water: arrival
+            .water
+            .as_ref()
+            .and_then(|water| water_mesh(water, &arrival.lit)),
     }
 }
 
@@ -745,6 +851,7 @@ fn enter_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut paints: ResMut<Assets<StandardMaterial>>,
+    mut shaded: ResMut<Assets<ShadedMaterial>>,
     mut seas: ResMut<Assets<SeaMaterial>>,
     mut images: ResMut<Assets<Image>>,
     view: Res<View>,
@@ -756,8 +863,12 @@ fn enter_world(
     info!("entered world");
 
     // Terrain material. Base colour is white so the vertex colours come
-    // through unmodified — StandardMaterial multiplies the two together.
-    commands.insert_resource(GroundMaterial(paints.add(matte(Color::WHITE))));
+    // through unmodified — StandardMaterial multiplies the two together —
+    // and the extension is what draws the baked shadows over the result.
+    commands.insert_resource(GroundMaterial(shaded.add(ShadedMaterial {
+        base: matte(Color::WHITE),
+        extension: Daylight::default(),
+    })));
 
     // Ocean floor. The sea is translucent, so without something opaque beneath
     // it the water beyond the terrain meshes blends against the sky and reads
@@ -783,16 +894,6 @@ fn enter_world(
         Name::new("Ocean floor"),
         OceanFloor,
         DespawnOnExit(AppState::InWorld),
-        // Nothing is below it to catch a shadow, so keep it out of the shadow
-        // pass entirely.
-        NotShadowCaster,
-        // And nothing above it may throw one onto it. No honest shadow can
-        // reach it — a clifftop's shadow dies within a few tens of metres of
-        // its coast, and every island ends in a hundred metres of open skirt
-        // — but the chunk meshes end in a two-metre step down to this plane,
-        // and that step's own shadow drew a thin dark line along the western
-        // edge of every island's chunk rectangle.
-        NotShadowReceiver,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
         MeshMaterial3d(paints.add(matte(Color::srgb(seabed.x, seabed.y, seabed.z)))),
         Transform::from_xyz(0.0, -OCEAN_DEPTH - SEA_FLOOR_CLEARANCE, 0.0),
@@ -812,7 +913,10 @@ fn enter_world(
         alpha_mode: AlphaMode::Blend,
         ..matte(Color::srgba(tint.x, tint.y, tint.z, WATER_ALPHA))
     };
-    commands.insert_resource(LakeMaterial(paints.add(still(LAKE_WATER))));
+    commands.insert_resource(LakeMaterial(shaded.add(ShadedMaterial {
+        base: still(LAKE_WATER),
+        extension: Daylight::default(),
+    })));
 
     // The sea alone wears the swell on top — a lake is sheltered water, and
     // stiller than the sea is most of what makes it read as one. The swell
@@ -836,42 +940,10 @@ fn enter_world(
         Name::new("Sea"),
         Sea,
         DespawnOnExit(AppState::InWorld),
-        // Water casts no shadow. Bevy shadows a transparent surface as though
-        // it were solid, so without this the sea throws its own shadow down
-        // onto its own bed — a broad darkening of everything under water, with
-        // a hard edge wherever the cascades stop resolving it, sliding about as
-        // the camera moves. It still *receives* shadows, which is what puts a
-        // cliff's shadow out across the water at its foot.
-        NotShadowCaster,
         Mesh3d(meshes.add(sea::surface_mesh(SEA_EXTENT))),
         MeshMaterial3d(sea),
         Transform::from_xyz(0.0, SEA_SURFACE, 0.0),
     ));
-}
-
-/// How the sky's light slices the view up into shadow cascades, out to
-/// `reach` metres. Built here rather than in [`crate::sky`], which hangs the
-/// light, because what it has to reach past is the ground this module streams.
-///
-/// Cascades are fitted to the camera's own frustum, so the far end of the
-/// shadowed region travels with the camera. It has to sit past everything the
-/// camera can see, or that end lands on ground that is in shot and whole
-/// hillsides gain and lose their shadows as the view moves. Out at the haze it
-/// can't be seen doing it, which is why the sky hangs its light with
-/// [`crate::HAZE_END`].
-///
-/// The reach is an argument rather than baked in only so the `--debug` overlay
-/// can wind it in and out to see what it is buying — the shadow pass redraws
-/// most of the scene per cascade, and the outermost one reaches the same
-/// kilometre whether the camera is looking at a kilometre or at forty metres.
-/// Nothing in a played game calls it with anything else.
-pub fn cascades(reach: f32) -> CascadeShadowConfig {
-    CascadeShadowConfigBuilder {
-        first_cascade_far_bound: 60.0,
-        maximum_distance: reach,
-        ..default()
-    }
-    .build()
 }
 
 /// Chunk entities despawn themselves on exit; the resources that tracked them
@@ -1007,11 +1079,6 @@ fn receive_chunks(
         if let Some(surface) = built.water {
             commands.entity(entity).with_child((
                 Name::new("Lake"),
-                // Water casts no shadow — Bevy shadows a transparent surface
-                // as though it were solid, so a lake would otherwise throw its
-                // own shadow down onto its own bed. The sea plane is kept out
-                // of the shadow pass for exactly this reason.
-                NotShadowCaster,
                 Mesh3d(meshes.add(surface)),
                 MeshMaterial3d(lake.0.clone()),
             ));
@@ -1111,7 +1178,7 @@ mod tests {
     fn a_chunk_mesh_is_one_flat_lozenge_per_cell() {
         let payload = a_slope();
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
-        let mesh = chunk_mesh(&heights, &payload.materials);
+        let mesh = chunk_mesh(&heights, &payload.materials, &payload.lit);
 
         // Four vertices to a cell and six indices, not six vertices: the two
         // triangles of a cell agree about everything, so they share corners.
@@ -1179,7 +1246,7 @@ mod tests {
         let heights: Vec<f32> = (0..CORNERS * CORNERS)
             .map(|i| (i % CORNERS) as f32)
             .collect();
-        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
+        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT], &all_day());
         let indices: Vec<usize> = mesh
             .indices()
             .expect("a cell shares its corners")
@@ -1223,7 +1290,7 @@ mod tests {
     fn chunk_positions_are_local_so_the_transform_places_them() {
         let heights = vec![3.5f32; CORNERS * CORNERS];
         let materials = vec![Material::Sand; MATERIAL_COUNT];
-        let mesh = chunk_mesh(&heights, &materials);
+        let mesh = chunk_mesh(&heights, &materials, &all_day());
 
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1324,7 +1391,7 @@ mod tests {
         // middle of every cell, so a rule written twice and changed once would
         // fail here loudly.
         let heights = a_saddle();
-        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
+        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT], &all_day());
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
@@ -1436,6 +1503,12 @@ mod tests {
 
     /// A water grid with a lake at `level` metres over the square of corners
     /// below `edge`, and nothing anywhere else.
+    /// A day nothing shadows, for the meshes whose light is not the thing
+    /// under test.
+    fn all_day() -> Vec<[u8; 2]> {
+        vec![protocol::ground::LIT_ALL_DAY; CORNERS * CORNERS]
+    }
+
     fn a_lake(level: f32, edge: usize) -> Vec<u16> {
         let mut water = vec![NO_WATER; CORNERS * CORNERS];
         for iz in 0..edge {
@@ -1448,7 +1521,7 @@ mod tests {
 
     #[test]
     fn a_lake_is_a_flat_sheet_at_the_level_it_was_sent() {
-        let mesh = water_mesh(&a_lake(12.0, 8)).expect("a lake");
+        let mesh = water_mesh(&a_lake(12.0, 8), &all_day()).expect("a lake");
 
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1483,7 +1556,7 @@ mod tests {
         // mesh cut the waterline instead of the quad grid cutting it. A lake
         // over the corners below 8 therefore reaches the quad from 7 to 8,
         // whose far corners are dry.
-        let mesh = water_mesh(&a_lake(12.0, 8)).expect("a lake");
+        let mesh = water_mesh(&a_lake(12.0, 8), &all_day()).expect("a lake");
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
@@ -1503,7 +1576,7 @@ mod tests {
 
     #[test]
     fn ground_with_no_lake_on_it_draws_no_water() {
-        assert!(water_mesh(&vec![NO_WATER; CORNERS * CORNERS]).is_none());
+        assert!(water_mesh(&vec![NO_WATER; CORNERS * CORNERS], &all_day()).is_none());
 
         // And a payload that carries no grid at all never gets as far as
         // asking — the common case, and the one that has to cost nothing.
@@ -1511,6 +1584,7 @@ mod tests {
             chunk: IVec2::ZERO,
             heights: a_slope().heights.iter().copied().map(dequantize).collect(),
             materials: a_slope().materials,
+            lit: all_day(),
             water: None,
             plants: Vec::new(),
         };
@@ -1529,7 +1603,7 @@ mod tests {
             }
         }
 
-        let mesh = water_mesh(&water).expect("two lakes");
+        let mesh = water_mesh(&water, &all_day()).expect("two lakes");
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
@@ -1585,7 +1659,7 @@ mod tests {
         // And a lake, whose level is quantised on the very same lattice as the
         // bed it stands on.
         for level in [0.0, 0.5, 12.0, 137.5, 402.0] {
-            let mesh = water_mesh(&a_lake(level, 8)).expect("a lake");
+            let mesh = water_mesh(&a_lake(level, 8), &all_day()).expect("a lake");
             let positions = mesh
                 .attribute(Mesh::ATTRIBUTE_POSITION)
                 .expect("positions")

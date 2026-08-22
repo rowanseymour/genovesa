@@ -58,9 +58,8 @@ pub const SKY: Color = Color::srgb(0.63, 0.80, 0.93);
 /// (see [`protocol::survey::SIGHT_RADIUS`]), and the haze follows it.
 pub const HAZE_START: f32 = protocol::survey::SIGHT_RADIUS;
 /// Distance at which the haze has fully replaced the ground with [`SKY`]. This
-/// is the edge of what the camera can see at all, whatever it is pointed at, so
-/// anything the picture depends on has to reach at least this far — the sun's
-/// shadows included.
+/// is the edge of what the camera can see at all, whatever it is pointed at,
+/// so anything the picture depends on has to reach at least this far.
 pub const HAZE_END: f32 = 900.0;
 
 /// Size of the window the game is played in, in pixels. Captured shots are
@@ -215,8 +214,8 @@ pub enum AppState {
     /// The way to the two screens below, and nothing else — see
     /// [`crate::menu`].
     Options,
-    /// Choosing how the game is drawn: how much screen it takes, how many
-    /// pixels it draws and whether the sun casts. See [`crate::settings`].
+    /// Choosing how the game is drawn: how much screen it takes and how many
+    /// pixels it draws. See [`crate::settings`].
     Display,
     /// Choosing which key does what.
     Controls,

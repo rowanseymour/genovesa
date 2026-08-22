@@ -1,8 +1,8 @@
 //! What this machine draws with, and the file it is remembered in.
 //!
-//! Three things, and they are three because they are what a player on a slow
-//! machine reaches for in the order they reach for them: fill the screen, draw
-//! fewer pixels, stop casting shadows.
+//! Two things, and they are two because they are what a player on a slow
+//! machine reaches for in the order they reach for them: fill the screen,
+//! draw fewer pixels.
 //!
 //! **The resolution is the real one** — the size of the surface the frame is
 //! drawn on, not a render scale laid over a full-size one. Bevy's piece for
@@ -53,10 +53,6 @@ pub struct DisplaySettings {
     pub fullscreen: bool,
     /// How many pixels it is drawn in — see [`Resolution`].
     pub resolution: Resolution,
-    /// Whether the sun casts. The first thing worth turning off on a machine
-    /// that cannot keep up, since the shadow pass draws the whole scene again
-    /// once per cascade.
-    pub shadows: bool,
 }
 
 impl Default for DisplaySettings {
@@ -67,7 +63,6 @@ impl Default for DisplaySettings {
             // of before you had seen it.
             fullscreen: false,
             resolution: Resolution::Native,
-            shadows: true,
         }
     }
 }
@@ -579,7 +574,6 @@ fn compose(settings: &DisplaySettings) -> String {
             Resolution::Rows(rows) => rows.to_string(),
         }
     );
-    let _ = writeln!(out, "shadows {}", switch(settings.shadows));
     out
 }
 
@@ -616,7 +610,6 @@ fn parse(text: &str) -> Result<DisplaySettings, String> {
             .ok_or_else(|| format!("a line with no value: `{line}`"))?;
         match key {
             "fullscreen" => settings.fullscreen = on(value)?,
-            "shadows" => settings.shadows = on(value)?,
             "resolution" => {
                 settings.resolution = if value == "native" {
                     Resolution::Native
@@ -698,7 +691,6 @@ mod tests {
             DisplaySettings {
                 fullscreen: true,
                 resolution: Resolution::Rows(720),
-                shadows: false,
             },
         ] {
             let read = parse(&compose(&settings)).expect("parse what was composed");
@@ -712,7 +704,6 @@ mod tests {
         // them existed is still a good file for the ones it does name.
         let read = parse("genovesa settings 1\nfullscreen on\n").expect("a partial file reads");
         assert!(read.fullscreen);
-        assert_eq!(read.shadows, DisplaySettings::default().shadows);
         assert_eq!(read.resolution, DisplaySettings::default().resolution);
     }
 
@@ -726,9 +717,12 @@ mod tests {
     fn what_is_not_settings_is_refused() {
         for (text, what) in [
             ("", "an empty file"),
-            ("genovesa settings 999\nshadows on\n", "a format from later"),
             (
-                "genovesa settings 1\nshadows maybe\n",
+                "genovesa settings 999\nfullscreen on\n",
+                "a format from later",
+            ),
+            (
+                "genovesa settings 1\nfullscreen maybe\n",
                 "a switch that is neither way",
             ),
             (
@@ -1073,7 +1067,6 @@ mod tests {
         let wanted = DisplaySettings {
             fullscreen: true,
             resolution: Resolution::Rows(720),
-            shadows: false,
         };
         app.world_mut()
             .resource_mut::<NextState<AppState>>()

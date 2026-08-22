@@ -31,7 +31,7 @@
 //! does with the asking.
 
 use bevy::color::Mix;
-use bevy::light::{DirectionalLight, DirectionalLightShadowMap};
+use bevy::light::DirectionalLight;
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource};
@@ -429,33 +429,17 @@ fn light_at(phase: f32) -> Hour {
 /// Hangs the one light the world is lit by. Aimed and coloured from the next
 /// frame on by [`light_the_world`]; what is set here is only what does not
 /// change with the hour.
+///
+/// It casts nothing. The terrain's shadows are baked where the terrain is
+/// made and arrive with each chunk — see
+/// [`protocol::ground::ChunkPayload::lit`] — so there is no shadow pass to
+/// configure, and no shadow map for anything else to be drawn into.
 fn hang_the_light(mut commands: Commands) {
-    // Shadow map resolution. The first cascade spreads its texels over the
-    // whole frustum slice out to its far bound — about a hundred metres of
-    // diagonal at the default zoom — so at Bevy's default 2048 a texel is
-    // around 5 cm of world. The terrain never notices: its facets are metres
-    // across and their shadows are broad shapes. The mast does. It is the
-    // thinnest caster in the world, and at 16 cm its shadow is a stripe three
-    // texels wide, whose edges snap from texel to texel as the boat moves —
-    // a visible flicker along the whole stripe. Doubling the resolution
-    // halves the texel and the stripe stops seething. The cost is GPU memory
-    // (each cascade is one square layer of this size), which is why it stops
-    // at 4096 rather than going further.
-    commands.insert_resource(DirectionalLightShadowMap { size: 4096 });
-
     commands.spawn((
         Name::new("Sky light"),
         SkyLight,
         DespawnOnExit(AppState::InWorld),
-        DirectionalLight {
-            shadow_maps_enabled: true,
-            // The default biases cause bad self-shadowing acne on a heightfield
-            // this large — dark speckle all over the hillsides.
-            shadow_depth_bias: 0.06,
-            shadow_normal_bias: 2.2,
-            ..default()
-        },
-        crate::terrain::cascades(crate::HAZE_END),
+        DirectionalLight::default(),
         Transform::default(),
     ));
 }

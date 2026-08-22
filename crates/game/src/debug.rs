@@ -1,13 +1,11 @@
-//! The debug readout: what each pass draws, and the switches that change it.
+//! The debug readout: what the frame draws, and the switches that change it.
 //!
 //! A small readout pinned to a corner of the window, over whatever screen the
 //! app is on, a subject to a line. The frame rate comes from Bevy's own
 //! frame-time diagnostics, already smoothed; the geometry under it is what the
 //! camera actually draws, so it moves with the view as well as with the
-//! streaming, and reads zero on the menu, where nothing 3D exists at all. The
-//! shadow line is the same frame drawn again as the sun sees it, once per
-//! cascade — a larger number than the one above it, and meant to be read
-//! against it. The chunk line shows the streamer's own bookkeeping instead,
+//! streaming, and reads zero on the menu, where nothing 3D exists at all.
+//! The chunk line shows the streamer's own bookkeeping instead,
 //! which is about what this machine *holds* rather than what it draws: how
 //! much of the world it has, how much of that was open water, and how much
 //! ground it is still waiting on. The last line reads the world and the view
@@ -20,17 +18,16 @@
 //! be number keys; the console replaced them because a vocabulary outgrows a
 //! number row, but reading a count and changing what is counted are still one
 //! job, which is why the state stays in this module with the readout: the
-//! reason to turn the shadows off is to watch the shadow line answer. When
+//! reason to turn the haze off is to watch the far ground answer. When
 //! any switch is away from the world's own state the readout says so on a
 //! last line, since a doctored picture that did not admit it would be worth
 //! less than no picture at all.
 
 use std::any::TypeId;
 
-use bevy::camera::visibility::{CascadesVisibleEntities, VisibleEntities};
+use bevy::camera::visibility::VisibleEntities;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
-use bevy::light::CascadeShadowConfig;
 use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
@@ -58,10 +55,6 @@ impl Plugin for DebugOverlayPlugin {
         }
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<Toggles>()
-            // The player's own switch over the same light this module's
-            // doctors — shared with the plugin that keeps it, each
-            // initialising it for its own tests, exactly as `Sky` is below.
-            .init_resource::<crate::settings::DisplaySettings>()
             // The hour the readout prints — shared with the plugin that
             // draws the sky, each initialising it for its own tests.
             .init_resource::<crate::sky::Sky>()
@@ -78,9 +71,8 @@ impl Plugin for DebugOverlayPlugin {
 /// rewrites the line every frame — which reads as a flicker rather than as a
 /// measurement, and is the one thing a readout must not do when what it is
 /// being read for is *whether the frame rate is steady*. And working it out
-/// costs a walk of every visible mesh and every cascade's, so a readout that
-/// refreshed with the frame would charge the frame for saying how long the
-/// frame took.
+/// costs a walk of every visible mesh, so a readout that refreshed with the
+/// frame would charge the frame for saying how long the frame took.
 ///
 /// Four times a second is fast enough that a sag is visible as it happens and
 /// slow enough to read. The frame rate itself is smoothed long before it gets
@@ -118,27 +110,13 @@ pub struct Toggles {
     /// mentions it: a readout that is visible has already admitted to being
     /// on.
     pub stats: bool,
-    /// `set shadows` — off, and the sun stops casting. The shadow line
-    /// disappears with it, Bevy clearing the cascade cull when a light's
-    /// shadows are off, so the readout cannot claim work that is no longer
-    /// being done.
-    pub shadows: bool,
     /// `set haze` — off, and the aerial haze comes away, so what the distant
-    /// ground is actually doing can be seen. Mostly worth having next to
-    /// `set reach`: judging what a shorter shadow reach costs is impossible
-    /// while the haze is hiding the far end of it.
+    /// ground is actually doing can be seen.
     pub haze: bool,
     /// `set wireframe` — every triangle drawn as lines, which is how the
     /// fixed 8,192 a chunk carries stops being a number and becomes a
     /// picture.
     pub wireframe: bool,
-    /// `set reach` — how far the sun's cascades go, in metres. The default
-    /// is [`crate::HAZE_END`], where the haze has closed and nothing can be
-    /// seen to lose its shadow; the question the switch exists to answer is
-    /// whether a shorter reach is *visibly* worse, and walking it in until
-    /// the far edge of the shadows sits in plain sight is where the answer
-    /// is.
-    pub reach: f32,
     /// `set resolution` — how tall a picture `shot` writes is, in rows off
     /// [`crate::settings::LADDER`]; the width follows from
     /// [`crate::settings::WIDESCREEN`], there being no display to take a
@@ -153,10 +131,8 @@ impl Default for Toggles {
     fn default() -> Self {
         Self {
             stats: false,
-            shadows: true,
             haze: true,
             wireframe: false,
-            reach: crate::HAZE_END,
             // A window until [`crate::control::ControlPlugin`] says
             // otherwise, that being the only thing in the game that knows
             // whether this run has one.
@@ -182,16 +158,11 @@ pub struct Switch {
     confessed: bool,
 }
 
-pub const SWITCHES: [Switch; 4] = [
+pub const SWITCHES: [Switch; 3] = [
     Switch {
         name: "stats",
         of: |toggles| &mut toggles.stats,
         confessed: false,
-    },
-    Switch {
-        name: "shadows",
-        of: |toggles| &mut toggles.shadows,
-        confessed: true,
     },
     Switch {
         name: "haze",
@@ -205,24 +176,22 @@ pub const SWITCHES: [Switch; 4] = [
     },
 ];
 
-/// The two variables that are not switches — metres, and rows of pixels,
-/// rather than on and off. They stay out of [`SWITCHES`] because that table
-/// carries `confessed` for [`Toggles::line`], which walks booleans and would
-/// have to unwrap a kind to do it; what they join instead is
-/// [`Toggles::variable`], which is what the grammar asks.
-const REACH: &str = "reach";
+/// The one variable that is not a switch — rows of pixels rather than on and
+/// off. It stays out of [`SWITCHES`] because that table carries `confessed`
+/// for [`Toggles::line`], which walks booleans and would have to unwrap a
+/// kind to do it; what it joins instead is [`Toggles::variable`], which is
+/// what the grammar asks.
 const RESOLUTION: &str = "resolution";
 
 /// What a variable holds, for [`Toggles::variable`] to answer with.
 ///
-/// Three kinds because there are three. The *wording* of each is
+/// Two kinds because there are two. The *wording* of each is
 /// [`crate::console`]'s, which owns the grammar — this only says which kind
 /// the name found, so the console can read and write every variable by asking
-/// once instead of testing for the two that are not switches everywhere it
+/// once instead of testing for the one that is not a switch everywhere it
 /// walks them.
 pub enum Value<'a> {
     Switch(&'a mut bool),
-    Metres(&'a mut f32),
     /// `None` in a run with a window, which has no off-screen picture to
     /// size — see [`Toggles::resolution`].
     Rows(&'a mut Option<u32>),
@@ -233,7 +202,6 @@ impl Toggles {
     /// name that is not one.
     pub fn variable(&mut self, name: &str) -> Option<Value<'_>> {
         match name {
-            REACH => Some(Value::Metres(&mut self.reach)),
             RESOLUTION => Some(Value::Rows(&mut self.resolution)),
             _ => self.switch(name).map(Value::Switch),
         }
@@ -246,7 +214,7 @@ impl Toggles {
         SWITCHES
             .iter()
             .map(|switch| switch.name)
-            .chain([REACH, RESOLUTION])
+            .chain([RESOLUTION])
     }
 
     /// The boolean switch a name asks for, or `None` where the name is not
@@ -262,12 +230,12 @@ impl Toggles {
     ///
     /// It has to say. The module above promises that a screenshot of this
     /// overlay is the whole of what it takes to stand here again, and a
-    /// picture taken with the sun switched off would quietly break that
+    /// picture taken with the haze stripped off would quietly break that
     /// promise in exactly the place it gets used: an argument about how the
     /// renderer should be set up.
     ///
     /// What it says is the *departure*, which each switch's own default
-    /// decides the wording of: one that is normally on reads as "no shadows"
+    /// decides the wording of: one that is normally on reads as "no haze"
     /// when it is off, one that is normally off reads as its own name when it
     /// is on.
     fn line(&self) -> Option<String> {
@@ -282,9 +250,6 @@ impl Toggles {
                     format!("no {}", switch.name)
                 });
             }
-        }
-        if self.reach != Self::default().reach {
-            on.push(format!("shadow {REACH} {:.0}m", self.reach));
         }
         (!on.is_empty()).then(|| format!("debug: {}", on.join(" / ")))
     }
@@ -315,23 +280,16 @@ struct Held<'a> {
 /// Makes the scene agree with [`Toggles`].
 ///
 /// Written as "set it to what it should be" rather than "change it when the
-/// switch is thrown", so that a sun or a camera spawned *after* the console
-/// spoke — leaving a world and entering another does exactly that — comes up
-/// in the state the readout claims it is in. The `is_changed` guard is only to
-/// keep it from writing the same values every frame, which would have every
-/// light and camera register as changed for anything else watching.
+/// switch is thrown". The `is_changed` guard is only to keep it from writing
+/// the same values every frame, which would have every camera register as
+/// changed for anything else watching.
 fn apply_toggles(
     mut commands: Commands,
     toggles: Res<Toggles>,
-    display: Res<crate::settings::DisplaySettings>,
     wireframe: Option<ResMut<WireframeConfig>>,
-    mut suns: Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
     cameras: Query<(Entity, Has<DistanceFog>), With<MapCamera>>,
-    mut lit: Local<bool>,
 ) {
-    let fresh_sun = !suns.is_empty() && !*lit;
-    *lit = !suns.is_empty();
-    if !toggles.is_changed() && !display.is_changed() && !fresh_sun {
+    if !toggles.is_changed() {
         return;
     }
 
@@ -340,18 +298,6 @@ fn apply_toggles(
         // Dark lines. The default is white, which disappears against sand and
         // surf — the two places the mesh is most worth looking at.
         wireframe.default_color = Color::srgb(0.05, 0.05, 0.05);
-    }
-
-    for (mut sun, mut cascades) in &mut suns {
-        // Two switches over one light, and the `&&` is which of them outranks
-        // which: the display setting is what the player asked for and the
-        // console's is a doctoring of it, so `set shadows on` cannot light a
-        // world whose owner has turned the sun's casting off. Kept to one
-        // writer for the reason this whole system is written the way it is —
-        // two systems setting the same field would each undo the other on
-        // alternate frames.
-        sun.shadow_maps_enabled = display.shadows && toggles.shadows;
-        *cascades = crate::terrain::cascades(toggles.reach);
     }
 
     for (camera, has_fog) in &cameras {
@@ -476,49 +422,33 @@ fn refresh_overlay(
     }
 }
 
-/// Everything drawn this frame, from the two points of view that draw it: the
-/// camera's, and the sun's once per cascade.
+/// Everything drawn this frame, from the camera's point of view.
 ///
-/// Both counts are read off culls somebody else has already done — the
-/// camera's [`VisibleEntities`] and the light's [`CascadesVisibleEntities`] —
-/// rather than worked out again here. That is what makes them comparable with
-/// each other, and it means a wrong number here would mean a wrong picture
-/// too, which is the kind of wrong that gets noticed.
+/// The count is read off a cull somebody else has already done — the camera's
+/// [`VisibleEntities`] — rather than worked out again here, which means a
+/// wrong number here would mean a wrong picture too, and that is the kind of
+/// wrong that gets noticed.
 ///
-/// Both lists are built in `PostUpdate` and read here in `Update`, so both are
-/// a frame old. Equally so, which is what matters for reading one against the
-/// other.
+/// The list is built in `PostUpdate` and read here in `Update`, so it is a
+/// frame old — near enough for a readout refreshed four times a second.
 #[derive(SystemParam)]
 struct Scene<'w, 's> {
     meshes: Res<'w, Assets<Mesh>>,
     drawn: Query<'w, 's, &'static Mesh3d>,
     cameras: Query<'w, 's, &'static VisibleEntities, With<MapCamera>>,
-    lights: Query<'w, 's, &'static CascadesVisibleEntities>,
 }
 
-/// The geometry lines of the readout: what the eye is given, and what the sun
-/// asks for on top of it.
+/// The geometry line of the readout: what the eye is given.
 struct Counts {
     triangles: usize,
     meshes: usize,
-    /// Absent where nothing is casting — see [`Scene::shadows`].
-    shadows: Option<ShadowLoad>,
 }
 
 impl Scene<'_, '_> {
-    /// What the camera draws, and what the sun redraws on top of it.
-    ///
-    /// Deliberately not [`ViewVisibility`], which looks like the same question
-    /// asked per entity and is not: the light sets it as well, so that a
-    /// caster standing behind the camera still reaches the shadow maps.
-    /// Counting that way puts geometry the camera never draws into the
-    /// camera's own line — which is the exact confusion these two lines exist
-    /// to resolve.
     fn counts(&self) -> Counts {
         let mut counts = Counts {
             triangles: 0,
             meshes: 0,
-            shadows: self.shadows(),
         };
         for camera in &self.cameras {
             for entity in camera.iter(TypeId::of::<Mesh3d>()) {
@@ -540,59 +470,6 @@ impl Scene<'_, '_> {
             .ok()
             .and_then(|handle| self.meshes.get(&handle.0))
     }
-
-    /// `None` where there is no sun — every menu screen, the light being
-    /// spawned with the world and despawned with it.
-    fn shadows(&self) -> Option<ShadowLoad> {
-        let mut load = ShadowLoad {
-            draws: 0,
-            triangles: 0,
-            cascades: 0,
-        };
-        let mut lit = false;
-        for light in &self.lights {
-            // Keyed by the view the cascades were fitted to, and there is one
-            // camera — but a light with no view yet has an empty map, which is
-            // what nothing to report looks like on the first frames.
-            for cascades in light.entities.values() {
-                lit = true;
-                load.cascades = load.cascades.max(cascades.len());
-                for cascade in cascades {
-                    load.draws += cascade.entities.len();
-                    for entity in &cascade.entities {
-                        let Some(mesh) = self.mesh_of(*entity) else {
-                            continue;
-                        };
-                        load.triangles += triangles_in(mesh);
-                    }
-                }
-            }
-        }
-        lit.then_some(load)
-    }
-}
-
-/// What the sun's cascades ask for in a frame.
-///
-/// The shadow pass is the frame drawn over again from the sun, once per
-/// cascade the mesh falls inside — so this is not the count above it with a
-/// constant on the front, and the two do not even move together. The cascades
-/// are fitted to the camera's frustum out to `maximum_distance`, and that
-/// reach does not shrink when the view does: zoomed out over an island the
-/// camera drew 29 meshes and the sun 67, but zoomed in on the boat the camera
-/// drew 7 and the sun still 100. Close to the ground the shadow pass does
-/// thirty times the camera's geometry, which is not what anybody guesses.
-///
-/// Which is the reason for the line. A frame rate that sags says nothing about
-/// *which* pass grew, and this is the half of the frame the count above it
-/// cannot see.
-struct ShadowLoad {
-    /// Mesh draws submitted, a mesh counted once per cascade that wants it.
-    draws: usize,
-    /// Triangles in those draws, on the same footing — a mesh in three
-    /// cascades is rasterised three times and counted three times.
-    triangles: usize,
-    cascades: usize,
 }
 
 /// Triangles a mesh draws. An index buffer overrules the vertex buffer
@@ -642,14 +519,6 @@ fn overlay_text(
         counts.meshes,
         thousands(counts.triangles)
     )];
-    if let Some(shadows) = &counts.shadows {
-        lines.push(format!(
-            "{} shadow tris / {} draws / {} cascades",
-            thousands(shadows.triangles),
-            shadows.draws,
-            shadows.cascades
-        ));
-    }
     if let Some(tally) = held.ground {
         lines.push(format!(
             "{} chunks / {} ocean / {} requested",
@@ -725,7 +594,6 @@ fn thousands(n: usize) -> String {
 mod tests {
     use super::*;
     use bevy::asset::RenderAssetUsages;
-    use bevy::camera::visibility::VisibleMeshEntities;
     use bevy::mesh::{Indices, PrimitiveTopology};
 
     /// A chunk of flat ground, which is all this needs of one: the readout
@@ -759,92 +627,6 @@ mod tests {
         }
     }
 
-    /// A headless app with a sun in it, standing in for a world's lighting:
-    /// what `apply_toggles` writes to is a `DirectionalLight` and a cascade
-    /// config, and neither of those needs a GPU to be looked at.
-    fn a_lit_app(display: crate::settings::DisplaySettings, toggles: Toggles) -> App {
-        let mut app = App::new();
-        app.insert_resource(display)
-            .insert_resource(toggles)
-            .add_systems(Update, apply_toggles);
-        app.world_mut().spawn((
-            DirectionalLight::default(),
-            crate::terrain::cascades(crate::HAZE_END),
-        ));
-        app.update();
-        app
-    }
-
-    fn sun_casts(app: &mut App) -> bool {
-        app.world_mut()
-            .query::<&DirectionalLight>()
-            .iter(app.world())
-            .next()
-            .expect("a sun")
-            .shadow_maps_enabled
-    }
-
-    /// Two switches over one light, and which of them outranks which. The
-    /// display setting is what the player asked for; the console's is a
-    /// doctoring of it, and a doctoring cannot overrule the request.
-    #[test]
-    fn the_console_cannot_light_a_world_whose_owner_turned_the_shadows_off() {
-        use crate::settings::DisplaySettings;
-
-        let off = DisplaySettings {
-            shadows: false,
-            ..default()
-        };
-        let mut app = a_lit_app(off, Toggles::default());
-        assert!(!sun_casts(&mut app), "the setting was not obeyed");
-
-        // The console saying yes to a sun the settings have already switched
-        // off changes nothing.
-        app.world_mut().resource_mut::<Toggles>().shadows = true;
-        app.update();
-        assert!(!sun_casts(&mut app), "the console overruled the setting");
-
-        // And with the setting on, the console can still take them away —
-        // which is the whole point of having it.
-        app.insert_resource(DisplaySettings::default());
-        app.update();
-        assert!(sun_casts(&mut app));
-        app.world_mut().resource_mut::<Toggles>().shadows = false;
-        app.update();
-        assert!(!sun_casts(&mut app), "the console lost its own switch");
-    }
-
-    /// A sun spawned *after* either switch was thrown still comes up the way
-    /// they say — leaving a world and entering another does exactly that.
-    #[test]
-    fn a_sun_hung_after_the_fact_comes_up_in_the_state_that_was_asked_for() {
-        use crate::settings::DisplaySettings;
-
-        let mut app = a_lit_app(
-            DisplaySettings {
-                shadows: false,
-                ..default()
-            },
-            Toggles::default(),
-        );
-        // The world the first sun belonged to goes, and another arrives.
-        let sun = app
-            .world_mut()
-            .query_filtered::<Entity, With<DirectionalLight>>()
-            .iter(app.world())
-            .next()
-            .expect("a sun");
-        app.world_mut().entity_mut(sun).despawn();
-        app.update();
-        app.world_mut().spawn((
-            DirectionalLight::default(),
-            crate::terrain::cascades(crate::HAZE_END),
-        ));
-        app.update();
-
-        assert!(!sun_casts(&mut app), "the new sun forgot the setting");
-    }
-
     #[test]
     fn an_unindexed_mesh_counts_by_its_vertices() {
         assert_eq!(triangles_in(&unindexed(6)), 2);
@@ -871,18 +653,9 @@ mod tests {
             ocean: 58,
             requested: 12,
         };
-        // The sun asks for more than the eye does, the outer cascades not
-        // narrowing when the view does — so the two triangle counts are
-        // deliberately unlike each other, and a formatter that muddled them
-        // would be caught here.
         let counts = Counts {
             triangles: 1_234_567,
             meshes: 214,
-            shadows: Some(ShadowLoad {
-                draws: 623,
-                triangles: 3_298_112,
-                cascades: 4,
-            }),
         };
         assert_eq!(
             overlay_text(
@@ -904,7 +677,6 @@ mod tests {
                 &showing()
             ),
             "60 fps / 214 meshes / 1,234,567 triangles\n\
-             3,298,112 shadow tris / 623 draws / 4 cascades\n\
              231 chunks / 58 ocean / 12 requested\n\
              96 surveyed / 21 with coast / 3 closed / 1 claimable\n\
              sky 08:24\n\
@@ -914,13 +686,12 @@ mod tests {
 
     #[test]
     fn the_readout_survives_having_no_frame_rate_yet_and_no_world() {
-        // On a menu screen there is no world to count, no sun casting and no
-        // camera to describe — so the readout falls back to its one line that
-        // is true anywhere.
+        // On a menu screen there is no world to count and no camera to
+        // describe — so the readout falls back to its one line that is true
+        // anywhere.
         let counts = Counts {
             triangles: 0,
             meshes: 0,
-            shadows: None,
         };
         assert_eq!(
             overlay_text(None, &counts, Held::default(), None, None, None, &showing()),
@@ -986,27 +757,8 @@ mod tests {
             .world_mut()
             .resource_mut::<Assets<Mesh>>()
             .add(unindexed(6));
-        let caster = app.world_mut().spawn(Mesh3d(handle.clone())).id();
+        let drawn = app.world_mut().spawn(Mesh3d(handle.clone())).id();
         app.world_mut().spawn(Mesh3d(handle));
-
-        // A sun whose cascades both want that one mesh, which is the whole
-        // point of counting the shadow pass separately: two triangles in the
-        // scene are four triangles of shadow work, because a mesh inside two
-        // cascades is rasterised into both.
-        let view = app.world_mut().spawn_empty().id();
-        let mut cascades = CascadesVisibleEntities::default();
-        cascades.entities.insert(
-            view,
-            vec![
-                VisibleMeshEntities {
-                    entities: vec![caster],
-                },
-                VisibleMeshEntities {
-                    entities: vec![caster],
-                },
-            ],
-        );
-        app.world_mut().spawn(cascades);
 
         // A world holding one chunk of ground and one of open water — a mesh
         // and a fact, which is the distinction the chunk line exists to draw,
@@ -1031,7 +783,7 @@ mod tests {
         // says. Filled by hand here: `check_visibility` belongs to the render
         // plugins, and this app has none.
         let mut seen = VisibleEntities::default();
-        seen.push(caster, TypeId::of::<Mesh3d>());
+        seen.push(drawn, TypeId::of::<Mesh3d>());
         app.world_mut().spawn((
             MapCamera::looking(View {
                 focus: Vec3::new(10.0, 0.0, -20.0),
@@ -1067,7 +819,6 @@ mod tests {
         assert!(
             text.ends_with(
                 "1 meshes / 2 triangles\n\
-                 4 shadow tris / 2 draws / 2 cascades\n\
                  2 chunks / 1 ocean / 0 requested\n\
                  sky 08:24\n\
                  seed 4242 / goto 10 -20 / yaw 0 / zoom 150"
@@ -1184,26 +935,13 @@ mod tests {
         // the wording.
         let all = Toggles {
             stats: true,
-            shadows: false,
             haze: false,
             wireframe: true,
-            reach: 225.0,
             // Not a doctoring of the picture but the size of it, which a
             // picture cannot hide, so the line never mentions it.
             resolution: Some(1080),
         };
-        assert_eq!(
-            all.line().as_deref(),
-            Some("debug: no shadows / no haze / wireframe / shadow reach 225m")
-        );
-
-        // And the reach only speaks up when it is not the world's own, since
-        // the default is what a normal run already has.
-        let default_reach = Toggles {
-            reach: crate::HAZE_END,
-            ..all.clone()
-        };
-        assert!(!default_reach.line().unwrap().contains("reach"));
+        assert_eq!(all.line().as_deref(), Some("debug: no haze / wireframe"));
     }
 
     #[test]
