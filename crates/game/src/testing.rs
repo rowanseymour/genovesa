@@ -336,6 +336,7 @@ fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
                 .then(|| ChunkPayload {
                     heights,
                     materials: vec![Material::Grass; MATERIAL_COUNT],
+                    lit: vec![protocol::ground::LIT_ALL_DAY; CORNERS * CORNERS],
                     // Both test islands are smooth shapes with nothing to
                     // enclose a basin, so there is no lake on either to draw.
                     water: None,

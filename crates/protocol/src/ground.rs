@@ -28,6 +28,19 @@
 //! can draw, but a lake stands at a height decided by a rim saddle that may be
 //! half a kilometre away, so where a chunk carries water its surface crosses
 //! the wire as a second grid — see [`ChunkPayload::water`].
+//!
+//! And for **sunlight**. The terrain is fixed and the sun rides one arc — see
+//! [`crate::towards_the_sun`] — so whether a corner stands in the sun is a
+//! function of the hour alone, and the whole day's answer is two phases: when
+//! it first sees the sun and when it loses it. What shadows a corner at dawn
+//! may be a ridge many chunks away that a client has never been sent, so only
+//! whoever holds the whole island can say — the generator bakes the pair per
+//! corner and it crosses the wire as [`ChunkPayload::lit`]. It is what lets a
+//! client draw the terrain's own shadows without a shadow map: thresholds
+//! interpolate across a cell exactly as heights do, so a shadow's edge still
+//! moves smoothly over the ground as the day turns, and the same pair asked
+//! with `phase + 0.5` answers for the moon, which rides the same arc half a
+//! day out of phase.
 
 use glam::{IVec2, Vec2, Vec3};
 
@@ -336,6 +349,23 @@ pub struct ChunkPayload {
     /// so two chunks agree about the cells they both describe. That is what
     /// `the_apron_is_the_neighbours_own_ground` holds them to.
     pub materials: Vec<Material>,
+    /// When each corner sees the sun: the first and last phase of the day —
+    /// [`crate::quantize_phase`] steps — at which the sun stands clear of the
+    /// terrain around it, one pair per corner on the grid of
+    /// [`ChunkPayload::heights`]. Between the two the corner is in direct
+    /// sun; outside them the terrain itself is in the way and the ground
+    /// stands in its own shadow. `from > until` is a corner that never sees
+    /// the sun at all. Why this crosses the wire, and what a client does with
+    /// it, is the module doc's sunlight note.
+    ///
+    /// A corner under standing water answers for the *surface* over it — the
+    /// lake's sheet or the sea's — since that is the ground a shadow falls
+    /// on; the bed beneath is seen through it and wears the same light.
+    ///
+    /// One interval, by construction: a corner lit, re-shadowed by a second
+    /// ridge and lit again is flattened to its outer ends, which errs toward
+    /// light and only where the terrain is convoluted enough to earn it.
+    pub lit: Vec<[u8; 2]>,
     /// Where standing water above sea level covers this chunk, and how high
     /// it stands: one quantised level per corner on the same grid as
     /// [`ChunkPayload::heights`], or `None` for a chunk with no lake on or
@@ -550,12 +580,30 @@ impl Plant {
 /// collide with.
 pub const NO_WATER: u16 = 0;
 
-/// Bytes a chunk's heights and materials occupy on the wire: two per corner
-/// height, one per cell of the material grid. Nothing is compressed — see the
-/// module docs on the grid being the format, and note that delta-coding the
-/// heights and run-coding the materials would take most of this back if the
-/// wire ever needs it to.
-pub const PAYLOAD_BYTES: usize = CORNERS * CORNERS * 2 + MATERIAL_COUNT;
+/// The lit pair of a corner nothing ever shadows: in the sun from the moment
+/// it clears the horizon to the moment it sets — [`crate::SUNRISE`] and
+/// [`crate::SUNSET`] as [`crate::quantize_phase`] spells them. What open
+/// water far from any island would carry if it carried anything, and the
+/// honest filler for a payload built where no generator has said otherwise.
+pub const LIT_ALL_DAY: [u8; 2] = [64, 192];
+
+/// The lit pair of a corner the sun never reaches — `from` past the end of
+/// the day and `until` before its start, so no phase at all lies between
+/// them. Any pair with `from > until` reads the same way; this is merely the
+/// one a writer with nothing subtler to say writes.
+pub const NEVER_LIT: [u8; 2] = [u8::MAX, 0];
+
+/// Bytes a chunk's heights, materials and lit grid occupy on the wire: two
+/// per corner height, one per cell of the material grid, two per corner lit
+/// pair. Nothing is compressed — see the module docs on the grid being the
+/// format, and note that delta-coding the heights and run-coding the
+/// materials would take most of this back if the wire ever needs it to.
+pub const PAYLOAD_BYTES: usize = CORNERS * CORNERS * 2 + MATERIAL_COUNT + LIT_BYTES;
+
+/// Bytes a chunk's lit grid occupies — a pair per corner, unconditionally:
+/// unlike a lake, there is no chunk of ground whose light is not worth
+/// saying.
+pub const LIT_BYTES: usize = CORNERS * CORNERS * 2;
 
 /// Bytes a chunk's water grid adds when it carries one — two per corner,
 /// like the heights it is compared against.
@@ -612,6 +660,15 @@ impl ChunkPayload {
         (level != NO_WATER).then_some(level)
     }
 
+    /// When corner `(ix, iz)` sees the sun — see [`ChunkPayload::lit`] — or
+    /// `None` off the grid.
+    pub fn lit(&self, ix: i32, iz: i32) -> Option<[u8; 2]> {
+        if !(0..CORNERS as i32).contains(&ix) || !(0..CORNERS as i32).contains(&iz) {
+            return None;
+        }
+        Some(self.lit[iz as usize * CORNERS + ix as usize])
+    }
+
     /// Whether this is a payload of the shape the grid says it should be.
     /// What a reader checks before believing a frame, and what a builder can
     /// assert against.
@@ -619,6 +676,7 @@ impl ChunkPayload {
         let corners = CORNERS * CORNERS;
         self.heights.len() == corners
             && self.materials.len() == MATERIAL_COUNT
+            && self.lit.len() == corners
             && self
                 .water
                 .as_ref()
@@ -631,18 +689,21 @@ impl ChunkPayload {
     }
 
     /// Appends this payload's bytes: every height little-endian, then every
-    /// surface, then the water grid where there is one.
+    /// surface, then every lit pair, then the water grid where there is one.
     ///
     /// The water goes after them, and the plants after that, so that a reader
-    /// of any kind of chunk finds the heights and the materials at the same
-    /// offsets — a lake and a stand of palms are things a chunk carries in
-    /// addition, never a rearrangement of what it already carried.
+    /// of any kind of chunk finds the heights, the materials and the light at
+    /// the same offsets — a lake and a stand of palms are things a chunk
+    /// carries in addition, never a rearrangement of what it already carried.
     pub(crate) fn put(&self, out: &mut Vec<u8>) {
         debug_assert!(self.well_formed(), "not a chunk's worth of ground");
         for height in &self.heights {
             out.extend_from_slice(&height.to_le_bytes());
         }
         out.extend(self.materials.iter().map(|material| material.to_byte()));
+        for pair in &self.lit {
+            out.extend_from_slice(pair);
+        }
         for level in self.water.iter().flatten() {
             out.extend_from_slice(&level.to_le_bytes());
         }
@@ -673,6 +734,7 @@ impl ChunkPayload {
         };
         let (heights, rest) = bytes.split_at(CORNERS * CORNERS * 2);
         let (materials, rest) = rest.split_at(MATERIAL_COUNT);
+        let (lit, rest) = rest.split_at(LIT_BYTES);
         let (water, plants) = rest.split_at(rest.len() - plants * PLANT_BYTES);
         Some(Self {
             heights: levels(heights),
@@ -680,6 +742,7 @@ impl ChunkPayload {
                 .iter()
                 .map(|byte| Material::from_byte(*byte))
                 .collect::<Option<_>>()?,
+            lit: lit.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect(),
             water: (!water.is_empty()).then(|| levels(water)),
             plants: plants
                 .chunks_exact(PLANT_BYTES)
@@ -700,8 +763,9 @@ mod tests {
         assert_eq!(CELL_COUNT, 16_384);
         assert_eq!(MATERIAL_CELLS, 130);
         assert_eq!(MATERIAL_COUNT, 16_900);
-        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_900);
+        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_900 + 129 * 129 * 2);
         assert_eq!(WATER_BYTES, 129 * 129 * 2);
+        assert_eq!(LIT_BYTES, 129 * 129 * 2);
         assert_eq!(payload_bytes(false, 0), PAYLOAD_BYTES);
         assert_eq!(payload_bytes(true, 0), PAYLOAD_BYTES + WATER_BYTES);
         assert_eq!(
@@ -868,6 +932,9 @@ mod tests {
             materials: (0..MATERIAL_COUNT)
                 .map(|i| Material::from_byte((i % PALETTE.len()) as u8).expect("a material"))
                 .collect(),
+            lit: (0..CORNERS * CORNERS)
+                .map(|i| [(i * 3 % 251) as u8, (i * 5 % 253) as u8])
+                .collect(),
             water: water.then(|| {
                 (0..CORNERS * CORNERS)
                     .map(|i| (i * 11 % 65_533) as u16)
@@ -897,6 +964,7 @@ mod tests {
                 let back = ChunkPayload::take(&bytes, water, plants).expect("a payload");
                 assert_eq!(back.heights, payload.heights);
                 assert_eq!(back.materials, payload.materials);
+                assert_eq!(back.lit, payload.lit);
                 assert_eq!(back.water, payload.water);
                 assert_eq!(back.plants.len(), payload.plants.len());
                 for (got, sent) in back.plants.iter().zip(&payload.plants) {
@@ -980,6 +1048,31 @@ mod tests {
     }
 
     #[test]
+    fn the_lit_sentinels_say_what_the_arc_says() {
+        // All day is sunrise to sunset as the wire spells them, not two
+        // numbers that happen to look right.
+        assert_eq!(
+            LIT_ALL_DAY,
+            [
+                crate::quantize_phase(crate::SUNRISE),
+                crate::quantize_phase(crate::SUNSET)
+            ]
+        );
+        // And never is an interval no phase can fall inside.
+        assert!(NEVER_LIT[0] > NEVER_LIT[1]);
+    }
+
+    #[test]
+    fn a_corner_answers_when_it_is_lit() {
+        let payload = a_payload(false, 0);
+        // Row-major on the corner grid, asked asymmetrically so a transpose
+        // cannot pass.
+        assert_eq!(payload.lit(3, 2), Some(payload.lit[2 * CORNERS + 3]));
+        assert_eq!(payload.lit(-1, 0), None);
+        assert_eq!(payload.lit(0, CORNERS as i32), None);
+    }
+
+    #[test]
     fn the_water_grid_is_the_only_thing_a_lake_adds() {
         // A watered payload is a dry one with a grid on the end: the heights
         // and the materials encode to exactly the same bytes in the same
@@ -994,13 +1087,13 @@ mod tests {
 
     #[test]
     fn a_payload_with_a_material_from_the_future_is_refused() {
-        // The last material byte, which is the last byte of a dry payload and
-        // sits in the middle of a watered one — so this also catches a reader
-        // that stopped checking materials once it knew there was water to come.
+        // The last material byte, which sits in the middle of the payload —
+        // so this also catches a reader that stopped checking materials once
+        // it knew there were grids still to come.
         for water in [false, true] {
             let mut bytes = Vec::new();
             a_payload(water, 2).put(&mut bytes);
-            bytes[PAYLOAD_BYTES - 1] = 0xFF;
+            bytes[CORNERS * CORNERS * 2 + MATERIAL_COUNT - 1] = 0xFF;
             assert_eq!(ChunkPayload::take(&bytes, water, 2), None);
         }
     }
@@ -1019,6 +1112,12 @@ mod tests {
         let mut empty = a_payload(true, 0);
         empty.water = Some(Vec::new());
         assert!(!empty.well_formed());
+
+        // The lit grid has no "none" to hide behind: every chunk of ground
+        // has a day over it, so a short grid is the only way to be wrong.
+        let mut dim = a_payload(false, 0);
+        dim.lit.truncate(4);
+        assert!(!dim.well_formed());
 
         // And no water at all is well formed — most chunks have none.
         assert!(a_payload(false, 0).well_formed());

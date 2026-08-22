@@ -38,9 +38,10 @@ use glam::{IVec2, UVec2, Vec2, Vec3};
 use protocol::ground::{quantize, ChunkPayload, Material};
 
 use crate::noise::smoothstep;
+use crate::sunlight::Sunlight;
 use crate::terrain::{
-    cell_materials, corner_heights, corner_water, normal_at, working_heights, MapConfig,
-    TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
+    cell_materials, corner_heights, corner_lit, corner_water, normal_at, working_heights,
+    MapConfig, TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
 };
 
 pub use protocol::ground::{chunk_at, CHUNK_METRES};
@@ -382,36 +383,44 @@ impl ParcelRng {
 pub struct Island {
     pub spec: IslandSpec,
     generator: TerrainGenerator,
+    /// When every point of the island sees the sun — baked here, with the
+    /// lakes already flooded, because only whoever holds the whole island
+    /// can say. See [`crate::sunlight`].
+    sunlight: Sunlight,
 }
 
 impl Island {
     fn generate(spec: IslandSpec) -> Self {
+        let generator = TerrainGenerator::new(&spec.config());
+        // Over every chunk the island answers for, reading the surface the
+        // sun actually strikes: the ground, the sea over the drowned shelf,
+        // or the lake standing in a basin.
+        let (lo, hi) = spec.covered();
+        let sunlight = Sunlight::bake(
+            lo.as_vec2() * CHUNK_METRES,
+            hi.as_vec2() * CHUNK_METRES,
+            |wx, wz| {
+                let surface = ground_height(&spec, &generator, wx, wz).max(0.0);
+                let local = Vec2::new(wx, wz) - spec.centre();
+                match generator.lake_level(local.x, local.y) {
+                    Some(level) => surface.max(level),
+                    None => surface,
+                }
+            },
+        );
         Self {
             spec,
-            generator: TerrainGenerator::new(&spec.config()),
+            generator,
+            sunlight,
         }
     }
 
     /// Height at a world point, in metres. Inside the frame this is the
     /// island's map, untouched; across the skirt it is that same field walked
     /// down to exactly [`-OCEAN_DEPTH`] by the skirt's outer edge, where the
-    /// open ocean takes over without a seam.
-    ///
-    /// In practice the walk has nowhere to go. As `SKIRT_CHUNKS` explains,
-    /// the generator's field is already at the floor by the frame, so the
-    /// blend below is `-OCEAN_DEPTH` blended into `-OCEAN_DEPTH` on every
-    /// island measured. It stays because it is what *makes* that true rather
-    /// than merely observing it — the seam this would show is a step of ocean
-    /// bed around every island in the world, and the fix belongs where it
-    /// cannot be forgotten.
+    /// open ocean takes over without a seam — see [`ground_height`].
     pub fn height(&self, wx: f32, wz: f32) -> f32 {
-        let beyond = self.spec.beyond_frame(Vec2::new(wx, wz));
-        if beyond >= SKIRT_METRES {
-            return -OCEAN_DEPTH;
-        }
-        let local = Vec2::new(wx, wz) - self.spec.centre();
-        let h = self.generator.height(local.x, local.y);
-        h + (-OCEAN_DEPTH - h) * smoothstep(0.0, SKIRT_METRES, beyond)
+        ground_height(&self.spec, &self.generator, wx, wz)
     }
 
     /// What the ground is painted at a world point, matching
@@ -435,6 +444,34 @@ impl Island {
         let local = Vec2::new(wx, wz) - self.spec.centre();
         self.generator.lake_level(local.x, local.y)
     }
+
+    /// When the surface at a world point sees the sun — the island's bake,
+    /// read back for every corner a payload carries. See
+    /// [`protocol::ground::ChunkPayload::lit`] for what the pair means.
+    pub fn lit(&self, wx: f32, wz: f32) -> [u8; 2] {
+        self.sunlight.at(wx, wz)
+    }
+}
+
+/// [`Island::height`] before there is an [`Island`] to ask: the generator's
+/// field inside the frame, walked down to exactly [`-OCEAN_DEPTH`] across the
+/// skirt. A free function because [`Island::generate`] bakes the sunlight
+/// against this same surface while the struct is still being put together.
+///
+/// In practice the walk has nowhere to go. As `SKIRT_CHUNKS` explains, the
+/// generator's field is already at the floor by the frame, so the blend below
+/// is `-OCEAN_DEPTH` blended into `-OCEAN_DEPTH` on every island measured. It
+/// stays because it is what *makes* that true rather than merely observing it
+/// — the seam this would show is a step of ocean bed around every island in
+/// the world, and the fix belongs where it cannot be forgotten.
+fn ground_height(spec: &IslandSpec, generator: &TerrainGenerator, wx: f32, wz: f32) -> f32 {
+    let beyond = spec.beyond_frame(Vec2::new(wx, wz));
+    if beyond >= SKIRT_METRES {
+        return -OCEAN_DEPTH;
+    }
+    let local = Vec2::new(wx, wz) - spec.centre();
+    let h = generator.height(local.x, local.y);
+    h + (-OCEAN_DEPTH - h) * smoothstep(0.0, SKIRT_METRES, beyond)
 }
 
 /// The world: its layout, asked about for free, and its islands, generated on
@@ -807,6 +844,7 @@ impl Archipelago {
                 island.material(wx, wz, height, normal)
             }),
             heights: heights.iter().copied().map(quantize).collect(),
+            lit: corner_lit(base, |wx, wz| island.lit(wx, wz)),
             water: corner_water(base, &heights, |wx, wz| island.lake_level(wx, wz)),
             plants: crate::plants::plants(&island, chunk),
         })
@@ -1326,7 +1364,8 @@ mod tests {
         // The water grid goes in too, and contributes nothing at all where
         // there is no lake — which is what makes its absence part of what is
         // pinned: a chunk that gained or lost standing water changes this
-        // digest by the whole length of a grid.
+        // digest by the whole length of a grid. The lit grid goes in
+        // unconditionally, which pins the sunlight bake with it.
         let middle = chunk_at(centre);
         let payload = world
             .chunk_payload(middle)
@@ -1337,6 +1376,7 @@ mod tests {
                 .iter()
                 .flat_map(|h| h.to_le_bytes())
                 .chain(payload.materials.iter().map(|tone| tone.to_byte()))
+                .chain(payload.lit.iter().flatten().copied())
                 .chain(payload.water.iter().flatten().flat_map(|w| w.to_le_bytes())),
         );
 
@@ -1346,7 +1386,7 @@ mod tests {
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0xD15B_BF89_88DF_E229, "the ground changed");
         assert_eq!(
-            sent, 0x8ADD_175F_FE7C_E49E,
+            sent, 0xBBEE_58B1_4C82_F896,
             "what a client would be sent changed"
         );
     }

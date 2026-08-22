@@ -2024,6 +2024,20 @@ pub(crate) fn corner_water(
     awash.then_some(levels)
 }
 
+/// When each of one chunk's corners sees the sun, on the same grid and in
+/// the same order as [`corner_heights`] — read off the island's bake, which
+/// is where the answer lives; see [`crate::sunlight`].
+pub(crate) fn corner_lit(base: Vec2, lit: impl Fn(f32, f32) -> [u8; 2]) -> Vec<[u8; 2]> {
+    let mut pairs = Vec::with_capacity(CORNERS * CORNERS);
+    for iz in 0..CORNERS {
+        let wz = base.y + iz as f32 * CELL_METRES;
+        for ix in 0..CORNERS {
+            pairs.push(lit(base.x + ix as f32 * CELL_METRES, wz));
+        }
+    }
+    pairs
+}
+
 /// The material of every cell of one chunk's material grid, apron included,
 /// row-major — the order a payload carries them in.
 ///

@@ -36,8 +36,6 @@ use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource};
 
-use std::f32::consts::TAU;
-
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
 use crate::clouds::{Clouds, CloudsPlugin};
@@ -70,17 +68,6 @@ const CATCH_UP: f32 = 2.0;
 /// of the ten-minute day, about a third of what the sun crosses between two
 /// tellings, and nothing the eye holds between two pictures.
 const CAUGHT_UP: f32 = 0.0005;
-
-/// How far the sun's arc leans from straight overhead, in radians — a little
-/// over twenty degrees, which puts noon short of the zenith.
-///
-/// The tropics would have it near enough vertical, and vertical is the one
-/// thing this look cannot use: a sun straight overhead lights every facet of
-/// a hillside equally and the relief the whole flat-shaded style is built out
-/// of disappears at midday. Leaning the arc keeps a shadow under everything
-/// at every hour, and it also keeps the light off the pole, where pointing it
-/// at the ground has no unique answer.
-const TILT: f32 = 0.38;
 
 /// What hour a screen with no world behind it is lit and cleared to: noon,
 /// which is the daylight the menus were drawn against when the world had
@@ -393,19 +380,6 @@ impl Plugin for SkyPlugin {
     }
 }
 
-/// Which way the sun lies from the ground at an hour, as a unit vector: `x`
-/// east, `y` up, `z` south — [`protocol::ground::NORTH`] being `-z`.
-///
-/// The sun rises due east at 0.25, stands at its highest at noon and sets due
-/// west at 0.75; below the horizon the same vector goes on round, and negated
-/// it is where the moon is. The arc is tilted southward by [`TILT`] rather
-/// than passing overhead, so `y` is never quite 1 and the light is never
-/// quite straight down.
-fn towards_the_sun(phase: f32) -> Vec3 {
-    let (up, east) = ((phase - 0.25) * TAU).sin_cos();
-    Vec3::new(east, up * TILT.cos(), up * TILT.sin())
-}
-
 /// Which way the world's light comes from at an hour: the sun through the
 /// day, the moon through the night, and neither of them from underneath.
 ///
@@ -423,7 +397,7 @@ fn towards_the_sun(phase: f32) -> Vec3 {
 /// in nature. So the direction is held at [`GRAZE`] rather than allowed under
 /// it: the last of the sun lies along the water instead of coming up out of it.
 fn light_from(phase: f32) -> Vec3 {
-    let sun = towards_the_sun(phase);
+    let sun = protocol::towards_the_sun(phase);
     let body = if protocol::is_night(phase) { -sun } else { sun };
     Vec3::new(body.x, body.y.max(GRAZE), body.z).normalize()
 }
@@ -924,27 +898,6 @@ mod tests {
     }
 
     #[test]
-    fn the_sun_rises_in_the_east_stands_south_of_overhead_and_sets_in_the_west() {
-        // The world's east is +x and its north is -z — see
-        // `protocol::ground::NORTH` — so this is the whole of what a day
-        // looks like from the ground.
-        let sunrise = towards_the_sun(0.25);
-        assert!(sunrise.x > 0.99, "the sun rose at {sunrise}");
-        assert!(sunrise.y.abs() < 1e-6, "the sun rose {} up", sunrise.y);
-
-        let noon = towards_the_sun(0.5);
-        assert!(noon.y > 0.9, "noon stands {} up", noon.y);
-        assert!(noon.z > 0.0, "noon is not south of overhead: {noon}");
-        assert!(noon.y < 1.0, "noon is straight overhead, which flattens it");
-
-        let sunset = towards_the_sun(0.75);
-        assert!(sunset.x < -0.99, "the sun set at {sunset}");
-
-        let midnight = towards_the_sun(0.0);
-        assert!(midnight.y < -0.9, "the sun at midnight is {midnight}");
-    }
-
-    #[test]
     fn the_light_comes_from_the_sun_by_day_the_moon_by_night_and_never_from_below() {
         // Through the day it stands where the sun is; through the night it is
         // opposite, which is where a full moon is. And at no hour at all does
@@ -965,7 +918,7 @@ mod tests {
                 "the light at {phase} is not a direction: {light}"
             );
 
-            let sun = towards_the_sun(phase);
+            let sun = protocol::towards_the_sun(phase);
             let side = if protocol::is_night(phase) { -sun } else { sun };
             assert!(
                 light.xz().dot(side.xz()) > 0.0,
