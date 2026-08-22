@@ -321,10 +321,12 @@ tools/readme-collage.sh 7
 
 ## Debugging
 
-The command line is short on purpose: `--state` to open on a given screen,
-`--seed` to pick the world, `--join` to play in somebody else's. Without
-`--seed` the run picks a world of its own and prints which, so a place worth
-going back to can be asked for by name. Run `cargo run -- --help` for the rest.
+The command line is short on purpose: `--seed` to open a world, `--join` to
+play in somebody else's. Naming a seed is what opens a world rather than the
+menu, and a world started from the menu prints the seed it got, so a place
+worth going back to can be asked for by name. Which screen a run opens on is
+not an option — it follows from whether a world was asked for, and the socket
+walks to the rest. Run `cargo run -- --help` for what is left.
 
 Everything about how a run *behaves* is said down a socket instead. `--debug`
 takes a port, and the run stays up on it, taking the lines the console takes —
