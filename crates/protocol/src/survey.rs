@@ -102,8 +102,9 @@ const _: () = assert!(SIGHT_RADIUS * SIGHT_RADIUS >= 2.0 * CHUNK_METRES * CHUNK_
 ///
 /// The contour comes off the grid with a point every crossing, which is far
 /// more than a coast's shape needs; this is what most of them are thrown away
-/// against. Three metres is under a facet, so nothing a facet could actually
-/// say is lost.
+/// against. Three metres is the chart's own coarseness, not the mesh's: the
+/// ground is drawn every metre now, so a survey deliberately keeps less than
+/// a facet could say — ink on a sea chart, not a tracing of the terrain.
 pub const TOLERANCE: f32 = 3.0;
 
 /// The depth whose edge is worth recording alongside the waterline, in metres.
@@ -121,8 +122,8 @@ pub const SHOAL_DEPTH: f32 = -3.0;
 /// A height field crossing the waterline leaves a scatter of one- and two-cell
 /// rings around any coast — rocks awash, and the odd hummock of sand a facet
 /// wide. Every one is honest ground, and drawn they read as dirt on the paper
-/// rather than as anything anybody could steer by. Six metres is three facets,
-/// which keeps a real skerry and loses the speckle.
+/// rather than as anything anybody could steer by. Six metres keeps a real
+/// skerry and loses the speckle.
 ///
 /// Open runs are not filtered: a short one is a coast leaving the chunk, and
 /// the rest of it is the neighbour's.
@@ -149,8 +150,8 @@ pub const LEAST_ISLAND: f32 = 100.0;
 /// One point of a surveyed coastline, in chunk-local steps.
 ///
 /// Two bytes, and the whole reason an infinite world's survey fits: a step is
-/// [`CHUNK_METRES`] over 255, about half a metre, which is a quarter of a facet
-/// and far finer than [`TOLERANCE`] has already thrown away.
+/// [`CHUNK_METRES`] over 255, about half a metre — half a facet, and far
+/// finer than [`TOLERANCE`] has already thrown away.
 ///
 /// A step also lands the ends of a stroke *exactly* on the chunk boundary — 0
 /// and 255 are the boundary itself — so a coast leaving one chunk and the one

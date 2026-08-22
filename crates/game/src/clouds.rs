@@ -57,9 +57,10 @@ use crate::{scramble, unit, AppState};
 const TILE: f32 = 1_400.0;
 
 /// Texels along each side of the mask. Over [`TILE`] that is a texel every
-/// 2.7 m, against ground facets 2 m across: the edge of a shadow lands within
-/// a facet or so of where it should, which is as fine as anything else in this
-/// picture is drawn.
+/// 2.7 m — a few facets, now that the ground is drawn every metre, so a
+/// shadow's edge is deliberately the softest thing in the frame: shade is
+/// weather, not geometry, and a mask chasing the mesh would cost four times
+/// the memory to sharpen something that reads better blurred.
 const TEXELS: usize = 512;
 
 /// Cells across the tile in the coarsest octave of the noise, and how many

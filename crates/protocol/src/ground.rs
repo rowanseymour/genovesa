@@ -12,9 +12,10 @@
 //! detail, say — is a change to the wire.
 //!
 //! And the **palette is the format**: a [`Surface`] is a byte and
-//! [`Surface::color`] is what it means. That keeps a chunk under twenty
-//! kilobytes instead of three floats per triangle, and keeps the two ends
-//! unable to disagree about what sand looks like.
+//! [`Surface::color`] is what it means. That keeps a chunk's surfaces to a
+//! byte per triangle instead of three floats — a quarter of the payload
+//! rather than three times it — and keeps the two ends unable to disagree
+//! about what sand looks like.
 //!
 //! The same goes for **standing water**. The sea is a plane at zero any client
 //! can draw, but a lake stands at a height decided by a rim saddle that may be
@@ -48,8 +49,8 @@ pub const NORTH: Vec2 = Vec2::NEG_Y;
 ///
 /// This is what an answer of *no ground* means. A chunk with no payload is
 /// not "unknown" and not "nothing" — it is flat floor at exactly this depth,
-/// which a client draws as a plane rather than as a mesh of eight thousand
-/// identical triangles. Every island's own sea bed is clamped to the same
+/// which a client draws as a plane rather than as a mesh of thirty-odd
+/// thousand identical triangles. Every island's own sea bed is clamped to the same
 /// level, so the plane and the meshes meet along every coast with nothing to
 /// show for it; a client drawing its backdrop at some other depth would print
 /// a step around every island in the world.
@@ -58,11 +59,13 @@ pub const OCEAN_DEPTH: f32 = 8.0;
 /// Metres between the corners the ground is drawn from.
 ///
 /// The height field behind it is continuous, so this is only how finely it
-/// gets *drawn*, and it is deliberately coarse: the ground is flat-shaded, and
-/// a facet has to be big enough to read as a facet. At 2 m one covers roughly
-/// 50 px at the default zoom, which is about where facets read as deliberate
-/// rather than as a low-resolution mesh.
-pub const FACET_METRES: f32 = 2.0;
+/// gets *drawn*. It was 2 m for a long time — big flat-shaded facets read as
+/// deliberate shapes — and moving to 1 m traded that cut-gem quality for
+/// ground the field can actually articulate: the generator now carries
+/// detail down to a few metres' wavelength, which a 2 m mesh could only
+/// alias. The move is wire-wide: it quadrupled the payload, which is what
+/// pushed the frame prefix to a u32.
+pub const FACET_METRES: f32 = 1.0;
 
 /// Quads along one edge of a chunk's facet grid.
 pub const FACET_QUADS: usize = (CHUNK_METRES / FACET_METRES) as usize;
@@ -83,9 +86,8 @@ pub const FACET_TRIS: usize = FACET_QUADS * FACET_QUADS * 2;
 /// the world builds, so no honest ground ever clamps against it.
 pub const HEIGHT_FLOOR: f32 = -16.0;
 
-/// Metres per step of a stored height — two centimetres, which is a fiftieth
-/// of the smallest thing anyone can see at the closest zoom and a two
-/// thousandth of a facet's own width.
+/// Metres per step of a stored height — two centimetres, a fiftieth of the
+/// smallest thing anyone can see at the closest zoom.
 ///
 /// Sixteen bits at this step reach from [`HEIGHT_FLOOR`] to something over a
 /// kilometre, and the tallest ground the generator builds is a few hundred
@@ -715,10 +717,10 @@ mod tests {
     #[test]
     fn the_grid_divides_a_chunk_exactly() {
         assert_eq!(FACET_QUADS as f32 * FACET_METRES, CHUNK_METRES);
-        assert_eq!(FACET_VERTS, 65);
-        assert_eq!(FACET_TRIS, 8192);
-        assert_eq!(PAYLOAD_BYTES, 65 * 65 * 2 + 8192);
-        assert_eq!(WATER_BYTES, 65 * 65 * 2);
+        assert_eq!(FACET_VERTS, 129);
+        assert_eq!(FACET_TRIS, 32_768);
+        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 32_768);
+        assert_eq!(WATER_BYTES, 129 * 129 * 2);
         assert_eq!(payload_bytes(false, 0), PAYLOAD_BYTES);
         assert_eq!(payload_bytes(true, 0), PAYLOAD_BYTES + WATER_BYTES);
         assert_eq!(

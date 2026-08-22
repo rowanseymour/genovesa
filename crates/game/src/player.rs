@@ -95,6 +95,12 @@ const WADE_DEPTH: f32 = 0.5;
 /// rule — about two percent of the land walled off, and every one of their
 /// summits still reachable by some way round. A walker is stopped by the
 /// steep, in other words, without being shut out of anywhere.
+///
+/// That flood was run against the 2 m field. The metre grid resolves the
+/// fine bands it smoothed over, so the walled-off share in rugged country
+/// runs higher now — a few percent, not two — and the reachability half has
+/// not been re-measured. Worth re-flooding if walkers start fetching up
+/// against ground the eye reads as ordinary.
 const WALKABLE_RISE: f32 = 0.7;
 
 /// The ring the landing probe searches, in metres from the rowboat's origin:
@@ -103,10 +109,10 @@ const WALKABLE_RISE: f32 = 0.7;
 /// a player can step off, they can step straight back aboard from.
 const LANDING_NEAR: f32 = 1.5;
 const LANDING_REACH: f32 = 6.0;
-/// Spacing of the probe's samples, well under the two-metre facet the
-/// heights are drawn on, so a strip of walkable ground one facet wide is
-/// not stepped over.
-const LANDING_STEP: f32 = 0.5;
+/// Spacing of the probe's samples: half the facet the heights are drawn on,
+/// derived so a strip of walkable ground one facet wide is never stepped
+/// over, whatever the facet becomes.
+const LANDING_STEP: f32 = FACET_METRES / 2.0;
 /// How many directions are tried at each radius, bow first — a boat is
 /// usually nosed *at* the shore, so the first ray is the likely one and the
 /// rest cover a hull lying alongside a beach.

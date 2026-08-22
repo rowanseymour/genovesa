@@ -54,12 +54,16 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// up on them.
 ///
 /// Deep enough to hold an arrival's whole burst — a couple of hundred chunks
-/// at sixteen kilobytes each, plus a word per boat in the world — while the
-/// socket drains it, and shallow enough that a client which has stopped
-/// reading altogether is noticed rather than buffered forever. Size it
-/// against the worst message and not the ordinary one: a queue this deep in
-/// longest-case survey batches is some fifteen megabytes for one player,
-/// which is why [`post`] hangs up on a full outbox rather than holding it.
+/// at sixty-six kilobytes each on the wire (and nearer twice that as the
+/// decoded values this queue actually holds), plus a word per boat in the
+/// world — while the socket drains it, and shallow enough that a client
+/// which has stopped reading altogether is noticed rather than buffered
+/// forever. Size it against the worst message and not the ordinary one: a
+/// queue this deep in longest-case survey batches is some sixty megabytes
+/// for one player, which is why [`post`] hangs up on a full outbox rather
+/// than holding it. That bound quadrupled when the facet went to a metre;
+/// the depth stays where the arrival burst needs it, and the memory is the
+/// price of a slow reader, paid knowingly.
 const OUTBOX_DEPTH: usize = 256;
 
 /// How many chunk requests may be waiting to be generated, across the whole
@@ -2695,10 +2699,10 @@ fn cairn_told_to(player: &Player, island: IVec2, claim: &Claim) -> ToClient {
 /// exactly what a client makes of an ocean answer, and is worth recording:
 /// water somebody has crossed is not water nobody has.
 fn survey_chunk(world: &Archipelago, chunk: IVec2) -> Soundings {
-    match world.chunk_payload(chunk) {
+    match world.chunk_heights(chunk) {
         None => Soundings::default(),
-        Some(payload) => {
-            let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
+        Some(heights) => {
+            let heights: Vec<f32> = heights.iter().copied().map(dequantize).collect();
             protocol::survey::survey(&heights)
         }
     }

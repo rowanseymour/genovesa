@@ -730,7 +730,9 @@ mod tests {
 
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
-    use protocol::ground::{quantize, ChunkPayload, Surface, Tone, FACET_TRIS, FACET_VERTS};
+    use protocol::ground::{
+        quantize, ChunkPayload, Surface, Tone, FACET_METRES, FACET_TRIS, FACET_VERTS,
+    };
 
     use crate::testing::{
         assert_model_draws, assert_model_is_painted, creature_named_by, span, test_ground,
@@ -795,7 +797,14 @@ mod tests {
         let centre = eyrie(&ground, chunk).expect("a summit this high holds an eagle");
         // The summit's corner is at facet coordinates times the facet stride,
         // in the chunk's own frame; the circle is flown above it.
-        assert_eq!(centre, Vec3::new(40.0, 80.0 + SOAR_CLEARANCE, 80.0));
+        assert_eq!(
+            centre,
+            Vec3::new(
+                20.0 * FACET_METRES,
+                80.0 + SOAR_CLEARANCE,
+                40.0 * FACET_METRES
+            )
+        );
     }
 
     #[test]

@@ -248,8 +248,8 @@ mod tests {
         // platform has stopped agreeing about what a seed means.
         let recorded = [
             (20_040_112u32, 0x5E7B_DBD0_BC5D_DEBAu64),
-            (1, 0x74BB_E6C0_F9DA_C0FF),
-            (7, 0x4C7F_8595_CCE7_CB1A),
+            (1, 0xDBBD_1689_3CD7_0BA1),
+            (7, 0xF8F7_48C3_FA15_1B58),
         ];
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()
