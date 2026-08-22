@@ -2178,8 +2178,9 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             //
             // Both conditions are exceptions that would otherwise strand
             // somebody. Not afoot: a player who left on their own feet has
-            // their ship anchored past wading depth and the dinghy on the
-            // beach is how they get out to it. And not the tender itself:
+            // their ship anchored past wading depth, and the dinghy on the
+            // beach — not a swim — is how they get out to it. And not the
+            // tender itself:
             // hanging up while rowing is the ordinary way to stop mid-passage,
             // and hoisting the boat they are sitting in leaves the entry block
             // dealing them a fresh sloop per handshake. Whoever comes to
