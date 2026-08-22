@@ -29,6 +29,9 @@
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::light::{
+    CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver,
+};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::platform::collections::{HashMap, HashSet};
@@ -894,6 +897,12 @@ fn enter_world(
         Name::new("Ocean floor"),
         OceanFloor,
         DespawnOnExit(AppState::InWorld),
+        // Nothing is below it to catch a shadow, and nothing above it may
+        // throw one onto it: it lies under metres of water, where a shadow
+        // would be a dark patch seen through the surface with nothing over it
+        // to have cast one.
+        NotShadowCaster,
+        NotShadowReceiver,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
         MeshMaterial3d(paints.add(matte(Color::srgb(seabed.x, seabed.y, seabed.z)))),
         Transform::from_xyz(0.0, -OCEAN_DEPTH - SEA_FLOOR_CLEARANCE, 0.0),
@@ -940,10 +949,55 @@ fn enter_world(
         Name::new("Sea"),
         Sea,
         DespawnOnExit(AppState::InWorld),
+        // Water casts no shadow: Bevy shadows a transparent surface as though
+        // it were solid, so without this the sea throws its own shadow down
+        // onto its own bed. It still receives, which is what puts a hull's
+        // shadow on the water beside it.
+        NotShadowCaster,
         Mesh3d(meshes.add(sea::surface_mesh(SEA_EXTENT))),
         MeshMaterial3d(sea),
         Transform::from_xyz(0.0, SEA_SURFACE, 0.0),
     ));
+}
+
+/// How far the sun's shadows reach, in metres: everything the camera can be
+/// looking at from its furthest zoom, and a little past it.
+///
+/// Far shorter than the [`crate::HAZE_END`] a landscape needed, because of
+/// what is left to cast. The ground casts nothing — see
+/// [`crate::sky::hang_the_light`] — so the pass is the boat, the plants, the
+/// player and the beasts, all of which stand on the ground the camera is
+/// centred on. What it must not be is *shorter* than the zoom: a reach that
+/// stopped inside [`crate::camera::MAX_DISTANCE`] would take the boat's own
+/// shadow away at the far end of the zoom, which is the one place a player
+/// would be looking straight at it.
+const CASTER_REACH: f32 = crate::camera::MAX_DISTANCE + 40.0;
+
+/// Where the near cascade gives way to the far one, in metres — a little
+/// past the default zoom, so the ordinary sailing view is wholly inside the
+/// crisp one.
+const CASCADE_SPLIT: f32 = 80.0;
+
+/// How the sky's light slices the view up for the shadow pass that is left.
+///
+/// Two cascades rather than four, and out to [`CASTER_REACH`] rather than to
+/// the haze: cascades exist to spend texels where the eye is, and with the
+/// terrain out of the pass what is left to resolve is small models near the
+/// camera. The near one carries the boat at any ordinary zoom, where the
+/// mast is the thinnest thing in the world and its stripe seethes if the
+/// texel grows; the far one covers the rest of the zoom at a texel nothing
+/// out there is small enough to mind.
+///
+/// Built here rather than in [`crate::sky`], which hangs the light, because
+/// what it has to reach past is the ground this module streams.
+pub fn cascades() -> CascadeShadowConfig {
+    CascadeShadowConfigBuilder {
+        num_cascades: 2,
+        first_cascade_far_bound: CASCADE_SPLIT,
+        maximum_distance: CASTER_REACH,
+        ..default()
+    }
+    .build()
 }
 
 /// Chunk entities despawn themselves on exit; the resources that tracked them
@@ -1032,6 +1086,14 @@ fn spawn_arrivals(
                     PendingPlants(plants),
                     ChunkBuild(task),
                     MeshMaterial3d(material.0.clone()),
+                    // The ground draws its own shadows out of the baked
+                    // intervals it arrived with, so putting it through the
+                    // shadow pass as well would be the same shadow drawn
+                    // twice by two methods that disagree at their edges — and
+                    // it is the whole of what made that pass expensive. It
+                    // still *receives*: what the pass is left for is the boat
+                    // and the palms, and their shadows have to land on this.
+                    NotShadowCaster,
                     // Visible from birth: plants parent themselves here as soon
                     // as the heights land, which can be before the mesh build
                     // finishes and Mesh3d's required components would have
@@ -1079,6 +1141,11 @@ fn receive_chunks(
         if let Some(surface) = built.water {
             commands.entity(entity).with_child((
                 Name::new("Lake"),
+                // Water casts no shadow — Bevy shadows a transparent surface
+                // as though it were solid, so a lake would otherwise throw
+                // its own shadow down onto its own bed. The sea plane is kept
+                // out of the pass for exactly this reason.
+                NotShadowCaster,
                 Mesh3d(meshes.add(surface)),
                 MeshMaterial3d(lake.0.clone()),
             ));

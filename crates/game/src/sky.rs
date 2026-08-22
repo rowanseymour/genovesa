@@ -31,7 +31,7 @@
 //! does with the asking.
 
 use bevy::color::Mix;
-use bevy::light::DirectionalLight;
+use bevy::light::{DirectionalLight, DirectionalLightShadowMap};
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource};
@@ -437,16 +437,36 @@ fn light_at(phase: f32) -> Hour {
 /// frame on by [`light_the_world`]; what is set here is only what does not
 /// change with the hour.
 ///
-/// It casts nothing. The terrain's shadows are baked where the terrain is
-/// made and arrive with each chunk — see
-/// [`protocol::ground::ChunkPayload::lit`] — so there is no shadow pass to
-/// configure, and no shadow map for anything else to be drawn into.
+/// It casts for the things that move and for nothing else. The ground's own
+/// shadows are baked where the ground is made and arrive with each chunk —
+/// see [`protocol::ground::ChunkPayload::lit`] — so the terrain is kept out
+/// of the pass as a caster, and what is left in it is the boat, the plants,
+/// the player and the beasts, whose shadows no baking could answer for
+/// because they are not a function of the hour alone. That is what makes
+/// [`crate::terrain::cascades`] a hundred metres and one cascade rather than
+/// a kilometre and four.
 fn hang_the_light(mut commands: Commands) {
+    // Shadow map resolution. One cascade now, so this is a single layer
+    // rather than four — and the reason it is not Bevy's 2048 is the mast.
+    // It is the thinnest caster in the world, and at 16 cm its shadow is a
+    // stripe a few texels wide whose edges snap from texel to texel as the
+    // boat moves, which reads as a flicker along the whole stripe. Halving
+    // the texel stops it seething.
+    commands.insert_resource(DirectionalLightShadowMap { size: 4096 });
+
     commands.spawn((
         Name::new("Sky light"),
         SkyLight,
         DespawnOnExit(AppState::InWorld),
-        DirectionalLight::default(),
+        DirectionalLight {
+            shadow_maps_enabled: true,
+            // Bevy's own biases, which are tuned for exactly what is left
+            // casting: models a couple of metres across. The heightfield that
+            // needed them wound far up — dark speckle all over the hillsides
+            // otherwise — is no longer in the pass to self-shadow.
+            ..default()
+        },
+        crate::terrain::cascades(),
         Transform::default(),
     ));
 }
