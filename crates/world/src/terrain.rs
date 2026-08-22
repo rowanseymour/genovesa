@@ -20,7 +20,7 @@
 //! decides which name; the protocol says what each one looks like.
 
 use glam::{UVec2, Vec2, Vec3};
-use protocol::ground::{Shade, Surface, Tone, CHUNK_METRES, FACET_METRES, FACET_VERTS};
+use protocol::ground::{Tone, CHUNK_METRES, FACET_CELLS, FACET_METRES, FACET_QUADS, FACET_VERTS};
 
 use crate::noise::{smoothstep, Noise};
 
@@ -553,8 +553,19 @@ const RUGGED_FINE_FLOOR: f32 = 0.08;
 /// purpose: at the default zoom the camera sees ~50 m of ground, so parcels much
 /// bigger than this mean the whole screen is one colour.
 const PATCH_SCALE: f32 = 30.0;
-/// Wavelength of the shade variation within a parcel, in metres.
+/// Wavelength of the variation within a parcel, in metres.
 const MOTTLE_SCALE: f32 = 18.0;
+/// How hard the mottle field pushes on the parcel bucket, as a fraction of
+/// [`PATCH_SCALE`]'s own field.
+///
+/// Judged by eye on nine seeds, because what it changes is the *shape* of the
+/// parcels and no count of them moves enough to measure: at 0.5 the parcels
+/// stop being shapes at all and the lowland reads as static, and at 0.1 the
+/// picture is indistinguishable from leaving the field out. Here it works as
+/// a finer grain within a parcel — a wood with lighter clearings in it — which
+/// is the job the brightness step used to do before a tone stopped carrying
+/// one.
+const MOTTLE_WEIGHT: f32 = 0.25;
 
 /// Deepest the sea bed is allowed to go, in metres below sea level.
 ///
@@ -1774,20 +1785,19 @@ impl TerrainGenerator {
         normal_at(wx, wz, |x, z| self.height(x, z))
     }
 
-    /// What one facet is painted, picked from a fixed palette.
+    /// What one cell of ground is made of, picked from a fixed palette.
     ///
-    /// Nothing here blends. Every choice is a hard threshold, so a facet gets
-    /// exactly one palette entry — that is what makes the ground read as flat
-    /// coloured shapes rather than as a wash of gradient. Naming the entry
-    /// rather than mixing a colour is also what lets a facet cross the wire in
-    /// a byte.
+    /// Nothing here blends. Every choice is a hard threshold, so a cell gets
+    /// exactly one material — that is what makes the ground read as flat
+    /// shapes rather than as a wash of gradient, and it is what lets a cell
+    /// cross the wire in a byte.
     ///
     /// Which means the work of getting from one band to the next is done by the
     /// *shape* of the boundary rather than by mixing the colours across it. Two
     /// things do it: the edges wander off the level by [`BAND_WANDER`], and the
     /// patchwork either side of them is cut from one field, so the parcels line
     /// up through the join. See [`LOWLAND_PARCELS`].
-    pub fn surface(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Surface {
+    pub fn surface(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Tone {
         // 0 on flat ground, approaching 1 on a cliff face.
         let slope = 1.0 - normal.y;
 
@@ -1817,16 +1827,16 @@ impl TerrainGenerator {
         let drowned = self.lakes.level(wx, wz).is_some_and(|level| height < level);
         if shore < LAKE_MARGIN || drowned {
             if shore < -LAKE_SHALLOWS {
-                return Surface::plain(Tone::Silt);
+                return Tone::Silt;
             }
             if shore < -LAKE_MARGIN {
-                return Surface::plain(Tone::Shoal);
+                return Tone::Shoal;
             }
-            return Surface::plain(if slope > ROCK_SLOPE {
+            return if slope > ROCK_SLOPE {
                 Tone::RockDark
             } else {
                 Tone::Marsh
-            });
+            };
         }
 
         // The sea. Two tones of sea bed, both read through translucent
@@ -1835,10 +1845,10 @@ impl TerrainGenerator {
         // than from anything here — [`shape_coast`] gives a beach a long
         // shallow apron and drops a cliff straight past it.
         if height < -SEABED_DEPTH {
-            return Surface::plain(Tone::Seabed);
+            return Tone::Seabed;
         }
         if height < -SHALLOW_DEPTH {
-            return Surface::plain(Tone::Shallow);
+            return Tone::Shallow;
         }
 
         // The shore itself, from the low-water mark to the back of the beach.
@@ -1847,23 +1857,23 @@ impl TerrainGenerator {
         // never fires and the sand stays clean.
         if height < SHORE_TOP {
             if slope > ROCK_SLOPE {
-                return Surface::plain(Tone::RockDark);
+                return Tone::RockDark;
             }
-            return Surface::plain(match self.shore(wx, wz) {
+            return match self.shore(wx, wz) {
                 Shore::Beach => Tone::Sand,
                 Shore::Rocky => Tone::Shingle,
                 Shore::Cliff => Tone::RockDark,
-            });
+            };
         }
 
         // Steep ground is bare rock whatever height it's at. Above the shore
         // this is what paints the cliff faces, and inland it picks out crags on
         // the hills the same way.
         if slope > CLIFF_SLOPE {
-            return Surface::plain(Tone::RockDark);
+            return Tone::RockDark;
         }
         if slope > ROCK_SLOPE {
-            return Surface::plain(Tone::Rock);
+            return Tone::Rock;
         }
 
         // How far this spot's band edges have strayed from the level.
@@ -1877,19 +1887,31 @@ impl TerrainGenerator {
         // The patchwork. Quantising a low-frequency noise field into a few
         // buckets gives irregular parcels with hard edges — woodland against
         // pasture against crop — instead of one smooth green wash.
+        //
+        // Two fields go into the one bucket, at different scales. The broad
+        // one lays out the parcels; the finer [`MOTTLE_SCALE`] one nudges the
+        // total, which breaks a big parcel into patches of its neighbours in
+        // the palette row rather than leaving it one flat slab. That used to
+        // be a brightness step riding on top of the tone, which meant the
+        // wire carried a rendering instruction — how much to scale a colour
+        // by — next to the material it applied to. Saying *grass, but the
+        // lighter kind* with a second material costs nothing extra on the
+        // wire and leaves the byte naming a substance and nothing else.
         let patch = self
             .detail
             .fbm(wx / PATCH_SCALE + 11.0, wz / PATCH_SCALE - 7.0, 3);
+        let mottle = self.detail.fbm(wx / MOTTLE_SCALE, wz / MOTTLE_SCALE, 2);
+        let field = patch + MOTTLE_WEIGHT * mottle;
         // Thresholds are set off the noise's measured distribution, not off its
         // nominal range, so all five actually get used — this field sits inside
         // roughly ±0.65 but four fifths of it is inside ±0.17.
-        let bucket = if patch < -0.20 {
+        let bucket = if field < -0.20 {
             0
-        } else if patch < -0.07 {
+        } else if field < -0.07 {
             1
-        } else if patch < 0.08 {
+        } else if field < 0.08 {
             2
-        } else if patch < 0.22 {
+        } else if field < 0.22 {
             3
         } else {
             4
@@ -1897,30 +1919,13 @@ impl TerrainGenerator {
 
         // Which row of the palette that parcel is drawn from — the only thing
         // height decides up here.
-        let parcel = if banded > MOUNTAIN_HEIGHT {
+        if banded > MOUNTAIN_HEIGHT {
             MOUNTAIN_PARCELS[bucket]
         } else if banded > MOOR_HEIGHT {
             MOOR_PARCELS[bucket]
         } else {
             LOWLAND_PARCELS[bucket]
-        };
-
-        // A finer band takes a lighter or darker cut of the same colour, so a
-        // big parcel still breaks into facets rather than reading as one slab.
-        // Most facets take the parcel colour untouched; only the tails of the
-        // field get shifted, so this reads as occasional patches rather than as
-        // constant speckle. What the three steps *are* is the palette's
-        // business — see [`Shade`].
-        let mottle = self.detail.fbm(wx / MOTTLE_SCALE, wz / MOTTLE_SCALE, 2);
-        let shade = if mottle > 0.26 {
-            Shade::Light
-        } else if mottle < -0.26 {
-            Shade::Dark
-        } else {
-            Shade::Plain
-        };
-
-        Surface::new(parcel, shade)
+        }
     }
 }
 
@@ -1981,41 +1986,54 @@ pub(crate) fn facet_water(
     awash.then_some(levels)
 }
 
-/// What every triangle of one chunk is painted, in the order
-/// [`protocol::ground::facets`] walks them — which is the order a payload
-/// carries them in, and the order a renderer builds its triangles in, so
-/// neither end has to be told twice.
+/// The material of every cell of one chunk, row-major from the chunk's lower
+/// corner — the order a payload carries them in.
 ///
-/// `heights` is what [`facet_heights`] returned for the same `base`. The ground
-/// is flat shaded, so one sample at a triangle's centre decides the whole of
-/// it, and the normal it is lit and classified by is the triangle's own.
+/// `heights` is what [`facet_heights`] returned for the same `base`, and the
+/// cell grid is the one those corners bound: cell `(ix, iz)` sits between
+/// corners `ix..=ix + 1` and `iz..=iz + 1`, so its centre is half a cell in
+/// from its lower corner.
+///
+/// The normal a cell is classified by is the one its four corners describe,
+/// not the generator's own gradient and not a triangle's. That is what keeps
+/// the answer independent of how anybody draws the cell: a client is free to
+/// split the square either way, or to draw it as a textured quad and never
+/// triangulate it at all, and the ground it draws will be made of the same
+/// stuff either way. It used to be a triangle's own normal, which quietly
+/// made the palette depend on a triangulation the wire no longer carries.
 pub(crate) fn facet_surfaces(
     base: Vec2,
     heights: &[f32],
-    surface: impl Fn(f32, f32, f32, Vec3) -> Surface,
-) -> Vec<Surface> {
+    surface: impl Fn(f32, f32, f32, Vec3) -> Tone,
+) -> Vec<Tone> {
     debug_assert_eq!(
         heights.len(),
         FACET_VERTS * FACET_VERTS,
         "not a chunk's corner grid"
     );
-    let corner = |(ix, iz): (usize, usize)| {
-        Vec3::new(
-            ix as f32 * FACET_METRES,
-            heights[iz * FACET_VERTS + ix],
-            iz as f32 * FACET_METRES,
-        )
-    };
+    let corner = |ix: usize, iz: usize| heights[iz * FACET_VERTS + ix];
 
-    protocol::ground::facets()
-        .map(|facet| {
-            let tri = facet.corners.map(corner);
-            // Counter-clockwise seen from above, so this points upwards.
-            let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
-            let mid = (tri[0] + tri[1] + tri[2]) / 3.0;
-            surface(base.x + mid.x, base.y + mid.z, mid.y, normal)
-        })
-        .collect()
+    let mut tones = Vec::with_capacity(FACET_CELLS);
+    for iz in 0..FACET_QUADS {
+        for ix in 0..FACET_QUADS {
+            let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
+            let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
+
+            // The bilinear patch's slope at the cell's centre, which is the
+            // mean of the two edges running each way. Written from the four
+            // corners the payload already carries rather than sampled afresh:
+            // a client reading the same heights arrives at the same normal,
+            // so the ground it lights matches the ground it was sent.
+            let along = (se + ne - sw - nw) / (2.0 * FACET_METRES);
+            let across = (nw + ne - sw - se) / (2.0 * FACET_METRES);
+            let normal = Vec3::new(-along, 1.0, -across).normalize();
+
+            let mid = Vec2::new(ix as f32 + 0.5, iz as f32 + 0.5) * FACET_METRES;
+            let height = (sw + se + nw + ne) / 4.0;
+            tones.push(surface(base.x + mid.x, base.y + mid.y, height, normal));
+        }
+    }
+    tones
 }
 
 /// Dimensions of a [`COAST_GRID`]-spaced grid covering a map of `tiles`,
@@ -3409,8 +3427,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x0004_82DB_6935_EB1Au64),
-            (99, UVec2::new(3, 2), 0x9ACA_8CDE_6967_D424u64),
+            (20_040_112u32, UVec2::new(4, 4), 0x26D2_9EE3_91D2_44AFu64),
+            (99, UVec2::new(3, 2), 0x6896_DA0D_73E9_E3D8u64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -3436,8 +3454,7 @@ mod tests {
                     let normal = gen.normal(wx, wz);
                     let surface = gen.surface(wx, wz, height, normal);
                     values.extend([height, normal.x, normal.y, normal.z]);
-                    painted.push(surface.tone as i64);
-                    painted.push(surface.shade as i64);
+                    painted.push(surface as i64);
                     painted.push(
                         gen.lake_level(wx, wz)
                             .map_or(protocol::ground::NO_WATER, protocol::ground::quantize)
@@ -3828,37 +3845,42 @@ mod tests {
     }
 
     #[test]
-    fn only_the_patchwork_is_ever_shaded() {
-        // The shade steps exist to break a big parcel of one colour into
-        // facets, so they belong to the parcels and nowhere else. A shaded
-        // shore or a shaded crag would be the mottle field reaching somewhere
-        // it has no business being.
-        let (config, gen) = generator(4, 4, 77);
+    fn every_parcel_of_every_band_gets_used() {
+        // The thresholds are set off the noise field's measured distribution
+        // rather than its nominal range, which is the kind of number that
+        // rots silently: a field whose spread moves leaves the outer buckets
+        // unreachable, and the map simply comes out with fewer colours in it
+        // than the palette has. That has happened before — a mask cut at 0.55
+        // on a field whose 99th percentile was 0.38 — so the palette rows are
+        // held to actually being used.
+        //
+        // On a map big enough to carry all three bands. A small island is all
+        // lowland and honestly has no moor row to use, so asking it for heath
+        // would be holding the generator to something untrue.
+        let (config, gen) = generator(12, 12, 77);
         let half = config.half_extent();
-        let parcels: std::collections::HashSet<u8> = LOWLAND_PARCELS
-            .iter()
-            .chain(&MOOR_PARCELS)
-            .chain(&MOUNTAIN_PARCELS)
-            .map(|tone| *tone as u8)
-            .collect();
 
-        let mut shaded = 0;
-        for iz in (0..config.tiles().y).step_by(4) {
-            for ix in (0..config.tiles().x).step_by(4) {
+        let mut seen = std::collections::HashSet::new();
+        for iz in (0..config.tiles().y).step_by(2) {
+            for ix in (0..config.tiles().x).step_by(2) {
                 let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                 let height = gen.height(wx, wz);
-                let surface = gen.surface(wx, wz, height, gen.normal(wx, wz));
-                if surface.shade != Shade::Plain {
-                    shaded += 1;
-                    assert!(
-                        parcels.contains(&(surface.tone as u8)),
-                        "{:?} was shaded, and only the patchwork may be",
-                        surface.tone
-                    );
-                }
+                seen.insert(gen.surface(wx, wz, height, gen.normal(wx, wz)) as u8);
             }
         }
-        assert!(shaded > 0, "a whole map with no mottle at all is not a map");
+
+        for (band, parcels) in [
+            ("lowland", LOWLAND_PARCELS),
+            ("moor", MOOR_PARCELS),
+            ("mountain", MOUNTAIN_PARCELS),
+        ] {
+            for parcel in parcels {
+                assert!(
+                    seen.contains(&(parcel as u8)),
+                    "no {parcel:?} anywhere on this map, though the {band} row calls for it"
+                );
+            }
+        }
     }
 
     /// A three-row grid whose rows all read the same, so the flood behaves
@@ -4087,7 +4109,7 @@ mod tests {
                     if height >= level {
                         continue;
                     }
-                    let tone = gen.surface(here, wz, height, gen.normal(here, wz)).tone;
+                    let tone = gen.surface(here, wz, height, gen.normal(here, wz));
                     painted += 1;
                     assert!(
                         fresh.contains(&tone),
@@ -4125,7 +4147,7 @@ mod tests {
             let half = config.chunks.as_vec2() * CHUNK_METRES / 2.0;
             let fresh = |wx: f32, wz: f32| {
                 let height = gen.height(wx, wz);
-                let tone = gen.surface(wx, wz, height, gen.normal(wx, wz)).tone;
+                let tone = gen.surface(wx, wz, height, gen.normal(wx, wz));
                 matches!(tone, Tone::Marsh | Tone::RockDark)
             };
             let drowned = |wx: f32, wz: f32| {

@@ -11,11 +11,16 @@
 //! the generator that samples it. Drawing at some other density — level of
 //! detail, say — is a change to the wire.
 //!
-//! And the **palette is the format**: a [`Surface`] is a byte and
-//! [`Surface::color`] is what it means. That keeps a chunk's surfaces to a
-//! byte per triangle instead of three floats — a quarter of the payload
-//! rather than three times it — and keeps the two ends unable to disagree
-//! about what sand looks like.
+//! What travels for the ground's *appearance* is a [`Tone`] per cell, one
+//! byte, naming a material rather than a colour. That much is the format: two
+//! builds numbering the tones differently would read each other's beaches as
+//! moorland.
+//!
+//! [`Tone::color`] is **not** the format. It is a reference rendering — the
+//! flat palette this world is authored in, which mapgen draws maps out of and
+//! a client may draw ground out of if it wants to. A client that paints its
+//! ground some other way, from textures say, is not disagreeing with anything;
+//! it is answering a question the wire never asked.
 //!
 //! The same goes for **standing water**. The sea is a plane at zero any client
 //! can draw, but a lake stands at a height decided by a rim saddle that may be
@@ -67,18 +72,22 @@ pub const OCEAN_DEPTH: f32 = 8.0;
 /// pushed the frame prefix to a u32.
 pub const FACET_METRES: f32 = 1.0;
 
-/// Quads along one edge of a chunk's facet grid.
+/// Cells along one edge of a chunk's ground grid.
 pub const FACET_QUADS: usize = (CHUNK_METRES / FACET_METRES) as usize;
 
-/// Corners along one edge of that grid — one more than the quads, since the
+/// Corners along one edge of that grid — one more than the cells, since the
 /// corners at both ends are shared.
 pub const FACET_VERTS: usize = FACET_QUADS + 1;
 
-/// Triangles in one chunk. Two per quad, and each gets its own [`Surface`]:
-/// flat shading means there is nothing to interpolate between a triangle's
-/// corners, so the colour is a property of the triangle rather than of the
-/// grid.
-pub const FACET_TRIS: usize = FACET_QUADS * FACET_QUADS * 2;
+/// Cells in one chunk, each of which carries a [`Tone`].
+///
+/// The wire says what a square metre of ground *is* and stops there. How that
+/// square is drawn — two triangles split one way or the other, a textured
+/// quad, nothing at all at distance — is the drawing end's own business, and
+/// the format deliberately holds no opinion about it. That is what lets one
+/// client flat-shade the ground and another paint it while both draw the same
+/// world.
+pub const FACET_CELLS: usize = FACET_QUADS * FACET_QUADS;
 
 // --- Heights ----------------------------------------------------------------
 
@@ -123,11 +132,11 @@ pub fn dequantize(stored: u16) -> f32 {
 
 // --- The palette ------------------------------------------------------------
 
-/// The ground palette. Small and flat on purpose — every triangle gets exactly
-/// one of these, so the whole world is drawn in eighteen colours plus three
-/// shade steps. Saturated well past anything natural, because flat shading has
-/// no texture or gradient to carry the picture; the colour has to do that work
-/// on its own.
+/// The ground materials. Small and flat on purpose — every cell of ground is
+/// exactly one of these, so the whole world is made of eighteen substances.
+/// In the reference palette they are saturated well past anything natural,
+/// because flat shading has no texture or gradient to carry the picture and
+/// the colour has to do that work on its own.
 ///
 /// The order is the wire's: a tone travels as its own number, so adding to the
 /// end is the cheap change and anything shuffled or removed repaints the world
@@ -255,90 +264,17 @@ impl Tone {
         })
     }
 
-    /// The sRGB this tone is drawn in, before any shade step.
+    /// The byte this tone travels as.
+    pub fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// The sRGB this tone is drawn in, in the reference palette.
+    ///
+    /// See the module docs: this is a rendering the wire ships alongside the
+    /// materials, not a thing the two ends have to agree about.
     pub fn color(self) -> Vec3 {
         TONES[self as usize]
-    }
-}
-
-/// A lighter or darker cut of the same tone, so a big parcel of one colour
-/// still breaks into facets rather than reading as one slab.
-///
-/// Three steps and not a multiplier curve: a gradient here would undo the
-/// point of a quantised palette. Most triangles are [`Shade::Plain`] — only
-/// the tails of the field behind it get shifted, so this reads as occasional
-/// patches rather than as constant speckle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum Shade {
-    Dark = 0,
-    Plain = 1,
-    Light = 2,
-}
-
-impl Shade {
-    /// What this step does to a tone.
-    fn factor(self) -> f32 {
-        match self {
-            Self::Dark => 0.92,
-            Self::Plain => 1.0,
-            Self::Light => 1.09,
-        }
-    }
-}
-
-/// What one triangle of ground is painted: a tone, and how bright a cut of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Surface {
-    pub tone: Tone,
-    pub shade: Shade,
-}
-
-impl Surface {
-    /// A tone at its plain shade, which is what everything but the vegetated
-    /// bands ever wants.
-    pub const fn plain(tone: Tone) -> Self {
-        Self {
-            tone,
-            shade: Shade::Plain,
-        }
-    }
-
-    pub const fn new(tone: Tone, shade: Shade) -> Self {
-        Self { tone, shade }
-    }
-
-    /// The sRGB this surface is drawn in.
-    ///
-    /// Clamped so that a light cut of a bright tone can never hand a renderer
-    /// a colour past white, whatever that renderer would do with one. No tone
-    /// in the current palette actually reaches the clamp — the tests hold
-    /// them all inside it — so this is a guard on the arithmetic rather than
-    /// a thing anyone sees.
-    pub fn color(self) -> Vec3 {
-        (self.tone.color() * self.shade.factor()).clamp(Vec3::ZERO, Vec3::ONE)
-    }
-
-    /// The byte this travels as: the tone in the high bits, the shade in the
-    /// low two. Eighteen tones and three shades, so a valid surface is always
-    /// under 76 and a good part of the byte is spare.
-    fn to_byte(self) -> u8 {
-        ((self.tone as u8) << 2) | self.shade as u8
-    }
-
-    /// The surface a byte names, or `None` if it names none — an unknown tone,
-    /// or the fourth shade that does not exist.
-    fn from_byte(byte: u8) -> Option<Self> {
-        let shade = match byte & 0b11 {
-            0 => Shade::Dark,
-            1 => Shade::Plain,
-            2 => Shade::Light,
-            _ => return None,
-        };
-        Some(Self {
-            tone: Tone::from_byte(byte >> 2)?,
-            shade,
-        })
     }
 }
 
@@ -348,10 +284,10 @@ impl Surface {
 ///
 /// Everything a renderer needs and nothing else. The corners are a
 /// [`FACET_VERTS`]-square grid sampled from the chunk's lower corner outwards
-/// at [`FACET_METRES`] spacing, row-major; the surfaces are one per triangle,
-/// in the order the quads are walked and each quad's two triangles are split.
-/// [`facets`] is the walk both ends build from, so neither has to restate the
-/// order in prose.
+/// at [`FACET_METRES`] spacing, row-major; the tones are one per cell on the
+/// [`FACET_QUADS`]-square grid those corners bound, also row-major. The two
+/// grids are offset half a cell from each other, which is simply what it means
+/// for corners to bound cells.
 ///
 /// A chunk of open ocean has no payload at all — see
 /// [`crate::ToClient::Chunk`]. What arrives here is ground worth drawing.
@@ -360,8 +296,9 @@ pub struct ChunkPayload {
     /// `FACET_VERTS * FACET_VERTS` corner heights, quantised — see
     /// [`quantize`].
     pub heights: Vec<u16>,
-    /// [`FACET_TRIS`] surfaces, one per triangle.
-    pub surfaces: Vec<Surface>,
+    /// [`FACET_CELLS`] tones, one per cell, row-major from the chunk's lower
+    /// corner.
+    pub surfaces: Vec<Tone>,
     /// Where standing water above sea level covers this chunk, and how high
     /// it stands: one quantised level per corner on the same grid as
     /// [`ChunkPayload::heights`], or `None` for a chunk with no lake on or
@@ -417,7 +354,7 @@ pub struct ChunkPayload {
 ///
 /// The tree itself is the drawing end's business — this says where one is and
 /// how it is turned, not what a palm looks like, in the same way the wire
-/// names a [`Tone`] rather than sending a colour per triangle.
+/// names a [`Tone`] rather than sending a colour per cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plant {
     /// Which kind is standing here, and so which model a client puts on the
@@ -573,12 +510,12 @@ impl Plant {
 /// collide with.
 pub const NO_WATER: u16 = 0;
 
-/// Bytes a chunk's heights and surfaces occupy on the wire: two per corner
-/// height, one per triangle. Nothing is compressed — see the module docs on
-/// the grid being the format, and note that delta-coding the heights and
-/// run-coding the surfaces would take most of this back if the wire ever
-/// needs it to.
-pub const PAYLOAD_BYTES: usize = FACET_VERTS * FACET_VERTS * 2 + FACET_TRIS;
+/// Bytes a chunk's heights and tones occupy on the wire: two per corner
+/// height, one per cell. Nothing is compressed — see the module docs on the
+/// grid being the format, and note that delta-coding the heights and
+/// run-coding the tones would take most of this back if the wire ever needs
+/// it to.
+pub const PAYLOAD_BYTES: usize = FACET_VERTS * FACET_VERTS * 2 + FACET_CELLS;
 
 /// Bytes a chunk's water grid adds when it carries one — two per corner,
 /// like the heights it is compared against.
@@ -600,7 +537,7 @@ impl ChunkPayload {
     pub fn well_formed(&self) -> bool {
         let corners = FACET_VERTS * FACET_VERTS;
         self.heights.len() == corners
-            && self.surfaces.len() == FACET_TRIS
+            && self.surfaces.len() == FACET_CELLS
             && self
                 .water
                 .as_ref()
@@ -624,7 +561,7 @@ impl ChunkPayload {
         for height in &self.heights {
             out.extend_from_slice(&height.to_le_bytes());
         }
-        out.extend(self.surfaces.iter().map(|s| s.to_byte()));
+        out.extend(self.surfaces.iter().map(|tone| tone.to_byte()));
         for level in self.water.iter().flatten() {
             out.extend_from_slice(&level.to_le_bytes());
         }
@@ -636,7 +573,7 @@ impl ChunkPayload {
     /// Reads a payload from exactly [`payload_bytes`] of them — `water` and
     /// `plants` say which length, and come from the flag and the count the
     /// caller has already read. `None` if the bytes are not that many, or if
-    /// any surface or plant byte names nothing this build knows.
+    /// any tone or plant byte names nothing this build knows.
     ///
     /// The length is checked rather than asserted because it is the one thing
     /// here a *frame* can be wrong about: the flag, the count and the length
@@ -654,13 +591,13 @@ impl ChunkPayload {
                 .collect::<Vec<u16>>()
         };
         let (heights, rest) = bytes.split_at(FACET_VERTS * FACET_VERTS * 2);
-        let (surfaces, rest) = rest.split_at(FACET_TRIS);
+        let (surfaces, rest) = rest.split_at(FACET_CELLS);
         let (water, plants) = rest.split_at(rest.len() - plants * PLANT_BYTES);
         Some(Self {
             heights: levels(heights),
             surfaces: surfaces
                 .iter()
-                .map(|byte| Surface::from_byte(*byte))
+                .map(|byte| Tone::from_byte(*byte))
                 .collect::<Option<_>>()?,
             water: (!water.is_empty()).then(|| levels(water)),
             plants: plants
@@ -671,45 +608,6 @@ impl ChunkPayload {
     }
 }
 
-/// One triangle of a chunk's facet grid: the three corners it is built from,
-/// as indices into a payload's height grid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Facet {
-    /// The quad this belongs to, in grid coordinates from the chunk's lower
-    /// corner.
-    pub quad: (usize, usize),
-    /// The three corners, each `(ix, iz)` into the height grid, wound
-    /// counter-clockwise seen from above so the face normal points up.
-    pub corners: [(usize, usize); 3],
-}
-
-/// Every triangle of a chunk, in the order a payload's surfaces are in.
-///
-/// The generator paints through this walk and a renderer builds through it, so
-/// the two cannot fall out of step over which triangle a surface belongs to —
-/// the ordering is written once, here, rather than twice in prose.
-///
-/// Which way a quad is split alternates like a checkerboard. Splitting every
-/// quad the same way lines the facets up into an obvious herringbone across
-/// open ground; alternating breaks that up without costing anything.
-pub fn facets() -> impl Iterator<Item = Facet> {
-    (0..FACET_QUADS).flat_map(|iz| {
-        (0..FACET_QUADS).flat_map(move |ix| {
-            let (tl, tr) = ((ix, iz), (ix + 1, iz));
-            let (bl, br) = ((ix, iz + 1), (ix + 1, iz + 1));
-            let split = if (ix + iz).is_multiple_of(2) {
-                [[tl, bl, tr], [tr, bl, br]]
-            } else {
-                [[tl, bl, br], [tl, br, tr]]
-            };
-            split.into_iter().map(move |corners| Facet {
-                quad: (ix, iz),
-                corners,
-            })
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,8 +616,8 @@ mod tests {
     fn the_grid_divides_a_chunk_exactly() {
         assert_eq!(FACET_QUADS as f32 * FACET_METRES, CHUNK_METRES);
         assert_eq!(FACET_VERTS, 129);
-        assert_eq!(FACET_TRIS, 32_768);
-        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 32_768);
+        assert_eq!(FACET_CELLS, 16_384);
+        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_384);
         assert_eq!(WATER_BYTES, 129 * 129 * 2);
         assert_eq!(payload_bytes(false, 0), PAYLOAD_BYTES);
         assert_eq!(payload_bytes(true, 0), PAYLOAD_BYTES + WATER_BYTES);
@@ -764,69 +662,44 @@ mod tests {
     }
 
     #[test]
-    fn every_surface_survives_its_byte() {
-        for tone in 0..TONES.len() as u8 {
-            for shade in [Shade::Dark, Shade::Plain, Shade::Light] {
-                let surface = Surface::new(Tone::from_byte(tone).expect("a tone"), shade);
-                assert_eq!(Surface::from_byte(surface.to_byte()), Some(surface));
-            }
+    fn every_tone_survives_its_byte() {
+        for byte in 0..TONES.len() as u8 {
+            let tone = Tone::from_byte(byte).expect("a tone");
+            assert_eq!(tone.to_byte(), byte);
+            assert_eq!(Tone::from_byte(tone.to_byte()), Some(tone));
         }
-        // The fourth shade, and a tone past the end of the table.
-        assert_eq!(Surface::from_byte(0b11), None);
-        assert_eq!(Surface::from_byte((TONES.len() as u8) << 2), None);
+        // One past the end of the table names nothing.
+        assert_eq!(Tone::from_byte(TONES.len() as u8), None);
+        assert_eq!(Tone::from_byte(u8::MAX), None);
     }
 
     #[test]
-    fn the_palette_stays_inside_the_colours_there_are() {
-        // Every combination is a colour a renderer can use, clamp and all.
-        for tone in 0..TONES.len() as u8 {
-            for shade in [Shade::Dark, Shade::Plain, Shade::Light] {
-                let c = Surface::new(Tone::from_byte(tone).expect("a tone"), shade).color();
-                assert!(
-                    c.cmpge(Vec3::ZERO).all() && c.cmple(Vec3::ONE).all(),
-                    "tone {tone} at {shade:?} is {c}"
-                );
-            }
-        }
-
-        // And nothing reaches the clamp: a lighter cut of every tone still
-        // moves the colour by the full step, so a shaded parcel really does
-        // break into three.
-        for tone in 0..TONES.len() as u8 {
-            let tone = Tone::from_byte(tone).expect("a tone");
-            let lit = tone.color() * Shade::Light.factor();
+    fn the_reference_palette_stays_inside_the_colours_there_are() {
+        // Not a claim about the format — a client may paint the ground any
+        // way it likes. It is a claim about the palette this world is
+        // authored in, which mapgen renders straight out of: a colour outside
+        // the unit cube is one somebody has typed wrong.
+        for byte in 0..TONES.len() as u8 {
+            let tone = Tone::from_byte(byte).expect("a tone");
+            let c = tone.color();
             assert!(
-                lit.cmple(Vec3::ONE).all(),
-                "{tone:?} is the wrong side of white when lightened"
+                c.cmpge(Vec3::ZERO).all() && c.cmple(Vec3::ONE).all(),
+                "{tone:?} is {c}"
             );
         }
     }
 
     #[test]
-    fn the_walk_covers_every_triangle_of_the_grid() {
-        let all: Vec<Facet> = facets().collect();
-        assert_eq!(all.len(), FACET_TRIS);
-
-        // Every corner index is on the grid, and each quad contributes two
-        // triangles that between them use all four of its corners.
-        for pair in all.chunks_exact(2) {
-            assert_eq!(pair[0].quad, pair[1].quad);
-            let (ix, iz) = pair[0].quad;
-            let mut used: Vec<(usize, usize)> = pair
-                .iter()
-                .flat_map(|facet| facet.corners)
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            used.sort();
-            assert_eq!(
-                used,
-                [(ix, iz), (ix, iz + 1), (ix + 1, iz), (ix + 1, iz + 1)]
-                    .into_iter()
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            );
+    fn no_two_tones_are_the_same_colour() {
+        // Eighteen materials that a reader cannot tell apart would be
+        // eighteen materials for nothing. Sharpest pair in the palette is
+        // some way above this, so it is a guard against a typo rather than a
+        // threshold anything is tuned against.
+        for (a, first) in TONES.iter().enumerate() {
+            for (b, second) in TONES.iter().enumerate().skip(a + 1) {
+                let apart = (*first - *second).length();
+                assert!(apart > 0.02, "tones {a} and {b} are {apart} apart");
+            }
         }
     }
 
@@ -857,13 +730,8 @@ mod tests {
             heights: (0..FACET_VERTS * FACET_VERTS)
                 .map(|i| (i * 7 % 65_535) as u16)
                 .collect(),
-            surfaces: (0..FACET_TRIS)
-                .map(|i| {
-                    Surface::new(
-                        Tone::from_byte((i % 16) as u8).expect("a tone"),
-                        [Shade::Dark, Shade::Plain, Shade::Light][i % 3],
-                    )
-                })
+            surfaces: (0..FACET_CELLS)
+                .map(|i| Tone::from_byte((i % TONES.len()) as u8).expect("a tone"))
                 .collect(),
             water: water.then(|| {
                 (0..FACET_VERTS * FACET_VERTS)
@@ -966,10 +834,10 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_with_a_surface_from_the_future_is_refused() {
-        // The last surface byte, which is the last byte of a dry payload and
+    fn a_payload_with_a_tone_from_the_future_is_refused() {
+        // The last tone byte, which is the last byte of a dry payload and
         // sits in the middle of a watered one — so this also catches a reader
-        // that stopped checking surfaces once it knew there was water to come.
+        // that stopped checking tones once it knew there was water to come.
         for water in [false, true] {
             let mut bytes = Vec::new();
             a_payload(water, 2).put(&mut bytes);

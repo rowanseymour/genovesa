@@ -185,7 +185,7 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
     // why the tone is asked for rather than a depth: out in the weed a cell
     // has to beat [`OFFSHORE`] of the threshold it has already beaten, so the
     // stand crowds the waterline and straggles away from it.
-    let thinner = match island.surface(at.x, at.y, height, normal).tone {
+    let thinner = match island.surface(at.x, at.y, height, normal) {
         Tone::Marsh => 1.0,
         Tone::Shoal => OFFSHORE,
         _ => return None,
@@ -305,9 +305,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    island
-                        .surface(at.x, at.y, height, island.normal(at.x, at.y))
-                        .tone,
+                    island.surface(at.x, at.y, height, island.normal(at.x, at.y)),
                     Tone::Marsh | Tone::Shoal
                 ),
                 "a mangrove stands on ground a lake has no say over"

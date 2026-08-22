@@ -1127,7 +1127,7 @@ mod tests {
     use bevy::input::mouse::AccumulatedMouseScroll;
     use bevy::state::app::StatesPlugin;
     use bevy::time::TimePlugin;
-    use protocol::ground::{quantize, ChunkPayload, Surface, Tone, FACET_TRIS, FACET_VERTS};
+    use protocol::ground::{quantize, ChunkPayload, Tone, FACET_CELLS, FACET_VERTS};
 
     /// A chunk standing well clear of the water.
     fn a_hill() -> ChunkPayload {
@@ -1143,7 +1143,7 @@ mod tests {
     fn payload(height: f32) -> ChunkPayload {
         ChunkPayload {
             heights: vec![quantize(height); FACET_VERTS * FACET_VERTS],
-            surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
+            surfaces: vec![Tone::Grass; FACET_CELLS],
             water: None,
             plants: Vec::new(),
         }

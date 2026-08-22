@@ -130,7 +130,7 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
     // the reason the palms' sand test gives: what a plant stands on has to be
     // the ground a player can *see*, and there is one thing that decides that.
     if !matches!(
-        island.surface(at.x, at.y, height, normal).tone,
+        island.surface(at.x, at.y, height, normal),
         Tone::Forest
             | Tone::GrassDark
             | Tone::Grass

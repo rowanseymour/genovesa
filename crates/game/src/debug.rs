@@ -692,10 +692,10 @@ mod tests {
     /// A chunk of flat ground, which is all this needs of one: the readout
     /// counts chunks, it does not look at them.
     fn a_chunk() -> protocol::ChunkPayload {
-        use protocol::ground::{quantize, Surface, Tone, FACET_TRIS, FACET_VERTS};
+        use protocol::ground::{quantize, Tone, FACET_CELLS, FACET_VERTS};
         protocol::ChunkPayload {
             heights: vec![quantize(1.0); FACET_VERTS * FACET_VERTS],
-            surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
+            surfaces: vec![Tone::Grass; FACET_CELLS],
             water: None,
             plants: Vec::new(),
         }

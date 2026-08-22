@@ -44,7 +44,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, UVec2, Vec2, Vec3};
-use protocol::ground::{quantize, ChunkPayload, Surface};
+use protocol::ground::{quantize, ChunkPayload, Tone};
 
 use crate::noise::smoothstep;
 use crate::terrain::{
@@ -425,7 +425,7 @@ impl Island {
 
     /// What the ground is painted at a world point, matching
     /// [`Island::height`].
-    pub fn surface(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Surface {
+    pub fn surface(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Tone {
         let local = Vec2::new(wx, wz) - self.spec.centre();
         self.generator.surface(local.x, local.y, height, normal)
     }
@@ -1349,10 +1349,7 @@ mod tests {
                 .heights
                 .iter()
                 .flat_map(|h| h.to_le_bytes())
-                .chain(payload.surfaces.iter().map(|s| {
-                    // Tone and shade in one byte, as the wire packs them.
-                    ((s.tone as u8) << 2) | s.shade as u8
-                }))
+                .chain(payload.surfaces.iter().map(|tone| tone.to_byte()))
                 .chain(payload.water.iter().flatten().flat_map(|w| w.to_le_bytes())),
         );
 
@@ -1362,7 +1359,7 @@ mod tests {
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0xD15B_BF89_88DF_E229, "the ground changed");
         assert_eq!(
-            sent, 0x280F_62FA_7F47_17E3,
+            sent, 0x9129_7941_6200_F15E,
             "what a client would be sent changed"
         );
     }

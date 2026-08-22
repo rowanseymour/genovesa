@@ -38,9 +38,8 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, facets, ChunkPayload, Plant, Surface, Tone, CHUNK_METRES, FACET_METRES,
-    FACET_QUADS, FACET_TRIS, FACET_VERTS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH,
-    SEA_WATER,
+    chunk_at, dequantize, ChunkPayload, Plant, Tone, CHUNK_METRES, FACET_CELLS, FACET_METRES,
+    FACET_QUADS, FACET_VERTS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
 };
 
 use crate::camera::{MapCamera, View};
@@ -202,7 +201,7 @@ pub struct Ground {
 struct Arrival {
     chunk: IVec2,
     heights: Arc<[f32]>,
-    surfaces: Vec<Surface>,
+    surfaces: Vec<Tone>,
     /// The chunk's standing water, still quantised: it is only ever compared
     /// against [`NO_WATER`] and turned into a height once per quad drawn, so
     /// there is nothing to be gained by dequantising a whole grid of it the
@@ -499,45 +498,74 @@ struct OceanFloor;
 
 /// Builds one chunk's mesh from what the server sent about it.
 ///
-/// The geometry is flat shaded: every triangle carries its own normal and its
-/// own single colour, so no vertex is shared between two triangles. That costs
-/// three vertices per triangle instead of roughly one — the price of flat
-/// shading with per-facet colour, paid in vertices rather than in the
-/// texture and gradient machinery the look exists to refuse. It also
-/// means chunks need no border samples to meet cleanly — there are no shared
-/// normals to disagree about.
+/// The wire hands over a height per corner and a material per cell, and stops
+/// there — how a square metre of ground becomes triangles is this client's
+/// decision and nobody else's. This one splits every cell in two and
+/// flat-shades the pair: both triangles carry the cell's own colour and the
+/// normal of the square they came from, so a cell reads as one flat lozenge
+/// of ground rather than as two triangles that happen to match.
+///
+/// Which diagonal a cell is split on alternates like a checkerboard. Splitting
+/// every cell the same way lines them up into an obvious herringbone across
+/// open ground; alternating breaks that up and costs nothing. The parity runs
+/// off the cell's index within the chunk, and [`CELLS`] is even, so the
+/// pattern carries across a chunk boundary without a phase step.
+///
+/// No vertex is shared between triangles: that costs three vertices per
+/// triangle instead of roughly one — the price of flat shading with per-cell
+/// colour, paid in vertices rather than in the texture and gradient machinery
+/// the look exists to refuse. It also means chunks need no border samples to
+/// meet cleanly, there being no shared normals to disagree about.
 ///
 /// Deliberately un-indexed: with no vertex shared between triangles an index
 /// buffer would be 0, 1, 2, 3, … and save nothing.
-fn chunk_mesh(heights: &[f32], surfaces: &[Surface]) -> Mesh {
-    let count = FACET_TRIS * 3;
+fn chunk_mesh(heights: &[f32], surfaces: &[Tone]) -> Mesh {
+    let count = FACET_CELLS * 6;
     let mut positions = Vec::with_capacity(count);
     let mut normals = Vec::with_capacity(count);
     let mut colors = Vec::with_capacity(count);
 
-    for (facet, surface) in facets().zip(surfaces) {
-        let tri = facet.corners.map(|(cx, cz)| {
-            Vec3::new(
-                cx as f32 * FACET_METRES,
-                heights[cz * FACET_VERTS + cx],
-                cz as f32 * FACET_METRES,
-            )
-        });
-        // The corners are wound counter-clockwise seen from above, which is
-        // what puts the face normal upwards.
-        let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
+    let corner = |cx: usize, cz: usize| {
+        Vec3::new(
+            cx as f32 * FACET_METRES,
+            heights[cz * FACET_VERTS + cx],
+            cz as f32 * FACET_METRES,
+        )
+    };
+
+    for (cell, tone) in surfaces.iter().enumerate() {
+        let (ix, iz) = (cell % FACET_QUADS, cell / FACET_QUADS);
+        let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
+        let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
+
+        // Counter-clockwise seen from above, which is what puts the face
+        // normals upwards.
+        let split = if (ix + iz).is_multiple_of(2) {
+            [[sw, nw, se], [se, nw, ne]]
+        } else {
+            [[sw, nw, ne], [sw, ne, se]]
+        };
+
+        // The square's own normal, not each triangle's. The generator
+        // classified the cell by this same normal — the mean slope of its four
+        // corners — so lighting it this way is what makes a crag look as steep
+        // as the palette says it is. It also stops a cell whose diagonal folds
+        // reading as two facets of different brightness.
+        let along = (se.y + ne.y - sw.y - nw.y) / (2.0 * FACET_METRES);
+        let across = (nw.y + ne.y - sw.y - se.y) / (2.0 * FACET_METRES);
+        let normal = Vec3::new(-along, 1.0, -across).normalize();
 
         // Vertex colours are consumed in linear space by the PBR shader; the
-        // palette is authored in sRGB.
-        let srgb = surface.color();
+        // reference palette is authored in sRGB.
+        let srgb = tone.color();
         let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
         let color = [linear.red, linear.green, linear.blue, 1.0];
 
         // No UVs: nothing binds a texture to the ground, and at a hundred
         // thousand vertices a chunk an attribute carried "for later" is
         // three-quarters of a megabyte of dead weight on every copy.
-        for corner in tri {
-            positions.push([corner.x, corner.y, corner.z]);
+        for vertex in split.into_iter().flatten() {
+            positions.push([vertex.x, vertex.y, vertex.z]);
             normals.push([normal.x, normal.y, normal.z]);
             colors.push(color);
         }
@@ -976,7 +1004,7 @@ fn within(chunk: IVec2, focus: Vec2, radius: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::ground::{quantize, Shade};
+    use protocol::ground::quantize;
 
     /// A payload of ground with a distinctive shape: a plane tilted along both
     /// axes, so that every corner has a different height and any transposed or
@@ -990,19 +1018,19 @@ mod tests {
                     quantize(ix as f32 + 10.0 * iz as f32)
                 })
                 .collect(),
-            surfaces: vec![Surface::new(Tone::Grass, Shade::Plain); FACET_TRIS],
+            surfaces: vec![Tone::Grass; FACET_CELLS],
             water: None,
             plants: Vec::new(),
         }
     }
 
     #[test]
-    fn a_chunk_mesh_is_two_flat_triangles_per_quad() {
+    fn a_chunk_mesh_is_one_flat_lozenge_per_cell() {
         let payload = a_slope();
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
         let mesh = chunk_mesh(&heights, &payload.surfaces);
 
-        assert_eq!(mesh.count_vertices(), FACET_TRIS * 3);
+        assert_eq!(mesh.count_vertices(), FACET_CELLS * 6);
         assert!(
             mesh.indices().is_none(),
             "flat shading needs no index buffer"
@@ -1018,29 +1046,80 @@ mod tests {
             other => panic!("colours came out as {other:?}"),
         };
 
-        for tri in 0..normals.len() / 3 {
-            let i = tri * 3;
-            for corner in 1..3 {
+        // Six vertices to a cell, and all six agree — which is the whole
+        // point of the cell being the unit. Two triangles of one cell lit
+        // differently would show the diagonal the wire deliberately stopped
+        // carrying.
+        for cell in 0..FACET_CELLS {
+            let i = cell * 6;
+            for vertex in 1..6 {
                 assert_eq!(
                     normals[i],
-                    normals[i + corner],
-                    "triangle {tri} has a varying normal"
+                    normals[i + vertex],
+                    "cell {cell} is lit as two triangles"
                 );
                 assert_eq!(
                     colors[i],
-                    colors[i + corner],
-                    "triangle {tri} has a varying colour"
+                    colors[i + vertex],
+                    "cell {cell} is painted as two triangles"
                 );
             }
-            // A heightfield can never overhang, so every facet faces upwards.
-            assert!(normals[i][1] > 0.0, "triangle {tri} faces downwards");
+            // A heightfield can never overhang, so every cell faces upwards.
+            assert!(normals[i][1] > 0.0, "cell {cell} faces downwards");
+        }
+    }
+
+    #[test]
+    fn every_cell_is_split_on_the_diagonal_its_parity_calls_for() {
+        // The split alternates like a checkerboard, and the vertices are the
+        // only place that shows. A cell's six vertices cover its four corners
+        // either way; which corner appears *twice* is what says which diagonal
+        // was cut, and it has to alternate or the ground grows a herringbone.
+        let heights: Vec<f32> = (0..FACET_VERTS * FACET_VERTS)
+            .map(|i| (i % FACET_VERTS) as f32)
+            .collect();
+        let mesh = chunk_mesh(&heights, &vec![Tone::Grass; FACET_CELLS]);
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("three floats each");
+
+        for (ix, iz) in [(0, 0), (1, 0), (0, 1), (1, 1), (FACET_QUADS - 1, 0)] {
+            let i = (iz * FACET_QUADS + ix) * 6;
+            let xz: Vec<(u32, u32)> = (0..6)
+                .map(|v| (positions[i + v][0] as u32, positions[i + v][2] as u32))
+                .collect();
+            let mut counts = std::collections::BTreeMap::new();
+            for corner in &xz {
+                *counts.entry(*corner).or_insert(0) += 1;
+            }
+            assert_eq!(
+                counts.len(),
+                4,
+                "a cell used something other than 4 corners"
+            );
+            let shared: Vec<(u32, u32)> = counts
+                .iter()
+                .filter(|(_, n)| **n == 2)
+                .map(|(c, _)| *c)
+                .collect();
+            let cut = if (ix + iz).is_multiple_of(2) {
+                // sw--ne split: the two corners on that diagonal are shared.
+                vec![(ix as u32 + 1, iz as u32), (ix as u32, iz as u32 + 1)]
+            } else {
+                vec![(ix as u32, iz as u32), (ix as u32 + 1, iz as u32 + 1)]
+            };
+            let mut cut = cut;
+            cut.sort();
+            assert_eq!(shared, cut, "cell ({ix}, {iz}) was cut the wrong way");
         }
     }
 
     #[test]
     fn chunk_positions_are_local_so_the_transform_places_them() {
         let heights = vec![3.5f32; FACET_VERTS * FACET_VERTS];
-        let surfaces = vec![Surface::plain(Tone::Sand); FACET_TRIS];
+        let surfaces = vec![Tone::Sand; FACET_CELLS];
         let mesh = chunk_mesh(&heights, &surfaces);
 
         let positions = mesh

@@ -20,8 +20,7 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
 use protocol::ground::{
-    quantize, ChunkPayload, Surface, Tone, CHUNK_METRES, FACET_METRES, FACET_TRIS, FACET_VERTS,
-    OCEAN_DEPTH,
+    quantize, ChunkPayload, Tone, CHUNK_METRES, FACET_CELLS, FACET_METRES, FACET_VERTS, OCEAN_DEPTH,
 };
 
 use crate::bindings::{Action, KeyBindings};
@@ -336,7 +335,7 @@ fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
                 .any(|h| *h != quantize(-OCEAN_DEPTH))
                 .then(|| ChunkPayload {
                     heights,
-                    surfaces: vec![Surface::plain(Tone::Grass); FACET_TRIS],
+                    surfaces: vec![Tone::Grass; FACET_CELLS],
                     // Both test islands are smooth shapes with nothing to
                     // enclose a basin, so there is no lake on either to draw.
                     water: None,

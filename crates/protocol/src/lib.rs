@@ -33,7 +33,7 @@ use std::io::{self, Read, Write};
 
 use glam::{IVec2, Vec2};
 
-pub use ground::{ChunkPayload, Shade, Surface, Tone};
+pub use ground::{ChunkPayload, Tone};
 
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
@@ -1423,7 +1423,7 @@ impl<'a> Payload<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::ground::{Shade, Surface, Tone, FACET_TRIS, FACET_VERTS};
+    use super::ground::{Tone, FACET_CELLS, FACET_VERTS};
     use super::survey::{Coast, Mark, Soundings};
     use super::*;
 
@@ -1469,18 +1469,15 @@ mod tests {
             heights: (0..FACET_VERTS * FACET_VERTS)
                 .map(|i| (i * 601 % 65_521) as u16)
                 .collect(),
-            surfaces: (0..FACET_TRIS)
+            surfaces: (0..FACET_CELLS)
                 .map(|i| {
-                    Surface::new(
-                        [
-                            Tone::Seabed,
-                            Tone::Sand,
-                            Tone::Forest,
-                            Tone::Fell,
-                            Tone::Marsh,
-                        ][i % 5],
-                        [Shade::Dark, Shade::Plain, Shade::Light][i % 3],
-                    )
+                    [
+                        Tone::Seabed,
+                        Tone::Sand,
+                        Tone::Forest,
+                        Tone::Fell,
+                        Tone::Marsh,
+                    ][i % 5]
                 })
                 .collect(),
             water: None,
@@ -2244,14 +2241,15 @@ mod tests {
         // 1202 — little-endian pairs.
         assert_eq!(ground[15..21], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
 
-        // Surfaces start once the heights are done. The first is Seabed dark
-        // — tone 0 in the high bits, shade 0 in the low two — and the second
-        // Sand plain: tone 2, shade 1.
+        // Tones start once the heights are done, one byte per cell naming a
+        // material and nothing else — the low bits used to carry a brightness
+        // step, which is why a tone is its own number now rather than one
+        // shifted up by two.
         let surfaces = 15 + FACET_VERTS * FACET_VERTS * 2;
         assert_eq!(
             ground[surfaces..surfaces + 3],
-            [0b0000_0000, 0b0000_1001, 0b0001_0010],
-            "seabed/dark, sand/plain, forest/light"
+            [0, 2, 4],
+            "seabed, sand, forest"
         );
 
         // And the same chunk with a lake on it. The heights and the surfaces
@@ -2282,15 +2280,15 @@ mod tests {
         );
         assert_eq!(lake[13], 2, "the flag says there is water on this ground");
         assert_eq!(
-            lake[14..surfaces + FACET_TRIS],
-            ground[14..surfaces + FACET_TRIS],
+            lake[14..surfaces + FACET_CELLS],
+            ground[14..surfaces + FACET_CELLS],
             "the water moved the heights or the surfaces"
         );
 
         // The water grid starts once the surfaces are done, little-endian
         // pairs like the heights: level 0 is 0, level 1 is 907, level 2 is
         // 1814.
-        let water = surfaces + FACET_TRIS;
+        let water = surfaces + FACET_CELLS;
         assert_eq!(lake[water..water + 6], [0, 0, 0x8B, 0x03, 0x16, 0x07]);
 
         // And a plant, which goes on the end of everything else: its kind
