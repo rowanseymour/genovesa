@@ -17,6 +17,12 @@
 //! gait's own [`Stride::amount`] crossfades them, so a figure that stops
 //! settles into standing rather than freezing mid-stride.
 //!
+//! A swimmer is the same figure laid flat: [`posture`] eases the whole model
+//! prone while the walker is [`Swimming`], and the clips play on unchanged —
+//! the run seeked by ground covered reads as a stroke, and standing reads as
+//! treading water. A swim clip would be a third node on the blend, the day it
+//! earns one.
+//!
 //! Two things about the model the game cannot see for itself, both pinned by
 //! tests here: the figure carries its own colours on its facets, drawn with a
 //! white material that does nothing but let them through (glTF materials are
@@ -30,7 +36,7 @@
 //! Only their own movement is a step — which is what makes being carried and
 //! walking two readings of one number rather than a mode flag.
 
-use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_PI_2, TAU};
 
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
 use bevy::animation::{AnimationClip, AnimationPlayer};
@@ -39,7 +45,7 @@ use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 
 use crate::models::above;
-use crate::player::{Afoot, Player};
+use crate::player::{Afoot, Player, Swimming};
 use crate::{eased, AppState};
 
 /// The figure, rigged and with its two clips in it.
@@ -65,6 +71,26 @@ const STRIDE: f32 = 1.7;
 /// per second — see [`eased`]. A fraction of a second, so a step taken from
 /// standing is a step rather than a limb snapping out.
 const SETTLING: f32 = 9.0;
+
+/// How fast the figure lies down into a swim and finds its feet again, in
+/// e-foldings per second — slower than [`SETTLING`], going prone being the
+/// whole body rather than a limb.
+const RECLINING: f32 = 6.0;
+
+/// How far back along itself the prone figure slides, in metres: half the
+/// standing height, laid flat about its soles stretching the body its whole
+/// length ahead of the origin. The origin is the point the camera follows and
+/// the server is told, so a swimmer should be *at* it rather than trailing it
+/// by the feet. A fact about the model, and so held to it by
+/// `a_swimmer_lies_along_the_water_it_floats_in`.
+///
+/// How deep the body floats needs no number beside it. [`crate::player::walk`]
+/// puts the swimmer's origin exactly on the water, and a figure pitched face
+/// down about that origin already straddles it — belly under, back and head
+/// proud — because that is where the model's own bulk lies either side of the
+/// axis it stands on. The same test says so, since nothing else would notice
+/// a remodelled figure that floated on the sea or under it.
+const PRONE_SETBACK: f32 = 0.9;
 
 /// How big a step has to be, in metres, before it is not a step at all.
 /// Boarding a boat puts the player from wherever they stood onto its deck,
@@ -153,6 +179,7 @@ impl Plugin for FigurePlugin {
             (
                 dress,
                 conduct,
+                posture,
                 // After the walking itself: this reads the transform the
                 // player's own systems write, and reading it a frame late
                 // — or, worse, a frame late every other frame — is what
@@ -310,6 +337,40 @@ fn stride(time: Res<Time>, mut players: Query<(&Transform, &mut Stride)>) {
         stride.phase = (stride.phase + going * covered / STRIDE * TAU).rem_euclid(TAU);
         let target = if covered > STIRRING { 1.0 } else { 0.0 };
         stride.amount += (target - stride.amount) * eased(SETTLING, dt);
+    }
+}
+
+/// Lays the figure prone while its walker is [`Swimming`] and stands it back
+/// up when their feet find the ground — the pitch, the slide back along the
+/// body and the sinking eased together, so the change is a movement rather
+/// than a cut. Face down, head the way they are going: the model's own up
+/// laid along its forward. The clips are untouched; the gait plays on in
+/// whatever attitude the figure is held at, the run reading as a stroke and
+/// standing as treading water.
+///
+/// Skipped once settled, in both attitudes — the stillness an idle walker's
+/// transform keeps (see [`crate::player::walk`]) is not undone here by
+/// writing the same pose every frame.
+fn posture(
+    time: Res<Time>,
+    walkers: Query<Has<Swimming>, With<Player>>,
+    mut figures: Query<(&ChildOf, &mut Transform), With<Figure>>,
+) {
+    for (walker, mut pose) in &mut figures {
+        let Ok(swimming) = walkers.get(walker.parent()) else {
+            continue;
+        };
+        let (pitch, lying) = if swimming {
+            (Quat::from_rotation_x(-FRAC_PI_2), Vec3::Z * PRONE_SETBACK)
+        } else {
+            (Quat::IDENTITY, Vec3::ZERO)
+        };
+        if pose.rotation.angle_between(pitch) < 1e-3 && pose.translation.distance(lying) < 1e-3 {
+            continue;
+        }
+        let blend = eased(RECLINING, time.delta_secs());
+        pose.rotation = pose.rotation.slerp(pitch, blend);
+        pose.translation = pose.translation.lerp(lying, blend);
     }
 }
 
@@ -718,6 +779,82 @@ mod tests {
         assert!(
             phase > PI,
             "the gait ran forwards on a player backing up: {phase}"
+        );
+    }
+
+    #[test]
+    fn a_swimmer_lies_along_the_water_it_floats_in() {
+        // The whole swimming animation for now: the same figure, laid flat.
+        // Carried out past their depth the model eases prone — up laid along
+        // forward, slid back and sunk — and carried ashore it stands back up
+        // on the spot it always held.
+        //
+        // The two numbers of the lying pose are checked against the model
+        // rather than against themselves, because that is what they are for:
+        // the body has to end up centred on the walker's origin and lying
+        // *through* the water, and both would quietly stop being true the
+        // afternoon in Blender that changes how tall the figure is or how
+        // deep its chest.
+        let mut app = ashore_app();
+
+        fn figure_pose(app: &mut App) -> Transform {
+            *app.world_mut()
+                .query_filtered::<&Transform, With<Figure>>()
+                .single(app.world())
+                .expect("the player has no figure hung under them")
+        }
+        fn carry_to(app: &mut App, x: f32) {
+            let mut players = app
+                .world_mut()
+                .query_filtered::<&mut Transform, With<Player>>();
+            players
+                .single_mut(app.world_mut())
+                .expect("a match should have a player in it")
+                .translation = Vec3::new(x, 0.0, 0.0);
+        }
+
+        carry_to(&mut app, TEST_ISLAND_REACH * 1.5);
+        run_frames(&mut app, 120);
+        let pose = figure_pose(&mut app);
+        let up = pose.rotation * Vec3::Y;
+        assert!(
+            up.z < -0.99,
+            "two seconds into a swim the figure's up points {up}, not prone along its forward"
+        );
+
+        // Laid flat about its soles the body stretches its whole standing
+        // height ahead of the origin, so the slide back is half of that.
+        let (_, standing) = extent(MODEL, 0, 1);
+        let ends = [0.0, -standing].map(|along| along + pose.translation.z);
+        assert!(
+            (ends[0] + ends[1]).abs() < 0.2,
+            "the prone body runs from {} to {}, not centred on the walker",
+            ends[0],
+            ends[1]
+        );
+
+        // And through the water rather than on it or under it: the walker's
+        // own origin floats at the surface (see `player::walk`), so the
+        // model's front-to-back extent, stood on end by the pitch, has to
+        // straddle zero — belly under, back proud, neither by a hair.
+        let (front, back) = extent(MODEL, 0, 2);
+        let (lowest, highest) = (front + pose.translation.y, back + pose.translation.y);
+        assert!(
+            lowest < -0.1 && highest > 0.1,
+            "the prone body lies from {lowest} to {highest} against a surface at 0"
+        );
+
+        carry_to(&mut app, TEST_ISLAND_REACH * 0.5);
+        run_frames(&mut app, 120);
+        let pose = figure_pose(&mut app);
+        assert!(
+            pose.rotation.angle_between(Quat::IDENTITY) < 0.01,
+            "back ashore the figure never found its feet"
+        );
+        assert!(
+            pose.translation.length() < 0.05,
+            "back ashore the figure stands {} off the walker",
+            pose.translation
         );
     }
 

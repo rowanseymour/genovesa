@@ -1079,6 +1079,7 @@ impl Fleet {
                         .entity(player)
                         .remove::<DespawnOnExit<AppState>>()
                         .remove::<crate::player::Unsettled>()
+                        .remove::<crate::player::Swimming>()
                         .insert((ChildOf(hull), helm));
                 } else {
                     commands.entity(hull).with_child((

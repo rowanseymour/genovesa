@@ -43,6 +43,7 @@ use crate::cairn::{Cairn, BERTH};
 use crate::chart::Chart;
 use crate::figure::FigurePlugin;
 use crate::net::Online;
+use crate::sea::SeaConditions;
 use crate::terrain::Ground;
 use crate::{AppState, Helm};
 
@@ -63,21 +64,23 @@ const WALK_SPEED: f32 = 3.0;
 const WALK_TURN_RATE: f32 = 3.0;
 
 /// How deep the player will wade, in metres of sea over the ground they are
-/// standing on. Past the waist the water is for boats; short of it the
-/// shallows are walkable, which is what lets a landing step off into knee
-/// water rather than demanding dry sand under the keel. Deliberately less
-/// than the ship's grounding draft, so everywhere the ship can float is
-/// water the walker refuses — and comfortably more than the rowboat's, so
-/// the boat rowed in until its keel takes the sand is standing in water its
-/// crew can step out into. The gap between ship and walker is the rowboat's
-/// water, and crossing it is what the boat is *for*.
+/// standing on: past this their feet leave the ground and they swim — see
+/// [`walk`]. Chest deep on a figure not two metres tall, which is about where
+/// a body honestly stops walking and starts floating. Comfortably more than
+/// the rowboat's draft, so the boat rowed in until its keel takes the sand is
+/// standing in water its crew can step out into.
 ///
 /// Measured against the flat waterline, not the ground alone, so it is the
-/// *sea* that stops a walker. A lake never does yet: the client keeps no
-/// lake levels once the mesh is built, so a walker crosses a lakebed as if
+/// *sea* a walker wades and swims in. A lake is neither yet: the client keeps
+/// no lake levels once the mesh is built, so a walker crosses a lakebed as if
 /// it were dry — visibly wrong in deep lakes, and the honest fix is the
 /// `Ground` resource learning lake levels, not a guess here.
-const WADE_DEPTH: f32 = 0.5;
+const WADE_DEPTH: f32 = 1.0;
+
+/// Metres per second swimming — half the walking pace: enough to cross a bay
+/// or reach a ship at anchor, and slow enough that the rowboat is still worth
+/// lowering. Backing up in the water is halved again, like the walk's.
+const SWIM_SPEED: f32 = 1.5;
 
 /// The steepest ground a walker will cross, as a gradient: metres of height
 /// per metre travelled, so this is a slope of about 35°. Up and down are the
@@ -145,6 +148,14 @@ pub struct Player;
 #[derive(Component)]
 pub struct Unsettled;
 
+/// A walker past their depth: sea deeper than [`WADE_DEPTH`] under them, feet
+/// off the ground, riding at the surface. Kept current by [`walk`], and put on
+/// by [`find_footing`] for somebody put down over deep water; every boarding
+/// takes it off, a deck being dry however deep the sea beneath it. Drawing a
+/// swimmer prone is [`crate::figure`]'s reading of this.
+#[derive(Component)]
+pub struct Swimming;
+
 /// The walkers still waiting for ground to stand on, as a query — see
 /// [`Unsettled`]. Not aboard anything: a player on a deck stands on the
 /// deck, and the hull's own transform is not theirs to write.
@@ -155,16 +166,24 @@ type Waiting<'w, 's> = Query<
     (With<Player>, With<Unsettled>, Without<ChildOf>),
 >;
 
-/// Settles an [`Unsettled`] walker onto the ground once it has arrived.
-/// Height only: where they stand is the server's word, and which way they
-/// face was entry's guess to make.
+/// Settles an [`Unsettled`] walker onto the ground once it has arrived — or,
+/// put down past wading depth, afloat at the surface instead. Height only:
+/// where they stand is the server's word, and which way they face was entry's
+/// guess to make.
 fn find_footing(mut commands: Commands, ground: Option<Res<Ground>>, mut walkers: Waiting) {
     for (walker, mut place) in &mut walkers {
         let standing = ground
             .as_ref()
             .and_then(|g| g.height(place.translation.x, place.translation.z));
         if let Some(height) = standing {
-            place.translation.y = height;
+            if -height > WADE_DEPTH {
+                // The flat waterline serves here — [`walk`] rides the swell
+                // from the next frame on.
+                place.translation.y = 0.0;
+                commands.entity(walker).insert(Swimming);
+            } else {
+                place.translation.y = height;
+            }
             commands.entity(walker).remove::<Unsettled>();
         }
     }
@@ -441,7 +460,7 @@ fn tilt(ground: &Ground, at: Vec2) -> Option<f32> {
 /// putting the walker up the wall it was watching for.
 ///
 /// Zero where either end is over a chunk that has not arrived — the same
-/// forgiveness [`wading`] shows, and for the same reason: ground the client has
+/// forgiveness [`swims`] shows, and for the same reason: ground the client has
 /// not been sent is no reason to pin a walker where they stand.
 fn climb(ground: Option<&Ground>, from: Vec2, to: Vec2) -> f32 {
     let along = from.distance(to);
@@ -455,21 +474,20 @@ fn climb(ground: Option<&Ground>, from: Vec2, to: Vec2) -> f32 {
     (there - here).abs() / along
 }
 
-/// How far past wadeable the water over a map point stands, in metres —
-/// negative or zero where a walker may go. The walking twin of
-/// `boat::grounding`, down to its answer for ground that has not arrived:
-/// `NEG_INFINITY`, ground the client has not been sent being no reason to
-/// pin a walker where they stand. [`footing`] is the strict half — where a
-/// player may be *put down* — and this is the forgiving one — where one
-/// already walking may go — and the gap between them is deliberate: a
-/// landing must never choose unknown ground, but a walker overtaken by a
-/// slow chunk must still be able to move.
-fn wading(ground: Option<&Ground>, at: Vec2) -> f32 {
-    match ground.and_then(|ground| ground.height(at.x, at.y)) {
-        Some(height) => -height - WADE_DEPTH,
-        None => f32::NEG_INFINITY,
-    }
+/// Whether the sea over a map point is past a walker's depth — deeper than
+/// [`WADE_DEPTH`], where feet leave the ground and [`walk`] swims them.
+/// Ground that has not arrived is not water to float in: a walker overtaken
+/// by a slow chunk keeps walking, the same benefit of the doubt [`climb`]
+/// gives, where [`footing`] — a landing choosing a spot — refuses instead.
+fn swims(ground: Option<&Ground>, at: Vec2) -> bool {
+    ground
+        .and_then(|ground| ground.height(at.x, at.y))
+        .is_some_and(|height| -height > WADE_DEPTH)
 }
+
+/// The walker as [`walk`] reads them: who they are, where they stand, whether
+/// anything carries them, and whether the water does.
+type Walker = (Entity, &'static mut Transform, Has<ChildOf>, Has<Swimming>);
 
 /// Every cairn this client has been told of, as a query — the only solid thing
 /// in the world. `Without<Player>` because Bevy cannot see that a cairn is
@@ -487,11 +505,10 @@ type Stones<'w, 's> = Query<'w, 's, &'static Transform, (With<Cairn>, Without<Pl
 /// Refused only when the step goes *further in*. A claim raises a cairn where
 /// the claimant is standing, so that is the one place somebody is certain to be
 /// inside the berth; every step that lengthens the distance is allowed, so they
-/// walk out of it. That is [`wading`]'s shoreward clause again, and for the
-/// same reason: a rule that can trap somebody is a bug however rarely it fires.
-/// A step *along* the berth is allowed too, so a walker turned back rounds the
-/// stones rather than sticking on them — the climb rule's contour clause in
-/// another shape.
+/// walk out of it — a rule that can trap somebody is a bug however rarely it
+/// fires. A step *along* the berth is allowed too, so a walker turned back
+/// rounds the stones rather than sticking on them — the climb rule's contour
+/// clause in another shape.
 ///
 /// [`BERTH`] is the cairn's own: how much room a pillar takes up is a fact
 /// about the pillar.
@@ -541,10 +558,11 @@ type Vessels<'w, 's> = Query<
 /// scenery without either being named anywhere. The rowboat lies where they
 /// left it, anyone's.
 ///
-/// Ashore, the key boards the nearest boat in reach — back into the
-/// hierarchy at the helm, the marker comes off, and the keys answer again —
-/// with the ship's sails as the player left them, making sail being a
-/// deliberate act rather than a side effect of stepping aboard.
+/// Ashore — or swimming, a gunwale being the other way out of the water —
+/// the key boards the nearest boat in reach: back into the hierarchy at the
+/// helm, the marker comes off, and the keys answer again — with the ship's
+/// sails as the player left them, making sail being a deliberate act rather
+/// than a side effect of stepping aboard.
 ///
 /// Every crossing asks the hull the player is leaving to be at rest first —
 /// nobody steps off a deck making way — though "at rest" is read by
@@ -724,6 +742,7 @@ fn embark_or_land(
                     commands
                         .entity(player)
                         .remove::<DespawnOnExit<AppState>>()
+                        .remove::<Swimming>()
                         .insert((ChildOf(boat), Transform::from_translation(hull.helm())));
                 }
             }
@@ -762,36 +781,47 @@ fn landing(ground: Option<&Ground>, boat: &Transform) -> Option<(Vec2, f32)> {
 /// stands when not. Standing is exact — an idle walker's transform goes
 /// unwritten frame after frame, the same stillness an idle boat holds.
 ///
-/// Three things can refuse a step, and a step has to satisfy all of them.
+/// Past [`WADE_DEPTH`] of sea the walker swims: slower — [`SWIM_SPEED`] —
+/// and riding just under the drawn surface at [`SWIM_HEIGHT`], swell and
+/// all like a hull, instead of standing on the ground. [`Swimming`] says so
+/// to whoever asks — the figure drawn prone most of all — and comes off the
+/// moment their feet find the ground again, or at a gunwale, boarding being
+/// the other way out of the water.
 ///
-/// The water is [`wading`]'s answer, judged like the keel's: the step is
-/// allowed into walkable ground, or anywhere no *deeper* than where they
-/// already stand — so a player somehow past their depth is herded shoreward by
-/// the same clause that frees a beached hull, and the sea edge can never be
-/// inched past because every step further in is deeper.
+/// What can refuse a step is decided by the water at the far end of it, and
+/// nothing else:
 ///
-/// The land is [`climb`]'s: ground rising or falling faster than
-/// [`WALKABLE_RISE`] across the step is not walked over, judged in strides of
-/// at most half a facet so no stride hides a whole facet of ground however
-/// long the frame was. It is a limit on the step and not on the spot, so it
-/// turns a walker back from a cliff without pinning them against it — the
-/// face of a bluff can be crossed along its contour.
+/// - A step **into the water** is always taken, at any depth and off any
+///   edge. There is no fall to refuse when a body floats at the bottom of
+///   it, and the alternative was worse than untidy: judged by [`climb`], a
+///   shore that shelves steeply — which is most of them — walls a walker out
+///   of the sea entirely, held at the water's edge by a seabed they could
+///   swim over. Undoing a dive back up the same face is not offered, and
+///   need not be: the sea is no trap, ending as it does at every beach.
 ///
-/// The stone is [`barged`]'s: a cairn is the one built thing in this world with
-/// any substance to it, and a step into one is not taken.
+/// - A step **onto dry ground** is [`climb`]'s: ground rising or falling
+///   faster than [`WALKABLE_RISE`] is not walked over, judged in strides of
+///   at most half a facet so no stride hides a whole facet of ground however
+///   long the frame was. It is a limit on the step and not on the spot, so it
+///   turns a walker back from a cliff without pinning them against it — the
+///   face of a bluff can be crossed along its contour. Read from the seabed
+///   for a swimmer, it is also what tells a beach to wade out of from a wall
+///   to be swum along.
 ///
-/// Between the three the climb has the last word: the shoreward clause frees a
-/// walker merely out of their depth, not one standing under a drop-off, who has
-/// nowhere to go until the water falls.
+/// - And everywhere, [`barged`]'s: a cairn is the one built thing in this
+///   world with any substance to it, and a step into one is not taken.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     time: Res<Time>,
     ground: Option<Res<Ground>>,
+    sea: Res<SeaConditions>,
     cairns: Stones,
-    mut players: Query<(&mut Transform, Has<ChildOf>), With<Player>>,
+    mut commands: Commands,
+    mut players: Query<Walker, With<Player>>,
 ) {
-    let Ok((mut transform, aboard)) = players.single_mut() else {
+    let Ok((walker, mut transform, aboard, was_afloat)) = players.single_mut() else {
         return;
     };
     if aboard {
@@ -807,11 +837,12 @@ fn walk(
 
     let ground = ground.as_deref();
     if drive != 0.0 {
-        let speed = if drive > 0.0 {
-            WALK_SPEED
+        let pace = if swims(ground, transform.translation.xz()) {
+            SWIM_SPEED
         } else {
-            WALK_SPEED * 0.5
+            WALK_SPEED
         };
+        let speed = if drive > 0.0 { pace } else { pace * 0.5 };
         let advance = transform.forward() * drive * speed * time.delta_secs();
         // Half a facet at a time, so that no stride can have a facet of ground
         // hidden inside it — that is the shortest distance over which the height
@@ -831,20 +862,43 @@ fn walk(
                 transform.translation.xz(),
                 (transform.translation + stride).xz(),
             );
-            let (here, there) = (wading(ground, from), wading(ground, to));
-            let wadeable = there <= 0.0 || there <= here;
-            if !wadeable || climb(ground, from, to) > WALKABLE_RISE || barged(&cairns, from, to) {
+            let taken = match ground.and_then(|g| g.height(to.x, to.y)) {
+                // Into the water, wading or swimming — see above.
+                Some(height) if height <= 0.0 => true,
+                Some(_) => climb(ground, from, to) <= WALKABLE_RISE,
+                // Ground the client has not been sent is no reason to pin a
+                // walker where they stand — [`climb`]'s forgiveness again.
+                None => true,
+            };
+            if !taken || barged(&cairns, from, to) {
                 break;
             }
             transform.translation += stride;
         }
     }
 
-    if let Some(height) =
-        ground.and_then(|g| g.height(transform.translation.x, transform.translation.z))
-    {
-        if transform.translation.y != height {
-            transform.translation.y = height;
+    // Feet on the ground out to wading depth; past it, riding the surface the
+    // sea is actually drawn wearing rather than the flat waterline — a body
+    // pinned to the waterline under a visible swell is sunk half the time.
+    // The origin goes exactly on the water; how far a *body* lies through it
+    // is the figure's own business — see [`crate::figure`].
+    let at = transform.translation.xz();
+    if let Some(height) = ground.and_then(|g| g.height(at.x, at.y)) {
+        let afloat = -height > WADE_DEPTH;
+        let level = if afloat {
+            sea.water_over(ground, at, time.elapsed_secs_wrapped())
+        } else {
+            height
+        };
+        if transform.translation.y != level {
+            transform.translation.y = level;
+        }
+        if afloat != was_afloat {
+            if afloat {
+                commands.entity(walker).insert(Swimming);
+            } else {
+                commands.entity(walker).remove::<Swimming>();
+            }
         }
     }
 }
@@ -858,8 +912,8 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        elapsed, hold, run_frames, set_wind, test_ground, test_shore, world_app, SHORE_BLUFF_FOOT,
-        SHORE_PEAK, SHORE_TOP, SHORE_WATERLINE, TEST_ISLAND_REACH,
+        elapsed, hold, plunging_shore, run_frames, run_until, set_wind, test_ground, test_shore,
+        world_app, SHORE_BLUFF_FOOT, SHORE_PEAK, SHORE_TOP, SHORE_WATERLINE, TEST_ISLAND_REACH,
     };
 
     /// How far off the waterline the ship is anchored in a [`shore_app`], in
@@ -1333,12 +1387,37 @@ mod tests {
         assert_ne!(after.rotation, before.rotation, "they never turned");
     }
 
+    /// Whether the player is swimming, by their own marker.
+    fn swimming(app: &mut App) -> bool {
+        app.world_mut()
+            .query_filtered::<Has<Swimming>, With<Player>>()
+            .single(app.world())
+            .expect("a match should have a player in it")
+    }
+
+    /// Puts the player on their own feet at a spot, the way several swimming
+    /// tests start: off whatever they were aboard, standing (or floating)
+    /// there on the next frame's word.
+    fn put_afoot(app: &mut App, at: Vec2) {
+        let player = app
+            .world_mut()
+            .query_filtered::<Entity, With<Player>>()
+            .single(app.world())
+            .expect("a match should have a player in it");
+        app.world_mut()
+            .entity_mut(player)
+            .remove::<ChildOf>()
+            .insert(Transform::from_xyz(at.x, 0.0, at.y));
+        app.update();
+    }
+
     #[test]
-    fn the_sea_stops_the_walker_at_wading_depth() {
+    fn past_wading_depth_the_walker_swims_instead_of_stopping() {
         // Ashore, turned round, and marched at the sea for a long time: the
-        // walker ends held at the water's edge — past the waterline into the
-        // shallows, and not a step past wading depth — instead of strolling
-        // out along the seabed.
+        // wade gives way to a swim at [`WADE_DEPTH`] instead of the water
+        // refusing the step, and the walker ends well out over water past
+        // their depth, riding at the surface rather than strolling the
+        // seabed.
         let mut app = shore_app();
         go_ashore(&mut app);
         // Out to sea, the island being at the origin.
@@ -1350,13 +1429,174 @@ mod tests {
         let at = player_transform(&mut app).translation;
         let depth = -ground_height(&app, at.xz());
         assert!(
-            depth <= WADE_DEPTH + 1e-3,
-            "the walker is out in {depth} m of water"
+            depth > WADE_DEPTH,
+            "the sea still stops the walker, held in {depth} m of water"
+        );
+        assert!(swimming(&mut app), "out of their depth with no swim on");
+        assert!(
+            (-1.0..1.0).contains(&at.y),
+            "the swimmer rides at {} m, nowhere near the surface",
+            at.y
+        );
+    }
+
+    #[test]
+    fn swimming_is_at_swimming_pace() {
+        let mut app = shore_app();
+        put_afoot(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
+        assert!(swimming(&mut app), "open ocean is past anybody's depth");
+        face(&mut app, Vec2::X);
+        let before = player_transform(&mut app).translation.xz();
+        let start = elapsed(&app);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 60);
+
+        let seconds = elapsed(&app) - start;
+        let made = player_transform(&mut app).translation.xz().distance(before);
+        assert!(
+            (made - SWIM_SPEED * seconds).abs() < SWIM_SPEED * 0.05,
+            "{made} m in {seconds} s is not swimming pace"
+        );
+    }
+
+    #[test]
+    fn a_swimmer_finds_their_feet_on_a_shelving_shore() {
+        // The way back in: swum at the island, the feet go down where the
+        // apron rises to wading depth and the walk simply carries on ashore.
+        let mut app = shore_app();
+        put_afoot(&mut app, Vec2::new(SHORE_WATERLINE + 10.0, 0.0));
+        assert!(
+            swimming(&mut app),
+            "ten metres off this shore is deep water"
+        );
+        face(&mut app, Vec2::NEG_X);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 600);
+
+        let at = player_transform(&mut app).translation;
+        assert!(!swimming(&mut app), "still swimming, never came ashore");
+        assert!(
+            at.y > 0.0,
+            "the swim ended at {} m instead of walking on inland",
+            at.y
+        );
+        assert_eq!(
+            at.y,
+            ground_height(&app, at.xz()),
+            "ashore but not standing on the ground"
+        );
+    }
+
+    #[test]
+    fn a_cliff_face_is_not_hauled_out_onto_from_the_water() {
+        // The swimming twin of what makes a cliff coast scenery: against the
+        // cliff island the sea ends at a wall, and a swimmer marched at it
+        // for a long time is still in the water. What refuses them is the
+        // same [`WALKABLE_RISE`] that refuses a walker — read from the
+        // seabed — which is why a shelving beach a stride away would let
+        // them wade out and this does not.
+        let mut app = world_app();
+        app.insert_resource(test_ground());
+        put_afoot(&mut app, Vec2::new(TEST_ISLAND_REACH + 6.0, 0.0));
+        assert!(swimming(&mut app), "off the rim is deep water");
+        face(&mut app, Vec2::NEG_X);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 600);
+
+        let at = player_transform(&mut app).translation;
+        assert!(
+            ground_height(&app, at.xz()) <= 0.0,
+            "the swimmer came out of the sea onto the cliff"
+        );
+    }
+
+    #[test]
+    fn a_steeply_shelving_shore_is_still_walked_into() {
+        // What the climb rule did to the water before the sea was let
+        // receive anybody: a seabed dropping faster than [`WALKABLE_RISE`]
+        // walled the walker out of a sea they could perfectly well swim in,
+        // held at the water's edge with dry feet. The shore island's apron
+        // is gentle, so the wall is built here — a shore that plunges — and
+        // the walker marched at it has to end up swimming.
+        let mut app = world_app();
+        app.insert_resource(plunging_shore());
+        put_afoot(&mut app, Vec2::new(-3.0, 0.0));
+        assert!(!swimming(&mut app), "the walker started in the water");
+        face(&mut app, Vec2::X);
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 300);
+
+        assert!(
+            swimming(&mut app),
+            "the walker was walled out of the sea by the bank under it, \
+             stopped at {}",
+            player_transform(&mut app).translation.x
+        );
+    }
+
+    #[test]
+    fn boarding_from_the_water_ends_the_swim() {
+        // Swum out to the ship at anchor, the gunwale key works from the
+        // water exactly as from the beach — and the deck is dry: the swim
+        // comes off with the boarding.
+        let mut app = shore_app();
+        go_ashore(&mut app);
+        face(&mut app, Vec2::X);
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        let anchorage = transform_of(&mut app, ship).translation.xz();
+
+        hold(&mut app, KeyCode::ArrowUp);
+        run_until(&mut app, "the swimmer never reached the ship", |app| {
+            swimming(app)
+                && player_transform(app).translation.xz().distance(anchorage) <= BOARD_REACH - 1.0
+        });
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowUp);
+
+        press_board(&mut app);
+        assert_eq!(
+            aboard_kind(&mut app),
+            Some(BoatKind::Sloop),
+            "the swimmer never climbed aboard"
+        );
+        assert!(!swimming(&mut app), "aboard and still swimming");
+    }
+
+    #[test]
+    fn a_walker_put_down_over_deep_water_settles_afloat() {
+        // Entry — or a `goto` — can land a walker over open ocean before or
+        // after any ground question is answerable. Settling puts them at the
+        // surface, swimming, never on the seabed.
+        let mut app = world_app();
+        app.insert_resource(test_shore());
+        let player = app
+            .world_mut()
+            .query_filtered::<Entity, With<Player>>()
+            .single(app.world())
+            .expect("a match should have a player in it");
+        app.world_mut()
+            .entity_mut(player)
+            .remove::<ChildOf>()
+            .insert((
+                Unsettled,
+                Transform::from_xyz(TEST_ISLAND_REACH * 2.0, 0.0, 0.0),
+            ));
+        run_frames(&mut app, 2);
+
+        let at = player_transform(&mut app).translation;
+        assert!(
+            swimming(&mut app),
+            "put down over the ocean with no swim on"
         );
         assert!(
-            depth > 0.0,
-            "the walker never even got their feet wet, stopped {} m up",
-            -depth
+            (-1.0..1.0).contains(&at.y),
+            "settled at {} m rather than afloat at the surface",
+            at.y
         );
     }
 
