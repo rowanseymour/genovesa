@@ -212,10 +212,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "args"
-version = "0.1.0"
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6194,7 +6190,6 @@ dependencies = [
 name = "world"
 version = "0.1.0"
 dependencies = [
- "args",
  "glam",
  "image",
  "libm",

@@ -14,7 +14,6 @@ publish = false
 [dependencies]
 # The two-part options `mapgen` takes, shared with the game so the two
 # binaries reject a malformed one the same way.
-args = { path = "../args" }
 # The same maths types Bevy re-exports, taken directly so this crate and the
 # game agree on them without this crate depending on Bevy. Versioned by the
 # workspace, which is what keeps that agreement true.
