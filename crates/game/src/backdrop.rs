@@ -77,8 +77,8 @@ impl Plugin for BackdropPlugin {
     fn build(&self, app: &mut App) {
         // The sheet stands behind every screen that is not a world, so it is
         // raised and struck by the world rather than by any one of them. The
-        // guard on `Startup` is for the runs that open straight into a world —
-        // `--state inworld`, and every run that takes pictures — which would
+        // guard on `Startup` is for the runs that open straight into a world
+        // — a `--seed` given on the command line — which would
         // otherwise engrave a whole sheet on their first frame and strike it
         // on their second.
         // Normally `UiPlugin`'s, initialised here the way the menu does its

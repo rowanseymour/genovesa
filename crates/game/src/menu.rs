@@ -433,7 +433,7 @@ impl MenuButton {
     /// Matched on `self` rather than listed beside the enum, which is the
     /// whole point: a button added to a screen cannot be added without being
     /// named, because the compiler asks. [`Action::name`] is the same shape
-    /// for the same reason. The four that carry something are named without
+    /// for the same reason. The five that carry something are named without
     /// it; what comes after is [`MenuButton::parse`]'s business.
     ///
     /// One word, hyphenated where it needs to be, because a line is split on
@@ -514,14 +514,14 @@ impl MenuButton {
         Self::EVERY.iter().map(|button| button.name()).collect()
     }
 
-    /// What the four buttons that carry something want said after their name.
+    /// What the five buttons that carry something want said after their name.
     pub(crate) const WANTS: &'static str = "`open-kept`, `ask-discard` and `discard` want a row \
                                             number, `rebind` a control, `resolution` a rung or \
                                             `native`";
 
     /// The button a `click` line names, or `None` for a line that names none.
     ///
-    /// One word and, for the four that carry something, one more.
+    /// One word and, for the five that carry something, one more.
     pub(crate) fn parse(words: &[&str]) -> Option<Self> {
         Some(match words {
             ["set-sail"] => Self::SetSail,

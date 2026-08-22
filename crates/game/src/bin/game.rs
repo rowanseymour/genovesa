@@ -1,7 +1,8 @@
 //! The game itself: an endless ocean of generated islands to look around.
 //!
-//! What `cargo run` runs, being the crate's `default-run`. The other binary,
-//! `mapgen`, draws the same terrain from above without opening a window.
+//! What `cargo run` runs, being the crate's `default-run`. The others are
+//! `mapgen`, which draws the same terrain from above without opening a
+//! window, and `server`, which hosts a world without drawing it at all.
 //!
 //! `game --help` lists what it can be asked for, which is not much on
 //! purpose: how a run *behaves* is said down the debug socket rather than on

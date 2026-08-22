@@ -36,7 +36,7 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::debug::{Toggles, BACKDROP, REACH, RESOLUTION, SWITCHES, TEXT};
+use crate::debug::{Toggles, Value, BACKDROP, TEXT};
 use crate::net::Online;
 use crate::Helm;
 
@@ -242,14 +242,10 @@ pub(crate) fn dispatch(line: &str, toggles: &mut Toggles) -> Dispatch {
 /// completes after `set`, and what a miss is told to try instead, this being
 /// the half of the grammar that lives on this machine.
 ///
-/// Read off [`SWITCHES`] rather than listed again here, so the words this
-/// offers are the words [`set`] serves, always.
+/// Read off [`Toggles::names`] rather than listed again here, so the words
+/// this offers are the words [`set`] serves, always.
 fn variables() -> Vec<&'static str> {
-    SWITCHES
-        .iter()
-        .map(|switch| switch.name)
-        .chain([REACH, RESOLUTION])
-        .collect()
+    Toggles::names().collect()
 }
 
 /// The longest lead every word here shares — at least what was typed, each
@@ -281,10 +277,10 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
             said.join(" / ")
         }
         [var] => read(var, toggles).unwrap_or_else(|| no_such(var)),
-        [var, value] if *var == REACH => reach(value, &mut toggles.reach),
-        [var, value] if *var == RESOLUTION => resolution(value, &mut toggles.resolution),
-        [var, value] => match toggles.switch(var) {
-            Some(state) => switch(var, value, state),
+        [var, value] => match toggles.variable(var) {
+            Some(Value::Switch(state)) => switch(var, value, state),
+            Some(Value::Metres(state)) => reach(var, value, state),
+            Some(Value::Rows(state)) => resolution(var, value, state),
             None => no_such(var),
         },
         _ => "one variable, one value — `set reach 450`".to_string(),
@@ -295,16 +291,12 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
 /// answer to setting is the proof it took. `None` for a name that is not a
 /// variable at all.
 fn read(var: &str, toggles: &mut Toggles) -> Option<String> {
-    if var == REACH {
-        return Some(format!("{REACH} {:.0}m", toggles.reach));
-    }
-    if var == RESOLUTION {
-        return Some(match toggles.resolution {
-            Some(rows) => format!("{RESOLUTION} {rows}p"),
-            None => format!("{RESOLUTION} the window's own"),
-        });
-    }
-    toggles.switch(var).map(|on| onoff(var, *on))
+    Some(match toggles.variable(var)? {
+        Value::Switch(on) => onoff(var, *on),
+        Value::Metres(metres) => format!("{var} {metres:.0}m"),
+        Value::Rows(Some(rows)) => format!("{var} {rows}p"),
+        Value::Rows(None) => format!("{var} the window's own"),
+    })
 }
 
 fn onoff(var: &str, on: bool) -> String {
@@ -335,7 +327,7 @@ fn switch(var: &str, value: &str, state: &mut bool) -> String {
 /// [`Toggles::reach`] — and the bounds only refuse what the cascades could
 /// not survive: a reach of nothing, or one so deep the maps are all in the
 /// haze.
-fn reach(value: &str, state: &mut f32) -> String {
+fn reach(var: &str, value: &str, state: &mut f32) -> String {
     let metres = match value {
         "default" => Some(crate::HAZE_END),
         _ => value
@@ -346,9 +338,9 @@ fn reach(value: &str, state: &mut f32) -> String {
     match metres {
         Some(metres) => {
             *state = metres;
-            format!("reach {metres:.0}m")
+            format!("{var} {metres:.0}m")
         }
-        None => "`reach` is metres — `set reach 450`, or `set reach default`".to_string(),
+        None => format!("`{var}` is metres — `set {var} 450`, or `set {var} default`"),
     }
 }
 
@@ -357,7 +349,7 @@ fn reach(value: &str, state: &mut f32) -> String {
 /// screen would have had. There is nothing to set in a run with a window: a
 /// picture of a window is the window, whatever is asked for here, and a
 /// number that quietly did nothing would be worse than a refusal.
-fn resolution(value: &str, state: &mut Option<u32>) -> String {
+fn resolution(var: &str, value: &str, state: &mut Option<u32>) -> String {
     let rungs = crate::settings::rungs();
     let Some(rows) = state.as_mut() else {
         return "a picture is the size of the window in a run that has one — \
@@ -367,12 +359,12 @@ fn resolution(value: &str, state: &mut Option<u32>) -> String {
     match value.parse::<u32>().ok().filter(|it| rungs.contains(it)) {
         Some(chosen) => {
             *rows = chosen;
-            format!("{RESOLUTION} {chosen}p")
+            format!("{var} {chosen}p")
         }
         None => {
             let offered: Vec<String> = rungs.iter().map(|rows| rows.to_string()).collect();
             format!(
-                "`{RESOLUTION}` is one of {} — `set {RESOLUTION} 1440`",
+                "`{var}` is one of {} — `set {var} 1440`",
                 offered.join(", ")
             )
         }

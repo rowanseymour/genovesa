@@ -196,22 +196,39 @@ struct Order {
     answer: SyncSender<String>,
 }
 
-/// A line that cannot be answered on the frame it arrived.
-enum Doing {
+/// A line that cannot be answered on the frame it arrived, and the way back
+/// to whoever sent it. The channel is here rather than in every kind of work
+/// because every kind of work ends the same way: something to say, said once.
+struct Doing {
+    answer: SyncSender<String>,
+    work: Work,
+}
+
+/// What a line is waiting for.
+///
+/// Two counters run through most of these and they are not the same thing.
+/// `waited` is frames since the thing being waited *for* last moved, held at
+/// zero while ground is still arriving — see [`Hands::waited`] — and `age` is
+/// frames since the line was taken, which is what runs out against
+/// [`PATIENCE`].
+enum Work {
     /// A key is down. Released when the time runs out, and answered then —
     /// the answer is what says the press is over.
     Pressing {
         key: KeyCode,
         left: f32,
         said: String,
-        answer: SyncSender<String>,
     },
-    /// The view has been moved; waiting for the world to catch up with it.
+    /// Waiting for the world to catch up with something that moved it.
+    ///
+    /// `stand_in` is a menu button's press, taken away on the first frame
+    /// here; every other line arrives with none. See [`begin`]'s `click` for
+    /// why it cannot be left lying about.
     Settling {
         waited: u32,
-        patience: u32,
+        age: u32,
         said: String,
-        answer: SyncSender<String>,
+        stand_in: Option<Entity>,
     },
     /// A picture is on its way, somewhere in [`Stage`].
     Shooting {
@@ -219,30 +236,15 @@ enum Doing {
         target: Option<Handle<Image>>,
         stage: Stage,
         waited: u32,
-        patience: u32,
-        answer: SyncSender<String>,
-    },
-    /// A menu button has been pressed, and the stand-in carrying the press
-    /// has still to be taken away — see [`begin`]'s `click`.
-    Clicking {
-        stand_in: Entity,
-        said: String,
-        answer: SyncSender<String>,
+        age: u32,
     },
     /// `hold on`, waiting for the drawn hour to catch up with the world's
     /// before it freezes anything — see [`crate::sky::Sky::caught_up`].
-    Holding {
-        waited: u32,
-        answer: SyncSender<String>,
-    },
+    Holding { age: u32 },
     /// A line has gone to the server; waiting for what it says back. The
     /// prefix is this end's own half of the answer, which `help` has and
     /// nothing else does.
-    Asking {
-        prefix: String,
-        waited: u32,
-        answer: SyncSender<String>,
-    },
+    Asking { prefix: String, age: u32 },
 }
 
 /// How far along a picture is.
@@ -277,7 +279,10 @@ impl Control {
         // consumes the channel, and anything else in hand is another line
         // still being served, which this reply is none of.
         match self.doing.take() {
-            Some(Doing::Asking { prefix, answer, .. }) => {
+            Some(Doing {
+                answer,
+                work: Work::Asking { prefix, .. },
+            }) => {
                 let said = both_halves(&prefix, text);
                 // A line that moved the player is not finished when the
                 // server says it is: the ground where they now are has still
@@ -286,7 +291,7 @@ impl Control {
                 // exactly as the view verbs are, and is answered when the
                 // picture has stopped changing.
                 self.doing = if std::mem::take(&mut self.put_down) {
-                    settling(said, answer)
+                    Some(settling(said, answer))
                 } else {
                     let _ = answer.send(said);
                     None
@@ -574,23 +579,20 @@ fn serve_orders(
     mut exit: MessageWriter<AppExit>,
 ) {
     // Copied out and written back so that serving the line can borrow the
-    // rest of the resource — the handle it photographs into, and the switch
-    // `hold` throws. Both halves need it: a line in hand can be a `hold` that
-    // has been waiting for the sky since the frame it arrived.
-    let target = control.target.clone();
+    // rest of the resource. A line in hand can be a `hold` that has been
+    // waiting for the sky since the frame it arrived, so both paths below
+    // write it.
     let mut holding = control.holding;
 
-    if let Some(doing) = control.doing.take() {
-        control.doing = advance(
-            doing,
-            &mut commands,
-            &mut hands,
-            &time,
-            Held {
-                target,
-                holding: &mut holding,
-            },
-        );
+    if let Some(mut doing) = control.doing.take() {
+        // Answered here rather than in each kind of work, every one of them
+        // ending the same way: something to say, said once.
+        match doing.advance(&mut commands, &mut hands, &time, &mut holding) {
+            Some(said) => {
+                let _ = doing.answer.send(said);
+            }
+            None => control.doing = Some(doing),
+        }
         control.holding = holding;
         return;
     }
@@ -621,7 +623,9 @@ fn serve_orders(
         &mut hands,
         &mut exit,
         Held {
-            target,
+            // Only a starting line photographs anything; one already in hand
+            // carries the handle it was given.
+            target: control.target.clone(),
             holding: &mut holding,
         },
     );
@@ -637,155 +641,117 @@ struct Held<'a> {
 
 /// Carries a line that could not be finished at once one frame further, or
 /// answers it and has done.
-fn advance(
-    doing: Doing,
-    commands: &mut Commands,
-    hands: &mut Hands,
-    time: &Time,
-    held: Held,
-) -> Option<Doing> {
-    match doing {
-        Doing::Pressing {
-            key,
-            left,
-            said,
-            answer,
-        } => {
-            let left = left - time.delta_secs();
-            if left > 0.0 {
-                return Some(Doing::Pressing {
-                    key,
-                    left,
-                    said,
-                    answer,
-                });
-            }
-            // Released rather than left down: the next line starts from a
-            // world with nothing held, which is what makes a script of
-            // presses read as a sequence of separate moves.
-            hands.keys.release(key);
-            let _ = answer.send(said);
-            None
-        }
-        Doing::Settling {
-            waited,
-            patience,
-            said,
-            answer,
-        } => {
-            if hands.settled(waited) {
-                let _ = answer.send(said);
-                return None;
-            }
-            if patience >= PATIENCE {
-                let _ = answer.send(format!("{said}, with ground still arriving"));
-                return None;
-            }
-            Some(Doing::Settling {
-                waited: hands.waited(waited),
-                patience: patience + 1,
-                said,
-                answer,
-            })
-        }
-        Doing::Shooting {
-            path,
-            target,
-            stage,
-            waited,
-            patience,
-            answer,
-        } => {
-            if patience >= PATIENCE {
-                let _ = answer.send(match stage {
-                    Stage::Arriving => {
-                        format!("the ground never finished arriving for {}", path.display())
-                    }
-                    _ => format!("nothing was written to {}", path.display()),
-                });
-                return None;
-            }
-            let (stage, waited) = match stage {
-                Stage::Arriving if hands.settled(waited) => {
-                    // A window is photographed as a window; a run without one
-                    // is photographed off the image its camera draws into.
-                    let mut asked = match &target {
-                        Some(target) => commands.spawn(Screenshot::image(target.clone())),
-                        None => commands.spawn(Screenshot::primary_window()),
-                    };
-                    asked.observe(save_to_disk(path.clone()));
-                    (Stage::Asked, 0)
-                }
-                Stage::Arriving => (Stage::Arriving, hands.waited(waited)),
-                Stage::Asked if path.exists() => (Stage::Written, 0),
-                Stage::Asked => (Stage::Asked, waited + 1),
-                Stage::Written if waited >= SHOT_SETTLE => {
-                    let _ = answer.send(format!("shot {}", path.display()));
+impl Doing {
+    /// One frame of the work. `Some` is what to answer with, and the end of
+    /// it; `None` is another frame of waiting.
+    fn advance(
+        &mut self,
+        commands: &mut Commands,
+        hands: &mut Hands,
+        time: &Time,
+        holding: &mut bool,
+    ) -> Option<String> {
+        match &mut self.work {
+            Work::Pressing { key, left, said } => {
+                *left -= time.delta_secs();
+                if *left > 0.0 {
                     return None;
                 }
-                Stage::Written => (Stage::Written, waited + 1),
-            };
-            Some(Doing::Shooting {
+                // Released rather than left down: the next line starts from a
+                // world with nothing held, which is what makes a script of
+                // presses read as a sequence of separate moves.
+                hands.keys.release(*key);
+                Some(std::mem::take(said))
+            }
+            Work::Settling {
+                waited,
+                age,
+                said,
+                stand_in,
+            } => {
+                // A frame late, and that is the whole of why a click waits
+                // here rather than answering outright: a stand-in left lying
+                // about still reads as *freshly changed* to any system that
+                // has not run since it was spawned, and the screen a click
+                // opens is exactly that. Left there, a `back` would be read a
+                // second time by the screen it returned to, which went back
+                // again. Real buttons cannot do it — a screen takes its own
+                // down on the way out — and this gives the stand-in the same
+                // manners.
+                if let Some(entity) = stand_in.take() {
+                    if let Ok(mut entity) = commands.get_entity(entity) {
+                        entity.despawn();
+                    }
+                }
+                if hands.settled(*waited) {
+                    return Some(std::mem::take(said));
+                }
+                if *age >= PATIENCE {
+                    return Some(format!("{said}, with ground still arriving"));
+                }
+                *waited = hands.waited(*waited);
+                *age += 1;
+                None
+            }
+            Work::Shooting {
                 path,
                 target,
                 stage,
                 waited,
-                patience: patience + 1,
-                answer,
-            })
-        }
-        Doing::Clicking {
-            stand_in,
-            said,
-            answer,
-        } => {
-            // A frame late, and that is the whole of why this is a state
-            // rather than one call: a stand-in left lying about still reads
-            // as *freshly changed* to any system that has not run since it
-            // was spawned, and the screen a click opens is exactly that. Its
-            // systems sat out every frame until now, so a `back` pressed on
-            // one screen would be read a second time by the screen it
-            // returned to, which went back again. Real buttons cannot do it —
-            // a screen takes its own down on the way out — and this is what
-            // gives the stand-in the same manners. `menu`'s own tests take
-            // theirs away for the same reason.
-            if let Ok(mut entity) = commands.get_entity(stand_in) {
-                entity.despawn();
+                age,
+            } => {
+                if *age >= PATIENCE {
+                    return Some(match stage {
+                        Stage::Arriving => {
+                            format!("the ground never finished arriving for {}", path.display())
+                        }
+                        _ => format!("nothing was written to {}", path.display()),
+                    });
+                }
+                (*stage, *waited) = match stage {
+                    Stage::Arriving if hands.settled(*waited) => {
+                        // A window is photographed as a window; a run without
+                        // one is photographed off the image its camera draws
+                        // into.
+                        let mut asked = match &target {
+                            Some(target) => commands.spawn(Screenshot::image(target.clone())),
+                            None => commands.spawn(Screenshot::primary_window()),
+                        };
+                        asked.observe(save_to_disk(path.clone()));
+                        (Stage::Asked, 0)
+                    }
+                    Stage::Arriving => (Stage::Arriving, hands.waited(*waited)),
+                    Stage::Asked if path.exists() => (Stage::Written, 0),
+                    Stage::Asked => (Stage::Asked, *waited + 1),
+                    Stage::Written if *waited >= SHOT_SETTLE => {
+                        return Some(format!("shot {}", path.display()))
+                    }
+                    Stage::Written => (Stage::Written, *waited + 1),
+                };
+                *age += 1;
+                None
             }
-            settling(said, answer)
-        }
-        Doing::Holding { waited, answer } => {
-            if hands.sky.caught_up() {
-                *held.holding = true;
-                let _ = answer.send("the clock is held where it stands".to_string());
-                return None;
+            Work::Holding { age } => {
+                if hands.sky.caught_up() {
+                    *holding = true;
+                    return Some("the clock is held where it stands".to_string());
+                }
+                if *age >= PATIENCE {
+                    // Nothing is held: a driver told the clock was stopped,
+                    // when it is running and at an hour nobody asked for,
+                    // would take every picture after this one on trust.
+                    return Some("the sky never caught up with the world's clock".to_string());
+                }
+                *age += 1;
+                None
             }
-            if waited >= PATIENCE {
-                // Nothing is held: a driver told the clock was stopped, when
-                // it is running and at an hour nobody asked for, would take
-                // every picture after this one on trust.
-                let _ = answer.send("the sky never caught up with the world's clock".to_string());
-                return None;
+            Work::Asking { prefix, age } => {
+                if *age >= ASK_FRAMES {
+                    return Some(both_halves(prefix, "the server said nothing back"));
+                }
+                *age += 1;
+                None
             }
-            Some(Doing::Holding {
-                waited: waited + 1,
-                answer,
-            })
-        }
-        Doing::Asking {
-            prefix,
-            waited,
-            answer,
-        } => {
-            if waited >= ASK_FRAMES {
-                let _ = answer.send(both_halves(&prefix, "the server said nothing back"));
-                return None;
-            }
-            Some(Doing::Asking {
-                prefix,
-                waited: waited + 1,
-                answer,
-            })
         }
     }
 }
@@ -803,13 +769,15 @@ fn begin(
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.split_first() {
         Some((&"shot", _)) => match shot(after_verb(&line)) {
-            Ok(path) => Some(Doing::Shooting {
-                path,
-                target: held.target,
-                stage: Stage::Arriving,
-                waited: 0,
-                patience: 0,
+            Ok(path) => Some(Doing {
                 answer,
+                work: Work::Shooting {
+                    path,
+                    target: held.target,
+                    stage: Stage::Arriving,
+                    waited: 0,
+                    age: 0,
+                },
             }),
             Err(why) => refuse(why, answer),
         },
@@ -821,11 +789,13 @@ fn begin(
                 // hand would.
                 let key = pressing.key(&hands.bindings);
                 hands.keys.press(key);
-                Some(Doing::Pressing {
-                    key,
-                    left,
-                    said: pressed(&pressing, left),
+                Some(Doing {
                     answer,
+                    work: Work::Pressing {
+                        key,
+                        left,
+                        said: pressed(pressing, left),
+                    },
                 })
             }
             Err(why) => refuse(why, answer),
@@ -837,7 +807,7 @@ fn begin(
                     ..*hands.view
                 };
                 hands.look(wanted);
-                settling(format!("zoom {distance}"), answer)
+                Some(settling(format!("zoom {distance}"), answer))
             }
             Err(why) => refuse(why, answer),
         },
@@ -848,7 +818,10 @@ fn begin(
                     ..*hands.view
                 };
                 hands.look(wanted);
-                settling(format!("yaw {}", bearing.to_degrees().round()), answer)
+                Some(settling(
+                    format!("yaw {}", bearing.to_degrees().round()),
+                    answer,
+                ))
             }
             Err(why) => refuse(why, answer),
         },
@@ -863,10 +836,14 @@ fn begin(
                 // which in a run with no mouse is always. A bare entity is no
                 // node, so nothing takes the press away but us.
                 let stand_in = commands.spawn((button, Interaction::Pressed)).id();
-                Some(Doing::Clicking {
-                    stand_in,
-                    said: format!("{} clicked", rest.join(" ")),
+                Some(Doing {
                     answer,
+                    work: Work::Settling {
+                        waited: 0,
+                        age: 0,
+                        said: format!("{} clicked", rest.join(" ")),
+                        stand_in: Some(stand_in),
+                    },
                 })
             }
             Err(why) => refuse(why, answer),
@@ -883,7 +860,10 @@ fn begin(
                 "there is no world here whose clock could be held".to_string(),
                 answer,
             ),
-            Ok(true) => Some(Doing::Holding { waited: 0, answer }),
+            Ok(true) => Some(Doing {
+                answer,
+                work: Work::Holding { age: 0 },
+            }),
             Ok(false) => {
                 *held.holding = false;
                 let _ = answer.send("the clock runs again".to_string());
@@ -918,13 +898,16 @@ fn refuse(why: String, answer: SyncSender<String>) -> Option<Doing> {
 
 /// Waits for the world to catch up with a view that has just moved, and says
 /// what was asked for once it has.
-fn settling(said: String, answer: SyncSender<String>) -> Option<Doing> {
-    Some(Doing::Settling {
-        waited: 0,
-        patience: 0,
-        said,
+fn settling(said: String, answer: SyncSender<String>) -> Doing {
+    Doing {
         answer,
-    })
+        work: Work::Settling {
+            waited: 0,
+            age: 0,
+            said,
+            stand_in: None,
+        },
+    }
 }
 
 /// Puts a line on the wire and waits for what the server says back.
@@ -939,10 +922,9 @@ fn forward(line: &str, prefix: String, hands: &Hands, answer: SyncSender<String>
         return None;
     };
     online.connection.command(line.to_string());
-    Some(Doing::Asking {
-        prefix,
-        waited: 0,
+    Some(Doing {
         answer,
+        work: Work::Asking { prefix, age: 0 },
     })
 }
 
@@ -1093,7 +1075,7 @@ fn press(args: &[&str]) -> Result<(Pressing, f32), String> {
         }
     };
     if let Some(key) = bindings::reserved_key(named) {
-        return Ok((Pressing::Reserved(key, named.to_string()), seconds));
+        return Ok((Pressing::Reserved(key), seconds));
     }
     let Some(action) = Action::ALL.into_iter().find(|it| it.name() == named) else {
         return Err(format!("no control called `{named}`\n{}", actions()));
@@ -1101,33 +1083,32 @@ fn press(args: &[&str]) -> Result<(Pressing, f32), String> {
     Ok((Pressing::Control(action), seconds))
 }
 
-/// What a `press` line named.
-///
-/// Two kinds because there are two: a control, which is pressed at whatever
-/// key it is *bound* to so that a rebound one is found where the player put
-/// it, and a key that is nobody's control and so has nothing to be bound to —
-/// see [`crate::bindings::reserved_key`].
-#[derive(Clone, PartialEq, Debug)]
+/// What a `press` line named: a control, pressed at whatever key it is
+/// *bound* to so a rebound one is found where the player put it, or a key
+/// that is nobody's control and so has nothing to be bound to.
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Pressing {
     Control(Action),
-    Reserved(KeyCode, String),
+    Reserved(KeyCode),
 }
 
 impl Pressing {
-    /// The key to hold down. The bindings are asked for a control and not for
-    /// a reserved key, which is the whole difference between them.
-    fn key(&self, bindings: &KeyBindings) -> KeyCode {
+    fn key(self, bindings: &KeyBindings) -> KeyCode {
         match self {
-            Self::Control(action) => bindings.key(*action),
-            Self::Reserved(key, _) => *key,
+            Self::Control(action) => bindings.key(action),
+            Self::Reserved(key) => key,
         }
     }
 
-    /// What it is called in an answer — the word that was typed.
-    fn name(&self) -> &str {
+    /// What it is called in an answer, which is the word that was typed —
+    /// both arms derive it from what they hold rather than carrying it.
+    fn name(self) -> &'static str {
         match self {
             Self::Control(action) => action.name(),
-            Self::Reserved(_, named) => named,
+            Self::Reserved(key) => bindings::NAMED
+                .iter()
+                .find(|(_, named)| *named == key)
+                .map_or("that key", |(name, _)| name),
         }
     }
 }
@@ -1135,7 +1116,7 @@ impl Pressing {
 /// What a press answers with when it is over. A tap and a hold are told apart
 /// because a driver that meant to sail and forgot the seconds gets a boat
 /// that has not moved, and the answer is the only place that shows.
-fn pressed(pressing: &Pressing, seconds: f32) -> String {
+fn pressed(pressing: Pressing, seconds: f32) -> String {
     if seconds > 0.0 {
         format!("{} held {seconds} seconds", pressing.name())
     } else {
@@ -1144,11 +1125,14 @@ fn pressed(pressing: &Pressing, seconds: f32) -> String {
 }
 
 /// The controls a `press` will take, as one line — read off [`Action::ALL`]
-/// so a control added to the game is offered here without being listed twice,
-/// with the one key that is nobody's control named after them.
+/// and [`bindings::NAMED`] so neither is listed twice.
 fn actions() -> String {
-    let names: Vec<&str> = Action::ALL.iter().map(|it| it.name()).collect();
-    format!("controls: {}, escape", names.join(", "))
+    let names = Action::ALL
+        .iter()
+        .map(|it| it.name())
+        .chain(bindings::NAMED.iter().map(|(name, _)| *name))
+        .collect::<Vec<_>>();
+    format!("controls: {}", names.join(", "))
 }
 
 #[cfg(test)]
@@ -1294,9 +1278,8 @@ mod tests {
 
     /// And a run with no world to hold the clock of is told so on the line
     /// that asked, rather than after half a minute of waiting for a word that
-    /// was never coming — `--debug` with `--state mainmenu` is a run like
-    /// that, and a driver taking pictures of the menus is the one who would
-    /// pay for it.
+    /// was never coming. A run given no seed is on the menu, and a driver
+    /// taking pictures of the menus is the one who would pay for it.
     #[test]
     fn holding_the_clock_of_no_world_is_refused_at_once() {
         let (mut app, orders) = driven_app();
@@ -1317,10 +1300,7 @@ mod tests {
     fn escape_is_pressable_though_it_is_nobodys_control() {
         assert_eq!(
             press(&["escape"]),
-            Ok((
-                Pressing::Reserved(KeyCode::Escape, "escape".to_string()),
-                0.0
-            ))
+            Ok((Pressing::Reserved(KeyCode::Escape), 0.0))
         );
         assert_eq!(
             press(&["escape", "0.5"]).map(|(_, seconds)| seconds),
@@ -1447,12 +1427,46 @@ mod tests {
         assert!(why.contains("new-world"), "unhelpful: {why}");
     }
 
+    /// Every word `help` offers is a word this end actually serves.
+    ///
+    /// `help` is the only documentation the socket has — see CLAUDE.md — and
+    /// `HELP` is a listing that [`begin`] never reads, so nothing but this
+    /// holds the two together. A verb dropped from the match would fall
+    /// through to `forward` and be refused by the server, while `help` went
+    /// on offering it. The other two vocabularies in this subsystem are each
+    /// pinned the same way: `server::console`'s `VERBS` to `interpret`, and
+    /// `MenuButton::EVERY` to `parse`.
+    ///
+    /// Every listed word is answered on the frame it arrives when given
+    /// alone — a refusal for the ones that want an argument, which is still
+    /// this end answering rather than the server.
+    #[test]
+    fn every_word_help_offers_is_a_word_this_end_serves() {
+        let (mut app, orders) = driven_app();
+        for line in HELP.lines() {
+            let verb = line
+                .split_whitespace()
+                .next()
+                .expect("every line of the help names its word");
+            let answered = say(&orders, verb);
+            app.update();
+
+            let said = answered
+                .try_recv()
+                .unwrap_or_else(|_| panic!("`{verb}` is offered by `help` and answered by nobody"));
+            assert_ne!(
+                said, "nobody is serving this world",
+                "`{verb}` is offered by `help` and served only by the server"
+            );
+        }
+    }
+
     /// Every button `click` offers can be clicked, and lands on the button it
     /// named. The listing is an index rather than the grammar — `parse` never
     /// reads it — so this is what holds the two to agreement, the way
     /// `server::console`'s `VERBS` is held to `interpret`.
     ///
-    /// The four that carry something are given one here. A button that grew
+    /// The five that carry something are given one here. A button that grew
     /// an argument and did not say so would show up as its bare name failing
     /// to parse.
     #[test]
@@ -1572,10 +1586,12 @@ mod tests {
     /// A line in flight, as [`forward`] leaves one, and the way to answer it.
     fn asking(app: &mut App) -> Receiver<String> {
         let (answer, answered) = sync_channel(1);
-        app.world_mut().resource_mut::<Control>().doing = Some(Doing::Asking {
-            prefix: String::new(),
-            waited: 0,
+        app.world_mut().resource_mut::<Control>().doing = Some(Doing {
             answer,
+            work: Work::Asking {
+                prefix: String::new(),
+                age: 0,
+            },
         });
         answered
     }
@@ -1613,7 +1629,10 @@ mod tests {
         assert!(
             matches!(
                 app.world().resource::<Control>().doing,
-                Some(Doing::Settling { waited: 0, .. })
+                Some(Doing {
+                    work: Work::Settling { waited: 0, .. },
+                    ..
+                })
             ),
             "the settling ran while the ground was still coming, so the frames \
              it counted were not settling frames"
@@ -1720,11 +1739,11 @@ mod tests {
     #[test]
     fn a_press_says_which_kind_it_was() {
         assert_eq!(
-            pressed(&Pressing::Control(Action::MoveForward), 20.0),
+            pressed(Pressing::Control(Action::MoveForward), 20.0),
             "forward held 20 seconds"
         );
         assert_eq!(
-            pressed(&Pressing::Control(Action::Chart), 0.0),
+            pressed(Pressing::Control(Action::Chart), 0.0),
             "chart tapped"
         );
     }

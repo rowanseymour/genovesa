@@ -21,7 +21,6 @@ use std::process::ExitCode;
 
 use glam::{UVec2, Vec2};
 
-use args::{metres, pair, pair_or_single};
 use world::archipelago::{Archipelago, WorldConfig};
 use world::plan;
 use world::terrain::{MapConfig, CHUNK_TILES};
@@ -154,6 +153,59 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
     Ok(parsed)
 }
 
+/// A number of metres that is somewhere.
+///
+/// `inf` and `nan` both parse happily as floats and neither is a place: a
+/// render walks out from the point it is given, so a non-finite one samples
+/// the world at non-finite coordinates and writes a picture of nothing,
+/// having said nothing about it.
+fn metres(value: &str) -> Option<f32> {
+    value.parse::<f32>().ok().filter(|m| m.is_finite())
+}
+
+/// Reads a two-part option as both halves parsed the same way, or one error
+/// naming what it should have looked like. If either half is nonsense the
+/// whole option is — an option that took half of what it was given would be
+/// worse than one that is refused.
+fn halves(
+    value: &str,
+    first: &str,
+    second: &str,
+    axis: impl Fn(&str) -> Option<f32>,
+    expected: &str,
+) -> Result<(f32, f32), String> {
+    let bad = || format!("`{value}` is not {expected}");
+    Ok((
+        axis(first.trim()).ok_or_else(bad)?,
+        axis(second.trim()).ok_or_else(bad)?,
+    ))
+}
+
+/// The separator is required — see [`pair_or_single`] for where it is not.
+fn pair(
+    value: &str,
+    separator: char,
+    axis: impl Fn(&str) -> Option<f32>,
+    expected: &str,
+) -> Result<(f32, f32), String> {
+    let (first, second) = value
+        .split_once(separator)
+        .ok_or_else(|| format!("`{value}` is not {expected}"))?;
+    halves(value, first, second, axis, expected)
+}
+
+/// The same, except that a value with no separator in it stands for both
+/// halves — `8192` for a square span.
+fn pair_or_single(
+    value: &str,
+    separator: char,
+    axis: impl Fn(&str) -> Option<f32>,
+    expected: &str,
+) -> Result<(f32, f32), String> {
+    let (first, second) = value.split_once(separator).unwrap_or((value, value));
+    halves(value, first, second, axis, expected)
+}
+
 /// Reads the `x,z` world point a `world` render is centred on, in metres.
 /// Finite, for the reason [`metres`] gives.
 fn focus(value: &str) -> Result<Vec2, String> {
@@ -162,7 +214,7 @@ fn focus(value: &str) -> Result<Vec2, String> {
 }
 
 /// Reads how much world a `world` render covers, in metres — `8192` for a
-/// square window, `8192x4096` for a rectangle, as [`MapConfig::parse_size`]
+/// square span, `8192x4096` for a rectangle, as [`MapConfig::parse_size`]
 /// takes a map's own size.
 ///
 /// Finite *and* positive, and the greater-than-zero test cannot stand in for
@@ -314,7 +366,13 @@ mod tests {
         // `nan` parse as floats and used to be taken, which drew a picture of
         // the world at coordinates no world has.
         for bad in ["2000", "north,south", "1,2,3", "inf,0", "0,nan", "-inf,0"] {
-            assert!(focus(bad).is_err(), "`{bad}` was accepted as a point");
+            let why = focus(bad).expect_err("`{bad}` was accepted as a point");
+            // Naming both what was given and what was wanted, since the whole
+            // of what a caller sees is this line on stderr.
+            assert!(
+                why.contains(bad) && why.contains("a point"),
+                "`{bad}` gave an error naming neither it nor what was wanted: {why}"
+            );
         }
     }
 

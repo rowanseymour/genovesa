@@ -11,10 +11,9 @@
 //! which is about what this machine *holds* rather than what it draws: how
 //! much of the world it has, how much of that was open water, and how much
 //! ground it is still waiting on. The last line reads the world and the view
-//! back in the terms the command line takes them —
-//! `--seed`, `--focus`, `--yaw`, `--zoom` — so a screenshot of the overlay is
-//! the whole of what it takes to stand here again — the three words the
-//! socket takes to put a view back where this one was.
+//! back in the words that put them there — `--seed`, then `goto`, `yaw` and
+//! `zoom` — so a screenshot of the overlay is the whole of what it takes to
+//! stand here again.
 //!
 //! The switches are [`Toggles`], and they are set from the console — see
 //! [`crate::console`], whose `set` lines are their only writer. They used to
@@ -79,11 +78,15 @@ struct DebugPanel;
 #[derive(Component)]
 struct DebugText;
 
-/// The switches the console's `set` lines throw — see [`crate::console`],
+/// The variables the console's `set` lines reach — see [`crate::console`],
 /// which owns the grammar, while this module owns making them true of the
-/// scene. All of them are about what *this machine* draws: nothing here
-/// reaches the world or anybody else's picture of it, which is what
-/// separates a `set` from the console's other language.
+/// scene. None of them reaches the world or anybody else's picture of it,
+/// which is what separates a `set` from the console's other language.
+///
+/// Most are about what this machine *draws*. `resolution` is the exception
+/// and lives here anyway: it belongs to [`crate::control`], which a run
+/// without a socket has none of, and `set` needs somewhere it can always
+/// reach.
 #[derive(Resource, PartialEq, Clone, Debug)]
 pub struct Toggles {
     /// `set stats` — whether the readout itself is on screen. The one switch
@@ -179,16 +182,52 @@ pub const SWITCHES: [Switch; 4] = [
 ];
 
 /// The two variables that are not switches — metres, and rows of pixels,
-/// rather than on and off — so each is a special case wherever the switches
-/// are walked rather than a row that would have to carry a second kind of
-/// value.
-pub const REACH: &str = "reach";
-pub const RESOLUTION: &str = "resolution";
+/// rather than on and off. They stay out of [`SWITCHES`] because that table
+/// carries `confessed` for [`Toggles::line`], which walks booleans and would
+/// have to unwrap a kind to do it; what they join instead is
+/// [`Toggles::variable`], which is what the grammar asks.
+const REACH: &str = "reach";
+const RESOLUTION: &str = "resolution";
+
+/// What a variable holds, for [`Toggles::variable`] to answer with.
+///
+/// Three kinds because there are three. The *wording* of each is
+/// [`crate::console`]'s, which owns the grammar — this only says which kind
+/// the name found, so the console can read and write every variable by asking
+/// once instead of testing for the two that are not switches everywhere it
+/// walks them.
+pub enum Value<'a> {
+    Switch(&'a mut bool),
+    Metres(&'a mut f32),
+    /// `None` in a run with a window, which has no off-screen picture to
+    /// size — see [`Toggles::resolution`].
+    Rows(&'a mut Option<u32>),
+}
 
 impl Toggles {
+    /// The variable a name asks for, whatever kind it holds, or `None` for a
+    /// name that is not one.
+    pub fn variable(&mut self, name: &str) -> Option<Value<'_>> {
+        match name {
+            REACH => Some(Value::Metres(&mut self.reach)),
+            RESOLUTION => Some(Value::Rows(&mut self.resolution)),
+            _ => self.switch(name).map(Value::Switch),
+        }
+    }
+
+    /// Every variable there is, in the order a bare `set` lists them — here
+    /// rather than in the console because this is where they live, and a list
+    /// kept beside the grammar would be a second place to add one.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        SWITCHES
+            .iter()
+            .map(|switch| switch.name)
+            .chain([REACH, RESOLUTION])
+    }
+
     /// The boolean switch a name asks for, or `None` where the name is not
     /// one of them.
-    pub fn switch(&mut self, name: &str) -> Option<&mut bool> {
+    fn switch(&mut self, name: &str) -> Option<&mut bool> {
         let switch = SWITCHES.iter().find(|switch| switch.name == name)?;
         Some((switch.of)(self))
     }
@@ -671,8 +710,8 @@ mod tests {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32, 0.0, 0.0]; vertices])
     }
 
-    /// The switches with the readout on — what most of these tests are
-    /// looking at, and exactly what `--debug` starts a run with.
+    /// The switches with the readout on, which is what most of these tests
+    /// are looking at. Not what a run starts with — `set stats on` is.
     fn showing() -> Toggles {
         Toggles {
             stats: true,
@@ -852,7 +891,7 @@ mod tests {
     #[test]
     fn the_view_line_folds_the_yaw_to_a_bearing() {
         // The camera's yaw runs unbounded, but the line has to say something
-        // `--yaw` would read back as the same view.
+        // `yaw` would read back as the same view.
         let at = |yaw: f32| View {
             focus: Vec3::ZERO,
             distance: 100.0,

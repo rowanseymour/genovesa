@@ -3,8 +3,8 @@ name = "game"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-# The workspace holds a second binary — `mapgen`, over in the world crate — so a
-# bare `cargo run` has to be told which of the two it means.
+# The workspace holds other binaries — `mapgen` in the world crate, `server` in
+# its own — so a bare `cargo run` has to be told which it means.
 default-run = "game"
 
 [dependencies]

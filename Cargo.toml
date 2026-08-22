@@ -1,10 +1,8 @@
 # A virtual workspace: nothing is built from here, and the crates sit as
 # equals under crates/ — the game, the engine-free world a server generates,
-# the protocol a served session speaks, the server that hosts one, and the
-# command-line reading the two binaries share.
+# the protocol a served session speaks, and the server that hosts one.
 [workspace]
 members = [
-    "crates/args",
     "crates/game",
     "crates/protocol",
     "crates/server",
