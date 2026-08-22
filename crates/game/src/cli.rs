@@ -47,8 +47,9 @@ pub struct Args {
     /// run nobody can drive has nothing to be windowless *for*.
     pub headless: bool,
     /// Where the camera opens. Not settable here any more — it is whatever the
-    /// welcome says, and moving it afterwards is the socket's `focus`, `zoom`
-    /// and `yaw`.
+    /// welcome says, and moving it afterwards is the console's `goto` — the
+    /// camera going with whatever carries the player — and the socket's
+    /// `zoom` and `yaw`.
     view: View,
 }
 
@@ -120,7 +121,7 @@ Debugging:
                     and a blank line. Everything the console takes: `set` for
                     this client's own switches, anything else for the server.
                     Plus the words a keyboard never needed — `shot`, `press`,
-                    `focus`, `zoom`, `yaw`, `hold` and `quit`. Send `help` for
+                    `zoom`, `yaw`, `hold` and `quit`. Send `help` for
                     the whole vocabulary
   --headless        no window: draw off screen and be driven down the socket
                     alone
@@ -130,7 +131,7 @@ reached down the socket and nowhere else — an option could only ever say them
 once, and before anything existed:
 
   game --seed 7 --debug 7777 --headless
-  printf 'set resolution 1080\\nfocus 98,-317\\nshot near.png\\nquit\\n' | nc 127.0.0.1 7777
+  printf 'set resolution 1080\\ngoto 98 -317\\nshot near.png\\nquit\\n' | nc 127.0.0.1 7777
 "
     )
 }

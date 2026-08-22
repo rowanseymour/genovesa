@@ -329,21 +329,24 @@ going back to can be asked for by name. Run `cargo run -- --help` for the rest.
 Everything about how a run *behaves* is said down a socket instead. `--debug`
 takes a port, and the run stays up on it, taking the lines the console takes —
 `set` for what this client draws, anything else for the server — plus the words
-a keyboard never needed: `shot`, `press`, `focus`, `zoom`, `yaw`, `hold` and
-`quit`. `help` lists the lot, both sides of the wire.
+a keyboard never needed: `shot`, `press`, `zoom`, `yaw`, `hold` and `quit`.
+`help` lists the lot, both sides of the wire. Where the *player* is is the
+server's `goto`, the same word a player types at the console, and the camera
+goes with whatever carries them.
 
 ```bash
 cargo run -- --seed 7 --debug 7777 --headless
 ```
 
 ```bash
-printf 'focus 98,-317\nzoom 120\nshot near.png\nzoom 340\nshot far.png\nquit\n' \
+printf 'goto 98 -317\nzoom 120\nshot near.png\nzoom 340\nshot far.png\nquit\n' \
   | nc 127.0.0.1 7777
 ```
 
 **Every line is answered when its work is done, and not before.** `press
-forward 20` answers twenty seconds later; `focus` answers once the ground at
-the new place has arrived and the picture has stopped moving; `shot` answers
+forward 20` answers twenty seconds later; a line that moved the player answers
+once the ground at the new place has arrived and the picture has stopped
+moving; `shot` answers
 when the file is on disk. So a pipe of lines is a script rather than a race,
 and the two pictures above are of one world from one process, worth comparing
 against each other.
@@ -363,7 +366,7 @@ it is driven. `set resolution 1080` sizes the pictures a windowless run writes,
 by the same rungs the display screen offers.
 
 The stats readout — frame rate, geometry counts, the chunk tallies and the view
-in the terms `focus`, `zoom` and `yaw` take — is `set stats on`, so it can be
+in the terms `goto`, `zoom` and `yaw` take — is `set stats on`, so it can be
 put up for one picture and taken down for the next. The same console is on the
 key left of 1 for anyone at a window.
 
@@ -455,7 +458,7 @@ cargo tree --workspace --invert bevy
 
 And the game must not depend on the world crate at all — it generates nothing,
 and reaches the world only through the server it may be hosting. Its direct
-dependencies should be `args`, `bevy`, `protocol` and `server`:
+dependencies should be `bevy`, `protocol` and `server`:
 
 ```bash
 cargo tree -p game --depth 1

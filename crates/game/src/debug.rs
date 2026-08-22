@@ -606,8 +606,10 @@ fn overlay_text(
 }
 
 /// The world and the view in the terms that take them back in: `--seed` on
-/// the command line, and then the socket's own `focus`, `yaw` and `zoom` —
-/// metres, degrees and metres. The yaw runs unbounded on the camera — easing
+/// the command line, the console's `goto`, and then the socket's own `yaw`
+/// and `zoom` — metres, degrees and metres. Written as they are typed, spaces
+/// and all, because the whole point is that a picture of this line is enough
+/// to stand here again. The yaw runs unbounded on the camera — easing
 /// never wants to wrap — so it is folded to a bearing here.
 ///
 /// The seed leads because it is the part that cannot be guessed from the
@@ -619,7 +621,7 @@ fn view_line(seed: Option<u32>, view: View) -> String {
     if let Some(seed) = seed {
         parts.push(format!("seed {seed}"));
     }
-    parts.push(format!("focus {:.0},{:.0}", view.focus.x, view.focus.z));
+    parts.push(format!("goto {:.0} {:.0}", view.focus.x, view.focus.z));
     parts.push(format!(
         "yaw {:.0}",
         view.yaw.to_degrees().rem_euclid(360.0)
@@ -827,7 +829,7 @@ mod tests {
              231 chunks / 58 ocean / 12 requested\n\
              96 surveyed / 21 with coast / 3 closed / 1 claimable\n\
              sky 08:24\n\
-             seed 20040112 / focus 98,-317 / yaw 45 / zoom 42"
+             seed 20040112 / goto 98 -317 / yaw 45 / zoom 42"
         );
     }
 
@@ -858,11 +860,11 @@ mod tests {
         };
         assert_eq!(
             view_line(Some(7), at(-90.0)),
-            "seed 7 / focus 0,0 / yaw 270 / zoom 100"
+            "seed 7 / goto 0 0 / yaw 270 / zoom 100"
         );
         assert_eq!(
             view_line(Some(7), at(450.0)),
-            "seed 7 / focus 0,0 / yaw 90 / zoom 100"
+            "seed 7 / goto 0 0 / yaw 90 / zoom 100"
         );
     }
 
@@ -880,7 +882,7 @@ mod tests {
                     yaw: 0.0,
                 }
             ),
-            "focus 98,-317 / yaw 0 / zoom 150"
+            "goto 98 -317 / yaw 0 / zoom 150"
         );
     }
 
@@ -982,7 +984,7 @@ mod tests {
                  4 shadow tris / 2 draws / 2 cascades\n\
                  2 chunks / 1 ocean / 0 requested\n\
                  sky 08:24\n\
-                 seed 4242 / focus 10,-20 / yaw 0 / zoom 150"
+                 seed 4242 / goto 10 -20 / yaw 0 / zoom 150"
             ),
             "overlay reads: {text}"
         );

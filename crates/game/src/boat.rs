@@ -1339,9 +1339,11 @@ fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
 
     // Said out loud for the same reason a run without a seed says which world
     // it picked: a placeholder nobody can find is indistinguishable from one
-    // that never spawned, and the socket's `focus` takes exactly these two
-    // numbers.
-    info!("boat launched at {}, {}", view.focus.x, view.focus.z);
+    // that never spawned. Spaced rather than comma'd so the two numbers are
+    // the line that goes back to it — the console's `goto` takes exactly
+    // this, and a log whose coordinates have to be re-punctuated before they
+    // can be used is a log that half does the job.
+    info!("boat launched at {} {}", view.focus.x, view.focus.z);
 }
 
 /// One hull, meshes and all, at a pose — everything a boat is *before*
@@ -2208,7 +2210,8 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
 /// allowed a pose that floats, since `here` at or under zero makes the second
 /// clause imply the first, so a boat under way halts still afloat with at most
 /// [`KEEL_BITE`] in the mud. What the second clause is for is the pose the boat
-/// did not sail into — a `focus` inland, or ground arriving under a hull
+/// did not sail into — a `goto` whose search for water came up dry and left
+/// the hull on the ground it was sent to, or ground arriving under a hull
 /// already sitting there — out of which every way down to the sea is downhill
 /// and every way further in is refused like any other climb. Which is why the
 /// comparison carries no tolerance: a hair a frame is a metre a second up a
@@ -4344,7 +4347,7 @@ mod tests {
         app
     }
 
-    /// Puts the boat down at a spot, pointing a way — a `focus` in little.
+    /// Puts the boat down at a spot, pointing a way — a put down in little.
     fn place(app: &mut App, at: Vec2, facing: Vec2) {
         let mut transform = app
             .world_mut()

@@ -26,8 +26,10 @@
 //!   bound key is the honest way in — the same key the player's own hand
 //!   would find, through the same bindings, so a press exercises the real
 //!   control and not a shortcut past it.
-//! - `focus`, `zoom`, `yaw` — the view, which used to be three options that
-//!   could each be said once.
+//! - `zoom`, `yaw` — the view, which used to be two options that could each
+//!   be said once. Where the *player* is is the server's `goto`, and the
+//!   camera goes with them: it is pinned to whatever carries them, and snaps
+//!   rather than eases when that jumps.
 //! - `hold` — the clock, stopped, so that two pictures of one place differ in
 //!   what they were taken to show and not in what hour it had got to. It
 //!   waits for the sky to reach the hour the world is at before freezing it,
@@ -41,7 +43,7 @@
 //! **A line is answered when its work is done, and not before.** That is the
 //! load-bearing property, and the reason this replaced a list of `--shot`s
 //! rather than sitting beside it. `press forward 20` answers twenty seconds
-//! later; `focus` answers once the ground at the new place has arrived and
+//! later; a `goto` answers once the ground at the new place has arrived and
 //! the picture has stopped moving; `shot` answers when the file is on disk.
 //! So a pipe of lines is a script rather than a race — each one starts from
 //! where the last left the world — and the settling that used to happen
@@ -81,7 +83,6 @@ use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 use std::sync::{Mutex, PoisonError};
 use std::thread;
 
-use args::{metres, pair};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::ecs::system::SystemParam;
@@ -96,7 +97,6 @@ use crate::camera::{MapCamera, View, MAX_DISTANCE, MIN_DISTANCE};
 use crate::console::{dispatch, Dispatch};
 use crate::debug::Toggles;
 use crate::net::Online;
-use crate::player::PlayerSweep;
 use crate::settings;
 use crate::terrain::{ChunkBuild, Ground};
 
@@ -106,7 +106,6 @@ use crate::terrain::{ChunkBuild, Ground};
 /// down the socket is the whole vocabulary, both sides of the wire.
 const HELP: &str = "shot <path> — write a PNG of the view, once the ground has arrived\n\
                     press <action> [seconds] — hold a control down, or tap it if no time is given\n\
-                    focus <x,z> — put the player down at a map point, in metres\n\
                     zoom <m> — camera distance\n\
                     yaw <deg> — bearing to look from\n\
                     hold on|off — stop the clock where it stands, so the light keeps still\n\
@@ -169,6 +168,15 @@ pub struct Control {
     /// [`hold_the_sky`], which does the holding every frame because the
     /// server keeps saying what hour it really is.
     holding: bool,
+    /// Whether the world has put this player down since the line in hand was
+    /// sent — see [`Control::put_down`].
+    ///
+    /// What lets a forwarded line that *moved* somebody wait for the ground
+    /// without this end knowing which of the server's verbs move people. The
+    /// grammar is the server's and is not parsed here (see
+    /// [`crate::console`]); a put down is a fact on the wire, so anything the
+    /// server ever adds that moves a player settles the same way `goto` does.
+    put_down: bool,
 }
 
 /// One line, and the way back to whoever sent it.
@@ -252,10 +260,29 @@ impl Control {
         // still being served, which this reply is none of.
         match self.doing.take() {
             Some(Doing::Asking { prefix, answer, .. }) => {
-                let _ = answer.send(both_halves(&prefix, text));
+                let said = both_halves(&prefix, text);
+                // A line that moved the player is not finished when the
+                // server says it is: the ground where they now are has still
+                // to arrive, and a `shot` on the next line would photograph
+                // whatever had turned up. So such a line becomes a settle,
+                // exactly as the view verbs are, and is answered when the
+                // picture has stopped changing.
+                self.doing = if std::mem::take(&mut self.put_down) {
+                    settling(said, answer)
+                } else {
+                    let _ = answer.send(said);
+                    None
+                };
             }
             otherwise => self.doing = otherwise,
         }
+    }
+
+    /// Notes that the world has put this player down somewhere — called by
+    /// [`crate::net::receive`] on every [`protocol::ToClient::PutDown`],
+    /// which is the one word that moves this client's own carrier.
+    pub fn put_down(&mut self) {
+        self.put_down = true;
     }
 }
 
@@ -294,6 +321,7 @@ pub fn open(port: u16) -> Result<Control, String> {
         doing: None,
         target: None,
         holding: false,
+        put_down: false,
     })
 }
 
@@ -480,23 +508,17 @@ struct Hands<'w, 's> {
     /// `hold` is the one line that waits on the light rather than the ground.
     sky: Res<'w, crate::sky::Sky>,
     cameras: Query<'w, 's, &'static mut MapCamera>,
-    player: PlayerSweep<'w, 's>,
     ground: GroundArriving<'w, 's>,
 }
 
 impl Hands<'_, '_> {
-    /// Puts the view where a line asked for it, and moves the player under it
-    /// when the point itself moved. The camera is pinned to the player, so a
-    /// focus is a sweep of whatever carries them — teleported, there being
-    /// nobody to watch it sail there.
-    fn look(&mut self, wanted: View, moved: bool) {
+    /// Puts the view where a line asked for it. Only ever the *view* — where
+    /// the player is is the server's to say, and the camera follows whatever
+    /// carries them of its own accord.
+    fn look(&mut self, wanted: View) {
         *self.view = wanted;
         for mut camera in &mut self.cameras {
             camera.snap_to(wanted);
-        }
-        if moved {
-            self.player
-                .teleport(Vec2::new(wanted.focus.x, wanted.focus.z));
         }
     }
 
@@ -568,6 +590,9 @@ fn serve_orders(
         order
     };
 
+    // Cleared as the line starts, so that a put down belonging to an earlier
+    // line — or to joining the world at all — cannot make this one wait.
+    control.put_down = false;
     control.doing = begin(
         order,
         &mut hands,
@@ -761,24 +786,13 @@ fn begin(
             }
             Err(why) => refuse(why, answer),
         },
-        Some((&"focus", rest)) => match one(rest, "focus", "<x,z>", focus) {
-            Ok(point) => {
-                let wanted = View {
-                    focus: point,
-                    ..*hands.view
-                };
-                hands.look(wanted, true);
-                settling(format!("focus {},{}", point.x, point.z), answer)
-            }
-            Err(why) => refuse(why, answer),
-        },
         Some((&"zoom", rest)) => match one(rest, "zoom", "<metres>", zoom) {
             Ok(distance) => {
                 let wanted = View {
                     distance,
                     ..*hands.view
                 };
-                hands.look(wanted, false);
+                hands.look(wanted);
                 settling(format!("zoom {distance}"), answer)
             }
             Err(why) => refuse(why, answer),
@@ -789,7 +803,7 @@ fn begin(
                     yaw: bearing,
                     ..*hands.view
                 };
-                hands.look(wanted, false);
+                hands.look(wanted);
                 settling(format!("yaw {}", bearing.to_degrees().round()), answer)
             }
             Err(why) => refuse(why, answer),
@@ -890,13 +904,6 @@ fn onoff(args: &[&str], verb: &str) -> Result<bool, String> {
         ["off"] => Ok(false),
         _ => Err(format!("`{verb}` is on or off — `{verb} on`")),
     }
-}
-
-/// A map point in metres, as `x,z`. The height is left at zero: the camera
-/// puts itself down on the ground on its first frame.
-fn focus(value: &str) -> Result<Vec3, String> {
-    let (x, z) = pair(value, ',', metres, "an x,z point in metres, e.g. 98,-317")?;
-    Ok(Vec3::new(x, 0.0, z))
 }
 
 /// A camera distance, inside what the camera will actually go to.
@@ -1051,6 +1058,7 @@ mod tests {
                 doing: None,
                 target: None,
                 holding: false,
+                put_down: false,
             })
             .init_resource::<Toggles>()
             // The hour, which `hold` waits on. A default one has heard
@@ -1235,17 +1243,41 @@ mod tests {
         );
     }
 
-    /// `focus` answers when the world has caught up with the view and not
-    /// before. This is the load-bearing claim of the module, and it fails
-    /// silently: a line answered early still answers, only with a world under
-    /// it that has not finished arriving.
+    /// A line in flight, as [`forward`] leaves one, and the way to answer it.
+    fn asking(app: &mut App) -> Receiver<String> {
+        let (answer, answered) = sync_channel(1);
+        app.world_mut().resource_mut::<Control>().doing = Some(Doing::Asking {
+            prefix: String::new(),
+            waited: 0,
+            answer,
+        });
+        answered
+    }
+
+    /// A line that moved the player is answered when the world has caught up
+    /// with where they now are, and not before. This is the load-bearing
+    /// claim of the module, and it fails silently: a line answered early
+    /// still answers, only with a world under it that has not finished
+    /// arriving.
+    ///
+    /// It is the *put down* that says a line moved somebody, not the line —
+    /// the server's grammar is not read on this side, so `goto` is nothing
+    /// here but a line that happened to be followed by one.
     #[test]
-    fn a_focus_waits_for_the_ground_and_then_answers() {
-        let (mut app, orders) = driven_app();
+    fn a_line_that_moved_the_player_waits_for_the_ground() {
+        let (mut app, _orders) = driven_app();
         // Ground delivered and not yet handed to a mesh builder, which is
         // exactly what [`Ground::settled`] is false for.
         app.insert_resource(crate::testing::test_ground());
-        let answered = say(&orders, "focus 98,-317");
+        let answered = asking(&mut app);
+
+        {
+            // The order `goto` puts them on the wire: the world moves the
+            // player, and only then does the server say what it did.
+            let mut control = app.world_mut().resource_mut::<Control>();
+            control.put_down();
+            control.answered("you are at 98 -317");
+        }
 
         run_frames(&mut app, SETTLE_FRAMES as usize * 3);
         assert!(
@@ -1263,10 +1295,30 @@ mod tests {
 
         // The last of it lands, and only now do the settling frames count.
         app.insert_resource(Ground::default());
-        run_until(&mut app, "the focus is answered", |app| {
+        run_until(&mut app, "the moved line is answered", |app| {
             app.world().resource::<Control>().doing.is_none()
         });
-        assert_eq!(answered.try_recv(), Ok("focus 98,-317".to_string()));
+        assert_eq!(answered.try_recv(), Ok("you are at 98 -317".to_string()));
+    }
+
+    /// And a line that moved nobody is not made to wait for ground it has no
+    /// reason to want — most lines are that, and a `weather gale` that waited
+    /// on the terrain would be a toll on every one of them.
+    #[test]
+    fn a_line_that_moved_nobody_is_answered_as_soon_as_the_server_speaks() {
+        let (mut app, _orders) = driven_app();
+        app.insert_resource(crate::testing::test_ground());
+        let answered = asking(&mut app);
+
+        app.world_mut()
+            .resource_mut::<Control>()
+            .answered("the wind is ordered gale");
+
+        assert_eq!(
+            answered.try_recv(),
+            Ok("the wind is ordered gale".to_string())
+        );
+        assert!(app.world().resource::<Control>().doing.is_none());
     }
 
     /// `help` down a socket that has not joined a world still lists the words
@@ -1339,16 +1391,13 @@ mod tests {
         assert_eq!(pressed(Action::Chart, 0.0), "chart tapped");
     }
 
-    /// The view verbs, which took the place of `--focus`, `--zoom` and
-    /// `--yaw` and have to refuse what those refused.
+    /// The view verbs, which took the place of `--zoom` and `--yaw` and have
+    /// to refuse what those refused.
     #[test]
     fn the_view_verbs_read_what_the_options_used_to() {
-        assert_eq!(focus("98,-317"), Ok(Vec3::new(98.0, 0.0, -317.0)));
         assert_eq!(zoom("120"), Ok(120.0));
         assert_eq!(yaw("90"), Ok(std::f32::consts::FRAC_PI_2));
 
-        assert!(focus("98").is_err(), "needs both axes");
-        assert!(focus("north,south").is_err());
         assert!(zoom("5").is_err(), "closer than the camera goes");
         assert!(zoom("5000").is_err(), "further than it goes");
         assert!(yaw("sideways").is_err());

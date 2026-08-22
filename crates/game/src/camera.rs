@@ -297,9 +297,8 @@ fn follow_player(
         camera.target_focus = Vec3::new(place.x, surface.unwrap_or(place.y), place.z);
 
         // A carrier further away than any hull could have sailed in a frame
-        // has been put down somewhere else — the console's `goto`, the
-        // socket's `focus` — and the eye goes with it outright rather than
-        // easing across the world. Not for the look of it: chunks are
+        // has been put down somewhere else — the console's `goto` — and the
+        // eye goes with it outright rather than easing across the world. Not for the look of it: chunks are
         // streamed around the camera's own focus, so an ease over a
         // kilometre of ocean orders in every chunk on the line as it passes,
         // which is the whole map the jump was for not looking at. Ungrounded
@@ -658,7 +657,7 @@ mod tests {
         let mut app = test_app_on_terrain();
         place_player(&mut app, Vec3::ZERO, DEFAULT_DISTANCE, YAW);
 
-        // A jump — a console `goto`, a socket `focus` — moves the carrier
+        // A jump — the console's `goto` — moves the carrier
         // outright, and the eye is on it the same frame rather than sliding
         // there over the next few seconds. It matters beyond the look of it:
         // ground is streamed around the focus, so an eased crossing orders
