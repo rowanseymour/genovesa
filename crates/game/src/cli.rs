@@ -121,8 +121,8 @@ Debugging:
                     and a blank line. Everything the console takes: `set` for
                     this client's own switches, anything else for the server.
                     Plus the words a keyboard never needed — `shot`, `press`,
-                    `zoom`, `yaw`, `hold` and `quit`. Send `help` for
-                    the whole vocabulary
+                    `click`, `zoom`, `yaw`, `hold` and `quit`. Send `help`
+                    for the whole vocabulary
   --headless        no window: draw off screen and be driven down the socket
                     alone
 

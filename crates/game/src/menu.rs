@@ -367,8 +367,8 @@ impl Harbour {
 #[derive(Resource, Default)]
 struct Rebinding(Option<Action>);
 
-#[derive(Component, Clone, Copy, PartialEq)]
-enum MenuButton {
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+pub(crate) enum MenuButton {
     /// Opens the kept-worlds screen, which is the only way to a world of one's
     /// own — see [`spawn_main_menu`].
     SetSail,
@@ -424,6 +424,97 @@ enum MenuButton {
     /// Gives that world up. Named for what it costs rather than "Back", which
     /// on every other screen means one step and here means the whole world.
     LeaveWorld,
+}
+
+impl MenuButton {
+    /// The bare words a `click` line may start with, in the order the error
+    /// that lists them says them: roughly the order a player meets them,
+    /// screen by screen down from the main menu.
+    ///
+    /// The ones that take an argument are named here without it — what
+    /// [`MenuButton::parse`] wants after them is in [`MenuButton::WANTS`].
+    pub(crate) const NAMES: [&'static str; 27] = [
+        "set-sail",
+        "new-world",
+        "join-world",
+        "options",
+        "display",
+        "controls",
+        "exit",
+        "random-seed",
+        "share",
+        "start",
+        "open-kept",
+        "ask-discard",
+        "discard",
+        "keep-it",
+        "kept-share",
+        "connect",
+        "rebind",
+        "reset-keys",
+        "fullscreen",
+        "resolutions",
+        "resolution",
+        "shut-resolutions",
+        "shadows",
+        "apply",
+        "back",
+        "resume",
+        "leave-world",
+    ];
+
+    /// What the four buttons that carry something want said after their name.
+    pub(crate) const WANTS: &'static str = "`open-kept`, `ask-discard` and `discard` want a row \
+                                            number, `rebind` a control, `resolution` a rung or \
+                                            `native`";
+
+    /// The button a `click` line names, or `None` for a line that names none.
+    ///
+    /// One word and, for the four that carry something, one more. Short
+    /// because it is meant to be typed, and hyphenated for the same reason
+    /// [`Action::name`] is: a line is split on spaces, so a button's name
+    /// cannot have one in it.
+    pub(crate) fn parse(words: &[&str]) -> Option<Self> {
+        Some(match words {
+            ["set-sail"] => Self::SetSail,
+            ["new-world"] => Self::NewWorld,
+            ["join-world"] => Self::JoinWorld,
+            ["options"] => Self::Options,
+            ["display"] => Self::Display,
+            ["controls"] => Self::Controls,
+            ["exit"] => Self::Exit,
+            ["random-seed"] => Self::RandomSeed,
+            ["share"] => Self::ToggleShare,
+            ["start"] => Self::Start,
+            ["open-kept", row] => Self::OpenKept(row.parse().ok()?),
+            ["ask-discard", row] => Self::AskDiscard(row.parse().ok()?),
+            ["discard", row] => Self::Discard(row.parse().ok()?),
+            ["keep-it"] => Self::KeepIt,
+            ["kept-share"] => Self::ToggleKeptShare,
+            ["connect"] => Self::Connect,
+            ["rebind", control] => Self::Rebind(
+                Action::ALL
+                    .into_iter()
+                    .find(|action| action.name() == *control)?,
+            ),
+            ["reset-keys"] => Self::ResetKeys,
+            ["fullscreen"] => Self::ToggleFullscreen,
+            ["resolutions"] => Self::OpenResolutions,
+            ["resolution", "native"] => Self::PickResolution(Resolution::Native),
+            ["resolution", rung] => Self::PickResolution(
+                settings::LADDER
+                    .into_iter()
+                    .find(|it| it.label() == format!("{rung}p"))?,
+            ),
+            ["shut-resolutions"] => Self::ShutResolutions,
+            ["shadows"] => Self::ToggleShadows,
+            ["apply"] => Self::ApplyDisplay,
+            ["back"] => Self::Back,
+            ["resume"] => Self::Resume,
+            ["leave-world"] => Self::LeaveWorld,
+            _ => return None,
+        })
+    }
 }
 
 /// Marks the seed readout so it can be refreshed as the player types.

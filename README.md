@@ -329,8 +329,15 @@ going back to can be asked for by name. Run `cargo run -- --help` for the rest.
 Everything about how a run *behaves* is said down a socket instead. `--debug`
 takes a port, and the run stays up on it, taking the lines the console takes —
 `set` for what this client draws, anything else for the server — plus the words
-a keyboard never needed: `shot`, `press`, `zoom`, `yaw`, `hold` and `quit`.
-`help` lists the lot, both sides of the wire. Where the *player* is is the
+a keyboard never needed: `shot`, `press`, `click`, `zoom`, `yaw`, `hold` and
+`quit`. `help` lists the lot, both sides of the wire.
+
+`click` drives the menus, which are a mouse and nothing else — and a windowless
+run has no cursor for Bevy's picking to work from, so naming the button is the
+only door there is. It goes through the same systems a click does. What it is
+for is the screens that cannot be opened outright: a controls row armed and
+waiting for a key, a display change counting down its trial, a world reached
+the way a player reaches one. Where the *player* is is the
 server's `goto`, the same word a player types at the console, and the camera
 goes with whatever carries them.
 

@@ -26,6 +26,14 @@
 //!   bound key is the honest way in — the same key the player's own hand
 //!   would find, through the same bindings, so a press exercises the real
 //!   control and not a shortcut past it.
+//! - `click <button>` — the menus. They are driven by the mouse and nothing
+//!   else, and a windowless run has no window, so no cursor, so no pointer
+//!   for Bevy's picking to work from: naming the button is not a shortcut
+//!   chosen over a click, it is the only door there is. It goes through the
+//!   same systems a click does, and skips only the hit-testing. What it buys
+//!   is the screens nothing can otherwise reach — a controls row armed and
+//!   waiting for a key, a display trial counting down — and the transitions
+//!   between screens, which anything that opens a screen outright walks past.
 //! - `zoom`, `yaw` — the view, which used to be two options that could each
 //!   be said once. Where the *player* is is the server's `goto`, and the
 //!   camera goes with them: it is pinned to whatever carries them, and snaps
@@ -96,6 +104,7 @@ use crate::bindings::{Action, KeyBindings};
 use crate::camera::{MapCamera, View, MAX_DISTANCE, MIN_DISTANCE};
 use crate::console::{dispatch, Dispatch};
 use crate::debug::Toggles;
+use crate::menu::MenuButton;
 use crate::net::Online;
 use crate::settings;
 use crate::terrain::{ChunkBuild, Ground};
@@ -106,6 +115,7 @@ use crate::terrain::{ChunkBuild, Ground};
 /// down the socket is the whole vocabulary, both sides of the wire.
 const HELP: &str = "shot <path> — write a PNG of the view, once the ground has arrived\n\
                     press <action> [seconds] — hold a control down, or tap it if no time is given\n\
+                    click <button> — press a menu button; `click` alone lists them\n\
                     zoom <m> — camera distance\n\
                     yaw <deg> — bearing to look from\n\
                     hold on|off — stop the clock where it stands, so the light keeps still\n\
@@ -209,6 +219,13 @@ enum Doing {
         stage: Stage,
         waited: u32,
         patience: u32,
+        answer: SyncSender<String>,
+    },
+    /// A menu button has been pressed, and the stand-in carrying the press
+    /// has still to be taken away — see [`begin`]'s `click`.
+    Clicking {
+        stand_in: Entity,
+        said: String,
         answer: SyncSender<String>,
     },
     /// `hold on`, waiting for the drawn hour to catch up with the world's
@@ -508,6 +525,10 @@ struct Hands<'w, 's> {
     /// `hold` is the one line that waits on the light rather than the ground.
     sky: Res<'w, crate::sky::Sky>,
     cameras: Query<'w, 's, &'static mut MapCamera>,
+    /// The buttons the screen is showing, read to refuse a `click` at one it
+    /// is not — a press nothing is listening for would otherwise be answered
+    /// as though it had done something.
+    buttons: Query<'w, 's, &'static MenuButton>,
     ground: GroundArriving<'w, 's>,
 }
 
@@ -595,6 +616,7 @@ fn serve_orders(
     control.put_down = false;
     control.doing = begin(
         order,
+        &mut commands,
         &mut hands,
         &mut exit,
         Held {
@@ -711,6 +733,26 @@ fn advance(
                 answer,
             })
         }
+        Doing::Clicking {
+            stand_in,
+            said,
+            answer,
+        } => {
+            // A frame late, and that is the whole of why this is a state
+            // rather than one call: a stand-in left lying about still reads
+            // as *freshly changed* to any system that has not run since it
+            // was spawned, and the screen a click opens is exactly that. Its
+            // systems sat out every frame until now, so a `back` pressed on
+            // one screen would be read a second time by the screen it
+            // returned to, which went back again. Real buttons cannot do it —
+            // a screen takes its own down on the way out — and this is what
+            // gives the stand-in the same manners. `menu`'s own tests take
+            // theirs away for the same reason.
+            if let Ok(mut entity) = commands.get_entity(stand_in) {
+                entity.despawn();
+            }
+            settling(said, answer)
+        }
         Doing::Holding { waited, answer } => {
             if hands.sky.caught_up() {
                 *held.holding = true;
@@ -751,6 +793,7 @@ fn advance(
 /// on doing where it cannot.
 fn begin(
     order: Order,
+    commands: &mut Commands,
     hands: &mut Hands,
     exit: &mut MessageWriter<AppExit>,
     held: Held,
@@ -805,6 +848,25 @@ fn begin(
                 };
                 hands.look(wanted);
                 settling(format!("yaw {}", bearing.to_degrees().round()), answer)
+            }
+            Err(why) => refuse(why, answer),
+        },
+        Some((&"click", rest)) => match button(rest, &hands.buttons) {
+            Ok(button) => {
+                // A stand-in rather than the button itself. Every menu system
+                // asks for `(&Interaction, &MenuButton)` and none of them
+                // cares which entity carries it, so this goes through the
+                // same code a click does — and the real button cannot be used
+                // for it: `ui_focus_system` sets every *node* it finds
+                // pressed back to `None` the moment the mouse is not down,
+                // which in a run with no mouse is always. A bare entity is no
+                // node, so nothing takes the press away but us.
+                let stand_in = commands.spawn((button, Interaction::Pressed)).id();
+                Some(Doing::Clicking {
+                    stand_in,
+                    said: format!("{} clicked", rest.join(" ")),
+                    answer,
+                })
             }
             Err(why) => refuse(why, answer),
         },
@@ -904,6 +966,27 @@ fn onoff(args: &[&str], verb: &str) -> Result<bool, String> {
         ["off"] => Ok(false),
         _ => Err(format!("`{verb}` is on or off — `{verb} on`")),
     }
+}
+
+/// The button a `click` names, if the screen is showing one.
+///
+/// Two refusals, and the second is the point: a name nothing answers to is a
+/// typo, and a button the screen has not got is a line that would otherwise
+/// be answered as though it had done something. Nothing listens for a `start`
+/// on the main menu, so a press of one is silence — and silence answered
+/// "start clicked" is the kind of lie a driver builds a whole script on.
+fn button(words: &[&str], on_screen: &Query<&MenuButton>) -> Result<MenuButton, String> {
+    let Some(wanted) = MenuButton::parse(words) else {
+        return Err(format!(
+            "`click` wants a button — `click new-world`\nbuttons: {}\n{}",
+            MenuButton::NAMES.join(", "),
+            MenuButton::WANTS
+        ));
+    };
+    if !on_screen.iter().any(|button| *button == wanted) {
+        return Err(format!("there is no `{}` on this screen", words.join(" ")));
+    }
+    Ok(wanted)
 }
 
 /// A camera distance, inside what the camera will actually go to.
@@ -1187,6 +1270,125 @@ mod tests {
         let said = answered.try_recv().expect("answered on the spot");
         assert!(said.contains("no world"), "unhelpful: {said}");
         assert!(!app.world().resource::<Control>().holding);
+    }
+
+    /// A click presses a button the screen is showing, and is answered once
+    /// what it opened has settled.
+    #[test]
+    fn a_click_presses_a_button_the_screen_is_showing() {
+        let (mut app, orders) = driven_app();
+        // A screen with one button on it, as a spawned menu leaves things.
+        app.world_mut()
+            .spawn((MenuButton::Options, Interaction::None));
+        let answered = say(&orders, "click options");
+
+        app.update();
+        let pressed: Vec<MenuButton> = app
+            .world_mut()
+            .query::<(&MenuButton, &Interaction)>()
+            .iter(app.world())
+            .filter(|(_, interaction)| **interaction == Interaction::Pressed)
+            .map(|(button, _)| *button)
+            .collect();
+        assert_eq!(
+            pressed,
+            vec![MenuButton::Options],
+            "the press never reached a button the menus would read"
+        );
+
+        run_until(&mut app, "the click is answered", |app| {
+            app.world().resource::<Control>().doing.is_none()
+        });
+        assert_eq!(answered.try_recv(), Ok("options clicked".to_string()));
+    }
+
+    /// And the stand-in carrying that press is taken away again before the
+    /// screen it opened can read it. A button left lying about reads as
+    /// freshly changed to systems that have not run since it was spawned —
+    /// which is every system of the arriving screen — so a `back` would be
+    /// read twice and go back twice. See [`advance`]'s `Clicking`.
+    #[test]
+    fn the_press_is_taken_away_before_the_next_screen_could_read_it() {
+        let (mut app, orders) = driven_app();
+        app.world_mut().spawn((MenuButton::Back, Interaction::None));
+        let _answered = say(&orders, "click back");
+
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&MenuButton>()
+                .iter(app.world())
+                .count(),
+            2,
+            "the stand-in never appeared"
+        );
+
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&MenuButton>()
+                .iter(app.world())
+                .count(),
+            1,
+            "the stand-in outlived the frame its press was read on"
+        );
+    }
+
+    /// A button the screen has not got is refused rather than pressed into
+    /// the void. Nothing listens for a `start` on a screen that has no Start,
+    /// so answering "start clicked" would be a lie a script is built on.
+    #[test]
+    fn a_click_at_a_button_that_is_not_there_is_refused() {
+        let (mut app, orders) = driven_app();
+        app.world_mut()
+            .spawn((MenuButton::Options, Interaction::None));
+
+        let answered = say(&orders, "click start");
+        app.update();
+        let why = answered.try_recv().expect("answered on the spot");
+        assert!(
+            why.contains("no `start` on this screen"),
+            "unhelpful: {why}"
+        );
+
+        // And a name nothing answers to lists what would.
+        let answered = say(&orders, "click sideways");
+        app.update();
+        let why = answered.try_recv().expect("answered on the spot");
+        assert!(why.contains("new-world"), "unhelpful: {why}");
+    }
+
+    /// The buttons that carry something take it as a second word — a row
+    /// number, a control, a rung of the display ladder.
+    #[test]
+    fn the_buttons_that_carry_something_read_it_off_the_line() {
+        assert_eq!(
+            MenuButton::parse(&["open-kept", "2"]),
+            Some(MenuButton::OpenKept(2))
+        );
+        assert_eq!(
+            MenuButton::parse(&["rebind", "chart"]),
+            Some(MenuButton::Rebind(Action::Chart))
+        );
+        assert_eq!(
+            MenuButton::parse(&["resolution", "1440"]),
+            Some(MenuButton::PickResolution(
+                crate::settings::Resolution::Rows(1440)
+            ))
+        );
+        assert_eq!(
+            MenuButton::parse(&["resolution", "native"]),
+            Some(MenuButton::PickResolution(
+                crate::settings::Resolution::Native
+            ))
+        );
+
+        // And what none of them is.
+        assert_eq!(MenuButton::parse(&["open-kept"]), None, "wants a row");
+        assert_eq!(MenuButton::parse(&["open-kept", "last"]), None);
+        assert_eq!(MenuButton::parse(&["rebind", "sideways"]), None);
+        assert_eq!(MenuButton::parse(&["resolution", "1441"]), None, "no rung");
+        assert_eq!(MenuButton::parse(&[]), None);
     }
 
     /// A tap is one frame of the key being down, which is the whole of what a
