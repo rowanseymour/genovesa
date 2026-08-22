@@ -35,6 +35,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, Vec2};
@@ -444,15 +445,37 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Where this machine keeps what outlives a run, once it has been asked.
+static PLACE: OnceLock<Option<PathBuf>> = OnceLock::new();
+
 /// Where this machine keeps what outlives a run: the platform's own place
 /// for an application's data, with the game's name on it. `None` on a
 /// machine so bare it cannot say where home is, which callers treat as
 /// "nothing can be kept" rather than inventing a directory.
 ///
-/// `GENOVESA_DATA` overrides the lot — which is how tests keep their worlds
-/// out of the player's real directory, and how a deployment that wants its
-/// files somewhere particular asks.
+/// `GENOVESA_DATA` overrides the lot — which is how a deployment that wants
+/// its files somewhere particular asks. Read on the first ask and remembered
+/// from then on, so that every part of a run agrees about where its files
+/// are, and so that nothing has to read the environment while threads are
+/// running: setting a variable in a process that has any is a data race with
+/// every other thread reading one, whoever they are and whichever variable.
+/// A test wanting the directory moved calls [`keep_data_in`].
 pub fn data_dir() -> Option<PathBuf> {
+    PLACE.get_or_init(look_for_data_dir).clone()
+}
+
+/// Puts the data directory somewhere of the caller's choosing — how a test
+/// keeps its worlds, logbooks and settings out of the player's real ones.
+///
+/// Answers whether it took, which it does only until something has asked
+/// where the directory is: [`data_dir`] is answered once and its answer is
+/// built into paths that outlive the ask, so a directory moved afterwards
+/// would move only what had not been worked out yet.
+pub fn keep_data_in(dir: PathBuf) -> bool {
+    PLACE.set(Some(dir)).is_ok()
+}
+
+fn look_for_data_dir() -> Option<PathBuf> {
     if let Some(overridden) = std::env::var_os("GENOVESA_DATA") {
         if !overridden.is_empty() {
             return Some(PathBuf::from(overridden));
@@ -1033,6 +1056,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("genovesa-keeper-{:016x}", mint()));
         fs::create_dir_all(&dir).expect("temp space");
         dir
+    }
+
+    #[test]
+    fn the_data_directory_is_settled_once() {
+        // The whole of what a test's quarantine rests on: the first word is
+        // the one that counts, and it counts for the rest of the process.
+        //
+        // Which word was first is deliberately not assumed. Nothing else in
+        // this binary asks where the data directory is today, but a test that
+        // began to would settle it before this one ran, and this would then
+        // fail for a reason that is nothing to do with what it pins — which
+        // is the very order-dependence-under-parallelism the whole of
+        // [`data_dir`] answering once exists to be rid of.
+        let mine = scratch();
+        if keep_data_in(mine.clone()) {
+            assert_eq!(data_dir(), Some(mine), "the word taken is the word kept");
+        }
+
+        let settled = data_dir();
+        assert!(
+            !keep_data_in(scratch()),
+            "a directory was moved out from under whoever had already been told it"
+        );
+        assert_eq!(data_dir(), settled, "and the answer stands");
     }
 
     fn a_record() -> WorldRecord {

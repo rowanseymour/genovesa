@@ -3048,6 +3048,11 @@ mod tests {
     /// sailed in — what a discard needs is a name to take the lock on and
     /// files to remove, and it never reads a byte of what is in them.
     fn a_kept_world(id: u64) -> KeptWorld {
+        // Before asking, not after: every caller builds its worlds before it
+        // builds the app that would otherwise have done this, so a world put
+        // together here is the first thing in the test to want a directory to
+        // put it in.
+        crate::testing::quarantine_data_dir();
         let dir = net::worlds_dir().expect("the quarantined data dir");
         std::fs::create_dir_all(&dir).expect("the worlds directory");
         let world = KeptWorld {
