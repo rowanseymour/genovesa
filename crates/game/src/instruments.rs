@@ -8,15 +8,15 @@
 //! card rather than against a rim of their own.
 //!
 //! **The lead** is a line hung down the screen with the waterline at its top,
-//! marked to the fathom, and the weight resting where the bottom is. The
-//! reading is the *position of the weight*: the figure beside it says the same
-//! thing in a leadsman's half-fathoms, but a player who never reads it still
-//! sees the bottom coming up as they close a shore, which is the question the
-//! instrument exists for. Water deeper than the scale is drawn as the line
-//! running off the end of it with nothing on it — no bottom found — and that
-//! is deliberately the shape the reading will keep when the ocean is deepened
-//! past anchoring: the instrument already says *this is more water than you
-//! can lie to*, and will not need a second way of saying it.
+//! graduated, and the weight resting where the bottom is. The reading is the
+//! *position of the weight*: the figure beside it says the same thing in
+//! metres, but a player who never reads it still sees the bottom coming up as
+//! they close a shore, which is the question the instrument exists for. Water
+//! deeper than the scale is drawn as the line running off the end of it with
+//! nothing on it — no bottom found — and that is deliberately the shape the
+//! reading will keep when the ocean is deepened past anchoring: the instrument
+//! already says *this is more water than you can lie to*, and will not need a
+//! second way of saying it.
 //!
 //! **The day's arc** is the sky seen side-on, with whichever body is up riding
 //! across it — see [`crate::sky::aloft`]. It is a clock and not a bearing: the
@@ -39,28 +39,32 @@ use crate::sky::{aloft, Aloft, Sky};
 use crate::terrain::Ground;
 use crate::{AppState, INK, INK_DIM};
 
-/// Metres in a fathom.
+/// How deep the lead is marked, in metres.
 ///
-/// The lead is marked in fathoms because a lead line is: the mark is the unit
-/// the instrument was built around, and a depth in metres on a hemp line would
-/// be the machinery showing through. Nothing else in the game is measured this
-/// way, and nothing else should be — this is the one instrument whose face is
-/// period, and the world is metres everywhere behind it.
-const FATHOM: f32 = 1.8288;
-
-/// How deep the lead is marked, in fathoms.
+/// Metres and not fathoms, though a lead line is a fathom's instrument and
+/// this one is drawn as period furniture. The chart's own scale bar is
+/// lettered in metres and kilometres because that is how a distance would be
+/// said out loud — see [`crate::chart`] — and a sounding said in fathoms
+/// beside it would have the game speaking two measures at one player, the odd
+/// one chosen for flavour. Flavour is what the *drawing* is for.
 ///
-/// Not struck from [`protocol::ground::OCEAN_DEPTH`], deliberately. The scale
-/// is how much water this instrument can *answer for*, and the ocean's floor
-/// is how much there is — tying them would grow the line every time the world
-/// got deeper, when the right answer past a certain depth is that the lead
-/// stops being the tool. See the module doc for what the line does when it
+/// Not struck from [`protocol::ground::OCEAN_DEPTH`], either. The scale is how
+/// much water this instrument can *answer for*, and the ocean's floor is how
+/// much there is — tying them would grow the line every time the world got
+/// deeper, when the right answer past a certain depth is that the lead has
+/// stopped being the tool. See the module doc for what the line does when it
 /// runs out.
-const SCALE_FATHOMS: u32 = 5;
-/// Pixels of line to a fathom of water.
-const FATHOM_PIXELS: f32 = 26.0;
+const SCALE_METRES: f32 = 10.0;
+/// Metres of water between one graduation and the next.
+///
+/// Two rather than one: at a metre the marks crowd close enough to read as a
+/// texture down the line rather than as a scale, and the weight's own height
+/// is most of the gap between them.
+const MARKED_EVERY: f32 = 2.0;
+/// Pixels of line to a metre of water.
+const METRE_PIXELS: f32 = 13.0;
 /// How far the marked part of the line runs, in pixels.
-const SCALE: f32 = SCALE_FATHOMS as f32 * FATHOM_PIXELS;
+const SCALE: f32 = SCALE_METRES * METRE_PIXELS;
 
 /// How far the line hangs clear of the card's left edge, in pixels — far
 /// enough that the eye reads two instruments rather than one with a tail.
@@ -75,7 +79,7 @@ const LEAD_GAP: f32 = 48.0;
 const COLUMN: f32 = 40.0;
 const LINE_X: f32 = 2.0;
 
-/// The line's stroke, and the length of a fathom's tick either side of it.
+/// The line's stroke, and the length of a graduation's tick either side of it.
 const LINE_STROKE: f32 = 1.5;
 const TICK: f32 = 5.0;
 
@@ -161,7 +165,7 @@ struct DayBody {
 /// What the lead found.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Sounding {
-    /// The weight is on the bottom, this many fathoms down.
+    /// The weight is on the bottom, this many metres down.
     Bottom(f32),
     /// Deeper than the line is marked for — see the module doc.
     NoBottom,
@@ -210,7 +214,7 @@ fn spawn_lead(commands: &mut Commands, images: &mut Assets<Image>) {
                 ..default()
             },
             // Blank until the first sounding, which may be the frame after
-            // this one: an instrument that opened reading zero fathoms would
+            // this one: an instrument that opened reading no water at all would
             // be saying the boat is aground.
             Visibility::Hidden,
             DespawnOnExit(AppState::InWorld),
@@ -248,14 +252,14 @@ fn spawn_wave(lead: &mut ChildSpawnerCommands, images: &mut Assets<Image>) {
     ));
 }
 
-/// One tick to the fathom, each a bar lying across the line.
+/// The graduations, each a bar lying across the line.
 fn spawn_marks(lead: &mut ChildSpawnerCommands) {
-    for fathom in 1..=SCALE_FATHOMS {
+    for mark in 1..=(SCALE_METRES / MARKED_EVERY) as u32 {
         lead.spawn((
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(LINE_X - TICK),
-                top: Val::Px(fathom as f32 * FATHOM_PIXELS),
+                top: Val::Px(mark as f32 * MARKED_EVERY * METRE_PIXELS),
                 width: Val::Px(TICK * 2.0),
                 height: Val::Px(1.0),
                 ..default()
@@ -423,28 +427,27 @@ fn sound(ground: &Ground, at: Vec2) -> Sounding {
     };
     // Ground standing above the waterline sounds as no water rather than as
     // negative depth: a boat that has run itself up a beach is in nought
-    // fathoms, which is a true and useful thing for the instrument to say.
-    let fathoms = (-height / FATHOM).max(0.0);
-    if fathoms > SCALE_FATHOMS as f32 {
+    // water, which is a true and useful thing for the instrument to say.
+    let depth = (-height).max(0.0);
+    if depth > SCALE_METRES {
         Sounding::NoBottom
     } else {
-        Sounding::Bottom(fathoms)
+        Sounding::Bottom(depth)
     }
 }
 
-/// The sounding in a leadsman's figures: whole fathoms and halves.
+/// The sounding written out: whole metres, and the unit with them.
 ///
-/// Quantised rather than exact, and that is the reading and not a shortcut. A
-/// lead line is read off the mark nearest the water, so halves are as fine as
-/// the instrument goes — and a figure counting off centimetres would be the
+/// Rounded rather than exact, and that is the reading and not a shortcut. A
+/// lead is read off the mark nearest the water, so the metre is as fine as
+/// this instrument goes — a figure counting off centimetres would be the
 /// machinery showing through a rope with knots in it.
-fn figure(fathoms: f32) -> String {
-    let halves = (fathoms * 2.0).round() as u32;
-    match (halves / 2, halves % 2 == 1) {
-        (0, true) => "½".to_string(),
-        (whole, true) => format!("{whole}½"),
-        (whole, false) => format!("{whole}"),
-    }
+///
+/// The unit is written because the chart says its own distances the same way,
+/// and a bare number beside a graduated line invites the reader to supply a
+/// measure of their own.
+fn figure(metres: f32) -> String {
+    format!("{} m", metres.round() as u32)
 }
 
 /// Hangs the lead over the side and reads it.
@@ -480,7 +483,7 @@ fn heave_the_lead(
     // How far down the line the weight hangs, and how much of the line that
     // leaves on the reel below it.
     let down = match sounding {
-        Sounding::Bottom(fathoms) => fathoms * FATHOM_PIXELS,
+        Sounding::Bottom(depth) => depth * METRE_PIXELS,
         // No bottom runs the line off the end of the marked scale rather than
         // stopping it at the last mark, which would read as a sounding of
         // five: what says *no bottom* is that there is nothing resting on the
@@ -520,10 +523,9 @@ fn heave_the_lead(
         if *visibility != showing {
             *visibility = showing;
         }
-        if let (LeadPart::Figure, Some(mut text), Sounding::Bottom(fathoms)) =
-            (part, text, sounding)
+        if let (LeadPart::Figure, Some(mut text), Sounding::Bottom(depth)) = (part, text, sounding)
         {
-            let reading = figure(fathoms);
+            let reading = figure(depth);
             if text.0 != reading {
                 text.0 = reading;
             }
@@ -732,12 +734,12 @@ mod tests {
     /// claim about where they are standing.
     #[test]
     fn the_lead_is_only_hung_afloat() {
-        let mut afloat = a_player_over(-2.0 * FATHOM, true);
+        let mut afloat = a_player_over(-4.0, true);
         let (drawn, figure) = reading(&mut afloat);
         assert!(drawn, "afloat, the lead was not hung");
-        assert_eq!(figure, "2", "afloat, the lead read {figure:?}");
+        assert_eq!(figure, "4 m", "afloat, the lead read {figure:?}");
 
-        let mut ashore = a_player_over(-2.0 * FATHOM, false);
+        let mut ashore = a_player_over(-4.0, false);
         assert!(
             !reading(&mut ashore).0,
             "ashore, the lead was still hanging"
@@ -765,11 +767,11 @@ mod tests {
             top
         };
 
-        let mut deep = a_player_over(-4.0 * FATHOM, true);
-        let mut shoal = a_player_over(-FATHOM, true);
-        assert!((plummet(&mut deep) - 4.0 * FATHOM_PIXELS).abs() < 1.0);
-        assert!((plummet(&mut shoal) - FATHOM_PIXELS).abs() < 1.0);
-        assert_eq!(reading(&mut shoal).1, "1");
+        let mut deep = a_player_over(-8.0, true);
+        let mut shoal = a_player_over(-2.0, true);
+        assert!((plummet(&mut deep) - 8.0 * METRE_PIXELS).abs() < 1.0);
+        assert!((plummet(&mut shoal) - 2.0 * METRE_PIXELS).abs() < 1.0);
+        assert_eq!(reading(&mut shoal).1, "2 m");
     }
 
     #[test]
@@ -802,20 +804,18 @@ mod tests {
 
     #[test]
     fn the_lead_reads_the_water_under_the_boat() {
-        // Two fathoms of water, near enough: the sounding is in fathoms
-        // however the world is measured.
-        let (ground, at) = over_a_bed(-2.0 * FATHOM);
-        let Sounding::Bottom(fathoms) = sound(&ground, at) else {
-            panic!("a bed two fathoms down did not sound as a bottom");
+        let (ground, at) = over_a_bed(-3.0);
+        let Sounding::Bottom(depth) = sound(&ground, at) else {
+            panic!("a bed three metres down did not sound as a bottom");
         };
-        assert!((fathoms - 2.0).abs() < 0.01, "sounded {fathoms} fathoms");
+        assert!((depth - 3.0).abs() < 0.01, "sounded {depth} metres");
     }
 
     #[test]
     fn water_past_the_scale_finds_no_bottom() {
         // The reading the deep ocean will give when it is deepened — see the
         // module doc. Nothing rests on the end of the line.
-        let (ground, at) = over_a_bed(-(SCALE_FATHOMS as f32 + 1.0) * FATHOM);
+        let (ground, at) = over_a_bed(-(SCALE_METRES + 1.0));
         assert_eq!(sound(&ground, at), Sounding::NoBottom);
     }
 
@@ -836,15 +836,13 @@ mod tests {
     }
 
     #[test]
-    fn the_figure_is_read_off_the_nearest_half_fathom() {
-        assert_eq!(figure(3.0), "3");
-        assert_eq!(figure(3.5), "3½");
+    fn the_figure_is_read_off_the_nearest_metre() {
+        assert_eq!(figure(3.0), "3 m");
         // Rounded to the mark, not truncated to it: a lead is read off the
         // mark nearest the water.
-        assert_eq!(figure(3.4), "3½");
-        assert_eq!(figure(3.2), "3");
-        assert_eq!(figure(0.4), "½");
-        assert_eq!(figure(0.1), "0");
+        assert_eq!(figure(3.4), "3 m");
+        assert_eq!(figure(3.6), "4 m");
+        assert_eq!(figure(0.4), "0 m");
     }
 
     #[test]
