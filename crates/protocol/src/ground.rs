@@ -341,7 +341,9 @@ pub struct ChunkPayload {
     /// [`ChunkPayload::heights`], or `None` for a chunk with no lake on or
     /// beside it — which is most of them.
     ///
-    /// A stored [`NO_WATER`] means dry. Everywhere else the corner has a lake
+    /// A stored [`NO_WATER`] means dry — though a reader after one corner
+    /// asks [`ChunkPayload::water_level`], which folds the sentinel and the
+    /// `None` below into one answer. Everywhere else the corner has a lake
     /// level over it, and water stands wherever that level is above the
     /// height at the same corner. The grid deliberately reaches well past the
     /// water's edge and up the bank behind it, so a client has a level on
@@ -589,6 +591,25 @@ impl ChunkPayload {
     /// coordinates — `None` past the apron. See [`material_index`].
     pub fn material(&self, ix: i32, iz: i32) -> Option<Material> {
         material_index(ix, iz).map(|at| self.materials[at])
+    }
+
+    /// The standing water over corner `(ix, iz)` of the heights grid, still
+    /// quantised — see [`quantize`] — or `None` where the corner is dry or
+    /// off the grid.
+    ///
+    /// Dry is spelt two ways in the bytes — a lakeless chunk carries no grid
+    /// at all, and a dry corner of a wet chunk stores [`NO_WATER`] — and this
+    /// is where the two become one answer, so no reader ever meets the
+    /// encoding. Still quantised because the question a level exists to
+    /// settle — does the water stand above the height at this same corner? —
+    /// is exact between two values on one lattice, and rounding luck between
+    /// the two floats made from them.
+    pub fn water_level(&self, ix: i32, iz: i32) -> Option<u16> {
+        if !(0..CORNERS as i32).contains(&ix) || !(0..CORNERS as i32).contains(&iz) {
+            return None;
+        }
+        let level = self.water.as_ref()?[iz as usize * CORNERS + ix as usize];
+        (level != NO_WATER).then_some(level)
     }
 
     /// Whether this is a payload of the shape the grid says it should be.
@@ -891,6 +912,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_corner_answers_its_water_in_one_spelling() {
+        // Dry is spelt two ways in the bytes — no grid at all, and the
+        // sentinel within one — and the accessor owes every reader the same
+        // `None` for both.
+        let dry = a_payload(false, 0);
+        assert_eq!(dry.water_level(0, 0), None);
+
+        let mut wet = a_payload(true, 0);
+        let grid = wet.water.as_mut().expect("a lake");
+        grid[0] = NO_WATER;
+        grid[1] = quantize(12.0);
+        grid[2 * CORNERS + 3] = quantize(31.0);
+        assert_eq!(wet.water_level(0, 0), None, "the sentinel read as a level");
+        assert_eq!(wet.water_level(1, 0), Some(quantize(12.0)));
+        // Row-major on the corner grid, exactly as the heights are — and
+        // asked asymmetrically, because a transpose would pass a square ask.
+        assert_eq!(wet.water_level(3, 2), Some(quantize(31.0)));
+
+        // Nothing past the grid: corners have no apron.
+        assert_eq!(wet.water_level(-1, 0), None);
+        assert_eq!(wet.water_level(0, CORNERS as i32), None);
     }
 
     #[test]
