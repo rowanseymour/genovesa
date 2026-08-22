@@ -65,11 +65,20 @@ This is not a claim that comments cannot rot; they do. It is that a comment
 rots *in the diff of the change that caused it*, where a reviewer is already
 looking, and a second copy in another directory rots where nobody is.
 
+Which leaves the listings that stand in for a grammar — `HELP`,
+`server::console`'s `VERBS`, `MenuButton::EVERY`. Each is an index and not the
+thing indexed: nothing reads it to serve a line, so each needs a test holding
+it to what it advertises, and a fourth wants one the day it is written. `HELP`
+went without for a while and nothing showed, which is the whole argument.
+
 ## Odds and ends
 
 - Only `game` may see Bevy. After moving things between crates, check both that
   and the paragraph above (README has the two commands).
 - Comments here explain *why*, including approaches that were tried and
-  failed. Match that rather than the density of the surrounding language.
+  failed — concisely. It is the subject that earns a comment and never the
+  length: prose that restates the code, or says a thing twice, earns nothing
+  by being about *why*. Match the kind of the surrounding language, not its
+  density.
 - Judge a change to the generator on nine seeds (`mapgen grid`), never on one
   favourite map.

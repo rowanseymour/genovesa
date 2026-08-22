@@ -182,16 +182,52 @@ pub const SWITCHES: [Switch; 4] = [
 ];
 
 /// The two variables that are not switches — metres, and rows of pixels,
-/// rather than on and off — so each is a special case wherever the switches
-/// are walked rather than a row that would have to carry a second kind of
-/// value.
-pub const REACH: &str = "reach";
-pub const RESOLUTION: &str = "resolution";
+/// rather than on and off. They stay out of [`SWITCHES`] because that table
+/// carries `confessed` for [`Toggles::line`], which walks booleans and would
+/// have to unwrap a kind to do it; what they join instead is
+/// [`Toggles::variable`], which is what the grammar asks.
+const REACH: &str = "reach";
+const RESOLUTION: &str = "resolution";
+
+/// What a variable holds, for [`Toggles::variable`] to answer with.
+///
+/// Three kinds because there are three. The *wording* of each is
+/// [`crate::console`]'s, which owns the grammar — this only says which kind
+/// the name found, so the console can read and write every variable by asking
+/// once instead of testing for the two that are not switches everywhere it
+/// walks them.
+pub enum Value<'a> {
+    Switch(&'a mut bool),
+    Metres(&'a mut f32),
+    /// `None` in a run with a window, which has no off-screen picture to
+    /// size — see [`Toggles::resolution`].
+    Rows(&'a mut Option<u32>),
+}
 
 impl Toggles {
+    /// The variable a name asks for, whatever kind it holds, or `None` for a
+    /// name that is not one.
+    pub fn variable(&mut self, name: &str) -> Option<Value<'_>> {
+        match name {
+            REACH => Some(Value::Metres(&mut self.reach)),
+            RESOLUTION => Some(Value::Rows(&mut self.resolution)),
+            _ => self.switch(name).map(Value::Switch),
+        }
+    }
+
+    /// Every variable there is, in the order a bare `set` lists them — here
+    /// rather than in the console because this is where they live, and a list
+    /// kept beside the grammar would be a second place to add one.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        SWITCHES
+            .iter()
+            .map(|switch| switch.name)
+            .chain([REACH, RESOLUTION])
+    }
+
     /// The boolean switch a name asks for, or `None` where the name is not
     /// one of them.
-    pub fn switch(&mut self, name: &str) -> Option<&mut bool> {
+    fn switch(&mut self, name: &str) -> Option<&mut bool> {
         let switch = SWITCHES.iter().find(|switch| switch.name == name)?;
         Some((switch.of)(self))
     }
