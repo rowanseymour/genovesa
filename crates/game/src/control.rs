@@ -100,7 +100,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
-use crate::bindings::{Action, KeyBindings};
+use crate::bindings::{self, Action, KeyBindings};
 use crate::camera::{MapCamera, View, MAX_DISTANCE, MIN_DISTANCE};
 use crate::console::{dispatch, Dispatch};
 use crate::debug::Toggles;
@@ -114,7 +114,8 @@ use crate::terrain::{ChunkBuild, Ground};
 /// guessed at, exactly as the console's tab completion asks — so one `help`
 /// down the socket is the whole vocabulary, both sides of the wire.
 const HELP: &str = "shot <path> — write a PNG of the view, once the ground has arrived\n\
-                    press <action> [seconds] — hold a control down, or tap it if no time is given\n\
+                    press <control> [seconds] — hold a control down, or tap it if no time is given; \
+                     `escape` too, which is nobody's control\n\
                     click <button> — press a menu button; `click` alone lists them\n\
                     zoom <m> — camera distance\n\
                     yaw <deg> — bearing to look from\n\
@@ -813,17 +814,17 @@ fn begin(
             Err(why) => refuse(why, answer),
         },
         Some((&"press", rest)) => match press(rest) {
-            Ok((action, left)) => {
-                // The key the action is *bound* to rather than one of this
+            Ok((pressing, left)) => {
+                // The key the control is *bound* to rather than one of this
                 // module's choosing, so a rebound control is pressed where
                 // the player put it and a press goes down the same path a
                 // hand would.
-                let key = hands.bindings.key(action);
+                let key = pressing.key(&hands.bindings);
                 hands.keys.press(key);
                 Some(Doing::Pressing {
                     key,
                     left,
-                    said: pressed(action, left),
+                    said: pressed(&pressing, left),
                     answer,
                 })
             }
@@ -1064,7 +1065,7 @@ fn shot(path: &str) -> Result<PathBuf, String> {
 /// Parsing only — the pressing is [`begin`]'s, which has the bindings and the
 /// key state. Split that way so what a line is allowed to say can be tested
 /// without standing up a world to say it in.
-fn press(args: &[&str]) -> Result<(Action, f32), String> {
+fn press(args: &[&str]) -> Result<(Pressing, f32), String> {
     let (named, seconds) = match args {
         // No time given is a tap: the key goes down now and comes up on the
         // next frame, which is exactly one frame of `just_pressed` for the
@@ -1091,28 +1092,63 @@ fn press(args: &[&str]) -> Result<(Action, f32), String> {
             ))
         }
     };
+    if let Some(key) = bindings::reserved_key(named) {
+        return Ok((Pressing::Reserved(key, named.to_string()), seconds));
+    }
     let Some(action) = Action::ALL.into_iter().find(|it| it.name() == named) else {
         return Err(format!("no control called `{named}`\n{}", actions()));
     };
-    Ok((action, seconds))
+    Ok((Pressing::Control(action), seconds))
+}
+
+/// What a `press` line named.
+///
+/// Two kinds because there are two: a control, which is pressed at whatever
+/// key it is *bound* to so that a rebound one is found where the player put
+/// it, and a key that is nobody's control and so has nothing to be bound to —
+/// see [`crate::bindings::reserved_key`].
+#[derive(Clone, PartialEq, Debug)]
+enum Pressing {
+    Control(Action),
+    Reserved(KeyCode, String),
+}
+
+impl Pressing {
+    /// The key to hold down. The bindings are asked for a control and not for
+    /// a reserved key, which is the whole difference between them.
+    fn key(&self, bindings: &KeyBindings) -> KeyCode {
+        match self {
+            Self::Control(action) => bindings.key(*action),
+            Self::Reserved(key, _) => *key,
+        }
+    }
+
+    /// What it is called in an answer — the word that was typed.
+    fn name(&self) -> &str {
+        match self {
+            Self::Control(action) => action.name(),
+            Self::Reserved(_, named) => named,
+        }
+    }
 }
 
 /// What a press answers with when it is over. A tap and a hold are told apart
 /// because a driver that meant to sail and forgot the seconds gets a boat
 /// that has not moved, and the answer is the only place that shows.
-fn pressed(action: Action, seconds: f32) -> String {
+fn pressed(pressing: &Pressing, seconds: f32) -> String {
     if seconds > 0.0 {
-        format!("{} held {seconds} seconds", action.name())
+        format!("{} held {seconds} seconds", pressing.name())
     } else {
-        format!("{} tapped", action.name())
+        format!("{} tapped", pressing.name())
     }
 }
 
 /// The controls a `press` will take, as one line — read off [`Action::ALL`]
-/// so a control added to the game is offered here without being listed twice.
+/// so a control added to the game is offered here without being listed twice,
+/// with the one key that is nobody's control named after them.
 fn actions() -> String {
     let names: Vec<&str> = Action::ALL.iter().map(|it| it.name()).collect();
-    format!("controls: {}", names.join(", "))
+    format!("controls: {}, escape", names.join(", "))
 }
 
 #[cfg(test)]
@@ -1270,6 +1306,59 @@ mod tests {
         let said = answered.try_recv().expect("answered on the spot");
         assert!(said.contains("no world"), "unhelpful: {said}");
         assert!(!app.world().resource::<Control>().holding);
+    }
+
+    /// `press escape` is the way to the pause menu, and there is no other:
+    /// Escape is reserved from rebinding, so it is bound to no [`Action`] and
+    /// nothing in [`Action::ALL`] can find it. Without this the pause menu
+    /// and the three screens under it are reachable by a hand at a keyboard
+    /// and by nothing else — `click` cannot open a screen no button opens.
+    #[test]
+    fn escape_is_pressable_though_it_is_nobodys_control() {
+        assert_eq!(
+            press(&["escape"]),
+            Ok((
+                Pressing::Reserved(KeyCode::Escape, "escape".to_string()),
+                0.0
+            ))
+        );
+        assert_eq!(
+            press(&["escape", "0.5"]).map(|(_, seconds)| seconds),
+            Ok(0.5)
+        );
+
+        // Named in what a missed control lists, so a driver finds it without
+        // having to know it is a special case.
+        assert!(actions().contains("escape"), "{}", actions());
+
+        // And the other reserved keys are not offered: the arrows are a
+        // second set of the movement controls and `press forward` says those
+        // already, and the backquote opens the console this line came down.
+        for key in ["arrowup", "up", "backquote", "`"] {
+            assert!(press(&[key]).is_err(), "`{key}` should not be a control");
+        }
+    }
+
+    /// And it goes down as the real key, so whatever reads Escape sees it —
+    /// the pause menu's own `helm_keys` among them.
+    #[test]
+    fn a_pressed_escape_is_the_escape_key_itself() {
+        let (mut app, orders) = driven_app();
+        let answered = say(&orders, "press escape");
+
+        app.update();
+        assert!(
+            keys(&app).just_pressed(KeyCode::Escape),
+            "escape never went down"
+        );
+        between_frames(&mut app);
+
+        app.update();
+        assert!(
+            !keys(&app).pressed(KeyCode::Escape),
+            "escape was never let go"
+        );
+        assert_eq!(answered.try_recv(), Ok("escape tapped".to_string()));
     }
 
     /// A click presses a button the screen is showing, and is answered once
@@ -1535,7 +1624,7 @@ mod tests {
         app.update();
         let reply = answered.try_recv().expect("nothing to wait for");
         assert!(reply.contains("shot <path>"), "{reply}");
-        assert!(reply.contains("press <action>"), "{reply}");
+        assert!(reply.contains("press <control>"), "{reply}");
         assert!(reply.contains("quit —"), "{reply}");
         assert!(reply.contains("nobody is serving this world"), "{reply}");
     }
@@ -1545,9 +1634,18 @@ mod tests {
     /// console's own [`dispatch`].
     #[test]
     fn press_reads_a_control_and_a_time() {
-        assert_eq!(press(&["forward", "20"]), Ok((Action::MoveForward, 20.0)));
-        assert_eq!(press(&["claim"]), Ok((Action::Claim, 0.0)));
-        assert_eq!(press(&["view-left", "0.5"]), Ok((Action::TurnLeft, 0.5)));
+        assert_eq!(
+            press(&["forward", "20"]),
+            Ok((Pressing::Control(Action::MoveForward), 20.0))
+        );
+        assert_eq!(
+            press(&["claim"]),
+            Ok((Pressing::Control(Action::Claim), 0.0))
+        );
+        assert_eq!(
+            press(&["view-left", "0.5"]),
+            Ok((Pressing::Control(Action::TurnLeft), 0.5))
+        );
     }
 
     /// Every refusal names what was wrong with the line. A driver reads these
@@ -1587,10 +1685,13 @@ mod tests {
     #[test]
     fn a_press_says_which_kind_it_was() {
         assert_eq!(
-            pressed(Action::MoveForward, 20.0),
+            pressed(&Pressing::Control(Action::MoveForward), 20.0),
             "forward held 20 seconds"
         );
-        assert_eq!(pressed(Action::Chart, 0.0), "chart tapped");
+        assert_eq!(
+            pressed(&Pressing::Control(Action::Chart), 0.0),
+            "chart tapped"
+        );
     }
 
     /// The view verbs, which took the place of `--zoom` and `--yaw` and have
