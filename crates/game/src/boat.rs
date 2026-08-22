@@ -2115,8 +2115,8 @@ fn settled(eased: f32, target: f32, within: f32) -> f32 {
 /// its sign and its ordering against itself, both of which the offset leaves
 /// alone.
 ///
-/// This is the whole of collision. The ground is a height field on a two-metre
-/// lattice and the boat is a keel line above it, so "is there water enough
+/// This is the whole of collision. The ground is a height field sampled every
+/// [`FACET_METRES`] and the boat is a keel line above it, so "is there water enough
 /// here" is a handful of lookups rather than triangle intersection —
 /// [`Ground::height`] answers on exactly the facets the mesh was built from,
 /// which is what makes the ground the boat is stopped by the ground the player
@@ -2220,11 +2220,13 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
 /// comparison carries no tolerance: a hair a frame is a metre a second up a
 /// hillside.
 ///
-/// Only the pose at the end of the advance is judged; the path swept getting
-/// there is covered by the probes of the frame before, which holds while a
-/// frame's advance stays under the probe spacing — seventeen centimetres at
-/// sixty frames a second, and two and a half metres at the quarter second Bevy
-/// clamps a stalled frame to.
+/// Poses are judged every [`FACET_METRES`] along the advance, not only at its
+/// end. An ordinary frame is one pose — seventeen centimetres of way at sixty
+/// frames a second — but the quarter second Bevy clamps a stalled frame to is
+/// two and a half metres, several probe spacings, and judged in one leap that
+/// would step a keel clean over a facet of ground an intermediate pose
+/// catches. Sub-stepping costs those stalled frames a handful of extra probe
+/// sets and ordinary frames nothing.
 ///
 /// Turning at speed also heels the hull, on the target of [`heel_for`] and the
 /// hull's heel-response curve, which is both the roll into the turn and the
@@ -2307,19 +2309,34 @@ fn steer(
         };
 
         let advance = transform.forward() * way * time.delta_secs();
-        let here = grounding(&hull, ground, &transform);
-        let there = grounding(
-            &hull,
-            ground,
-            &Transform {
-                translation: transform.translation + advance,
-                ..*transform
-            },
-        );
+        // One pose per facet of advance — see the swept-path paragraph above.
+        // Ordinary frames advance far less than a facet and take one step.
+        let steps = (advance.length() / FACET_METRES).ceil().max(1.0);
+        let step = advance / steps;
+        let mut here = grounding(&hull, ground, &transform);
+        let mut walked = 0.0;
+        let mut blocked = false;
+        while walked < steps {
+            let there = grounding(
+                &hull,
+                ground,
+                &Transform {
+                    translation: transform.translation + step,
+                    ..*transform
+                },
+            );
+            if there <= 0.0 || there <= here {
+                transform.translation += step;
+                here = there;
+                walked += 1.0;
+            } else {
+                blocked = true;
+                break;
+            }
+        }
 
-        if there <= 0.0 || there <= here {
+        if !blocked {
             boat.way = way;
-            transform.translation += advance;
         } else {
             boat.way = 0.0;
         }

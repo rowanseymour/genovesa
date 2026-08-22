@@ -791,7 +791,7 @@ impl Archipelago {
     /// shape inside a fitted sea, and every chunk of the rectangle that misses
     /// the land entirely — the whole skirt, and the corners of most frames —
     /// comes out as a flat plane at minus [`OCEAN_DEPTH`]. Sending those costs
-    /// sixteen kilobytes apiece to draw exactly what a client's ocean-floor
+    /// sixty-six kilobytes apiece to draw exactly what a client's ocean-floor
     /// backdrop is already drawing underneath them. Measured over a streaming
     /// radius on five seeds it ran from a quarter of the chunks to nearly two
     /// thirds — the share goes with the mix of island sizes nearby, since a
@@ -824,6 +824,31 @@ impl Archipelago {
             water: facet_water(base, &heights, |wx, wz| island.lake_level(wx, wz)),
             plants: crate::plants::plants(&island, chunk),
         })
+    }
+
+    /// One chunk's corner heights alone, quantised exactly as
+    /// [`chunk_payload`] would send them, or `None` for open water — the same
+    /// answer, minus the surfaces, standing water and plants that cost most
+    /// of a payload to make.
+    ///
+    /// For the survey, which reads nothing but the heights and used to pay
+    /// for a whole payload to get them — on the connection's own thread,
+    /// where a burst of freshly-seen chunks is time the client's other
+    /// messages wait behind. The quantise round trip is load-bearing, not an
+    /// economy to skip: a coastline is settled on the heights a client was
+    /// *sent*, and a corner a centimetre either side of the sea puts the
+    /// waterline somewhere else.
+    ///
+    /// [`chunk_payload`]: Archipelago::chunk_payload
+    pub fn chunk_heights(&self, chunk: IVec2) -> Option<Vec<u16>> {
+        let island = self.island(self.island_at_chunk(chunk)?);
+        let base = chunk.as_vec2() * CHUNK_METRES;
+
+        let heights = facet_heights(base, |wx, wz| island.height(wx, wz));
+        if heights.iter().all(|h| *h == -OCEAN_DEPTH) {
+            return None;
+        }
+        Some(heights.iter().copied().map(quantize).collect())
     }
 
     /// Drops every cached island whose frame lies entirely beyond `radius` of
@@ -1212,7 +1237,7 @@ mod tests {
     /// The number that matters for the shape of the whole arrangement — a
     /// client asks for all of these at once, and the server has to make them
     /// and put them on a socket. The water is nearly free at both ends; the
-    /// ground is sixteen kilobytes apiece and is where a slow link would be
+    /// ground is sixty-six kilobytes apiece and is where a slow link would be
     /// felt, so the split between them is as much the point as the time is.
     #[test]
     #[ignore]
@@ -1335,9 +1360,9 @@ mod tests {
             "layout digests to {layout:#018X}, ground to {ground:#018X}, sent to {sent:#018X}"
         );
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
-        assert_eq!(ground, 0x017C_624C_2A04_C8B4, "the ground changed");
+        assert_eq!(ground, 0xD15B_BF89_88DF_E229, "the ground changed");
         assert_eq!(
-            sent, 0xCADE_76FF_AE4E_4449,
+            sent, 0x280F_62FA_7F47_17E3,
             "what a client would be sent changed"
         );
     }

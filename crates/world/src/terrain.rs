@@ -464,8 +464,12 @@ const MASSIF_EQUALITY: f32 = 0.85;
 
 /// Wavelength of the undulations within a field, in metres.
 const DETAIL_SCALE: f32 = 50.0;
-/// Wavelength of the surface roughness, in metres.
-const MICRO_SCALE: f32 = 12.0;
+/// Wavelength of the surface roughness, in metres. Deliberately *not* a
+/// multiple of the metre the mesh is sampled at, for the reason
+/// [`GRAIN_SCALE`] spells out — at 12.0 the ridged crag pinned its maximum
+/// onto every twelfth mesh corner, a regular grid of peaks in the band that
+/// exists to look broken.
+const MICRO_SCALE: f32 = 11.4;
 /// How far the undulations lift or drop the ground away from the landform they
 /// are laid over, in metres.
 const DETAIL_RELIEF: f32 = 5.0;
@@ -479,10 +483,18 @@ const MICRO_RELIEF: f32 = 1.2;
 /// from 2 m to 1 m facets: the roughness above bottoms out at half
 /// [`MICRO_SCALE`], so between ~6 m and the facet the field was smooth and the
 /// finer mesh only resampled it — the faceting the look leans on washed out
-/// instead of sharpening. Four metres is the old floor restated for the new
-/// facet: a wavelength a few vertices wide, so neighbouring facets tilt
+/// instead of sharpening. A few vertices wide, so neighbouring facets tilt
 /// against each other instead of shading one slope.
-const GRAIN_SCALE: f32 = 4.0;
+///
+/// Not a whole number of metres, and that is load-bearing: Perlin is exactly
+/// zero at its own lattice nodes, and a wavelength commensurate with the
+/// metre grid the mesh samples pins those zeros to mesh corners — measured
+/// at 4.0, a third of the band's amplitude vanished along axis-aligned lines
+/// every fourth corner, and one lattice edge in sixteen was perfectly flat.
+/// An incommensurate wavelength walks the sample phase through the whole
+/// field instead, which is what noise sampled on a grid has to do to read
+/// as noise.
+const GRAIN_SCALE: f32 = 4.7;
 /// How far the grain lifts or drops the ground, in metres. The next step of
 /// the same power law [`MICRO_RELIEF`] holds to. It was first tuned alone —
 /// up to a full metre — to be visible over a MICRO still capped for the old
@@ -519,6 +531,16 @@ const RUGGED_SCALE: f32 = 280.0;
 /// ground to parkland, which reads as mountains being mountains rather than
 /// as patches of texture landing wherever the noise fell.
 const RUGGED_CLIMB: f32 = 150.0;
+/// Where the dial's field reads as fully gentle and fully rugged: the
+/// smoothstep edges the field-plus-altitude sum is cut at. Asymmetric about
+/// zero on purpose — the field's spread is narrow (a 2-octave fbm rarely
+/// leaves ±0.5), so a symmetric cut would leave the dial parked mid-range
+/// everywhere and neither country would commit. What the pair actually
+/// produces is reported per seed by `island_shape` (the rugged share),
+/// which is the number to watch when moving either edge.
+const RUGGED_GENTLE: f32 = -0.45;
+/// See [`RUGGED_GENTLE`].
+const RUGGED_FULL: f32 = 0.5;
 /// How much of the undulations' relief survives in the gentlest country.
 /// Plains still roll — a dead-flat interior reads as unfinished, not calm.
 const RUGGED_SWELL_FLOOR: f32 = 0.35;
@@ -638,9 +660,12 @@ const BEACH_STEEP_TARGET: f32 = 0.01;
 /// enough to see; a seed still failing here keeps its few sand ribbons.
 const COAST_SCALE_LIMIT: f32 = 2.0;
 
-/// Spacing of the distance-to-water field, in metres. Finer than the facet
-/// grid would buy nothing — the field is only ever read to shape and fade a
-/// coast that is drawn every [`FACET_METRES`].
+/// Spacing of the distance-to-water field, in metres. Coarser than the
+/// facet grid the coast is drawn on — deliberately, since the field is only
+/// ever read to shape and fade over tens of metres, and matching the mesh
+/// would cost sixteen times the fitting for smoothness nothing reads. The
+/// price is that the field bends linearly between cells where the true
+/// distance curves, which is part of the slack the lake test carries.
 const COAST_GRID: f32 = 4.0;
 
 /// Wavelength of the skerries — the rock heads left standing offshore of a
@@ -1588,6 +1613,20 @@ impl TerrainGenerator {
         )
     }
 
+    /// The country-character dial at a point, 0 gentle to 1 rugged — the
+    /// field cut at [`RUGGED_GENTLE`]/[`RUGGED_FULL`], nudged by altitude.
+    /// Split out of [`height`] so the `island_shape` reporter can measure
+    /// the split the cuts actually produce.
+    ///
+    /// [`height`]: TerrainGenerator::height
+    fn rugged_dial(&self, wx: f32, wz: f32, base: f32) -> f32 {
+        smoothstep(
+            RUGGED_GENTLE,
+            RUGGED_FULL,
+            self.rugged.fbm(wx / RUGGED_SCALE, wz / RUGGED_SCALE, 2) + base / RUGGED_CLIMB,
+        )
+    }
+
     /// Terrain height in metres at a world-space `(x, z)`. Sea level is 0.
     pub fn height(&self, wx: f32, wz: f32) -> f32 {
         let base = self.landform(wx, wz);
@@ -1600,11 +1639,7 @@ impl TerrainGenerator {
             // Which country this is. The dial suppresses relief rather than
             // adding any, so every bound counted from the reliefs below —
             // [`LAKE_RELIEF`] above all — still holds at its old value.
-            let rugged = smoothstep(
-                -0.45,
-                0.5,
-                self.rugged.fbm(wx / RUGGED_SCALE, wz / RUGGED_SCALE, 2) + base / RUGGED_CLIMB,
-            );
+            let rugged = self.rugged_dial(wx, wz, base);
             let swell = self.detail.fbm(wx / DETAIL_SCALE, wz / DETAIL_SCALE, 3) * DETAIL_RELIEF;
             // The mid band changes shape with the dial, not just size:
             // gentle country rolls, rugged country breaks into the crests
@@ -2350,14 +2385,16 @@ const LAKE_FREEBOARD: f32 = 0.5;
 /// steep bank gets a narrow margin and a shallow one a wide one — which is
 /// what keeps the fade from reading as a ring stamped around the water.
 ///
-/// The size of it is not a taste: it is what makes the fade a *guarantee* that
-/// the ground stays on the side of the surface the flood put it. The weight is
-/// [`smoothstep`], so the ground is displaced by at most `relief * t²(3-2t)`
-/// where the surface is `relief * t` away, and `t(3-2t)` peaks at 1.125 —
-/// anything past 1.125 times the displacement's own reach cannot carry ground
-/// across the water however the noise falls. So a lake never leaks along a dip
-/// in its bank, a bed never breaks its own surface, and a reader of a level can
-/// just compare a height against it.
+/// The size of it is not a taste: it is what holds the ground to the side of
+/// the surface the flood put it. The weight is [`smoothstep`], so the ground
+/// is displaced by at most `relief * t²(3-2t)` where the surface is
+/// `relief * t` away, and `t(3-2t)` peaks at 1.125 — so the displacement
+/// itself can never carry ground across the water. What can, by centimetres,
+/// is the fade being *read* off the fitting grid: between two of its cells
+/// the true weight curves where the bilinear read runs straight, and the
+/// finer the detail bands the further the field curves past the line. The
+/// lake test measures that leak and carries it as its slack — a few
+/// centimetres, against a guarantee that holds in metres.
 ///
 /// Sized against the detail and only the detail. The coastal reshaping happens
 /// downstream and answers to the sea, so a lake within [`SHORE_REACH`] of the
@@ -3372,8 +3409,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0xB4AB_5DB0_037E_5906u64),
-            (99, UVec2::new(3, 2), 0xBE7C_00A6_29D1_C09Eu64),
+            (20_040_112u32, UVec2::new(4, 4), 0x0004_82DB_6935_EB1Au64),
+            (99, UVec2::new(3, 2), 0x9ACA_8CDE_6967_D424u64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -4228,6 +4265,24 @@ mod bench {
             slopes.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a height field"));
             let slope = |p: usize| slopes[slopes.len() * p / 100] as u32;
 
+            // Which country the dial deals out — the number that watches
+            // [`RUGGED_GENTLE`]/[`RUGGED_FULL`], the way the shore mix
+            // watches the coast cuts. Counted over land, dial past halfway.
+            let mut rugged = 0u32;
+            let mut dialled = 0u32;
+            for iz in (0..size as i32).step_by(8) {
+                for ix in (0..size as i32).step_by(8) {
+                    let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
+                    let base = gen.landform(wx, wz);
+                    if base > 0.0 {
+                        dialled += 1;
+                        if gen.rugged_dial(wx, wz, base) > 0.5 {
+                            rugged += 1;
+                        }
+                    }
+                }
+            }
+
             let cells = (size / 2) * (size / 2);
             let area = land as f32 * 4.0;
             let coast = edges as f32 * 2.0;
@@ -4236,7 +4291,7 @@ mod bench {
             println!(
                 "seed {seed:>9}  land {:4.1}%  mountain {:4.1}% of land  peak {peak:5.0} m  \
                  lakes {:4.1}%  shoreline index {:.2}  slope p50/p90/p99 {:>2}/{:>2}/{:>2} deg  \
-                 land height p50/p90 {:>3}/{:>3} m",
+                 land height p50/p90 {:>3}/{:>3} m  rugged {:4.1}% of land",
                 land as f32 / cells as f32 * 100.0,
                 mountain as f32 / land.max(1) as f32 * 100.0,
                 lake as f32 / cells as f32 * 100.0,
@@ -4246,6 +4301,7 @@ mod bench {
                 slope(99),
                 decile(50),
                 decile(90),
+                rugged as f32 / dialled.max(1) as f32 * 100.0,
             );
         }
     }

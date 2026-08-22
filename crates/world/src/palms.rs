@@ -29,9 +29,9 @@ use crate::plants::{draw, mix};
 /// below, the closest two of them ever come.
 ///
 /// A coconut palm wants some yards to itself, and the number is doing a second
-/// job at this scale: the ground is drawn in two-metre facets, so a lattice
-/// much finer than this would put several trees on one triangle of sand and
-/// they would read as a hedge rather than as trees.
+/// job at this scale: a lattice much finer than this would stand trees a
+/// stride apart down a beach, and they would read as a hedge rather than as
+/// trees.
 const CELL: f32 = 8.0;
 
 /// How far off its cell's centre a palm may stand. Short of half a cell, so a
@@ -230,8 +230,8 @@ mod tests {
         // — run with --nocapture and the new values are printed. If you did
         // not, a platform has stopped agreeing about what a seed means.
         let recorded = [
-            (20_040_112u32, 0x43CD_58C0_FA53_41F7u64),
-            (1, 0x4814_F4F0_2E1F_C1DC),
+            (20_040_112u32, 0x7919_6D68_4EB4_038Fu64),
+            (1, 0xC7CC_05C9_81FF_F461),
             (7, 0x1AC0_0B7B_05CF_A21D),
         ];
         // Every seed digested before any is judged, so a re-recording run

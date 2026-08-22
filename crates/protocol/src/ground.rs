@@ -12,9 +12,10 @@
 //! detail, say — is a change to the wire.
 //!
 //! And the **palette is the format**: a [`Surface`] is a byte and
-//! [`Surface::color`] is what it means. That keeps a chunk under twenty
-//! kilobytes instead of three floats per triangle, and keeps the two ends
-//! unable to disagree about what sand looks like.
+//! [`Surface::color`] is what it means. That keeps a chunk's surfaces to a
+//! byte per triangle instead of three floats — a quarter of the payload
+//! rather than three times it — and keeps the two ends unable to disagree
+//! about what sand looks like.
 //!
 //! The same goes for **standing water**. The sea is a plane at zero any client
 //! can draw, but a lake stands at a height decided by a rim saddle that may be
@@ -48,8 +49,8 @@ pub const NORTH: Vec2 = Vec2::NEG_Y;
 ///
 /// This is what an answer of *no ground* means. A chunk with no payload is
 /// not "unknown" and not "nothing" — it is flat floor at exactly this depth,
-/// which a client draws as a plane rather than as a mesh of eight thousand
-/// identical triangles. Every island's own sea bed is clamped to the same
+/// which a client draws as a plane rather than as a mesh of thirty-odd
+/// thousand identical triangles. Every island's own sea bed is clamped to the same
 /// level, so the plane and the meshes meet along every coast with nothing to
 /// show for it; a client drawing its backdrop at some other depth would print
 /// a step around every island in the world.
@@ -85,9 +86,8 @@ pub const FACET_TRIS: usize = FACET_QUADS * FACET_QUADS * 2;
 /// the world builds, so no honest ground ever clamps against it.
 pub const HEIGHT_FLOOR: f32 = -16.0;
 
-/// Metres per step of a stored height — two centimetres, which is a fiftieth
-/// of the smallest thing anyone can see at the closest zoom and a two
-/// thousandth of a facet's own width.
+/// Metres per step of a stored height — two centimetres, a fiftieth of the
+/// smallest thing anyone can see at the closest zoom.
 ///
 /// Sixteen bits at this step reach from [`HEIGHT_FLOOR`] to something over a
 /// kilometre, and the tallest ground the generator builds is a few hundred

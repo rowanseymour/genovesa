@@ -143,7 +143,10 @@ const DESPAWN_RADIUS: f32 = 1280.0;
 /// construction — the difference between meshing the near ones first and
 /// taking them in whatever order the query yields is a few frames of a corner
 /// of the view filling in.
-const MESHES_PER_FRAME: usize = 8;
+/// Two rather than the eight it stood at when a chunk's mesh was a quarter
+/// this size: the cap bounds *bytes* handed to the GPU in one frame, and at
+/// ~4.5 MB per land chunk two holds the budget eight was chosen for.
+const MESHES_PER_FRAME: usize = 2;
 
 pub struct TerrainPlugin;
 
@@ -269,8 +272,8 @@ impl Ground {
     ///
     /// Heights are turned back into metres here rather than in the build task,
     /// because what stands on the ground wants them this frame and what draws
-    /// it can wait: dequantising four thousand corners is arithmetic, meshing
-    /// is twenty-four thousand vertices.
+    /// it can wait: dequantising sixteen thousand corners is arithmetic,
+    /// meshing is ninety-eight thousand vertices.
     pub fn deliver(&mut self, chunk: IVec2, payload: Option<ChunkPayload>) {
         self.outstanding.remove(&chunk);
         match payload {
@@ -498,20 +501,19 @@ struct OceanFloor;
 ///
 /// The geometry is flat shaded: every triangle carries its own normal and its
 /// own single colour, so no vertex is shared between two triangles. That costs
-/// three vertices per triangle instead of roughly one, and buys it back many
-/// times over from drawing at [`FACET_METRES`] rather than per metre. It also
+/// three vertices per triangle instead of roughly one — the price of flat
+/// shading with per-facet colour, paid in vertices rather than in the
+/// texture and gradient machinery the look exists to refuse. It also
 /// means chunks need no border samples to meet cleanly — there are no shared
 /// normals to disagree about.
 ///
 /// Deliberately un-indexed: with no vertex shared between triangles an index
 /// buffer would be 0, 1, 2, 3, … and save nothing.
-fn chunk_mesh(chunk: IVec2, heights: &[f32], surfaces: &[Surface]) -> Mesh {
+fn chunk_mesh(heights: &[f32], surfaces: &[Surface]) -> Mesh {
     let count = FACET_TRIS * 3;
     let mut positions = Vec::with_capacity(count);
     let mut normals = Vec::with_capacity(count);
-    let mut uvs = Vec::with_capacity(count);
     let mut colors = Vec::with_capacity(count);
-    let base = chunk.as_vec2() * CHUNK_METRES;
 
     for (facet, surface) in facets().zip(surfaces) {
         let tri = facet.corners.map(|(cx, cz)| {
@@ -531,19 +533,12 @@ fn chunk_mesh(chunk: IVec2, heights: &[f32], surfaces: &[Surface]) -> Mesh {
         let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
         let color = [linear.red, linear.green, linear.blue, 1.0];
 
-        // UVs are in world metres over the chunk size, so a future overlay
-        // lines up across chunk boundaries. One value for the whole triangle,
-        // like everything else about it.
-        let mid = (tri[0] + tri[1] + tri[2]) / 3.0;
-        let uv = [
-            (base.x + mid.x) / CHUNK_METRES,
-            (base.y + mid.z) / CHUNK_METRES,
-        ];
-
+        // No UVs: nothing binds a texture to the ground, and at a hundred
+        // thousand vertices a chunk an attribute carried "for later" is
+        // three-quarters of a megabyte of dead weight on every copy.
         for corner in tri {
             positions.push([corner.x, corner.y, corner.z]);
             normals.push([normal.x, normal.y, normal.z]);
-            uvs.push(uv);
             colors.push(color);
         }
     }
@@ -554,7 +549,6 @@ fn chunk_mesh(chunk: IVec2, heights: &[f32], surfaces: &[Surface]) -> Mesh {
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
 }
 
@@ -575,11 +569,9 @@ fn chunk_mesh(chunk: IVec2, heights: &[f32], surfaces: &[Surface]) -> Mesh {
 /// mesh hides the part that has gone underground. The waterline the player sees
 /// is therefore the true intersection of the two surfaces, exactly as the sea
 /// already meets every coast.
-fn water_mesh(chunk: IVec2, water: &[u16]) -> Option<Mesh> {
+fn water_mesh(water: &[u16]) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut uvs: Vec<[f32; 2]> = Vec::new();
-    let base = chunk.as_vec2() * CHUNK_METRES;
 
     for iz in 0..FACET_QUADS {
         for ix in 0..FACET_QUADS {
@@ -606,10 +598,6 @@ fn water_mesh(chunk: IVec2, water: &[u16]) -> Option<Mesh> {
                 // nothing for the light to pick out — which is what makes a
                 // lake read as a sheet of water rather than as ground.
                 normals.push([0.0, 1.0, 0.0]);
-                uvs.push([
-                    (base.x + cx as f32 * FACET_METRES) / CHUNK_METRES,
-                    (base.y + cz as f32 * FACET_METRES) / CHUNK_METRES,
-                ]);
             }
         }
     }
@@ -621,7 +609,6 @@ fn water_mesh(chunk: IVec2, water: &[u16]) -> Option<Mesh> {
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     })
 }
 
@@ -635,11 +622,8 @@ struct ChunkMeshes {
 
 fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
     ChunkMeshes {
-        ground: chunk_mesh(arrival.chunk, &arrival.heights, &arrival.surfaces),
-        water: arrival
-            .water
-            .as_ref()
-            .and_then(|water| water_mesh(arrival.chunk, water)),
+        ground: chunk_mesh(&arrival.heights, &arrival.surfaces),
+        water: arrival.water.as_ref().and_then(|water| water_mesh(water)),
     }
 }
 
@@ -1016,7 +1000,7 @@ mod tests {
     fn a_chunk_mesh_is_two_flat_triangles_per_quad() {
         let payload = a_slope();
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
-        let mesh = chunk_mesh(IVec2::ZERO, &heights, &payload.surfaces);
+        let mesh = chunk_mesh(&heights, &payload.surfaces);
 
         assert_eq!(mesh.count_vertices(), FACET_TRIS * 3);
         assert!(
@@ -1057,7 +1041,7 @@ mod tests {
     fn chunk_positions_are_local_so_the_transform_places_them() {
         let heights = vec![3.5f32; FACET_VERTS * FACET_VERTS];
         let surfaces = vec![Surface::plain(Tone::Sand); FACET_TRIS];
-        let mesh = chunk_mesh(IVec2::new(4, -2), &heights, &surfaces);
+        let mesh = chunk_mesh(&heights, &surfaces);
 
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1166,7 +1150,7 @@ mod tests {
 
     #[test]
     fn a_lake_is_a_flat_sheet_at_the_level_it_was_sent() {
-        let mesh = water_mesh(IVec2::ZERO, &a_lake(12.0, 8)).expect("a lake");
+        let mesh = water_mesh(&a_lake(12.0, 8)).expect("a lake");
 
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1201,7 +1185,7 @@ mod tests {
         // mesh cut the waterline instead of the quad grid cutting it. A lake
         // over the corners below 8 therefore reaches the quad from 7 to 8,
         // whose far corners are dry.
-        let mesh = water_mesh(IVec2::ZERO, &a_lake(12.0, 8)).expect("a lake");
+        let mesh = water_mesh(&a_lake(12.0, 8)).expect("a lake");
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
@@ -1221,7 +1205,7 @@ mod tests {
 
     #[test]
     fn ground_with_no_lake_on_it_draws_no_water() {
-        assert!(water_mesh(IVec2::ZERO, &vec![NO_WATER; FACET_VERTS * FACET_VERTS]).is_none());
+        assert!(water_mesh(&vec![NO_WATER; FACET_VERTS * FACET_VERTS]).is_none());
 
         // And a payload that carries no grid at all never gets as far as
         // asking — the common case, and the one that has to cost nothing.
@@ -1247,7 +1231,7 @@ mod tests {
             }
         }
 
-        let mesh = water_mesh(IVec2::ZERO, &water).expect("two lakes");
+        let mesh = water_mesh(&water).expect("two lakes");
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
@@ -1303,7 +1287,7 @@ mod tests {
         // And a lake, whose level is quantised on the very same lattice as the
         // bed it stands on.
         for level in [0.0, 0.5, 12.0, 137.5, 402.0] {
-            let mesh = water_mesh(IVec2::ZERO, &a_lake(level, 8)).expect("a lake");
+            let mesh = water_mesh(&a_lake(level, 8)).expect("a lake");
             let positions = mesh
                 .attribute(Mesh::ATTRIBUTE_POSITION)
                 .expect("positions")

@@ -1298,11 +1298,23 @@ fn put_ivec2(out: &mut Vec<u8>, value: IVec2) {
     out.extend_from_slice(&value.y.to_le_bytes());
 }
 
-/// A string as a u16 byte count and its UTF-8 bytes. A count too big for the
-/// u16 wraps, but the payload it miscounts cannot leave the machine: the
-/// frame it belongs to is over its own ceiling by more, and is refused whole
-/// by [`write_frame`].
+/// A string as a u16 byte count and its UTF-8 bytes.
+///
+/// The count wrapping is asserted against rather than left to the frame
+/// ceiling: it used to be true that a string too long for the u16 made its
+/// frame too long for [`write_frame`], but the server's ceiling has grown
+/// past 64 KiB (a chunk of ground is bigger than that now), so a wrapped
+/// count would frame cleanly and reach the peer as a truncated string with
+/// spare bytes behind it — a corrupt session blamed on the wrong message.
+/// Every string actually sent is bounded far below the limit (names by
+/// [`NAME_BYTES`], console traffic by [`MAX_CLIENT_FRAME`]), so the assert
+/// is the tripwire for the first future message that is not.
 fn put_str(out: &mut Vec<u8>, value: &str) {
+    assert!(
+        value.len() <= u16::MAX as usize,
+        "a {}-byte string cannot travel as a u16 count",
+        value.len()
+    );
     put_u16(out, value.len() as u16);
     out.extend_from_slice(value.as_bytes());
 }
@@ -1907,7 +1919,11 @@ mod tests {
             heading: 0.75,
             occupant: None,
         });
-        assert_eq!(empty[..4], [23, 0, 0, 0], "an empty boat is shorter by its hand");
+        assert_eq!(
+            empty[..4],
+            [23, 0, 0, 0],
+            "an empty boat is shorter by its hand"
+        );
         assert_eq!(empty[4..26], occupied[4..26], "emptiness moved the fields");
         assert_eq!(empty[26], 0, "nobody at the helm is flag 0");
         // A rowing boat differs in exactly the kind byte.
@@ -1937,7 +1953,7 @@ mod tests {
                 heading: Some(0.75),
             }),
             [
-                14, 0, 0, 0, // length
+                14, 0, 0, 0,  // length
                 17, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // z = -2.0
@@ -1951,7 +1967,7 @@ mod tests {
                 heading: None,
             }),
             [
-                10, 0, 0, 0, // length
+                10, 0, 0, 0,  // length
                 17, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // z = -2.0
@@ -2507,7 +2523,7 @@ mod tests {
         assert!(ToServer::read(&mut bad_papers.as_slice()).is_err());
 
         // A chunk whose flag byte is none of the three kinds of answer.
-        let mut bad_flag = vec![10, 0, 5];
+        let mut bad_flag = vec![10, 0, 0, 0, 5];
         bad_flag.extend([0; 8]);
         bad_flag.push(3);
         assert!(ToClient::read(&mut bad_flag.as_slice()).is_err());
@@ -2517,7 +2533,7 @@ mod tests {
         // that disagrees with its own flag is corrupt rather than a chunk
         // with a short lake.
         let mut short_lake = Vec::new();
-        put_u16(&mut short_lake, (1 + 8 + 1 + ground::PAYLOAD_BYTES) as u16);
+        put_u32(&mut short_lake, (1 + 8 + 1 + ground::PAYLOAD_BYTES) as u32);
         short_lake.push(5);
         short_lake.extend([0; 8]);
         short_lake.push(2);
@@ -2526,7 +2542,7 @@ mod tests {
 
         // A survey promising more chunks than it carries: the counts inside a
         // batch are a reader's to believe only as far as the bytes go.
-        let short_survey = [3, 0, 14, 2, 0];
+        let short_survey = [3, 0, 0, 0, 14, 2, 0];
         assert!(ToClient::read(&mut short_survey.as_slice()).is_err());
 
         // And a wire that simply ends is an ordinary end-of-file error.
