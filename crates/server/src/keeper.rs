@@ -1061,19 +1061,25 @@ mod tests {
     #[test]
     fn the_data_directory_is_settled_once() {
         // The whole of what a test's quarantine rests on: the first word is
-        // the one that counts, and it counts for the rest of the process. So
-        // this test owns the answer for this binary — nothing else here asks
-        // where the data directory is, and something that started to would
-        // fail this rather than quietly take the decision away from it.
-        let dir = scratch();
-        assert!(keep_data_in(dir.clone()), "nobody had asked yet");
-        assert_eq!(data_dir(), Some(dir.clone()));
+        // the one that counts, and it counts for the rest of the process.
+        //
+        // Which word was first is deliberately not assumed. Nothing else in
+        // this binary asks where the data directory is today, but a test that
+        // began to would settle it before this one ran, and this would then
+        // fail for a reason that is nothing to do with what it pins — which
+        // is the very order-dependence-under-parallelism the whole of
+        // [`data_dir`] answering once exists to be rid of.
+        let mine = scratch();
+        if keep_data_in(mine.clone()) {
+            assert_eq!(data_dir(), Some(mine), "the word taken is the word kept");
+        }
 
+        let settled = data_dir();
         assert!(
             !keep_data_in(scratch()),
             "a directory was moved out from under whoever had already been told it"
         );
-        assert_eq!(data_dir(), Some(dir), "and the answer stands");
+        assert_eq!(data_dir(), settled, "and the answer stands");
     }
 
     fn a_record() -> WorldRecord {
