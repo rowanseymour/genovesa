@@ -65,10 +65,34 @@ impl Plugin for DebugOverlayPlugin {
             // The hour the readout prints — shared with the plugin that
             // draws the sky, each initialising it for its own tests.
             .init_resource::<crate::sky::Sky>()
+            .init_resource::<NextRefresh>()
             .add_systems(Startup, spawn_overlay)
             .add_systems(Update, (apply_toggles, refresh_overlay).chain());
     }
 }
+
+/// How often the readout is worked out again, in seconds.
+///
+/// Not every frame, for two reasons that point the same way. The numbers are
+/// printed as whole figures, and a frame rate hovering between two of them
+/// rewrites the line every frame — which reads as a flicker rather than as a
+/// measurement, and is the one thing a readout must not do when what it is
+/// being read for is *whether the frame rate is steady*. And working it out
+/// costs a walk of every visible mesh and every cascade's, so a readout that
+/// refreshed with the frame would charge the frame for saying how long the
+/// frame took.
+///
+/// Four times a second is fast enough that a sag is visible as it happens and
+/// slow enough to read. The frame rate itself is smoothed long before it gets
+/// here — see [`Diagnostic::smoothed`] — so this samples an average rather
+/// than decimating a raw signal.
+const REFRESH_SECONDS: f32 = 0.25;
+
+/// When the readout is next due. Zero on the first frame, so a run that has
+/// just turned `stats` on gets its numbers immediately rather than after a
+/// wait.
+#[derive(Resource, Default)]
+struct NextRefresh(f32);
 
 /// Marks the overlay's panel, so showing and hiding it can find it.
 #[derive(Component)]
@@ -373,12 +397,15 @@ fn spawn_overlay(mut commands: Commands) {
         });
 }
 
-/// The overlay's two entities, as the refresh reaches them: the panel that
-/// shows or hides, and the text that says everything.
+/// The overlay's two entities, as the refresh reaches them — the panel that
+/// shows or hides and the text that says everything — and the clock that says
+/// whether this frame is one of the four a second that print.
 #[derive(SystemParam)]
 struct Overlay<'w, 's> {
     panels: Query<'w, 's, &'static mut Visibility, With<DebugPanel>>,
     texts: Query<'w, 's, &'static mut Text, With<DebugText>>,
+    time: Res<'w, Time>,
+    due: ResMut<'w, NextRefresh>,
 }
 
 fn refresh_overlay(
@@ -400,8 +427,20 @@ fn refresh_overlay(
     // Hidden is hidden: the counting below walks every visible mesh, and a
     // readout nobody can see should cost what it shows — nothing.
     if !toggles.stats {
+        // Left due, so turning it back on prints at once rather than after a
+        // wait measured from whenever it was last on.
+        overlay.due.0 = 0.0;
         return;
     }
+
+    // And a readout that is on still only costs four times a second — see
+    // [`REFRESH_SECONDS`]. The visibility above is settled every frame; it is
+    // the counting and the printing that wait.
+    let now = overlay.time.elapsed_secs();
+    if now < overlay.due.0 {
+        return;
+    }
+    overlay.due.0 = now + REFRESH_SECONDS;
 
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
@@ -1005,10 +1044,17 @@ mod tests {
         // diagnostic frames with a measurable delta, with real time between
         // them — back-to-back updates can land zero frame time, which the
         // diagnostic refuses to count.
+        //
+        // Then a wait past [`REFRESH_SECONDS`] and one more, because the
+        // readout is worked out four times a second rather than every frame:
+        // the frames above are what give the diagnostic something to say, and
+        // this last one is the one that prints it.
         for _ in 0..4 {
             app.update();
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        std::thread::sleep(std::time::Duration::from_secs_f32(REFRESH_SECONDS));
+        app.update();
 
         let text = app
             .world_mut()
@@ -1028,6 +1074,68 @@ mod tests {
             "overlay reads: {text}"
         );
         assert!(!text.starts_with("-- fps"), "FPS never got a value: {text}");
+    }
+
+    #[test]
+    fn the_readout_is_worked_out_four_times_a_second_and_not_every_frame() {
+        // The line is printed in whole figures, so a frame rate sitting
+        // between two of them would rewrite it every frame and read as a
+        // flicker — in a readout whose whole job is to say whether the frame
+        // rate is steady. Working it out also walks every visible mesh and
+        // every cascade's, which is a cost the frame should not pay for being
+        // told how long it took.
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::time::TimePlugin,
+            bevy::diagnostic::FrameCountPlugin,
+            DebugOverlayPlugin,
+        ))
+        .insert_resource(Assets::<Mesh>::default());
+        app.world_mut().resource_mut::<Toggles>().stats = true;
+        app.world_mut().spawn((
+            MapCamera::looking(View {
+                focus: Vec3::ZERO,
+                distance: 100.0,
+                yaw: 0.0,
+            }),
+            VisibleEntities::default(),
+        ));
+
+        let printed = |app: &mut App| {
+            app.world_mut()
+                .query_filtered::<&Text, With<DebugText>>()
+                .single(app.world())
+                .expect("the overlay never spawned")
+                .0
+                .clone()
+        };
+
+        // The first update prints, because a run that has just turned stats
+        // on should not wait a quarter second to see anything.
+        app.update();
+        let first = printed(&mut app);
+        assert!(!first.is_empty(), "the readout never printed at all");
+
+        // Frames inside the interval leave it alone, however many there are
+        // and however much the frame rate moves under them.
+        for _ in 0..30 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(
+            printed(&mut app),
+            first,
+            "the readout was rewritten inside its own refresh interval"
+        );
+
+        // And past it, it prints again — a readout that had simply stopped
+        // would pass everything above.
+        std::thread::sleep(std::time::Duration::from_secs_f32(REFRESH_SECONDS));
+        app.update();
+        assert!(
+            !printed(&mut app).is_empty(),
+            "the readout stopped rather than slowed"
+        );
     }
 
     #[test]
