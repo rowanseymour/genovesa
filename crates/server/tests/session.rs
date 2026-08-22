@@ -480,6 +480,38 @@ impl Client {
         }
     }
 
+    /// Every beast there is, as one beat tells them.
+    ///
+    /// A beat says the whole flock in one burst, under the roster's own lock,
+    /// so a client either sees all of a beat or none of it — which makes an id
+    /// coming round a second time the end of the first complete beat, and this
+    /// reads exactly that far. Bounded like the reader above, and for the same
+    /// reason.
+    ///
+    /// This rather than [`Client::hear_a_beast`] wherever a test means *the
+    /// animals*, plural: waters that have had a whale summoned into them hold
+    /// that whale and the one they were going to raise anyway, and "the next
+    /// whale" is then a question with two right answers.
+    fn hear_the_flock(&self) -> Vec<(BeastId, BeastKind, Vec2)> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut beat: Vec<(BeastId, BeastKind, Vec2)> = Vec::new();
+        loop {
+            if let ToClient::Beast {
+                id, kind, position, ..
+            } = ToClient::read(&mut &self.0).expect("read")
+            {
+                if beat.iter().any(|(told, ..)| *told == id) {
+                    return beat;
+                }
+                beat.push((id, kind, position));
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ten seconds in these waters and no beat of them"
+            );
+        }
+    }
+
     /// The next word putting this player down somewhere, with nothing said
     /// about any boat on the way to it.
     ///
@@ -1075,20 +1107,30 @@ fn a_night_stops_running_off_once_the_asking_stops() {
     let addr = host_at(3, 0.82);
     let (client, _id, _, _) = Client::join(addr);
 
-    // Asked for long enough that the night is plainly running — a second of
-    // one moves a tenth of a day, where the day itself moves a
-    // six-hundredth.
+    // Asked until the night is plainly running, rather than for a fixed while
+    // and then asked whether that was long enough. A wound tick moves the day
+    // by `SKY_TICK` of `NIGHT_PACE`, a fiftieth of it exactly, so "plainly" is
+    // two of them — and how long two ticks take in real seconds is the
+    // machine's business rather than this test's. Asking by the clock was the
+    // first version, and it wanted both ticks inside six hundred
+    // milliseconds: a loaded machine that fitted one failed here having done
+    // nothing wrong.
+    //
+    // The deadline is only what a night that never started running looks
+    // like, and is nowhere near either pace — two wound ticks want under half
+    // a second, where five seconds of a day passing on its own moves a
+    // hundred and twentieth of one, a quarter of what is asked for here.
     let opened = client.hear_the_time();
-    let asking = std::time::Instant::now() + Duration::from_millis(600);
+    let giving_up = std::time::Instant::now() + Duration::from_secs(5);
     let mut phase = opened;
-    while std::time::Instant::now() < asking {
+    while (phase - opened).rem_euclid(1.0) <= 0.02 {
+        assert!(
+            std::time::Instant::now() < giving_up,
+            "the night never started running: {opened} then {phase}"
+        );
         client.say(ToServer::WantDawn);
         phase = client.hear_the_time();
     }
-    assert!(
-        (phase - opened).rem_euclid(1.0) > 0.02,
-        "the night never started running: {opened} then {phase}"
-    );
 
     // Then quiet — listened to throughout rather than slept through, so that
     // nothing piles up in the socket for the readings below to mistake for
@@ -2238,10 +2280,10 @@ fn joining_and_hanging_up_over_and_over_leaves_one_hull_behind() {
 
 #[test]
 fn a_kept_world_reopens_with_its_beasts_where_they_were() {
-    // The shark scenario, by proxy of a whale: an animal alive when a world
-    // closes is in its file, and reopening finds it where it stood — a beast
-    // with consequence cannot be escaped by relogging, any more than a gale
-    // can.
+    // The shark scenario, by proxy of a whole sea: the animals alive when a
+    // world closes are in its file, and reopening finds each of them where it
+    // stood — a beast with consequence cannot be escaped by relogging, any
+    // more than a gale can.
     let path = scratch("beasts").join("one.world");
     let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
         .expect("bind")
@@ -2259,10 +2301,21 @@ fn a_kept_world_reopens_with_its_beasts_where_they_were() {
         summons.starts_with("a whale"),
         "the summons came to: {summons}"
     );
-    // Being told of it means it is in the flock — and the ledger a save
-    // reads is rewritten before each beat's tellings go out, so by now the
-    // whale is in it.
-    let (_id, seen_at, _velocity) = client.hear_a_beast(BeastKind::Whale);
+
+    // The whole flock rather than the next whale, because by now there are
+    // two of those — the summoned one, and the one these waters were going to
+    // raise for a player anyway — and neither is the one the test means.
+    //
+    // Read on until a whale is in the beat: a beat already in flight when the
+    // summons landed has yet to hear of it. Once it is told of, it is in the
+    // ledger a save reads too, that being rewritten before each beat's
+    // tellings go out.
+    let before = loop {
+        let beat = client.hear_the_flock();
+        if beat.iter().any(|(_, kind, _)| *kind == BeastKind::Whale) {
+            break beat;
+        }
+    };
     drop(client);
     drop(host);
 
@@ -2270,15 +2323,25 @@ fn a_kept_world_reopens_with_its_beasts_where_they_were() {
     let addr = again.local_addr().expect("addr");
     let _host = again.spawn().expect("spawn");
     let (client, ..) = Client::join_presenting(addr, Some(token));
+    let after = client.hear_the_flock();
 
-    // The same whale, near where it was — it wanders at a whale's own pace,
-    // and no world time passed while the world was closed, so the slack
-    // only covers the few real seconds either side of the reopening.
-    let (_id, still_at, _velocity) = client.hear_a_beast(BeastKind::Whale);
-    assert!(
-        still_at.distance(seen_at) < 300.0,
-        "the whale was at {seen_at} and reopened at {still_at}"
-    );
+    // Every animal that was there is there again, one for one and near where
+    // it was — they wander at their own pace, and no world time passed while
+    // the world was closed, so the slack only covers the few real seconds
+    // either side of the reopening. Matched off as they are found, so two
+    // whales that came back as one are still a whale lost. Animals the
+    // reopened world raised on top of these are its own business: the promise
+    // is that none was lost, not that the sea stood still.
+    let mut unclaimed = after.clone();
+    for (_, kind, was) in &before {
+        let same = unclaimed
+            .iter()
+            .position(|(_, found, at)| found == kind && at.distance(*was) < 300.0);
+        let Some(same) = same else {
+            panic!("a {kind:?} was at {was} and the reopened world has only {after:?}")
+        };
+        unclaimed.remove(same);
+    }
 }
 
 #[test]

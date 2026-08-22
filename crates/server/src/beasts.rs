@@ -1075,9 +1075,17 @@ impl Flock {
             }
         }
 
-        for (id, beast) in &self.beasts {
+        // In id order, for the same reason the minding above is in it. A beat
+        // tells the whole flock at once, so this order is the order a client
+        // reads the sea in — and a test that asks what the next whale is is
+        // asking the map's hashing under one that runs from the map's own.
+        // Nothing a client *draws* turns on it, a telling being an upsert.
+        let mut telling: Vec<BeastId> = self.beasts.keys().copied().collect();
+        telling.sort_unstable_by_key(|id| id.0);
+        for id in telling {
+            let beast = &self.beasts[&id];
             news.push(ToClient::Beast {
-                id: *id,
+                id,
                 kind: beast.habitat.kind,
                 position: beast.position,
                 velocity: beast.heading * beast.pace(),
