@@ -247,24 +247,19 @@ impl PlayerPlace<'_, '_> {
 /// parentage it asked for is still a queued command, the same case
 /// [`Fleet::gone`] reads its own book for.
 ///
-/// One direction, and never the other — with one window where the parentage
-/// the scene graph answers with is stale, named here rather than denied. A
-/// telling that takes our helm away does take the player off the deck in the
-/// same breath — see [`Fleet::told`]'s out-of-order defence — but the taking
-/// off is a queued command where the book's line through it is written the
-/// instant the telling is read, so until the next sync point the scene graph
-/// still says the player is a hull's child. A put down landing inside that
-/// window moves the hull, and the hull is one the wire has just stopped
-/// calling ours. Left standing on purpose: closing it means changing which of
-/// the two is asked first, which is an argument about carriers in general and
-/// not about this window, and would want its own reasons and its own test.
-/// Set down all the same, because a window nobody has named is one the next
-/// change walks into.
+/// One window is left open on purpose: a telling that takes our helm away
+/// takes the player off the deck in the same breath, but that is a queued
+/// command where the book's line through it is written the instant the
+/// telling is read — so until the next sync point the scene graph still says
+/// the player is a hull's child, and a put down landing inside that window
+/// moves a hull the wire has just stopped calling ours. Closing it means
+/// changing which of the two is asked first, an argument about carriers in
+/// general that wants its own reasons and its own test. Named rather than
+/// denied, a window nobody has named being one the next change walks into.
 ///
-/// Moved by a command rather than through a transform of its own for the
-/// queued-parentage case again: what the queue guarantees is order, so a
-/// seating's transform is written first and this one is the last word about
-/// where the hull is.
+/// Moved by a command rather than a transform for the queued-parentage case
+/// again: the queue guarantees order, so a seating's transform is written
+/// first and this one is the last word about where the hull is.
 ///
 /// A hull is put down at rest. You were taken there; you did not sail there,
 /// and a jump that left the sails drawing would deliver a ship to an
@@ -536,19 +531,15 @@ type Vessels<'w, 's> = Query<
 ///
 /// In the *rowboat*, at rest, a ship laid alongside outranks the shore: a
 /// boat pulled deliberately against a hull is asking aboard, and the tender
-/// goes back aboard the ship with them — the world retires it, see
-/// [`crate::boat::Fleet::gone`]. Failing that the key steps ashore, and the
-/// spot must offer [`footing`]: the probe walks rings outward from just
-/// short of the bow ([`LANDING_NEAR`]) to a few strides past it
-/// ([`LANDING_REACH`]), bow direction first at each radius, and takes the
-/// first walkable point — nearest wins, so the player steps to the shore the
+/// goes back aboard with them (see [`crate::boat::Fleet::gone`]). Failing
+/// that the key steps ashore, and the spot must offer [`footing`] — the probe
+/// walks rings outward from just short of the bow to a few strides past it,
+/// bow direction first, nearest winning, so the player steps to the shore the
 /// bow is nosed against rather than teleporting down the beach. And there
 /// must *be* such a spot: against a cliff coast the probe finds nothing and
-/// the key does nothing, which is the rule that makes beaches landings and
-/// cliffs scenery without either being named anywhere. The player steps off
-/// facing away from the boat — the direction they stepped — and takes on a
-/// `DespawnOnExit` of their own, being no longer under the boat's; the
-/// rowboat lies where they left it, anyone's.
+/// the key does nothing, which is what makes beaches landings and cliffs
+/// scenery without either being named anywhere. The rowboat lies where they
+/// left it, anyone's.
 ///
 /// Ashore, the key boards the nearest boat in reach — back into the
 /// hierarchy at the helm, the marker comes off, and the keys answer again —
@@ -780,15 +771,11 @@ fn landing(ground: Option<&Ground>, boat: &Transform) -> Option<(Vec2, f32)> {
 /// inched past because every step further in is deeper.
 ///
 /// The land is [`climb`]'s: ground rising or falling faster than
-/// [`WALKABLE_RISE`] across the step is not walked over. A frame's advance is
-/// taken in strides of at most half a facet and each judged in turn, so no
-/// stride has a whole facet of ground hidden inside it however long the frame
-/// was. A walker turned back mid-advance keeps the strides already made.
-///
-/// That is a limit on the step and not on the spot, so it turns a walker back
-/// from a cliff without pinning them against it — the face of a bluff can be
-/// crossed along its contour, as a person picks their way across a steep
-/// hillside.
+/// [`WALKABLE_RISE`] across the step is not walked over, judged in strides of
+/// at most half a facet so no stride hides a whole facet of ground however
+/// long the frame was. It is a limit on the step and not on the spot, so it
+/// turns a walker back from a cliff without pinning them against it — the
+/// face of a bluff can be crossed along its contour.
 ///
 /// The stone is [`barged`]'s: a cairn is the one built thing in this world with
 /// any substance to it, and a step into one is not taken.

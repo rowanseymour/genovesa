@@ -6,9 +6,12 @@
 //! was arrived at: corner heights on a fixed grid, and one material per cell.
 //!
 //! The **grid is the format**. [`CELL_METRES`] is how finely the ground is
-//! drawn, and moving it would move the payload, so it lives here rather than in
-//! the generator that samples it. Drawing at some other density — level of
-//! detail, say — is a change to the wire.
+//! *sampled*, and moving it moves every payload, so it lives here rather than
+//! in the generator that samples it. How finely the ground is *drawn* is not
+//! the wire's business at all — see [`CELL_COUNT`]. A client that lays one
+//! lozenge over sixteen cells out at half a kilometre is throwing away
+//! samples it was sent, which is the whole of what level of detail is, and
+//! the format neither knows nor minds.
 //!
 //! What travels for the ground's *appearance* is a [`Material`] per cell, one
 //! byte, naming a substance rather than a colour. That much is the format: two
@@ -351,10 +354,11 @@ pub struct ChunkPayload {
     /// Sent per corner rather than as one level and a mask because a chunk
     /// may hold more than one lake, and two basins a hillside apart stand at
     /// different heights; a single level per chunk would drain one of them or
-    /// flood the other. Sent only where there is water because lakes are
-    /// occasional — most ground carries none, and a grid of "dry" on every
-    /// chunk in the world would be half as much again on the wire for
-    /// nothing.
+    /// flood the other. `None` rather than a grid of "dry" because lakes are
+    /// occasional and the absence is worth saying outright: a client can hang
+    /// the whole question of standing water on whether this is `Some`, rather
+    /// than scanning sixteen thousand corners of every chunk in the world to
+    /// find out that none of them is wet.
     pub water: Option<Vec<u16>>,
     /// Everything growing on this chunk, of every kind, in no order anything
     /// may rely on beyond its being the same order every time.

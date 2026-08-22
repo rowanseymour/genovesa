@@ -2,76 +2,45 @@
 //! the world's north.
 //!
 //! Both the boat and the view can turn, so neither would make a steady
-//! compass: a card fixed to the bow would spin through every tack, and one
-//! fixed to the screen would say nothing at all. The card is aligned with the
-//! world instead — however the view is spun, its N sits over
-//! [`protocol::ground::NORTH`], the direction a map puts at the top of the
-//! page — so a bearing read off it means the same thing to every player in
-//! the world, whichever way each of them happens to be looking.
+//! compass. The card is aligned with the world instead — its N sits over
+//! [`protocol::ground::NORTH`] however the view is spun — so a bearing read
+//! off it means the same thing to every player in the world. It follows the
+//! camera's eased yaw rather than the target, so it swings with the picture
+//! through a turn instead of arriving ahead of it.
 //!
-//! It reads the camera's eased yaw rather than the target, so the card swings
-//! with the picture through a turn instead of arriving ahead of it.
+//! The card is drawn *lying on the sea* rather than flat on the glass: against
+//! ground drawn at the camera's pitch an unforeshortened dial reads as a
+//! sticker on the screen. The tilt is the projection itself — a flat card on
+//! the ground plane seen from [`PITCH`][crate::camera::PITCH] above horizontal
+//! is its upright drawing squashed by `sin(PITCH)`, applied after the card's
+//! own spin so the letters shear the way paint on a deck would. Real geometry
+//! parented to the camera differs by a keystone too small to see, and would
+//! need letters as meshes and an exemption from the fog and the lighting.
 //!
-//! The card is drawn *lying on the sea* rather than flat on the glass: a
-//! bearing on it is carried out into the picture, and against ground drawn at
-//! the camera's pitch an unforeshortened dial reads as a sticker on the screen.
-//! The tilt is the projection itself — a flat card on the ground plane, seen
-//! from [`PITCH`][crate::camera::PITCH] above horizontal, is its upright
-//! drawing squashed vertically by `sin(PITCH)`, applied *after* the card's own
-//! spin so the letters shear the way paint on a deck would. Real 3D geometry
-//! parented to the camera differs only by a keystone too small to see, and
-//! would need letters as meshes and an exemption from the fog, the lighting and
-//! the terrain's occlusion.
+//! Three readings ride on it besides north. The bow, at the middle, drawn as
+//! the chart's [`READERS_MARK`] so one glyph means *you* on every instrument.
+//! The wind, a stream of chevrons crossing the whole card and flying leeward,
+//! its strength in pace and ink rather than in reach — an arm that grew with
+//! the wind was tried, and a lone length has nothing on the card to be read
+//! against, so a fresh breeze and a light air looked alike. And a ring of arcs
+//! round the rim, one per stretch of coast within sight.
 //!
-//! The card carries a second reading: the reader's own mark at the middle of
-//! it, spun to the way the boat is actually pointing. The glyph is the
-//! chart's own [`READERS_MARK`] — one arrowhead meaning *you* on every
-//! instrument — and it is the third shape to stand there: a drawn boat would
-//! be a picture of a ship a few pixels across, and the dart that replaced it
-//! read as a leaf that had to be squinted at for a direction. The chart's
-//! mark had already been through that argument and won it.
+//! The bow and the wind have to be told apart at a glance or the card is worse
+//! than nothing, and what separates them is kind rather than position: the bow
+//! is the one solid, stationary thing on the card and the wind is stroked and
+//! *moving*. That is what buys the wind the centre — a stream can run under
+//! the mark without being mistaken for it, where a second arrow could not —
+//! and the chevrons point the way they fly, so a screenshot still reads.
 //!
-//! And a third: the wind, a stream of chevrons crossing the whole card
-//! through the middle, flying leeward. A wind is only ever wanted *against*
-//! something — the way home, the way the boat is pointed — and both are
-//! bearings, so one card holding north, the bow and the wind together answers
-//! "the wind is off my starboard bow" in a glance. Its strength is pace and
-//! ink rather than reach — the stream drifts faster and darker as the wind
-//! stiffens. An arm that grew with the wind was tried first: a lone length
-//! has nothing on the card to be read against, so a fresh breeze and a light
-//! air looked alike unless the day happened to offer both.
-//!
-//! Those two readings have to be told apart at a glance or the card is worse
-//! than nothing. An earlier card managed it by anchoring — the wind held off
-//! the middle so the bow could own it — because with both of them still, two
-//! arrows on one card were a puzzle with two pieces however they were inked.
-//! What separates them now is kind: the bow is the one solid, stationary
-//! thing on the card, and the wind is stroked and *moving*, which is what
-//! weather does and nothing a player steers. That difference is what buys the
-//! wind the centre back — a stream can run under the mark without being
-//! mistaken for it, where a second arrow could not — and motion is not the
-//! only channel carrying it, because a screenshot still has to read: the
-//! chevrons point the way they fly. And because the card is aligned with the
-//! world, the bow lies the way the hull in the picture does — the instrument
-//! visibly agreeing with what the player is already looking at.
-//!
-//! And a fourth: a ring of marks round the rim, one arc per stretch of coast
-//! within sight. This camera looks *down*, so land a few hundred metres off can
-//! be outside the picture entirely while the player is close enough to walk up
-//! its beach. The ring answers what the picture cannot: something is over
-//! there, and it is that way.
-//!
-//! It marks what has not been charted louder than what has, the problem being
-//! finding *new* islands, and it reaches exactly as far as the haze does — see
-//! [`SIGHT`]. The card says what the player could have noticed and did not, and
-//! nothing about what is over the horizon.
-//!
-//! Ashore the ring goes out altogether: everything it could mark from a beach
-//! is either the island underfoot or in plain view across it.
-//!
+//! The ring answers what the picture cannot. This camera looks *down*, so land
+//! a few hundred metres off can be outside the frame while the player is close
+//! enough to walk up its beach. It marks the uncharted louder than the charted,
+//! the problem being finding *new* islands; it reaches exactly as far as the
+//! haze does (see [`SIGHT`]), saying what the player could have noticed and
+//! not what is over the horizon; and it goes out ashore, where everything it
+//! could mark is either the island underfoot or in plain view across it.
 //! Nothing about it crosses the wire — the sweep reads the chunks this machine
-//! was already sent, the arrangement the chart is built on too.
-
+//! was already sent.
 use std::f32::consts::TAU;
 
 use bevy::asset::RenderAssetUsages;

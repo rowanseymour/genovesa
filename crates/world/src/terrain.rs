@@ -2373,54 +2373,43 @@ impl CoastDistance {
 
 // --- Lakes -------------------------------------------------------------------
 //
-// Sea level is one height for the whole world, and the calibration sets it
-// high enough that hollows below it flood — the sounds and lagoons these maps
-// are riddled with. But noise digs hollows at every altitude, and a hollow
-// whose floor stands *above* sea level was, until here, a dry green bowl:
-// ground enclosing a depression with nothing in it, which is a thing rain
-// does not permit. Anywhere the terrain encloses, water stands.
+// Noise digs hollows at every altitude, and one whose floor stands above sea
+// level was, until here, a dry green bowl — a thing rain does not permit.
+// Anywhere the terrain encloses, water stands.
 //
 // Where that water's surface sits cannot be read off any point of the ground:
 // it is set by the lowest saddle on the whole rim of the basin, which may be
-// half a kilometre from the shore it decides. So lakes are found the way the
-// coast fields are made — one pass over the whole fitting grid at
-// construction — here a priority flood, the standard tool of drainage
-// analysis: walk out from the sea always taking the lowest frontier cell
-// first, and each cell is first reached along the route whose highest point
-// is lowest, which is exactly the level water must rise to before that cell
-// drains. Cells the answer leaves at their own ground drain freely and are
-// dry; cells it leaves under water are lake, and a connected lake's cells all
-// agree on their level, that being the one rim saddle they share. Terraced
-// and nested basins fall out of the same walk without being special cases.
+// half a kilometre from the shore it decides. So lakes are found in one pass
+// over the fitting grid at construction, by a priority flood — walk out from
+// the sea always taking the lowest frontier cell first, and each cell is first
+// reached along the route whose highest point is lowest, which is exactly the
+// level water must rise to before that cell drains. Terraced and nested basins
+// fall out of the same walk without being special cases.
 //
-// The flood runs on the landform, not the finished height: the detail layers
-// lay metres of texture over it, and flooding the drawn field would find a
-// thousand puddle-sized dimples rather than the basins the landform encloses.
+// The flood runs on the landform, not the finished height: flooding the drawn
+// field would find a thousand puddle-sized dimples rather than basins.
 //
-// Which leaves the two fields to be reconciled, and letting the drawn ground
-// wander around the answer — the way it wanders around sea level — does not
-// work, the two waterlines being unalike. Sea level is one number over the
-// whole world, so wandering across it only moves a coast; a lake's level holds
-// over its own basin, so ground wandering across it *outside* the basin is
-// water where the flood found none, stopped only by the level field running
-// out — a straight grid-aligned edge with no shore. Inside, the same wander
-// beached the bed of any basin shallower than the texture over it: a quarter of
-// the flooded area on the seeds surveyed was drawn as dry ground.
+// Reconciling the two fields by letting the drawn ground wander across the
+// answer, the way it wanders across sea level, does not work — sea level is
+// one number over the whole world, so wandering only moves a coast, where a
+// lake's level holds over its own basin and ground wandering across it
+// *outside* the basin is water the flood never found, ending in a straight
+// grid-aligned edge with no shore. Inside, the same wander beached any basin
+// shallower than the texture over it: a quarter of the flooded area on the
+// seeds surveyed came out drawn as dry ground.
 //
 // So the ground gives way to the water instead. The detail fades out as the
-// landform approaches a lake's surface and back in over [`LAKE_RELIEF`] of
-// height either side, so the drawn waterline is the landform's own contour at
-// that level. Only the detail: fading the coastal reshaping out as well took
-// the flat out of any beach standing near a lake. A lake still gets islands
-// where the texture is proud; what it no longer gets is texture finer than the
-// fitting grid punching through, which was never an islet but the bed showing.
+// landform approaches a lake's surface and back in over [`LAKE_RELIEF`] either
+// side, making the drawn waterline the landform's own contour at that level.
+// Only the detail — fading the coastal reshaping out as well took the flat out
+// of any beach standing near a lake.
 //
-// Where a lake's *colours* are is a separate question, and not answered by a
-// height at all. Silt, weed and reed margin used to be depths and a height
-// above the surface, and a lake is the worst place on the map for a height
-// threshold: the fade leaves its banks smooth and its bed shelves gently, so
-// the margin came out under a facet wide and the weed's edge came out fractal.
-// They are measured out from the water's edge instead — see [`Lakes::shore`].
+// A lake's *colours* are a separate question and not answered by a height at
+// all. Silt, weed and reed margin were depths and a height above the surface
+// once, and a lake is the worst place on the map for a height threshold: the
+// fade leaves its banks smooth and its bed shelves gently, so the margin came
+// out under a facet wide and the weed's edge came out fractal. They are
+// measured out from the water's edge instead — see [`Lakes::shore`].
 
 /// Metres a lake's surface stands below the saddle it would otherwise spill
 /// over.

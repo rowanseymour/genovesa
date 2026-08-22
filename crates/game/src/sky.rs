@@ -12,13 +12,10 @@
 //! way the light comes from, what colour it is, and how dark the night gets.
 //! The server says only what time it is.
 //!
-//! One light does the whole day. It stands in the sun through the day and in
-//! the moon — which is opposite the sun, this world's moon being always full
-//! — through the night, changing places in the dark at either end of the
-//! night rather than at the horizon: see [`light_from`]. A second light for
-//! the moon would have cost a second shadow pass over the whole scene for the
-//! sake of a moment nobody can see, the light at the swap being a twentieth
-//! of noon's with the sky doing most of the work.
+//! One light does the whole day: it stands in the sun and then in the moon,
+//! changing places in the dark at either end of the night rather than at the
+//! horizon (see [`light_from`]). A second light for the moon would have cost
+//! a second shadow pass over the whole scene for a moment nobody can see.
 //!
 //! That one light carries the weather as well as the hour. The cloud shadows
 //! are a mask on it, and where they fall is decided by where the light is put

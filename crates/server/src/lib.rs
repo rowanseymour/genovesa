@@ -564,24 +564,18 @@ pub(crate) struct BoatState {
     /// offered instead of a newly minted one — see `fresh_hull` in the join
     /// path for what that buys.
     ///
-    /// On a rowing boat it answers a second question, the two being one fact:
-    /// whose ship's boat is in the water. The `Lower` arm hoists the dinghy
-    /// its asker is keeping as it puts another over the side, and a keeper
-    /// leaving the world at a ship's helm takes theirs with them — see that
-    /// arm and the departure at the end of [`serve`]. Both ask this rather
-    /// than a name remembered against the player, and that is the whole
-    /// point: a claim that did not travel with the hull went on meaning a
-    /// boat somebody else had since rowed off in, and the hoists took a
-    /// dinghy out from under its new keeper, leaving them ashore with their
-    /// own ship offshore.
+    /// On a rowing boat it answers a second question, the two being one
+    /// fact: whose ship's boat is in the water. Both hoists ask this rather
+    /// than a name remembered against the player, which is the whole point —
+    /// a claim that did not travel with the hull went on meaning a boat
+    /// somebody else had since rowed off in, taking a dinghy out from under
+    /// its new keeper.
     ///
-    /// It is not ownership, which boats do not have. It says nothing about
-    /// who may row a hull — anyone may take up a free one, and doing so makes
-    /// it theirs — only whose doing it is that this one is where it is. Nor
-    /// is it one apiece: board two beached dinghies in turn and both say they
-    /// are yours, and a hoist takes whichever it finds first. Arbitrary, and
-    /// left so — only a free hull is ever taken, so nobody is stranded and
-    /// the fleet does not grow either way.
+    /// It is not ownership, which boats do not have: anyone may take up a
+    /// free hull and doing so makes it theirs. Nor is it one apiece — board
+    /// two beached dinghies and both say they are yours, and a hoist takes
+    /// whichever it finds first. Arbitrary and left so, only a free hull ever
+    /// being taken.
     ///
     /// Session-local, and deliberately: the whole of what it guards is a
     /// keeper who is *here*, so that a boat a live player parked on a beach
@@ -2176,49 +2170,25 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             if let Some(state) = helm.and_then(|boat| boats.get_mut(&boat)) {
                 state.occupant = None;
             }
-            // And a ship's boat goes back aboard when its keeper leaves the
-            // world at some *other* helm. This is the other half of the
-            // one-boat-in-the-water bound, and the half that survives a
-            // reconnect: without it a client loops lower, step out, board,
-            // hang up and leaves a permanent hull behind every handshake,
-            // remembered by nobody, written to the world file and posted to
-            // every future joiner.
+            // A ship's boat goes back aboard when its keeper leaves the world
+            // at some *other* helm — the half of the one-boat-in-the-water
+            // bound that survives a reconnect. Without it a client loops
+            // lower, step out, board, hang up, leaving a permanent hull behind
+            // every handshake.
             //
-            // At a helm, and at some *other* one: two conditions, two ways of
-            // stranding somebody, each worse than the hull it would save.
+            // Both conditions are exceptions that would otherwise strand
+            // somebody. Not afoot: a player who left on their own feet has
+            // their ship anchored past wading depth and the dinghy on the
+            // beach is how they get out to it. And not the tender itself:
+            // hanging up while rowing is the ordinary way to stop mid-passage,
+            // and hoisting the boat they are sitting in leaves the entry block
+            // dealing them a fresh sloop per handshake. Whoever comes to
+            // simplify this to hoisting unconditionally is re-creating both,
+            // so: don't.
             //
-            // Not afoot: a player who leaves on their own feet has their ship
-            // anchored well offshore, past any depth a walker can wade, and
-            // the dinghy they hauled up the beach is how they get back out to
-            // it. Take it and they come back to an island they can only leave
-            // on the world's charity — the entry block deals a marooned
-            // returner a hull for exactly this reason, and a strand answered
-            // by a minted sloop is the leak back with a longer way round.
-            //
-            // And not the tender itself: hanging up while rowing is the most
-            // ordinary way to stop mid-passage, and the boat they are sitting
-            // in is the boat they are seated back into on return. Hoist it and
-            // the entry block finds a name no hull answers to and falls
-            // through to dealing them a fresh one, which mints a sloop per
-            // handshake. The bound is unmoved by the exception: re-entering
-            // that loop needs a ship's helm, and this player is in a dinghy.
-            //
-            // Whoever comes to simplify this to hoisting unconditionally is
-            // re-creating both, so: don't.
-            //
-            // What the exceptions leave open is smaller than it looks but not
-            // nothing, and it is not this rule's to close: the *honest* way
-            // from a beach back to a ship's helm is rowing the dinghy already
-            // there, which is re-use rather than minting, but nothing here
-            // polices the other way. A client may report itself alongside any
-            // free sloop and ask for its helm, and the door already mints one
-            // per handshake for a stranger who does much less than that.
-            //
-            // After the helm above is freed, and asked of the hulls rather
-            // than of a name the leaver remembered — see
-            // [`BoatState::keeper`], which is what makes "theirs" survive
-            // somebody else rowing off in it. Only while it lies free all the
-            // same: a hull with hands on it is those hands' until they let go.
+            // Asked of the hulls rather than of a name the leaver remembered —
+            // see [`BoatState::keeper`], which is what makes "theirs" survive
+            // somebody else rowing off in it — and only while it lies free.
             let hoisted = helm.zip(papers).and_then(|(held, papers)| {
                 boats
                     .iter()

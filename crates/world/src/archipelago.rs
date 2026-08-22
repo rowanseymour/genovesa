@@ -19,24 +19,15 @@
 //!
 //! # How endless is endless
 //!
-//! World coordinates are `f32` metres, so "endless" has a horizon after all —
-//! not one the layout imposes but one the arithmetic does. Measured against
-//! the two scales that matter, the height field's half-metre steps and the
-//! [`protocol::ground::CELL_METRES`] the ground is drawn at:
-//!
-//! - out to about **1,280 km** neighbouring `f32` coordinates are 0.15 m
-//!   apart, so a half-metre step in the field still resolves and the ground is
-//!   exactly the ground everywhere a player could sail to;
-//! - by about **12,800 km** they are 1.5 m apart, past the half metre, and the
-//!   field has stopped resolving its own smallest steps — coastlines quantise;
-//! - by about **128,000 km** they are 15 m apart, past the mesh step outright,
-//!   and the ground is flat because there is nowhere between the facets left
-//!   to sample.
-//!
-//! A player panning at the camera's own speed reaches the first of those in
-//! something over a year of continuous play, so the practical answer is that
-//! the ocean does not end. The numbers are here so that "infinite-ish" is a
-//! measurement rather than a hope.
+//! World coordinates are `f32` metres, so the horizon is the arithmetic's
+//! rather than the layout's. Out to about **1,280 km** neighbouring
+//! coordinates are 0.15 m apart and the ground is exactly the ground; by
+//! **12,800 km** they are past the height field's half-metre step and
+//! coastlines quantise; by **128,000 km** they are past
+//! [`protocol::ground::CELL_METRES`] outright and the ground is flat, there
+//! being nowhere between the facets left to sample. A player panning at the
+//! camera's own speed reaches the first in something over a year of
+//! continuous play, so "infinite-ish" is a measurement rather than a hope.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -655,25 +646,19 @@ impl Archipelago {
     /// past the haze on every seed's worse days, so a new arrival saw water in
     /// every direction and steered blind.
     ///
-    /// Nearest by frame rather than by centre, because the coast is what
-    /// entry cares about. And the waterline rather than the frame, the frame
-    /// being a rectangle of map and not of land: a fitted coast can recede
-    /// hundreds of metres inside it. So the shore is found on the terrain itself — the
-    /// island's land nearest the origin, off a half-chunk lattice over the
-    /// frame, names the landfall; the line from the origin to it is *sounded*
-    /// [`SOUNDING`] metres a step, and the first ground at sea level is the
-    /// shore the spawn backs [`SPAWN_OFFSHORE`] metres off. It steps further
-    /// seaward should its own spot prove dry, so the point is water by
-    /// measurement rather than by intent.
+    /// Nearest by frame rather than by centre, and the waterline rather than
+    /// the frame — a frame is a rectangle of map and not of land, and a fitted
+    /// coast can recede hundreds of metres inside it. So the shore is found on
+    /// the terrain: the line from the origin to the island's nearest land is
+    /// *sounded* [`SOUNDING`] metres a step, and the first ground at sea level
+    /// is the shore the spawn backs [`SPAWN_OFFSHORE`] metres off, stepping
+    /// further seaward should its own spot prove dry.
     ///
-    /// Unlike the rest of the layout's questions this one generates its island,
-    /// costing tens to hundreds of milliseconds on a cold cache — borrowed
-    /// rather than added, entry being when that island is about to be
-    /// generated anyway.
-    ///
-    /// Every *other* island keeps its distance by construction: layout margins
-    /// leave hundreds of metres between frames, so a point beside the chosen
-    /// island's frame is far outside everything else's ground.
+    /// Unlike the rest of the layout's questions this one generates its
+    /// island, which is borrowed rather than added — entry being when that
+    /// island is about to be generated anyway. Every *other* island keeps its
+    /// distance by construction, layout margins leaving hundreds of metres
+    /// between frames.
     ///
     /// [`None`] means the layout offered no island at all out to the widest
     /// window the search reaches, which is a broken layout rather than a wide
@@ -1169,8 +1154,9 @@ mod tests {
     #[test]
     fn an_islands_flat_chunks_send_nothing_either() {
         // An island is answerable for its skirt, but a skirt chunk is flat
-        // ocean floor — the backdrop plane's job, not a mesh's. Sending them
-        // would be most of what a session spent its bandwidth on.
+        // ocean floor — the backdrop plane's job, not a mesh's. Sent, it would
+        // be a mesh of thirty thousand identical triangles laid over a plane
+        // already drawing the same surface.
         let world = world(1);
         let spec = specs(&world)
             .into_iter()

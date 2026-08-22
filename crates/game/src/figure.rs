@@ -1,23 +1,17 @@
 //! What the player is drawn as: a person, modelled and rigged like anything
 //! else the game draws, and walked by a clip out of the same file.
 //!
-//! The first model that *moves under its own power*, and the reason the export
-//! carries skins and actions at all.
-//!
 //! The division is: **the master owns the pose, this module owns the clock.**
-//! Blender says what a running person looks like at any point in the cycle.
-//! Nothing here knows the length of a leg, how far it swings, or that the body
-//! dips when the legs are spread — remodel the figure with longer legs and a
-//! rolling gait and no line below changes.
+//! Nothing here knows the length of a leg or how far it swings — remodel the
+//! figure with a rolling gait and no line below changes.
 //!
-//! What this module owns is *where in the cycle the figure is*, and it drives
-//! that by **ground covered** rather than by the clock: the run clip is paused,
-//! and [`animate`] seeks it to the point the player's own stride has reached. A
-//! clip left running at its own speed would slide the feet at any other pace,
-//! and would keep walking on the spot when the player stopped. Seeking it means
-//! the feet keep up by construction, a player backing up runs the cycle
-//! backwards, and anything else that moves the player moves the legs with no
-//! second animation.
+//! The clock runs on **ground covered** rather than on time: the run clip is
+//! paused and [`animate`] seeks it to the point the player's own stride has
+//! reached. A clip left running at its own speed would slide the feet at any
+//! other pace and keep walking on the spot when the player stopped. Seeking
+//! it means the feet keep up by construction, a player backing up runs the
+//! cycle backwards, and anything else that moves the player moves the legs
+//! with no second animation.
 //!
 //! Standing is the other clip. `idle` and `run` hang off one blend node and the
 //! gait's own [`Stride::amount`] crossfades them, so a figure that stops

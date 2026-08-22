@@ -3,55 +3,35 @@
 //! Claiming an island is the server's to grant — it asks its own survey
 //! whether this player has been the whole way round this coast and is standing
 //! inside it, and nothing a client says about that is believed. What lands on
-//! this side is the answer: [`protocol::ToClient::Cairn`], told to whoever
-//! comes near one, the same way a beast or a boat is. This module is the half
-//! the server has no opinion on — what being claimed *looks like* from the
-//! ground.
+//! this side is the answer, [`protocol::ToClient::Cairn`], told to whoever
+//! comes near one. This module is the half the server has no opinion on: what
+//! being claimed *looks like* from the ground.
 //!
-//! # Why it is a thing and not a widget
+//! It is a thing and not a widget. A label floating over an island says *the
+//! game* is telling you something, where stone standing on a headland says
+//! *somebody was here*, which is the whole of what a claim means.
 //!
-//! The obvious way to show an island is spoken for is a label floating over it,
-//! and it is the wrong way: a marker drawn in screen space says *the game* is
-//! telling you something, where stone standing on a headland says *somebody was
-//! here*, which is the whole of what a claim means.
-//!
-//! # Why it is the size of a person
-//!
-//! It was a beacon first — twenty metres of staff and seven of banner out of a
-//! heap six across, built to be read from a mile. It read from a mile and it
-//! read as *civic*: a mast and a flag that size are what a shipyard puts up,
-//! not what one person carrying rock does in an afternoon. Up close it was
-//! worse, the heap alone standing twice the player's height, so walking up to
-//! your own claim meant disappearing behind it.
-//!
-//! So it is a survey mark rather than a daymark: a pillar of dry stone a little
-//! over head height, stacked in [`COURSES`] that step in as they rise. The
-//! taper is the whole of what says *built* — rock dropped in a pile is a cone,
-//! rock stacked to stand is a pillar, and a person reads the difference without
-//! being told it. What it costs is the mile, paid deliberately — see [`STONE`]
-//! for what is bought with it.
+//! And it is the size of a person. It was a beacon first — twenty metres of
+//! staff and seven of banner — which read from a mile and read as *civic*: a
+//! mast and a flag that size are what a shipyard puts up, not what one person
+//! carrying rock does in an afternoon. So it is a survey mark instead, a
+//! pillar of dry stone a little over head height, stacked in [`COURSES`] that
+//! step in as they rise. The taper is the whole of what says *built*, and what
+//! it costs is the mile — see [`STONE`] for what is bought with it.
 //!
 //! # Standing it on the ground
 //!
-//! A cairn arrives as a point on the plane, and the height it stands at is
-//! this side's own business: the server has no camera and no need of one.
-//! Ground arrives in chunks, and a cairn can be told of before the chunk under
-//! it has landed — the telling and the chunks are separate answers travelling
-//! at their own speeds — so a cairn waits [`Unfooted`] until there is ground to
-//! stand on, exactly as an arriving player does.
+//! A cairn arrives as a point on the plane and the height it stands at is this
+//! side's own business, the server having no camera. The telling and the
+//! chunks are separate answers travelling at their own speeds, so a cairn
+//! waits [`Unfooted`] until there is ground under it, exactly as an arriving
+//! player does. `server::CAIRN_SIGHT` is inside the stream radius, so the wait
+//! is usually a few frames — but the rule guards against a chunk that has not
+//! arrived, and *when* it has not arrived is not this side's to promise.
 //!
-//! It used to be a long wait by construction: cairns were told from half a
-//! kilometre further out than terrain streamed, so the wait was the whole
-//! approach. `server::CAIRN_SIGHT` is inside the stream radius now, and the
-//! wait is usually a few frames. The rule is unchanged and has to be — what
-//! it guards against is a chunk that has not arrived, and *when* it has not
-//! arrived is not this side's to promise.
-//!
-//! It waits *unseen*. A cairn drawn at its told point before its ground
-//! arrives is a cairn standing on the open sea for the whole of the approach,
-//! which then jumps onto the headland as the shore streams in. Hidden until it
-//! is footed, the mark simply appears with the island it belongs to.
-
+//! It waits *unseen*, because a cairn drawn at its told point before its
+//! ground arrives stands on the open sea for the whole approach and then jumps
+//! onto the headland as the shore streams in.
 use std::collections::HashMap;
 
 use bevy::prelude::*;

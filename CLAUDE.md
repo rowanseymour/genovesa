@@ -46,6 +46,23 @@ another language against `protocol`'s documentation alone. Concretely, `game`
 must not depend on `world`, and anything a client needs in order to *draw*
 belongs in `protocol` rather than being recomputed either side.
 
+## Nobody is playing this yet
+
+Every world is served and the server can hold a roster, but what runs is one
+client over the loopback. The split is a bet on a client small enough to
+rewrite in another language, and on company later — it is not a response to
+traffic.
+
+So the wire's size is not an argument, and neither is anything else about
+load. Justify a shape by what it lets a client do, or by what it stops the two
+ends disagreeing about, never by the bytes. Drawing the ground at some coarser
+density — level of detail — is the client discarding samples it already holds,
+and costs the format nothing.
+
+What stays is the *shape* of the split, which costs nothing today and is what
+a second player would need: the server owns the world, the client draws what
+it is told, and nothing consequential is decided at the client.
+
 ## The vocabularies answer for themselves
 
 Three binaries answer `--help`, and the debug socket answers `help` with its

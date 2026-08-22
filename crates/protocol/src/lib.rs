@@ -694,20 +694,17 @@ pub enum ToClient {
     /// and it is a different message rather than a special case of an
     /// existing one.
     ///
-    /// `heading` is a yaw about the vertical, as [`ToClient::Boat`]'s is,
-    /// and `None` is the world declining to have an opinion: turn a hull to
-    /// face the shore it has been anchored off, and leave a walker facing
-    /// however they were facing. It has to be sayable, because a walker's
-    /// bearing never crosses the wire in the first place — [`ToServer::Move`]
-    /// carries a position and nothing else — so a heading of zero here would
-    /// be the world spinning somebody north for no reason.
+    /// `heading` is a yaw about the vertical, and `None` is the world
+    /// declining to have an opinion — leave a walker facing however they
+    /// were. It has to be sayable, a walker's bearing never crossing the wire
+    /// in the first place, so a heading of zero would be the world spinning
+    /// somebody north for no reason.
     ///
-    /// A hull put down this way arrives *at rest*: way off, sails furled,
-    /// as a world is entered. The point of saying so on the wire rather than
-    /// leaving it to each client is that the alternative is not a matter of
-    /// taste — a ship anchored off a beach to be looked at, still carrying
-    /// the way it had when its helmsman typed, closes that beach in seconds
-    /// and runs itself aground. Nobody was sailing; they were taken.
+    /// A hull put down this way arrives *at rest*, and the wire says so
+    /// rather than leaving it to each client: a ship anchored off a beach
+    /// while still carrying the way it had when its helmsman typed closes
+    /// that beach in seconds and runs itself aground. Nobody was sailing;
+    /// they were taken.
     ///
     /// A client that has just been seated at a helm by a `Boat` telling in
     /// the same breath applies this to *that* hull: the seating is read

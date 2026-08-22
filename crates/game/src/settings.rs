@@ -4,16 +4,12 @@
 //! machine reaches for in the order they reach for them: fill the screen, draw
 //! fewer pixels, stop casting shadows.
 //!
-//! **The resolution is the real one.** It is the size of the surface the frame
-//! is drawn on — the window's, or the display's own mode in fullscreen — and
-//! not a render scale laid over a full-size one. Bevy has a piece for that
-//! ([`bevy::camera::MainPassResolutionOverride`]) and it is not this: it draws
-//! the world's passes into a corner of a full-size target and leaves the blit
-//! to the screen sampling the whole of it, so without an upscaler behind it —
-//! the DLSS-shaped thing it was built to sit in front of — the picture comes
-//! out in the top-left with rubbish around it. Asking the *window* for fewer
-//! pixels needs nothing behind it and is what the setting says it is: at 720p
-//! the machine draws 921,600 pixels, whatever else is going on.
+//! **The resolution is the real one** — the size of the surface the frame is
+//! drawn on, not a render scale laid over a full-size one. Bevy's piece for
+//! that ([`bevy::camera::MainPassResolutionOverride`]) draws into a corner of
+//! a full-size target and leaves the blit sampling the whole of it, so
+//! without the upscaler it was built to sit in front of the picture comes out
+//! in the top-left with rubbish around it.
 //!
 //! Which is why fullscreen and resolution are one question here rather than
 //! two. A borderless fullscreen window is always the size of the desktop, so a

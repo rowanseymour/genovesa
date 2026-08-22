@@ -1,61 +1,34 @@
 //! The debug socket: the console, on a port instead of a keyboard.
 //!
-//! `--debug <port>` puts a listener on the loopback address that takes the
-//! same lines the console takes, one per line of the connection, and writes
-//! back what they answer. It is the whole of how this game is debugged from
-//! outside itself. The command line used to carry a second vocabulary for
-//! that — a view to open on, a list of pictures to take — and every option in
-//! it could only ever say what the run should do *before* it started. A
-//! socket says it at any point, as often as it likes, which is strictly more,
-//! so those options went and this took their place.
+//! `--debug <port>` puts a listener on the loopback that takes the same lines
+//! the console takes, one per line of the connection, and writes back what
+//! they answer. It is the whole of how this game is debugged from outside
+//! itself, and it replaced a second vocabulary on the command line: an option
+//! can only say what a run should do *before* it starts, where a socket says
+//! it at any point and as often as it likes.
 //!
-//! Nothing here invents a grammar. A line arrives, and it goes to
+//! Nothing here invents a grammar. A line goes to
 //! [`crate::console::dispatch`] exactly as a typed one would — so `set haze
 //! off` doctors this client's picture and `weather gale` crosses the wire to
-//! the server, by the same one syntactic rule, and a verb added to either
-//! side is reachable from here the day it is added. What this module adds is
-//! what a *keyboard* never needed words for, because a person at a window
-//! already has them:
+//! the server, and a verb added to either side is reachable from here the day
+//! it is added. What this module adds is what a *keyboard* never needed words
+//! for: `shot`, `press`, `click`, `zoom`, `yaw`, `hold` and `quit`.
 //!
-//! - `shot <path>` — the eyes. A driver that can order a gale and not see it
-//!   is not debugging anything.
-//! - `press <action> [seconds]` — the hands. The client is where sailing
-//!   happens: [`protocol::ToServer`] carries `Move` and `Helm`, which is a
-//!   client *telling* a server where it got to, so no amount of commanding
-//!   the world from the server's side can make a boat sail. Pressing the
-//!   bound key is the honest way in — the same key the player's own hand
-//!   would find, through the same bindings, so a press exercises the real
-//!   control and not a shortcut past it.
-//! - `click <button>` — the menus. They are driven by the mouse and nothing
-//!   else, and a windowless run has no window, so no cursor, so no pointer
-//!   for Bevy's picking to work from: naming the button is not a shortcut
-//!   chosen over a click, it is the only door there is. It goes through the
-//!   same systems a click does, and skips only the hit-testing. What it buys
-//!   is the screens nothing can otherwise reach — a controls row armed and
-//!   waiting for a key, a display trial counting down — and the transitions
-//!   between screens, which anything that opens a screen outright walks past.
-//! - `zoom`, `yaw` — the view, which used to be two options that could each
-//!   be said once. Where the *player* is is the server's `goto`, and the
-//!   camera goes with them: it is pinned to whatever carries them, and snaps
-//!   rather than eases when that jumps.
-//! - `hold` — the clock, stopped, so that two pictures of one place differ in
-//!   what they were taken to show and not in what hour it had got to. It
-//!   waits for the sky to reach the hour the world is at before freezing it,
-//!   for the reason everything here waits: `time` moves the *world's* clock,
-//!   and the sky eases onto that rather than jumping, so a hold thrown on the
-//!   frame `time` was answered would pin the hour the light was leaving.
-//! - `quit` — the way out. A run that is hosting writes its world down as it
-//!   goes (see [`crate::stopping`]), so a driver that ends by killing the
-//!   process loses the last of the world it was making.
+//! Two of those are less obvious than they look. `press` works the bound key
+//! through the real bindings rather than commanding the world, because
+//! sailing happens at the client — [`protocol::ToServer`] carries `Move` and
+//! `Helm`, a client *telling* a server where it got to, so no amount of
+//! ordering the world about from the server's side makes a boat sail. And
+//! `click` is not a shortcut chosen over a mouse: a windowless run has no
+//! cursor for Bevy's picking to work from, so naming the button is the only
+//! door to the menus there is.
 //!
 //! **A line is answered when its work is done, and not before.** That is the
-//! load-bearing property, and the reason this replaced a list of `--shot`s
-//! rather than sitting beside it. `press forward 20` answers twenty seconds
-//! later; a `goto` answers once the ground at the new place has arrived and
-//! the picture has stopped moving; `shot` answers when the file is on disk.
-//! So a pipe of lines is a script rather than a race — each one starts from
-//! where the last left the world — and the settling that used to happen
-//! silently, in frames nobody could see, is now the thing an answer means.
+//! load-bearing property. `press forward 20` answers twenty seconds later; a
+//! `goto` answers once the ground at the new place has arrived and the picture
+//! has stopped moving; `shot` answers when the file is on disk. So a pipe of
+//! lines is a script rather than a race, and the settling that used to happen
+//! silently in frames nobody could see is now the thing an answer means.
 //!
 //! Answers are line-based and end with a blank line, which is what makes the
 //! socket usable from a shell with nothing in between:
@@ -65,24 +38,15 @@
 //! ```
 //!
 //! A blank line inside an answer would end it early, so blank lines are
-//! dropped from answers rather than escaped: nothing either grammar says
-//! carries meaning in one.
+//! dropped from answers rather than escaped. One connection is served through
+//! to its end before another is accepted, there being one of everything two
+//! drivers would both be moving.
 //!
-//! The socket serves one connection through to its end before accepting
-//! another. There is no reason for two drivers at once — the world has one of
-//! everything they would both be moving.
-//!
-//! It is loopback TCP rather than a Unix socket for the plainest of reasons —
-//! a Unix socket would put `#[cfg(unix)]` through this module and leave the
-//! game unbuildable on a platform that only ever wanted to compile it. A port
-//! on `127.0.0.1` is reachable by anything else on this machine, which is the
-//! same footing the console already stands on: anyone in a session may
-//! command it. In one respect it is a wider door than the console ever was,
-//! and it is worth saying plainly rather than leaving to be discovered:
-//! `shot <path>` unlinks the file it is about to write (see [`shot`]), so
-//! whatever can reach the port can delete any file this run's user can. It is
-//! a development instrument and is off unless asked for.
-
+//! It is loopback TCP rather than a Unix socket to keep `#[cfg(unix)]` out of
+//! a module the game has to build without. Worth saying plainly: `shot <path>`
+//! unlinks the file it is about to write (see [`shot`]), so whatever can reach
+//! the port can delete any file this run's user can. It is a development
+//! instrument and is off unless asked for.
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};

@@ -569,12 +569,6 @@ struct OceanFloor;
 /// normal of the square they came from, so a cell reads as one flat lozenge
 /// of ground rather than as two triangles that happen to match.
 ///
-/// Which diagonal a cell is split on alternates like a checkerboard. Splitting
-/// every cell the same way lines them up into an obvious herringbone across
-/// open ground; alternating breaks that up and costs nothing. The parity runs
-/// off the cell's index within the chunk, and [`CELLS`] is even, so the
-/// pattern carries across a chunk boundary without a phase step.
-///
 /// A cell's four corners are shared between its own two triangles and with
 /// nothing else. Flat shading means a corner carries the normal and the colour
 /// of the cell it belongs to, so the same point of ground is four different

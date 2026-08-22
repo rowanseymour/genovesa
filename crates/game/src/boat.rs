@@ -1864,23 +1864,14 @@ fn conduct_the_oars(
 /// — and shown only while there is a pull asked for or the boat is still going,
 /// at rest the oars lying stowed.
 ///
-/// Whether it turns at all is *measured*, not taken on trust: the hull's own
-/// place, this frame against last.
-/// Reading [`Boat::way`] is shorter and was what this did — [`steer`] advances
-/// the hull by exactly `way * dt` and zeroes the way it grounds on, so the two
-/// numbers agree on every frame `steer` runs. They part on the frames it does
-/// not, and `steer` is the one system here the pause stops: with the chart or
-/// the menu up the way stands frozen at whatever it last was while the hull
-/// sits perfectly still, and a stroke integrating that number rows forever on
-/// a dead boat. Water covered cannot lie that way — a hull nothing moved
-/// covered none — which is the whole reason the figure measures too.
-///
-/// Measuring also buys the hulls this client never steers: a dinghy under
-/// somebody else's oars carries no [`Boat`] to ask what it is doing and is
-/// walked across the water by [`moor`]. Moving, it is taken to be rowed, at
-/// the same cadence and whichever way round its own movement says — that
-/// client has already put its weather into the place it reports. One left at
-/// anchor covers nothing and lies with its oars in.
+/// Whether it turns at all is *measured* — the hull's own place, this frame
+/// against last — rather than read off [`Boat::way`], which was what this did.
+/// The two agree on every frame [`steer`] runs and part on the frames it does
+/// not, and `steer` is the one system here the pause stops: with the chart up
+/// the way stands frozen while the hull sits still, and a stroke integrating
+/// that number rows forever on a dead boat. Measuring also buys the hulls this
+/// client never steers, a dinghy under somebody else's oars carrying no
+/// [`Boat`] to ask — moving, it is taken to be rowed.
 ///
 /// Height is thrown away, [`float`] setting the hull to the water's every
 /// frame and a swell being no part of a stroke; a jump is not a stroke either,
@@ -2167,78 +2158,53 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
     (spot, f32::atan2(-forward.x, -forward.z))
 }
 
-/// Sails the boat the player is at the helm of, in its own frame, the way a
-/// boat is sailed: one key makes sail and hands the hull to the wind, one
-/// furls, and the steering keys are the helm, bringing the bow round for as
-/// long as they're held. The view plays no part — turning the camera changes
-/// what the keys look like on screen, never what they do — which is what
-/// makes a long sail a held course rather than a chase between the camera's
-/// yaw and the boat's.
+/// Sails the boat the player is at the helm of, in its own frame. The view
+/// plays no part — turning the camera changes what the keys look like on
+/// screen, never what they do — which is what makes a long sail a held course
+/// rather than a chase between the camera's yaw and the boat's. Only the boat
+/// the player is *aboard* answers, so a hull left at anchor holds station
+/// rather than sailing off with its absent owner's keystrokes.
 ///
-/// Only the boat the player is *aboard* answers, which is what being at the
-/// helm means here. Ashore, the same keys are the walker's — see
-/// `player::walk` — and a hull left at anchor holds station rather than
-/// sailing off with its absent owner's keystrokes.
-///
-/// With the sails set the wind is the throttle — the target speed is the hull's
-/// times [`sail_drive`], and the player's whole control of it is the helm. An
-/// unsparred hull is rowed instead, which is the same keys and a different
-/// bargain: the oars make their own speed and the wind only leans on it, by
-/// [`row_drive`], so there is no heading a rowboat cannot be pointed at — only
-/// a wind hard enough that pointing at it makes no ground.
-/// Furling takes the target to zero; the way runs off on the glide and the hull
-/// holds station where it dies, which is all "anchored" means here. Backing is
-/// the one drive the wind has no part in, because backing off a beach is how a
-/// grounding is undone and an escape that waited on a favourable wind would be
-/// no escape. The sail keys are taps, and a frame carrying both furls first and
-/// hoists second.
+/// With the sails set the wind is the throttle ([`sail_drive`]) and the
+/// player's whole control of it is the helm. An unsparred hull is rowed, the
+/// same keys on a different bargain: the oars make their own speed and the
+/// wind only leans on it ([`row_drive`]), so there is no heading a rowboat
+/// cannot be pointed at — only a wind hard enough that pointing at it makes no
+/// ground. Backing is the one drive the wind has no part in, because backing
+/// off a beach is how a grounding is undone and an escape that waited on a
+/// favourable wind would be no escape.
 ///
 /// The way is eased rather than instant, stepped exactly for however long the
-/// frame was so the ramp is the same shape at any frame rate, with
-/// [`WAY_STOPPED`] closing the tail the exponential would never finish. The
-/// glide is also what makes tacking work at all: the target dies crossing the
-/// no-go zone, but the way carried into the turn brings the bow through the eye
-/// and out the other side still moving.
+/// frame was so the ramp is the same shape at any frame rate. The glide is
+/// what makes tacking work at all: the target dies crossing the no-go zone,
+/// but the way carried into the turn brings the bow through the eye and out
+/// the other side still moving. The helm answers even with no way on and
+/// aground — a turn refused alongside an advance is a hull wedged bow-first
+/// with nothing left that would free it.
 ///
-/// The helm answers with no way on, and aground: a turn refused alongside an
-/// advance is a hull wedged bow-first against a shore with nothing left that
-/// would free it, so the bow may always come round even where the hull may not
-/// go.
-///
-/// Land is what the hull may not go through, and the frame's advance is offered
-/// to [`grounding`] before it is taken. It is allowed if the pose it would
+/// Land is what the hull may not go through, and the frame's advance is
+/// offered to [`grounding`] before it is taken: allowed if the pose it would
 /// reach floats, or failing that if it is aground no *deeper* than the pose
-/// already held — the only rule that both frees a stranded hull and cannot be
-/// played. It is narrower than it reads: a floating hull can only ever be
-/// allowed a pose that floats, since `here` at or under zero makes the second
-/// clause imply the first, so a boat under way halts still afloat with at most
-/// [`KEEL_BITE`] in the mud. What the second clause is for is the pose the boat
-/// did not sail into — a `goto` whose search for water came up dry and left
-/// the hull on the ground it was sent to, or ground arriving under a hull
-/// already sitting there — out of which every way down to the sea is downhill
-/// and every way further in is refused like any other climb. Which is why the
-/// comparison carries no tolerance: a hair a frame is a metre a second up a
-/// hillside.
+/// already held, which is the only rule that both frees a stranded hull and
+/// cannot be played. The second clause is narrower than it reads — a floating
+/// hull can only ever reach a floating pose — and what it is for is the pose
+/// the boat did not sail into, a `goto` that came up dry or ground arriving
+/// under a hull already sitting there, out of which every way down to the sea
+/// is downhill. It carries no tolerance: a hair a frame is a metre a second up
+/// a hillside.
 ///
-/// Poses are judged every [`CELL_METRES`] along the advance, not only at its
-/// end. An ordinary frame is one pose — seventeen centimetres of way at sixty
-/// frames a second — but the quarter second Bevy clamps a stalled frame to is
-/// two and a half metres, several probe spacings, and judged in one leap that
-/// would step a keel clean over a facet of ground an intermediate pose
-/// catches. Sub-stepping costs those stalled frames a handful of extra probe
-/// sets and ordinary frames nothing.
+/// Poses are judged every [`CELL_METRES`] along the advance rather than only
+/// at its end. An ordinary frame is one pose, but the quarter second Bevy
+/// clamps a stalled frame to is two and a half metres — judged in one leap
+/// that would step a keel clean over a facet an intermediate pose catches.
 ///
-/// Turning at speed also heels the hull, on the target of [`heel_for`] and the
-/// hull's heel-response curve, which is both the roll into the turn and the
-/// straightening out of it. The roll is applied about the boat's own forward
-/// axis, and the keel lies along that axis, so heeling moves nothing
-/// [`grounding`] probes along — it is wholly a thing the eye gets.
-///
-/// Both poses are judged with the rotation the helm has just applied, so a turn
-/// only ever changes where the advance goes, never whether it is allowed. What
-/// the hull is stopped *by* is the keel line and nothing else — the stem rakes
-/// out over the forefoot, so a bow can overhang a cliff face by half a metre
-/// before anything objects.
+/// Turning at speed heels the hull, about its own forward axis. The keel lies
+/// along that axis, so heeling moves nothing [`grounding`] probes along: it is
+/// wholly a thing the eye gets. Both poses are judged with the rotation the
+/// helm has just applied, so a turn only ever changes where the advance goes,
+/// never whether it is allowed — and what stops the hull is the keel line
+/// alone, the stem raking out over the forefoot so a bow can overhang a cliff
+/// by half a metre before anything objects.
 fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,

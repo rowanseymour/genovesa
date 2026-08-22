@@ -1,112 +1,36 @@
 //! The chart: what the player has seen of the world, drawn in plan on paper.
 //!
 //! Pressing the chart key lays the sheet over the world. North is up and stays
-//! up — that is the whole difference from the view it covers, which turns —
-//! and the rose in the corner says so rather than pointing anywhere.
+//! up — the whole of the difference from the view it covers, which turns.
 //!
-//! A chart is a *drawing of a survey*, and nothing else. What a survey is —
-//! what counts as looked at, how a coastline closes, what makes a closed one
-//! an island — is [`protocol::survey`]'s, because a claim is the server's to
-//! grant and both ends have to reach the same answer about a coast. This
-//! module holds one [`Survey`], asks it questions, and puts ink on paper.
+//! **Nothing here surveys anything.** What counts as looked at, how a
+//! coastline closes and what makes a closed one an island are
+//! [`protocol::survey`]'s, because a claim is the server's to grant and both
+//! ends have to reach the same answer about a coast. This module holds one
+//! [`Survey`], asks it questions, and puts ink on paper.
 //!
-//! **Nothing here surveys anything.** The survey belongs to the world: the
-//! server says what has been seen and what is on it (see
-//! [`protocol::ToClient::Surveyed`]), and this module records and draws that.
-//! It could not honestly have a rule of its own — a claim is judged against a
-//! coast the server has walked, and a client that decided for itself what it
-//! had seen would have a chart and claims about two different worlds.
+//! It is also the one thing here that **accumulates**. Everything else this
+//! client holds is streamed and forgotten as the camera moves on, but a coast
+//! is worth remembering for as long as the player is in the world, and what
+//! arrives over the wire is told once and never again. What makes that
+//! affordable is throwing the ground away and keeping only the two lines worth
+//! drawing — where it meets the sea, and where the water over it reaches
+//! [`protocol::survey::SHOAL_DEPTH`]. Sailed right around, a 1.5 km island is
+//! about a megabyte of height grid and a few kilobytes of those two lines.
 //!
-//! # The one thing that accumulates
+//! Three things can be true of an island here, earned three different ways: a
+//! cairn seen from offshore, unlettered; a cairn landed at and read, its name
+//! beside it; and a coastline sailed the whole way round, closed and lettered.
+//! Only the third is this sheet's own seeing and only the third earns the
+//! right to claim — a chart that let hearsay close a ring would be one an
+//! island could be claimed off having been *told* about it. The first two
+//! arrive as [`Claimed`] and put no stroke of coastline on the paper.
 //!
-//! Everything else this client holds is streamed and forgotten: chunks, meshes,
-//! palms, the beasts in the water. The camera moves on and `terrain` drops what
-//! it has left behind, because the server is the one holding the world. The
-//! chart cannot do that — a coast is worth remembering exactly as long as the
-//! player is in the world — so it is the one structure here that has to be
-//! designed for a world with no edges. What arrives over the wire is told once
-//! and never told again, so what is on the sheet is only ever what was put
-//! there.
-//!
-//! What makes that affordable is throwing the ground away and keeping only the
-//! two lines worth drawing — where it meets the sea, and where the water over
-//! it reaches [`protocol::survey::SHOAL_DEPTH`]. Sailed right around, a 1.5 km
-//! island is about a megabyte of height grid and a few kilobytes of those two
-//! lines; the arithmetic is [`protocol::survey`]'s.
-//!
-//! What belongs to the *chart* is why the second line is kept at all: it is the
-//! one piece of **depth** on a sheet that is otherwise all outline, drawn
-//! stippled the way an engraved chart draws the limit of a bank. But it is ink
-//! and nothing else — it rings nothing, names nothing and closes nothing, and
-//! every question about islands is asked of the waterline alone.
-//!
-//! # Names
-//!
-//! An island this player has *claimed* can be named: clicking one on the sheet
-//! puts a caret on its lettering and the keyboard becomes the pen — there is
-//! no dialog, because a chart is written on, not filled in. The pen does not
-//! open on anything else, an island nobody holds having nothing to write on
-//! and somebody else's having nothing this player may write.
-//!
-//! Nothing is lettered here. A name rides the claim it is written on, so Enter
-//! offers it to the world and the cairn comes back saying whatever it now says.
-//! Both are settled against the ring's identity
-//! ([`protocol::survey::Island::id`]), a fact about the coast and so the same
-//! on every machine.
-//!
-//! # What the sheet knows, and how it came to
-//!
-//! Three things can be true of an island here, and they are earned three
-//! different ways:
-//!
-//! | on the paper | what it took |
-//! | --- | --- |
-//! | a cairn, unlettered | having seen the stones from offshore |
-//! | a cairn with a name beside it | having landed and read them |
-//! | a coastline, closed and lettered | having sailed the whole way round |
-//!
-//! Only the third is this sheet's own seeing, and only the third earns the right
-//! to claim. The first two arrive as [`Claimed`] and put no stroke of coastline
-//! on the paper: a chart that let hearsay close a ring would be one a player
-//! could claim an island off having been *told* about it.
-//!
-//! How near is near enough is the server's alone and is not written down twice.
-//! What matters here is that a cairn with no name on it is not a puzzle — it is
-//! either an island nobody has christened or one whose stones this player has
-//! not been up to, and from a mile offshore those are the same thing.
-//!
-//! # Ink, not paper
-//!
-//! An old chart's character is easy to get from a paper texture and a wash of
-//! stains, and that is the one way it cannot be got here: this world is flat
-//! tones with no texture or gradient anywhere in it, and a mottled sheet would
-//! be the only one of either. So the hand is in the line instead — a coast
-//! weighted heavier than the graticule under it, ticked on its landward side
-//! the way an engraved chart hatches its shores, stippled on its seaward side
-//! where the water is shallow, on one flat tone of parchment. The furniture is
-//! lettered in the menus' serif; the islands are named in an italic of the Fell
-//! types (see [`NAME_FONT`]).
-//!
-//! Outside all of it the sheet has an edge — a double rule just inside the
-//! window with the ruling's graduations between the two lines, and the
-//! engraving covered over beyond it. A chart drawn to the window's own edge has
-//! no edge at all, and reads as a viewport rather than as a sheet.
-//!
-//! Under all of it is the rhumb net: roses standing on the ruling's crossings,
-//! each throwing the thirty-two points of the compass across the paper (see
-//! [`rhumbs`]). It is the sheet's whole character and none of its content, so
-//! it is ruled fainter than anything over it, and its rays are graded — the
-//! principal winds ruled, the quarter winds dashed — so a dozen roses' worth
-//! reads as a net rather than a haze. The roses are drawn in two flat tones,
-//! each point of the star split down its own axis (see [`star`]), two tones
-//! meeting on an edge being the only way to draw a lit thing on a sheet with
-//! no gradients.
-//!
-//! A coast that has not been closed is not closed on the sheet either. Half an
-//! island is drawn as half an island, the line simply stopping where the survey
-//! did — which is what a partly run coastline looked like on a real chart, and
-//! saves inventing the other side.
-
+//! The character is in the line rather than in the paper. An old chart's
+//! stains and mottle are the one way it cannot be got here, this world having
+//! no texture or gradient anywhere for them to keep company with; what does
+//! the work instead is weight and hatching, and a coast the survey never
+//! closed simply stops where the survey did.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::input::keyboard::{Key, KeyboardInput};

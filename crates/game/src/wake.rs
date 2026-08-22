@@ -10,13 +10,8 @@
 //! What the shader gets is a [`Track`]: a polyline of points the bow has
 //! lately laid — a shoulder's radius abaft the stem; [`lay_the_wake`] says
 //! why — each carrying how long ago it was laid and how fast the hull was
-//! moving when it was. Everything else is worked out from that, and two
-//! things are painted off it —
-//!
-//! - the **boil**, solid white close about the hull and for a second or two
-//!   astern, which is the water the hull itself is turning over; and
-//! - the **arms**, a pair of narrow bands opening away from the track at a
-//!   fixed angle, which is the V a moving hull throws.
+//! moving when it was. Two things are painted off it: the **boil**, solid
+//! white close about the hull, and the **arms**, the V a moving hull throws.
 //!
 //! Age takes both back, and it takes them back by *breaking them up* rather
 //! than by fading them: the foam is thresholded against the same kind of

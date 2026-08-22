@@ -7,13 +7,12 @@
 //! of a real sky from up there is its *shadow*, so that is the whole of what is
 //! drawn.
 //!
-//! Which makes this a thing done to the light rather than a thing in the world.
-//! Bevy will mask a directional light with a texture — a film lamp's gobo — and
-//! a masked light carries the pattern onto every surface it touches in one
-//! pass, so everything under the same sun falls under the same cloud without a
-//! line of this file knowing any of them exist. In the materials instead it
-//! would be the same function written into three shaders, and three of them
-//! would have gone out of step.
+//! Which makes this a thing done to the light rather than a thing in the
+//! world. A masked directional light — a film lamp's gobo — carries the
+//! pattern onto every surface it touches in one pass, so everything under the
+//! same sun falls under the same cloud without a line of this file knowing
+//! any of them exist. In the materials instead it would be one function
+//! written into three shaders, which would go out of step.
 //!
 //! The mask lies in the plane facing the sun, and is projected down the light
 //! like everything else the light does. Three consequences, and each is a

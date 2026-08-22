@@ -9,31 +9,21 @@
 //! What stays here is the texture nobody compares notes on: each client raises
 //! its own birds out of the ground it was already sent and its own clock.
 //!
-//! The birds come in two shapes, at opposite ends of what decoration can be:
+//! The birds come in two shapes. An **eagle** belongs to a *place*: a chunk
+//! whose ground holds a summit worth the name gets one circling it, which is
+//! a fact about the chunk grid, so every client raises eagles over the same
+//! peaks without a word crossing the wire and streaming despawns them with
+//! the ground. A **crossing** belongs to a *moment*: a line of seabirds along
+//! the shallows, surfacing near whoever is looking and gone again, where the
+//! unit is the [`Formation`] rather than the individual — the line carries
+//! the course and the lifetime and a bird knows only its station in it.
 //!
-//! - An **eagle** belongs to a *place*. A chunk whose ground holds a summit
-//!   worth the name gets a bird — sometimes a pair — circling it. A summit
-//!   is a fact about the chunk grid, so every client raises eagles over the
-//!   same peaks without a word crossing the wire, and the birds hang off the
-//!   chunk entity so streaming despawns them with the ground. Each bird
-//!   carries its own circle: a pair is two birds on one thermal rather than
-//!   a thing of its own.
-//! - A **crossing** belongs to a *moment*: a line of seabirds undulating
-//!   along the shallows. It surfaces near whoever is looking and is gone; a
-//!   client anchored a mile away gets its own. Here the unit is the
-//!   [`Formation`] rather than the individual — the line carries the course
-//!   and the lifetime, and a bird only ever knows its station in it and its
-//!   phase of the line's own rhythm. It retires out at the edge of the
-//!   haze, where a vanishing bird is a vanishing speck.
-//!
-//! And though nothing here can be touched, it can be *approached* — so the
-//! one behaviour wildlife owes the player is absence: birds give way upward
-//! as the player nears, eased rather than snapped, so an encounter reads as
-//! the bird minding them and never as the boat passing through it. [`Shy`]
-//! carries how much of the player a creature is currently minding and
-//! [`give_way`] eases it on and off, while what being shy *means* stays
-//! each kind's own business. (The beasts run their giving-way on the
-//! server, where behaviour about a player belongs.)
+//! Though nothing here can be touched it can be *approached*, so the one
+//! behaviour wildlife owes the player is absence: birds give way upward as
+//! they near, eased rather than snapped, so an encounter reads as the bird
+//! minding them and never as the boat passing through it. [`Shy`] carries how
+//! much of the player a creature is minding and [`give_way`] eases it on and
+//! off, while what being shy *means* stays each kind's own business.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::ops::Index;

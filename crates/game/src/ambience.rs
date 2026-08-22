@@ -172,17 +172,13 @@ fn heard(state: &AppState, helm: Option<&Helm>) -> bool {
 /// thrown away on purpose: a hull backing water is pushing the same water
 /// about as one going ahead.
 ///
-/// Distance does two separate things, and the range is read twice for them.
-/// The wash alone falls off as the inverse of it past [`EARSHOT`], twice as
-/// far leaving half the boat's share — the sea's floor is no part of that,
-/// see that constant. Then the whole of it, floor included, is taken down
-/// towards [`ALOFT`] as the camera climbs away from the water.
-///
-/// That second fall is spread evenly across the zoom's *notches* rather than
-/// across its metres, which is what the logarithm is for: the zoom is
-/// geometric, so linear in metres was flat for most of the scroll and then
-/// dropped away over the last few clicks, and a sea that quietens all at once
-/// sounds like a fault rather than like pulling back.
+/// Distance does two separate things, so the range is read twice. The wash
+/// alone falls off as the inverse of it past [`EARSHOT`]; then the whole of
+/// it, floor included, is taken down towards [`ALOFT`] as the camera climbs.
+/// That second fall is spread across the zoom's *notches* rather than its
+/// metres — the zoom being geometric, linear in metres was flat for most of
+/// the scroll and then dropped away over the last few clicks, and a sea that
+/// quietens all at once sounds like a fault rather than like pulling back.
 fn loudness(way: f32, liveliness: f32, range: f32) -> f32 {
     let lying = (LYING * liveliness).min(1.0);
     let speed = (way.abs() / FULL_SPEED).min(1.0).sqrt();

@@ -1,99 +1,73 @@
 //! The beasts: the creatures the server *means*.
 //!
-//! The game's client-side wildlife — the eagles, the seabird lines — is
-//! scenery a client raises for itself, and the server has never heard of it.
-//! That holds exactly as long as a creature can never matter, and there are
-//! two ways to matter. The shark's way is consequence: it will one day go for
-//! a player swimming where it hunts, and one client seeing it while another
-//! did not would make that moment a private hallucination. The whale's and the
-//! dolphins' way is company: they are rare, pointable events, and two players
-//! anchored side by side must be able to point at the same one. Birds are
-//! texture nobody compares notes on, and stay each client's own.
+//! The client's own wildlife — eagles, seabird lines — is scenery it raises
+//! for itself and the server has never heard of it. What earns a creature a
+//! place here is mattering, and there are two ways to matter: the shark's is
+//! consequence, since it will one day go for a swimmer and one client seeing
+//! that while another did not would make it a private hallucination; the
+//! whale's and the pod's is company, they being rare pointable events two
+//! players anchored side by side must be able to point at together. Birds are
+//! texture nobody compares notes on.
 //!
 //! So a beast is run the way a player is: the server holds where it is and
-//! tells everyone on a beat, and a client's whole part is to draw what it is
-//! told — see [`ToClient::Beast`], one message that is both introduction and
-//! movement, so joining mid-life needs no catching up beyond the next beat.
+//! tells everyone on a beat — see [`ToClient::Beast`], one message that is
+//! both introduction and movement, so joining mid-life needs no catching up.
 //!
-//! Beasts are world state with session manners. Raised where the players are,
-//! alive while anyone is near, let go when the last of them sails away: the
-//! *population* is a performance around whoever is present, not a fact a seed
-//! means the way it means palms. But the animals alive when a kept world is
-//! written are in its file and reopen where they stood, because nothing with
-//! consequence may be escapable by relogging — a shark that had somebody
-//! cornered when they quit must still have them cornered when they reload.
-//! What is kept is only what a save could ever show, see `keeper::BeastRecord`;
-//! everything re-derived starts over, which nothing can see.
+//! Beasts are world state with session manners. Raised where the players are
+//! and let go when the last of them sails away, the *population* being a
+//! performance around whoever is present rather than something a seed means
+//! the way it means palms. But the animals alive when a kept world is written
+//! are in its file, because nothing with consequence may be escapable by
+//! relogging — a shark that had somebody cornered when they quit must still
+//! have them cornered when they reload.
 //!
 //! # What passes for a mind
 //!
-//! Every beast is born in deep water with **one place it is going**, and
-//! swims there. That is the whole of it, and the two kinds of animal here are
-//! only two answers to what the place is:
+//! Every beast is born in deep water with **one place it is going**, and swims
+//! there; the two kinds are two answers to what the place is. For a whale or a
+//! pod it is open water a kilometre off, laid so the course runs near whoever
+//! it was raised for, and arriving is the *end* — the journey is the life, so
+//! nothing is ever stationed near a player or can drift into being so. For a
+//! shark it is the shallows off a coast, and arriving is the *start* of
+//! snooping its strip of water.
 //!
-//! - A **whale or a pod is passing through**. Its one place is open water a
-//!   kilometre or so off, laid so the course runs near whoever it was raised
-//!   for, and reaching it is the end of the animal: it goes down and is let
-//!   go. So a whale is never *stationed* near a player and could not drift
-//!   into being so — the meeting was the middle of a crossing, and the journey
-//!   is the life, with no separate clock saying when it is over.
-//! - A **shark lives somewhere**. Its one place is the shallows off a coast,
-//!   and reaching it is the *start*: from there it snoops its strip of water
-//!   for as long as its life runs, which is the one kind here that has a life
-//!   counted in beats rather than in metres swum.
+//! Nothing is plotted beyond that. Where it is going is a *want*, steered
+//! towards each beat through the water actually found; deciding in advance
+//! where an animal would be was tried and made one that could not be
+//! surprised, which is exactly what a boat is here to be.
 //!
-//! Nothing is plotted beyond that point. Where the animal is going is a
-//! *want*, and every beat it is steered towards that through the water it
-//! actually finds, so a course is what a beast has swum rather than something
-//! it was issued. Deciding where an animal would be *before* it was there was
-//! tried and thrown out: it made an animal that could not be surprised, and a
-//! boat is exactly the surprise these animals are for.
-//!
-//! Two rules finish the shape:
-//!
-//! - **Born deep, and never watched appearing.** Deep water is the water
-//!   players are not standing in, every coast has some within a few hundred
-//!   metres, and the open sea is made of it — so it is somewhere any beast
-//!   can be raised at more or less any moment.
-//! - **Gone under, and never watched vanishing.** An animal on its way out is
-//!   submerged — see [`ToClient::Beast`]'s `surfaced` — and is only let go
-//!   once it is down and over deep floor. What a player sees is something
-//!   sounding and not coming back up. There is no second way out: an animal
-//!   nobody has been near for a while is not dropped where it stands but told
-//!   to leave, and leaves like anything else, because "nobody is near it" is
-//!   a statement about a radius and not about whether anyone is looking.
+//! Two rules finish the shape. **Born deep, and never watched appearing** —
+//! deep water is the water players are not standing in, so it is somewhere a
+//! beast can be raised at any moment. **Gone under, and never watched
+//! vanishing** — an animal on its way out submerges and is let go only once it
+//! is down over deep floor, and one nobody has been near for a while is told
+//! to leave rather than dropped where it stands, "nobody is near it" being a
+//! statement about a radius and not about whether anyone is looking.
 //!
 //! # What one makes of another
 //!
-//! What an animal does about anything else in the water is one entry in a
-//! table — [`REGARDS`], a row per kind and a column per thing there is to meet
-//! — and the entry carries its own reach, because how far off a whale starts
-//! caring is a fact about a whale *and a hull*. A single "how wary is this
-//! kind" number was the first shape of this and could not say that dolphins
-//! drive a shark off while a shark gives a pod room, which is the interesting
-//! half of what these animals are.
+//! What an animal does about anything else in the water is one entry in
+//! [`REGARDS`], a row per kind and a column per thing there is to meet, and
+//! the entry carries its own reach — how far off a whale starts caring is a
+//! fact about a whale *and a hull*. A single "how wary is this kind" number
+//! came first and could not say that dolphins drive a shark off while a shark
+//! gives a pod room, which is the interesting half of these animals.
 //!
-//! A stance is about *steering*, never about the life: a regard slots into
-//! [`swim`] between wanting to be somewhere and holding to water it can be in,
-//! so it outranks the journey and the ground outranks it. Nothing here can
-//! make an animal live longer, die sooner, or arrive somewhere it was not
-//! going.
-//!
-//! Mostly that comes out as studied indifference — a berth given ([`skirt`]),
-//! or a whale going under and staying under while a boat is there. The
-//! exception is the pod, which will come and *ride a bow* ([`ride`]): the one
-//! thing here that closes on a player on purpose, and the one stance that
-//! takes over where an animal is going rather than bending how it gets there.
-//! It has to take over, two swings under the same clamp cancelling. So a ride
-//! is bounded instead and the pod peels off to finish its crossing — the
-//! alternative being a pod that has become scenery attached to a boat.
+//! A stance is about *steering*, never about the life: it slots into [`swim`]
+//! between wanting to be somewhere and holding to water it can be in, so
+//! nothing here can make an animal live longer, die sooner, or arrive
+//! somewhere it was not going. Mostly it comes out as a berth given
+//! ([`skirt`]). The exception is the pod, which will come and *ride a bow*
+//! ([`ride`]) — the one stance that takes over where an animal is going rather
+//! than bending how it gets there, two swings under the same clamp cancelling.
+//! It is bounded, the alternative being a pod that has become scenery attached
+//! to a boat.
 //!
 //! The one thing the server cannot yet see is whether a player is *in the
 //! water*: a client reports a position, not whether its player is afoot,
-//! aboard or wading. So the table's two player columns are read as one — a pod
-//! will happily ride the bow of a swimmer. What a swimmer really needs is the
-//! shark, and that split is blocked on the wire rather than on this file.
-
+//! aboard or wading, so the table's two player columns are read as one and a
+//! pod will happily ride the bow of a swimmer. That split is blocked on the
+//! wire rather than on this file.
 // Nearly everything worth pointing at from these docs — the table, the
 // stances, the swimming — is private to this file and staying that way.
 #![allow(rustdoc::private_intra_doc_links)]
@@ -521,36 +495,23 @@ const A_PLAYER: Met = Met::Afloat;
 /// their water while a shark gives a pod a wide berth, which is two answers to
 /// one pairing that no single number held *between* two kinds could say.
 ///
-/// The reaches are in metres. A whale's suits a wide animal on a long turn and
-/// is also the range it goes down at. A pod's is a few boat lengths: inside it
-/// a pod comes to a moving bow and gives way to a still one, and outside it a
-/// boat is somebody else's business. Widening that when `Play` arrived was
-/// tried — fifty metres reads better as the range you notice a bow wave from,
-/// but the same number is what the give-way half promises to clear by
-/// [`BERTH`], and against a course laid at the hull a pod could only make
-/// fourteen of the twenty-five. A reach that keeps one of its two promises is
-/// worse than a close one that keeps both.
+/// The reaches are in metres, and the pod's is deliberately only a few boat
+/// lengths. Widening it when `Play` arrived was tried — fifty metres reads
+/// better as the range you notice a bow wave from, but the same number is
+/// what the give-way half promises to clear by [`BERTH`], and against a
+/// course laid at the hull a pod could only make fourteen of the twenty-five.
+/// A reach that keeps one of its two promises is worse than a close one that
+/// keeps both. The shark's is `Ignore` pointedly: that a shark gives you no
+/// room is the first thing a player learns about one.
 ///
-/// The shark's is `Ignore` and pointedly so: that a shark gives you no room is
-/// the first thing a player learns about one.
-///
-/// # What is not filled in
-///
-/// The nine cells of the top-left block are what one beast makes of another,
-/// and every one is `Ignore`, because the beasts have never seen each other.
-/// Standing them up is not a matter of writing stances in:
-///
-/// - There is no still picture of what is *in* the water the way [`Flock::beat`]
-///   takes one of where the players are.
-/// - `Harry` and `Play` both close the range, and two animals with stances on
-///   each other make a chase, which drags both across the map and quietly
-///   subverts the journey that is a traveller's whole life. An engagement has
-///   to be bounded before either is safe to write.
-///
-/// `Play` is written and `Harry` is not, which is not an accident of order: the
-/// thing a ride closes on is a *player*, who has no stance and so cannot close
-/// back, so [`RIDE`] only has to stop a pod forgetting its crossing rather than
-/// stop two animals towing each other off the map.
+/// The nine cells of the top-left block — what one beast makes of another —
+/// are all `Ignore`, and filling them in is not a matter of writing stances
+/// in. There is no still picture of what is *in* the water the way
+/// [`Flock::beat`] takes one of where the players are, and `Harry` and `Play`
+/// both close the range, so two animals with stances on each other make a
+/// chase that drags both across the map. `Play` is written and `Harry` is not
+/// because a ride closes on a *player*, who has no stance and cannot close
+/// back — so [`RIDE`] only has to stop a pod forgetting its crossing.
 #[rustfmt::skip]
 const REGARDS: [[Regard; Met::ALL.len()]; HABITATS.len()] = {
     use Regard::{Ignore, Play, Sound};
