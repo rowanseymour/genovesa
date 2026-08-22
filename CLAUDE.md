@@ -88,14 +88,28 @@ thing indexed: nothing reads it to serve a line, so each needs a test holding
 it to what it advertises, and a fourth wants one the day it is written. `HELP`
 went without for a while and nothing showed, which is the whole argument.
 
+## Comments explain why, and stop
+
+A comment earns its place by saying what the code cannot: why this shape and
+not the obvious one, what was tried and failed, what a later edit would break.
+Prose that restates the line below it earns nothing by being about *why*.
+
+Two rules that have an answer rather than asking for judgement:
+
+- **A fact is written once, at the definition it belongs to.** Don't restate
+  at a call site what the callee's own doc already says — link to it. This is
+  where long blocks come from: half of a caller's doc is usually its callees',
+  said again and further from the code that would correct them.
+- **Long rationale goes in the module's `//!` header.** An item's own doc
+  stays under about ten lines. Past that, the design note is in the wrong
+  place and drifting out of reach of the diff that would catch it.
+
+Match the kind of the surrounding language. A worthy subject earns a comment,
+not a long one.
+
 ## Odds and ends
 
 - Only `game` may see Bevy. After moving things between crates, check both that
-  and the paragraph above (README has the two commands).
-- Comments here explain *why*, including approaches that were tried and
-  failed — concisely. It is the subject that earns a comment and never the
-  length: prose that restates the code, or says a thing twice, earns nothing
-  by being about *why*. Match the kind of the surrounding language, not its
-  density.
+  and "The client is meant to be replaceable" (README has the two commands).
 - Judge a change to the generator on nine seeds (`mapgen grid`), never on one
   favourite map.

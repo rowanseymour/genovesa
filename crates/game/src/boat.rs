@@ -2160,51 +2160,34 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
 
 /// Sails the boat the player is at the helm of, in its own frame. The view
 /// plays no part — turning the camera changes what the keys look like on
-/// screen, never what they do — which is what makes a long sail a held course
-/// rather than a chase between the camera's yaw and the boat's. Only the boat
-/// the player is *aboard* answers, so a hull left at anchor holds station
-/// rather than sailing off with its absent owner's keystrokes.
+/// screen, never what they do — so a long sail is a held course rather than
+/// a chase between the camera's yaw and the boat's.
 ///
-/// With the sails set the wind is the throttle ([`sail_drive`]) and the
-/// player's whole control of it is the helm. An unsparred hull is rowed, the
-/// same keys on a different bargain: the oars make their own speed and the
-/// wind only leans on it ([`row_drive`]), so there is no heading a rowboat
-/// cannot be pointed at — only a wind hard enough that pointing at it makes no
-/// ground. Backing is the one drive the wind has no part in, because backing
-/// off a beach is how a grounding is undone and an escape that waited on a
-/// favourable wind would be no escape.
+/// Set sails take the wind as their throttle ([`sail_drive`]) and an
+/// unsparred hull is rowed ([`row_drive`]), but backing is the one drive the
+/// wind has no part in: backing off a beach is how a grounding is undone,
+/// and an escape that waited on a favourable wind would be no escape.
 ///
-/// The way is eased rather than instant, stepped exactly for however long the
-/// frame was so the ramp is the same shape at any frame rate. The glide is
-/// what makes tacking work at all: the target dies crossing the no-go zone,
-/// but the way carried into the turn brings the bow through the eye and out
-/// the other side still moving. The helm answers even with no way on and
-/// aground — a turn refused alongside an advance is a hull wedged bow-first
-/// with nothing left that would free it.
+/// Easing the way rather than setting it is what makes tacking work — the
+/// target dies crossing the no-go zone, but the way carried into the turn
+/// brings the bow through the eye and out the other side still moving. The
+/// helm answers even with no way on and aground, a turn refused alongside an
+/// advance being a hull wedged bow-first with nothing left to free it.
 ///
-/// Land is what the hull may not go through, and the frame's advance is
-/// offered to [`grounding`] before it is taken: allowed if the pose it would
-/// reach floats, or failing that if it is aground no *deeper* than the pose
-/// already held, which is the only rule that both frees a stranded hull and
-/// cannot be played. The second clause is narrower than it reads — a floating
-/// hull can only ever reach a floating pose — and what it is for is the pose
-/// the boat did not sail into, a `goto` that came up dry or ground arriving
-/// under a hull already sitting there, out of which every way down to the sea
-/// is downhill. It carries no tolerance: a hair a frame is a metre a second up
-/// a hillside.
+/// The frame's advance is offered to [`grounding`] before it is taken, and
+/// allowed if the pose it would reach floats, or failing that if it is
+/// aground no *deeper* than the one already held — the only rule that both
+/// frees a stranded hull and cannot be played, a floating hull only ever
+/// reaching a floating pose. The second clause is for the pose the boat did
+/// not sail into: a `goto` that came up dry, or ground arriving under a hull
+/// already sitting there. It carries no tolerance, a hair a frame being a
+/// metre a second up a hillside. Poses are judged every [`CELL_METRES`]
+/// along the advance, because the quarter second Bevy clamps a stalled frame
+/// to is two and a half metres, and in one leap that steps a keel clean over
+/// a facet.
 ///
-/// Poses are judged every [`CELL_METRES`] along the advance rather than only
-/// at its end. An ordinary frame is one pose, but the quarter second Bevy
-/// clamps a stalled frame to is two and a half metres — judged in one leap
-/// that would step a keel clean over a facet an intermediate pose catches.
-///
-/// Turning at speed heels the hull, about its own forward axis. The keel lies
-/// along that axis, so heeling moves nothing [`grounding`] probes along: it is
-/// wholly a thing the eye gets. Both poses are judged with the rotation the
-/// helm has just applied, so a turn only ever changes where the advance goes,
-/// never whether it is allowed — and what stops the hull is the keel line
-/// alone, the stem raking out over the forefoot so a bow can overhang a cliff
-/// by half a metre before anything objects.
+/// Heel is wholly a thing the eye gets: the keel lies along the forward axis
+/// the hull rolls about, so it moves nothing [`grounding`] probes along.
 fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
@@ -2226,7 +2209,8 @@ fn steer(
         return;
     };
 
-    // The sail keys — see the doc above for the furl-then-hoist order.
+    // Furl is read before hoist, so a frame that somehow sees both keys
+    // tapped ends with the sails set.
     if bindings.tapped(&keys, Action::MoveBack, KeyCode::ArrowDown) {
         boat.furl();
     }
@@ -2275,7 +2259,6 @@ fn steer(
         };
 
         let advance = transform.forward() * way * time.delta_secs();
-        // One pose per facet of advance — see the swept-path paragraph above.
         // Ordinary frames advance far less than a facet and take one step.
         let steps = (advance.length() / CELL_METRES).ceil().max(1.0);
         let step = advance / steps;
