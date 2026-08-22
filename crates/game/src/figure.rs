@@ -341,12 +341,13 @@ fn stride(time: Res<Time>, mut players: Query<(&Transform, &mut Stride)>) {
 }
 
 /// Lays the figure prone while its walker is [`Swimming`] and stands it back
-/// up when their feet find the ground — the pitch, the slide back along the
-/// body and the sinking eased together, so the change is a movement rather
-/// than a cut. Face down, head the way they are going: the model's own up
-/// laid along its forward. The clips are untouched; the gait plays on in
-/// whatever attitude the figure is held at, the run reading as a stroke and
-/// standing as treading water.
+/// up when their feet find the ground — the pitch and the slide back along
+/// the body eased together, so the change is a movement rather than a cut.
+/// Those two and nothing else: no sinking, for the reason [`PRONE_SETBACK`]
+/// gives. Face down, head the way they are going: the model's own up laid
+/// along its forward. The clips are untouched; the gait plays on in whatever
+/// attitude the figure is held at, the run reading as a stroke and standing
+/// as treading water.
 ///
 /// Skipped once settled, in both attitudes — the stillness an idle walker's
 /// transform keeps (see [`crate::player::walk`]) is not undone here by

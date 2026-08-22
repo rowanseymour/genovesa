@@ -85,10 +85,17 @@ const SWIM_SPEED: f32 = 1.5;
 /// The steepest ground a walker will cross, as a gradient: metres of height
 /// per metre travelled, so this is a slope of about 35°. Up and down are the
 /// same number, because steep ground is a wall from either side — which is
-/// also what keeps the rule from trapping anybody. Every step is judged
-/// against the one that would undo it, so the way back off a slope is as open
-/// as the way onto it was, and there is nowhere a walker can reach that they
-/// cannot leave.
+/// also what keeps the rule from trapping anybody. Every step it judges is
+/// judged against the one that would undo it, so the way back off a slope is
+/// as open as the way onto it was, and there is nowhere on land a walker can
+/// reach that they cannot leave.
+///
+/// One step is not judged by it at all, and so is not symmetric: dropping
+/// into water deep enough to swim, which [`walk`] takes off any edge. That
+/// one is answered by the sea rather than by being undoable — swim far
+/// enough along any coast and there is a beach to wade out onto — but it is
+/// the exception to the paragraph above, and a reader reasoning about where
+/// a walker can get to should count it.
 ///
 /// The number is set against the ground the generator actually raises rather
 /// than picked for the look of it: half of any island's land lies under 15°
@@ -183,6 +190,12 @@ fn find_footing(mut commands: Commands, ground: Option<Res<Ground>>, mut walkers
                 commands.entity(walker).insert(Swimming);
             } else {
                 place.translation.y = height;
+                // Said as plainly as the insert, rather than left for
+                // [`walk`] to notice: somebody set down ashore out of a swim
+                // is standing, and `walk` is stopped while the menu is up —
+                // so leaving it would draw them face down on the beach for
+                // as long as the game were paused.
+                commands.entity(walker).remove::<Swimming>();
             }
             commands.entity(walker).remove::<Unsettled>();
         }
@@ -349,6 +362,10 @@ impl Plugin for PlayerPlugin {
         // player spawned without one would be invisible.
         app.add_plugins(FigurePlugin)
             .init_resource::<Fleet>()
+            // A swimmer rides the sea, so [`walk`] reads the weather — and a
+            // plugin asks for what its own systems read rather than trusting
+            // whoever else was added to have asked first.
+            .init_resource::<SeaConditions>()
             .add_systems(
                 Update,
                 (embark_or_land, claim_the_island, walk)
@@ -447,9 +464,18 @@ fn tilt(ground: &Ground, at: Vec2) -> Option<f32> {
     Some(Vec2::new(across(Vec2::X * reach)?, across(Vec2::Y * reach)?).length())
 }
 
-/// How steeply the ground climbs across a step, as a gradient: metres of
-/// height per metre travelled, unsigned, up and down being one rule — see
+/// How steeply the way climbs across a step, as a gradient: metres of height
+/// per metre travelled, unsigned, up and down being one rule — see
 /// [`WALKABLE_RISE`].
+///
+/// Measured against [`Ground::surface`] — the ground, or the waterline where
+/// the sea stands over it — rather than the bare bed, because what a walker
+/// has to get up or down is what is *under their feet*, and in the water that
+/// is the water. The two are the same everywhere dry, so this changes nothing
+/// ashore; where the sea covers the ground it is the difference between
+/// wading down a bank that plunges, which costs a body nothing, and stepping
+/// off a ledge into the shallows at its foot, which is a fall. Both read as
+/// the same steep bed and neither is, so the bed is the wrong thing to ask.
 ///
 /// The two ends of the step and nothing in between, which makes this a *mean*
 /// gradient and so only as honest as the step is short: one long enough to
@@ -467,7 +493,7 @@ fn climb(ground: Option<&Ground>, from: Vec2, to: Vec2) -> f32 {
     let (Some(ground), true) = (ground, along > 0.0) else {
         return 0.0;
     };
-    let (Some(here), Some(there)) = (ground.height(from.x, from.y), ground.height(to.x, to.y))
+    let (Some(here), Some(there)) = (ground.surface(from.x, from.y), ground.surface(to.x, to.y))
     else {
         return 0.0;
     };
@@ -782,34 +808,34 @@ fn landing(ground: Option<&Ground>, boat: &Transform) -> Option<(Vec2, f32)> {
 /// unwritten frame after frame, the same stillness an idle boat holds.
 ///
 /// Past [`WADE_DEPTH`] of sea the walker swims: slower — [`SWIM_SPEED`] —
-/// and riding just under the drawn surface at [`SWIM_HEIGHT`], swell and
-/// all like a hull, instead of standing on the ground. [`Swimming`] says so
-/// to whoever asks — the figure drawn prone most of all — and comes off the
-/// moment their feet find the ground again, or at a gunwale, boarding being
-/// the other way out of the water.
+/// and riding the surface the sea is drawn wearing, swell and all like a
+/// hull, instead of standing on the ground. Their origin goes exactly on the
+/// water; how far a *body* lies through it is [`crate::figure`]'s. [`Swimming`]
+/// says which they are doing to whoever asks — the figure drawn prone most of
+/// all — and comes off the moment their feet find the ground again, or at a
+/// gunwale, boarding being the other way out of the water.
 ///
-/// What can refuse a step is decided by the water at the far end of it, and
-/// nothing else:
+/// Two things can refuse a step:
 ///
-/// - A step **into the water** is always taken, at any depth and off any
-///   edge. There is no fall to refuse when a body floats at the bottom of
-///   it, and the alternative was worse than untidy: judged by [`climb`], a
-///   shore that shelves steeply — which is most of them — walls a walker out
-///   of the sea entirely, held at the water's edge by a seabed they could
-///   swim over. Undoing a dive back up the same face is not offered, and
-///   need not be: the sea is no trap, ending as it does at every beach.
+/// - **Water deep enough to swim in takes anybody**, off any edge: there is
+///   no fall to refuse when a body floats at the bottom of it. Undoing a dive
+///   back up the same face is not offered, and need not be — the sea is no
+///   trap, ending as it does at every beach. Shallows are *not* covered by
+///   this, and deliberately: a ledge with ankle-deep water at its foot is a
+///   fall like any other, and nothing catches you.
 ///
-/// - A step **onto dry ground** is [`climb`]'s: ground rising or falling
-///   faster than [`WALKABLE_RISE`] is not walked over, judged in strides of
-///   at most half a facet so no stride hides a whole facet of ground however
-///   long the frame was. It is a limit on the step and not on the spot, so it
-///   turns a walker back from a cliff without pinning them against it — the
-///   face of a bluff can be crossed along its contour. Read from the seabed
-///   for a swimmer, it is also what tells a beach to wade out of from a wall
-///   to be swum along.
+/// - **Everything else is [`climb`]'s**: rising or falling faster than
+///   [`WALKABLE_RISE`] is not walked over, judged in strides of at most half a
+///   facet so no stride hides a whole facet of ground however long the frame
+///   was. It is a limit on the step and not on the spot, so it turns a walker
+///   back from a cliff without pinning them against it — the face of a bluff
+///   can be crossed along its contour. Because it reads the *surface* rather
+///   than the bed, wading in is the level walk it looks like however steeply
+///   the bottom drops away, and it is still what tells a beach to wade out
+///   onto from a wall to be swum along.
 ///
-/// - And everywhere, [`barged`]'s: a cairn is the one built thing in this
-///   world with any substance to it, and a step into one is not taken.
+/// And, as everywhere, [`barged`]'s: a cairn is the one built thing in this
+/// world with any substance to it, and a step into one is not taken.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     keys: Res<ButtonInput<KeyCode>>,
@@ -862,14 +888,12 @@ fn walk(
                 transform.translation.xz(),
                 (transform.translation + stride).xz(),
             );
-            let taken = match ground.and_then(|g| g.height(to.x, to.y)) {
-                // Into the water, wading or swimming — see above.
-                Some(height) if height <= 0.0 => true,
-                Some(_) => climb(ground, from, to) <= WALKABLE_RISE,
-                // Ground the client has not been sent is no reason to pin a
-                // walker where they stand — [`climb`]'s forgiveness again.
-                None => true,
-            };
+            // Water to be swum in takes anybody, off any edge; everything
+            // else — dry ground, and shallows a body is not held up by — is
+            // the climb rule's, read off the surface so that wading in is
+            // the level walk it is. Ground not yet sent falls through to a
+            // climb of zero, which is [`climb`]'s own forgiveness.
+            let taken = swims(ground, to) || climb(ground, from, to) <= WALKABLE_RISE;
             if !taken || barged(&cairns, from, to) {
                 break;
             }
