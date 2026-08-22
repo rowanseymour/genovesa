@@ -336,6 +336,33 @@ impl Sky {
     }
 }
 
+/// Whichever of the two bodies is above the horizon.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Aloft {
+    Sun,
+    Moon,
+}
+
+/// Which body is up at an hour, and how far it is through its own crossing of
+/// the sky: `0.0` as it rises, `1.0` as it sets.
+///
+/// The half-turn either side of [`towards_the_sun`]'s own horizon — the sun is
+/// up from 0.25 to 0.75, and the moon, being opposite it, holds the other
+/// half. What [`crate::instruments`] draws the day's arc from.
+///
+/// Not a second opinion about [`Sky::is_night`], which asks a different
+/// question: that one is about which body is *lighting the world*, and the two
+/// deliberately part company for the last tenths of an hour either side of the
+/// swap — see [`light_from`] for what that buys.
+pub fn aloft(phase: f32) -> (Aloft, f32) {
+    let risen = (phase - 0.25).rem_euclid(1.0);
+    if risen < 0.5 {
+        (Aloft::Sun, risen / 0.5)
+    } else {
+        (Aloft::Moon, (risen - 0.5) / 0.5)
+    }
+}
+
 /// Marks the one light in the sky, so the systems that aim and colour it can
 /// find it again. It is the sun for most of the day and the moon for the rest
 /// — see the module doc for why that is one entity and not two. Public
@@ -921,6 +948,45 @@ mod tests {
             light.forward().as_vec3(),
             -light_from(phase)
         );
+    }
+
+    /// What [`crate::instruments`] draws the day's arc from: the two bodies
+    /// take the sky in turn, each crossing it once, and neither is ever half
+    /// way through a crossing it has not begun.
+    #[test]
+    fn the_bodies_take_the_sky_in_turn() {
+        assert_eq!(
+            aloft(0.25),
+            (Aloft::Sun, 0.0),
+            "the sun did not rise at 0.25"
+        );
+        assert_eq!(aloft(0.5), (Aloft::Sun, 0.5), "noon was not mid-crossing");
+        assert_eq!(
+            aloft(0.75),
+            (Aloft::Moon, 0.0),
+            "the moon did not rise at 0.75"
+        );
+        assert_eq!(
+            aloft(0.0),
+            (Aloft::Moon, 0.5),
+            "midnight was not mid-crossing"
+        );
+
+        // The wrap round midnight, which is where an arithmetic that forgot to
+        // fold would hand back a crossing outside its own arc.
+        for hundredth in 0..100 {
+            let (_, through) = aloft(hundredth as f32 / 100.0);
+            assert!(
+                (0.0..1.0).contains(&through),
+                "the hour {hundredth} was {through} through a crossing"
+            );
+        }
+
+        // And the swap is the horizon, not the night: the light is still the
+        // sun's a little past sunset — see `light_from` — so these two are
+        // entitled to disagree, and the arc must follow the horizon.
+        assert_eq!(aloft(0.77).0, Aloft::Moon);
+        assert!(!protocol::is_night(0.77), "the test's premise has moved");
     }
 
     #[test]
