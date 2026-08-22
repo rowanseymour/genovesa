@@ -1445,6 +1445,40 @@ mod tests {
         assert!(why.contains("new-world"), "unhelpful: {why}");
     }
 
+    /// Every word `help` offers is a word this end actually serves.
+    ///
+    /// `help` is the only documentation the socket has — see CLAUDE.md — and
+    /// `HELP` is a listing that [`begin`] never reads, so nothing but this
+    /// holds the two together. A verb dropped from the match would fall
+    /// through to `forward` and be refused by the server, while `help` went
+    /// on offering it. The other two vocabularies in this subsystem are each
+    /// pinned the same way: `server::console`'s `VERBS` to `interpret`, and
+    /// `MenuButton::EVERY` to `parse`.
+    ///
+    /// Every listed word is answered on the frame it arrives when given
+    /// alone — a refusal for the ones that want an argument, which is still
+    /// this end answering rather than the server.
+    #[test]
+    fn every_word_help_offers_is_a_word_this_end_serves() {
+        let (mut app, orders) = driven_app();
+        for line in HELP.lines() {
+            let verb = line
+                .split_whitespace()
+                .next()
+                .expect("every line of the help names its word");
+            let answered = say(&orders, verb);
+            app.update();
+
+            let said = answered
+                .try_recv()
+                .unwrap_or_else(|_| panic!("`{verb}` is offered by `help` and answered by nobody"));
+            assert_ne!(
+                said, "nobody is serving this world",
+                "`{verb}` is offered by `help` and served only by the server"
+            );
+        }
+    }
+
     /// Every button `click` offers can be clicked, and lands on the button it
     /// named. The listing is an index rather than the grammar — `parse` never
     /// reads it — so this is what holds the two to agreement, the way
