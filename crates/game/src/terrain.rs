@@ -38,8 +38,8 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, ChunkPayload, Plant, Tone, CHUNK_METRES, FACET_CELLS, FACET_METRES,
-    FACET_QUADS, FACET_VERTS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
+    chunk_at, dequantize, ChunkPayload, Material, Plant, CELLS, CELL_COUNT, CELL_METRES,
+    CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
 };
 
 use crate::camera::{MapCamera, View};
@@ -201,7 +201,7 @@ pub struct Ground {
 struct Arrival {
     chunk: IVec2,
     heights: Arc<[f32]>,
-    surfaces: Vec<Tone>,
+    materials: Vec<Material>,
     /// The chunk's standing water, still quantised: it is only ever compared
     /// against [`NO_WATER`] and turned into a height once per quad drawn, so
     /// there is nothing to be gained by dequantising a whole grid of it the
@@ -291,7 +291,7 @@ impl Ground {
                 self.arrived.push(Arrival {
                     chunk,
                     heights,
-                    surfaces: payload.surfaces,
+                    materials: payload.materials,
                     water: payload.water,
                     plants: payload.plants,
                 });
@@ -403,10 +403,7 @@ impl Ground {
             .copied()
             .enumerate()
             .max_by(|a, b| a.1.total_cmp(&b.1))?;
-        let local = Vec2::new(
-            (highest % FACET_VERTS) as f32,
-            (highest / FACET_VERTS) as f32,
-        ) * FACET_METRES;
+        let local = Vec2::new((highest % CORNERS) as f32, (highest / CORNERS) as f32) * CELL_METRES;
         Some((chunk.as_vec2() * CHUNK_METRES + local, height))
     }
 
@@ -432,16 +429,16 @@ impl Ground {
 /// splits its quads — see [`facets`] — or a hull crossing a quad would step
 /// where the picture slopes. `local` is metres from the chunk's own corner.
 fn height_at(heights: &[f32], local: Vec2) -> f32 {
-    let cell = local / FACET_METRES;
+    let cell = local / CELL_METRES;
     // Clamped rather than trusted: a point exactly on a chunk's far edge
     // belongs to the next chunk, but the arithmetic that got here is `f32` and
     // is entitled to land on the boundary itself.
-    let ix = (cell.x.floor().max(0.0) as usize).min(FACET_QUADS - 1);
-    let iz = (cell.y.floor().max(0.0) as usize).min(FACET_QUADS - 1);
+    let ix = (cell.x.floor().max(0.0) as usize).min(CELLS - 1);
+    let iz = (cell.y.floor().max(0.0) as usize).min(CELLS - 1);
     let u = (cell.x - ix as f32).clamp(0.0, 1.0);
     let v = (cell.y - iz as f32).clamp(0.0, 1.0);
 
-    let corner = |cx: usize, cz: usize| heights[cz * FACET_VERTS + cx];
+    let corner = |cx: usize, cz: usize| heights[cz * CORNERS + cx];
     let (tl, tr) = (corner(ix, iz), corner(ix + 1, iz));
     let (bl, br) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
 
@@ -519,22 +516,22 @@ struct OceanFloor;
 ///
 /// Deliberately un-indexed: with no vertex shared between triangles an index
 /// buffer would be 0, 1, 2, 3, … and save nothing.
-fn chunk_mesh(heights: &[f32], surfaces: &[Tone]) -> Mesh {
-    let count = FACET_CELLS * 6;
+fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
+    let count = CELL_COUNT * 6;
     let mut positions = Vec::with_capacity(count);
     let mut normals = Vec::with_capacity(count);
     let mut colors = Vec::with_capacity(count);
 
     let corner = |cx: usize, cz: usize| {
         Vec3::new(
-            cx as f32 * FACET_METRES,
-            heights[cz * FACET_VERTS + cx],
-            cz as f32 * FACET_METRES,
+            cx as f32 * CELL_METRES,
+            heights[cz * CORNERS + cx],
+            cz as f32 * CELL_METRES,
         )
     };
 
-    for (cell, tone) in surfaces.iter().enumerate() {
-        let (ix, iz) = (cell % FACET_QUADS, cell / FACET_QUADS);
+    for (cell, material) in materials.iter().enumerate() {
+        let (ix, iz) = (cell % CELLS, cell / CELLS);
         let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
         let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
 
@@ -551,13 +548,13 @@ fn chunk_mesh(heights: &[f32], surfaces: &[Tone]) -> Mesh {
         // corners — so lighting it this way is what makes a crag look as steep
         // as the palette says it is. It also stops a cell whose diagonal folds
         // reading as two facets of different brightness.
-        let along = (se.y + ne.y - sw.y - nw.y) / (2.0 * FACET_METRES);
-        let across = (nw.y + ne.y - sw.y - se.y) / (2.0 * FACET_METRES);
+        let along = (se.y + ne.y - sw.y - nw.y) / (2.0 * CELL_METRES);
+        let across = (nw.y + ne.y - sw.y - se.y) / (2.0 * CELL_METRES);
         let normal = Vec3::new(-along, 1.0, -across).normalize();
 
         // Vertex colours are consumed in linear space by the PBR shader; the
         // reference palette is authored in sRGB.
-        let srgb = tone.color();
+        let srgb = material.color();
         let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
         let color = [linear.red, linear.green, linear.blue, 1.0];
 
@@ -601,8 +598,8 @@ fn water_mesh(water: &[u16]) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
 
-    for iz in 0..FACET_QUADS {
-        for ix in 0..FACET_QUADS {
+    for iz in 0..CELLS {
+        for ix in 0..CELLS {
             let (tl, tr) = ((ix, iz), (ix + 1, iz));
             let (bl, br) = ((ix, iz + 1), (ix + 1, iz + 1));
 
@@ -612,7 +609,7 @@ fn water_mesh(water: &[u16]) -> Option<Mesh> {
             // them is entitled to hide.
             let Some(level) = [tl, tr, bl, br]
                 .iter()
-                .map(|(cx, cz)| water[cz * FACET_VERTS + cx])
+                .map(|(cx, cz)| water[cz * CORNERS + cx])
                 .filter(|level| *level != NO_WATER)
                 .max()
             else {
@@ -621,7 +618,7 @@ fn water_mesh(water: &[u16]) -> Option<Mesh> {
             let y = dequantize(level) + OFF_LATTICE;
 
             for (cx, cz) in [tl, bl, tr, tr, bl, br] {
-                positions.push([cx as f32 * FACET_METRES, y, cz as f32 * FACET_METRES]);
+                positions.push([cx as f32 * CELL_METRES, y, cz as f32 * CELL_METRES]);
                 // Dead flat, so every normal is the same one and there is
                 // nothing for the light to pick out — which is what makes a
                 // lake read as a sheet of water rather than as ground.
@@ -650,7 +647,7 @@ struct ChunkMeshes {
 
 fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
     ChunkMeshes {
-        ground: chunk_mesh(&arrival.heights, &arrival.surfaces),
+        ground: chunk_mesh(&arrival.heights, &arrival.materials),
         water: arrival.water.as_ref().and_then(|water| water_mesh(water)),
     }
 }
@@ -662,7 +659,7 @@ fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
 fn enter_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut paints: ResMut<Assets<StandardMaterial>>,
     mut seas: ResMut<Assets<SeaMaterial>>,
     mut images: ResMut<Assets<Image>>,
     view: Res<View>,
@@ -675,7 +672,7 @@ fn enter_world(
 
     // Terrain material. Base colour is white so the vertex colours come
     // through unmodified — StandardMaterial multiplies the two together.
-    commands.insert_resource(GroundMaterial(materials.add(matte(Color::WHITE))));
+    commands.insert_resource(GroundMaterial(paints.add(matte(Color::WHITE))));
 
     // Ocean floor. The sea is translucent, so without something opaque beneath
     // it the water beyond the terrain meshes blends against the sky and reads
@@ -696,7 +693,7 @@ fn enter_world(
     // buffer — which read as a faint darker banding drifting across the open
     // sea as the camera moved. A couple of metres of parallax at the seam is
     // invisible with the colours matched; a shimmer is not.
-    let seabed = Tone::Seabed.color();
+    let seabed = Material::Seabed.color();
     commands.spawn((
         Name::new("Ocean floor"),
         OceanFloor,
@@ -712,7 +709,7 @@ fn enter_world(
         // edge of every island's chunk rectangle.
         NotShadowReceiver,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
-        MeshMaterial3d(materials.add(matte(Color::srgb(seabed.x, seabed.y, seabed.z)))),
+        MeshMaterial3d(paints.add(matte(Color::srgb(seabed.x, seabed.y, seabed.z)))),
         Transform::from_xyz(0.0, -OCEAN_DEPTH - SEA_FLOOR_CLEARANCE, 0.0),
     ));
 
@@ -730,7 +727,7 @@ fn enter_world(
         alpha_mode: AlphaMode::Blend,
         ..matte(Color::srgba(tint.x, tint.y, tint.z, WATER_ALPHA))
     };
-    commands.insert_resource(LakeMaterial(materials.add(still(LAKE_WATER))));
+    commands.insert_resource(LakeMaterial(paints.add(still(LAKE_WATER))));
 
     // The sea alone wears the swell on top — a lake is sheltered water, and
     // stiller than the sea is most of what makes it read as one. The swell
@@ -1012,13 +1009,13 @@ mod tests {
     /// one.
     fn a_slope() -> ChunkPayload {
         ChunkPayload {
-            heights: (0..FACET_VERTS * FACET_VERTS)
+            heights: (0..CORNERS * CORNERS)
                 .map(|i| {
-                    let (ix, iz) = (i % FACET_VERTS, i / FACET_VERTS);
+                    let (ix, iz) = (i % CORNERS, i / CORNERS);
                     quantize(ix as f32 + 10.0 * iz as f32)
                 })
                 .collect(),
-            surfaces: vec![Tone::Grass; FACET_CELLS],
+            materials: vec![Material::Grass; CELL_COUNT],
             water: None,
             plants: Vec::new(),
         }
@@ -1028,9 +1025,9 @@ mod tests {
     fn a_chunk_mesh_is_one_flat_lozenge_per_cell() {
         let payload = a_slope();
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
-        let mesh = chunk_mesh(&heights, &payload.surfaces);
+        let mesh = chunk_mesh(&heights, &payload.materials);
 
-        assert_eq!(mesh.count_vertices(), FACET_CELLS * 6);
+        assert_eq!(mesh.count_vertices(), CELL_COUNT * 6);
         assert!(
             mesh.indices().is_none(),
             "flat shading needs no index buffer"
@@ -1050,7 +1047,7 @@ mod tests {
         // point of the cell being the unit. Two triangles of one cell lit
         // differently would show the diagonal the wire deliberately stopped
         // carrying.
-        for cell in 0..FACET_CELLS {
+        for cell in 0..CELL_COUNT {
             let i = cell * 6;
             for vertex in 1..6 {
                 assert_eq!(
@@ -1075,18 +1072,18 @@ mod tests {
         // only place that shows. A cell's six vertices cover its four corners
         // either way; which corner appears *twice* is what says which diagonal
         // was cut, and it has to alternate or the ground grows a herringbone.
-        let heights: Vec<f32> = (0..FACET_VERTS * FACET_VERTS)
-            .map(|i| (i % FACET_VERTS) as f32)
+        let heights: Vec<f32> = (0..CORNERS * CORNERS)
+            .map(|i| (i % CORNERS) as f32)
             .collect();
-        let mesh = chunk_mesh(&heights, &vec![Tone::Grass; FACET_CELLS]);
+        let mesh = chunk_mesh(&heights, &vec![Material::Grass; CELL_COUNT]);
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
             .as_float3()
             .expect("three floats each");
 
-        for (ix, iz) in [(0, 0), (1, 0), (0, 1), (1, 1), (FACET_QUADS - 1, 0)] {
-            let i = (iz * FACET_QUADS + ix) * 6;
+        for (ix, iz) in [(0, 0), (1, 0), (0, 1), (1, 1), (CELLS - 1, 0)] {
+            let i = (iz * CELLS + ix) * 6;
             let xz: Vec<(u32, u32)> = (0..6)
                 .map(|v| (positions[i + v][0] as u32, positions[i + v][2] as u32))
                 .collect();
@@ -1118,9 +1115,9 @@ mod tests {
 
     #[test]
     fn chunk_positions_are_local_so_the_transform_places_them() {
-        let heights = vec![3.5f32; FACET_VERTS * FACET_VERTS];
-        let surfaces = vec![Tone::Sand; FACET_CELLS];
-        let mesh = chunk_mesh(&heights, &surfaces);
+        let heights = vec![3.5f32; CORNERS * CORNERS];
+        let materials = vec![Material::Sand; CELL_COUNT];
+        let mesh = chunk_mesh(&heights, &materials);
 
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1161,15 +1158,15 @@ mod tests {
         ground.deliver(IVec2::ZERO, Some(payload));
 
         // Every corner of the grid, at its own world position.
-        for iz in 0..FACET_VERTS {
-            for ix in 0..FACET_VERTS {
+        for iz in 0..CORNERS {
+            for ix in 0..CORNERS {
                 // The far edges belong to the next chunk along, which has not
                 // arrived; inside the chunk, a corner is its own height.
-                if ix == FACET_QUADS || iz == FACET_QUADS {
+                if ix == CELLS || iz == CELLS {
                     continue;
                 }
-                let at = Vec2::new(ix as f32, iz as f32) * FACET_METRES;
-                let want = heights[iz * FACET_VERTS + ix].max(0.0);
+                let at = Vec2::new(ix as f32, iz as f32) * CELL_METRES;
+                let want = heights[iz * CORNERS + ix].max(0.0);
                 let got = ground.surface(at.x, at.y).expect("the chunk arrived");
                 assert!(
                     (got - want).abs() < 1.0e-3,
@@ -1181,9 +1178,8 @@ mod tests {
         // And the middle of a facet is on the plane of that facet: this slope
         // is planar within each quad either way it is split, so the midpoint of
         // a quad is the mean of its four corners.
-        let mid = Vec2::splat(FACET_METRES * 0.5);
-        let mean =
-            (heights[0] + heights[1] + heights[FACET_VERTS] + heights[FACET_VERTS + 1]) / 4.0;
+        let mid = Vec2::splat(CELL_METRES * 0.5);
+        let mean = (heights[0] + heights[1] + heights[CORNERS] + heights[CORNERS + 1]) / 4.0;
         let got = ground.surface(mid.x, mid.y).expect("the chunk arrived");
         assert!(
             (got - mean).abs() < 1.0e-3,
@@ -1218,10 +1214,10 @@ mod tests {
     /// A water grid with a lake at `level` metres over the square of corners
     /// below `edge`, and nothing anywhere else.
     fn a_lake(level: f32, edge: usize) -> Vec<u16> {
-        let mut water = vec![NO_WATER; FACET_VERTS * FACET_VERTS];
+        let mut water = vec![NO_WATER; CORNERS * CORNERS];
         for iz in 0..edge {
             for ix in 0..edge {
-                water[iz * FACET_VERTS + ix] = quantize(level);
+                water[iz * CORNERS + ix] = quantize(level);
             }
         }
         water
@@ -1277,21 +1273,21 @@ mod tests {
             .fold(0.0f32, f32::max);
         assert_eq!(
             reach,
-            8.0 * FACET_METRES,
+            8.0 * CELL_METRES,
             "the sheet stops at the last wet corner instead of running past it"
         );
     }
 
     #[test]
     fn ground_with_no_lake_on_it_draws_no_water() {
-        assert!(water_mesh(&vec![NO_WATER; FACET_VERTS * FACET_VERTS]).is_none());
+        assert!(water_mesh(&vec![NO_WATER; CORNERS * CORNERS]).is_none());
 
         // And a payload that carries no grid at all never gets as far as
         // asking — the common case, and the one that has to cost nothing.
         let dry = Arrival {
             chunk: IVec2::ZERO,
             heights: a_slope().heights.iter().copied().map(dequantize).collect(),
-            surfaces: a_slope().surfaces,
+            materials: a_slope().materials,
             water: None,
             plants: Vec::new(),
         };
@@ -1302,11 +1298,11 @@ mod tests {
     fn two_lakes_in_one_chunk_each_keep_their_own_level() {
         // A chunk can straddle two basins a hillside apart, which is the
         // whole reason the level travels per corner rather than per chunk.
-        let mut water = vec![NO_WATER; FACET_VERTS * FACET_VERTS];
+        let mut water = vec![NO_WATER; CORNERS * CORNERS];
         for iz in 0..4 {
             for ix in 0..4 {
-                water[iz * FACET_VERTS + ix] = quantize(6.0);
-                water[iz * FACET_VERTS + ix + 20] = quantize(31.0);
+                water[iz * CORNERS + ix] = quantize(6.0);
+                water[iz * CORNERS + ix + 20] = quantize(31.0);
             }
         }
 
@@ -1318,7 +1314,7 @@ mod tests {
             .expect("three floats each");
 
         for point in positions {
-            let want = if point[0] < 10.0 * FACET_METRES {
+            let want = if point[0] < 10.0 * CELL_METRES {
                 6.0 + OFF_LATTICE
             } else {
                 31.0 + OFF_LATTICE

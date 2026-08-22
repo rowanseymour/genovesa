@@ -9,18 +9,18 @@
 //! number on each, from a single chunk up, square or not.
 //!
 //! The tile is the map's unit of ground, not the picture's: the height field is
-//! continuous, and it is drawn every [`protocol::ground::FACET_METRES`]. See
+//! continuous, and it is drawn every [`protocol::ground::CELL_METRES`]. See
 //! [`TerrainGenerator::surface`] for why the palette is what it is — the ground
 //! is flat shaded in a fixed set of colours, and both the facets and the colour
 //! bands want to be large enough to read as deliberate shapes.
 //!
 //! The colours themselves are not here. A surface is *named* — see
-//! [`protocol::ground::Tone`] — because what a facet is painted has to cross
+//! [`protocol::ground::Material`] — because what a facet is painted has to cross
 //! the wire, and a name is a byte where three floats are twelve. This module
 //! decides which name; the protocol says what each one looks like.
 
 use glam::{UVec2, Vec2, Vec3};
-use protocol::ground::{Tone, CHUNK_METRES, FACET_CELLS, FACET_METRES, FACET_QUADS, FACET_VERTS};
+use protocol::ground::{Material, CELLS, CELL_COUNT, CELL_METRES, CHUNK_METRES, CORNERS};
 
 use crate::noise::{smoothstep, Noise};
 
@@ -790,23 +790,29 @@ const BAND_WANDER: f32 = 9.0;
 /// two of rock — so the patchwork thins out with the vegetation without
 /// stopping dead. Bare rock has nothing growing on it to make parcels of, and
 /// the relief up there is drawn by the slope tests instead;
-/// [`Tone::RockDark`] is left to them, so a dark facet on a mountain always
+/// [`Material::RockDark`] is left to them, so a dark facet on a mountain always
 /// means a crag.
-const LOWLAND_PARCELS: [Tone; 5] = [
-    Tone::Forest,
-    Tone::GrassDark,
-    Tone::Grass,
-    Tone::GrassLight,
-    Tone::Meadow,
+const LOWLAND_PARCELS: [Material; 5] = [
+    Material::Forest,
+    Material::GrassDark,
+    Material::Grass,
+    Material::GrassLight,
+    Material::Meadow,
 ];
-const MOOR_PARCELS: [Tone; 5] = [
-    Tone::Heath,
-    Tone::Heath,
-    Tone::Upland,
-    Tone::Fell,
-    Tone::Fell,
+const MOOR_PARCELS: [Material; 5] = [
+    Material::Heath,
+    Material::Heath,
+    Material::Upland,
+    Material::Fell,
+    Material::Fell,
 ];
-const MOUNTAIN_PARCELS: [Tone; 5] = [Tone::Rock, Tone::Rock, Tone::Rock, Tone::Scree, Tone::Scree];
+const MOUNTAIN_PARCELS: [Material; 5] = [
+    Material::Rock,
+    Material::Rock,
+    Material::Rock,
+    Material::Scree,
+    Material::Scree,
+];
 
 /// Parameters the map is generated from.
 #[derive(Clone, Copy, Debug)]
@@ -1797,11 +1803,11 @@ impl TerrainGenerator {
     /// things do it: the edges wander off the level by [`BAND_WANDER`], and the
     /// patchwork either side of them is cut from one field, so the parcels line
     /// up through the join. See [`LOWLAND_PARCELS`].
-    pub fn surface(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Tone {
+    pub fn material(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Material {
         // 0 on flat ground, approaching 1 on a cliff face.
         let slope = 1.0 - normal.y;
 
-        // A lake first, out of fresh water's own three tones, which is the
+        // A lake first, out of fresh water's own three materials, which is the
         // whole of what tells a lake from an inlet. The sea's bed brightens
         // towards its shore, and a pale shelf under a beach behind it is what
         // draws the turquoise ring every coast wears; give that ring to a lake
@@ -1827,28 +1833,28 @@ impl TerrainGenerator {
         let drowned = self.lakes.level(wx, wz).is_some_and(|level| height < level);
         if shore < LAKE_MARGIN || drowned {
             if shore < -LAKE_SHALLOWS {
-                return Tone::Silt;
+                return Material::Silt;
             }
             if shore < -LAKE_MARGIN {
-                return Tone::Shoal;
+                return Material::Shoal;
             }
             return if slope > ROCK_SLOPE {
-                Tone::RockDark
+                Material::RockDark
             } else {
-                Tone::Marsh
+                Material::Marsh
             };
         }
 
-        // The sea. Two tones of sea bed, both read through translucent
+        // The sea. Two materials of sea bed, both read through translucent
         // water: a dark bottom, then a bright shelf that gives a coast its
         // turquoise ring. How wide that ring is comes from the landform rather
         // than from anything here — [`shape_coast`] gives a beach a long
         // shallow apron and drops a cliff straight past it.
         if height < -SEABED_DEPTH {
-            return Tone::Seabed;
+            return Material::Seabed;
         }
         if height < -SHALLOW_DEPTH {
-            return Tone::Shallow;
+            return Material::Shallow;
         }
 
         // The shore itself, from the low-water mark to the back of the beach.
@@ -1857,12 +1863,12 @@ impl TerrainGenerator {
         // never fires and the sand stays clean.
         if height < SHORE_TOP {
             if slope > ROCK_SLOPE {
-                return Tone::RockDark;
+                return Material::RockDark;
             }
             return match self.shore(wx, wz) {
-                Shore::Beach => Tone::Sand,
-                Shore::Rocky => Tone::Shingle,
-                Shore::Cliff => Tone::RockDark,
+                Shore::Beach => Material::Sand,
+                Shore::Rocky => Material::Shingle,
+                Shore::Cliff => Material::RockDark,
             };
         }
 
@@ -1870,10 +1876,10 @@ impl TerrainGenerator {
         // this is what paints the cliff faces, and inland it picks out crags on
         // the hills the same way.
         if slope > CLIFF_SLOPE {
-            return Tone::RockDark;
+            return Material::RockDark;
         }
         if slope > ROCK_SLOPE {
-            return Tone::Rock;
+            return Material::Rock;
         }
 
         // How far this spot's band edges have strayed from the level.
@@ -1930,26 +1936,26 @@ impl TerrainGenerator {
 }
 
 /// The corner heights one chunk of ground is built from: a
-/// [`FACET_VERTS`]-square grid, row-major, sampled from `base` outwards at
-/// [`FACET_METRES`] spacing.
+/// [`CORNERS`]-square grid, row-major, sampled from `base` outwards at
+/// [`CELL_METRES`] spacing.
 ///
 /// The loop order is the format, so a caller may also *look* at the grid before
 /// deciding whether the chunk is worth sending at all — the open world skips
 /// chunks whose every corner sits on the ocean floor.
-pub(crate) fn facet_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec<f32> {
-    let mut heights = vec![0.0f32; FACET_VERTS * FACET_VERTS];
-    for iz in 0..FACET_VERTS {
-        let wz = base.y + iz as f32 * FACET_METRES;
-        for ix in 0..FACET_VERTS {
-            let wx = base.x + ix as f32 * FACET_METRES;
-            heights[iz * FACET_VERTS + ix] = height(wx, wz);
+pub(crate) fn corner_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec<f32> {
+    let mut heights = vec![0.0f32; CORNERS * CORNERS];
+    for iz in 0..CORNERS {
+        let wz = base.y + iz as f32 * CELL_METRES;
+        for ix in 0..CORNERS {
+            let wx = base.x + ix as f32 * CELL_METRES;
+            heights[iz * CORNERS + ix] = height(wx, wz);
         }
     }
     heights
 }
 
 /// The standing water one chunk carries, on the same grid and in the same
-/// order as [`facet_heights`] — or `None` where the chunk has no lake water
+/// order as [`corner_heights`] — or `None` where the chunk has no lake water
 /// on it, which is most of them.
 ///
 /// Sampled at the corners rather than derived from the heights, because a
@@ -1962,25 +1968,25 @@ pub(crate) fn facet_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec
 /// [`TerrainGenerator::lake_level`] answers out past a lake's edge, so a chunk
 /// catching only bank has no water to draw and would otherwise pay a full grid
 /// to say so.
-pub(crate) fn facet_water(
+pub(crate) fn corner_water(
     base: Vec2,
     heights: &[f32],
     level: impl Fn(f32, f32) -> Option<f32>,
 ) -> Option<Vec<u16>> {
     debug_assert_eq!(
         heights.len(),
-        FACET_VERTS * FACET_VERTS,
+        CORNERS * CORNERS,
         "not a chunk's corner grid"
     );
-    let mut levels = vec![protocol::ground::NO_WATER; FACET_VERTS * FACET_VERTS];
+    let mut levels = vec![protocol::ground::NO_WATER; CORNERS * CORNERS];
     let mut awash = false;
-    for iz in 0..FACET_VERTS {
-        let wz = base.y + iz as f32 * FACET_METRES;
-        for ix in 0..FACET_VERTS {
-            let wx = base.x + ix as f32 * FACET_METRES;
+    for iz in 0..CORNERS {
+        let wz = base.y + iz as f32 * CELL_METRES;
+        for ix in 0..CORNERS {
+            let wx = base.x + ix as f32 * CELL_METRES;
             let Some(level) = level(wx, wz) else { continue };
-            levels[iz * FACET_VERTS + ix] = protocol::ground::quantize(level);
-            awash |= heights[iz * FACET_VERTS + ix] < level;
+            levels[iz * CORNERS + ix] = protocol::ground::quantize(level);
+            awash |= heights[iz * CORNERS + ix] < level;
         }
     }
     awash.then_some(levels)
@@ -1989,7 +1995,7 @@ pub(crate) fn facet_water(
 /// The material of every cell of one chunk, row-major from the chunk's lower
 /// corner — the order a payload carries them in.
 ///
-/// `heights` is what [`facet_heights`] returned for the same `base`, and the
+/// `heights` is what [`corner_heights`] returned for the same `base`, and the
 /// cell grid is the one those corners bound: cell `(ix, iz)` sits between
 /// corners `ix..=ix + 1` and `iz..=iz + 1`, so its centre is half a cell in
 /// from its lower corner.
@@ -2001,21 +2007,21 @@ pub(crate) fn facet_water(
 /// triangulate it at all, and the ground it draws will be made of the same
 /// stuff either way. It used to be a triangle's own normal, which quietly
 /// made the palette depend on a triangulation the wire no longer carries.
-pub(crate) fn facet_surfaces(
+pub(crate) fn cell_materials(
     base: Vec2,
     heights: &[f32],
-    surface: impl Fn(f32, f32, f32, Vec3) -> Tone,
-) -> Vec<Tone> {
+    material: impl Fn(f32, f32, f32, Vec3) -> Material,
+) -> Vec<Material> {
     debug_assert_eq!(
         heights.len(),
-        FACET_VERTS * FACET_VERTS,
+        CORNERS * CORNERS,
         "not a chunk's corner grid"
     );
-    let corner = |ix: usize, iz: usize| heights[iz * FACET_VERTS + ix];
+    let corner = |ix: usize, iz: usize| heights[iz * CORNERS + ix];
 
-    let mut tones = Vec::with_capacity(FACET_CELLS);
-    for iz in 0..FACET_QUADS {
-        for ix in 0..FACET_QUADS {
+    let mut tones = Vec::with_capacity(CELL_COUNT);
+    for iz in 0..CELLS {
+        for ix in 0..CELLS {
             let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
             let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
 
@@ -2024,13 +2030,13 @@ pub(crate) fn facet_surfaces(
             // corners the payload already carries rather than sampled afresh:
             // a client reading the same heights arrives at the same normal,
             // so the ground it lights matches the ground it was sent.
-            let along = (se + ne - sw - nw) / (2.0 * FACET_METRES);
-            let across = (nw + ne - sw - se) / (2.0 * FACET_METRES);
+            let along = (se + ne - sw - nw) / (2.0 * CELL_METRES);
+            let across = (nw + ne - sw - se) / (2.0 * CELL_METRES);
             let normal = Vec3::new(-along, 1.0, -across).normalize();
 
-            let mid = Vec2::new(ix as f32 + 0.5, iz as f32 + 0.5) * FACET_METRES;
+            let mid = Vec2::new(ix as f32 + 0.5, iz as f32 + 0.5) * CELL_METRES;
             let height = (sw + se + nw + ne) / 4.0;
-            tones.push(surface(base.x + mid.x, base.y + mid.y, height, normal));
+            tones.push(material(base.x + mid.x, base.y + mid.y, height, normal));
         }
     }
     tones
@@ -3452,9 +3458,9 @@ mod tests {
                     let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                     let height = gen.height(wx, wz);
                     let normal = gen.normal(wx, wz);
-                    let surface = gen.surface(wx, wz, height, normal);
+                    let material = gen.material(wx, wz, height, normal);
                     values.extend([height, normal.x, normal.y, normal.z]);
-                    painted.push(surface as i64);
+                    painted.push(material as i64);
                     painted.push(
                         gen.lake_level(wx, wz)
                             .map_or(protocol::ground::NO_WATER, protocol::ground::quantize)
@@ -3752,8 +3758,8 @@ mod tests {
 
         let mut climbed = 0;
         for step in 0..12 {
-            let distance = step as f32 * FACET_METRES;
-            let rise = shape_coast(0.0, distance + FACET_METRES, 1.0, 1.0)
+            let distance = step as f32 * CELL_METRES;
+            let rise = shape_coast(0.0, distance + CELL_METRES, 1.0, 1.0)
                 - shape_coast(0.0, distance, 1.0, 1.0);
             if rise > 0.1 {
                 climbed += 1;
@@ -3801,22 +3807,22 @@ mod tests {
         // order a client rebuilds the ground from.
         let (_, gen) = generator(2, 2, 1);
         let base = Vec2::new(-64.0, 32.0);
-        let heights = facet_heights(base, |wx, wz| gen.height(wx, wz));
+        let heights = corner_heights(base, |wx, wz| gen.height(wx, wz));
 
-        assert_eq!(heights.len(), FACET_VERTS * FACET_VERTS);
+        assert_eq!(heights.len(), CORNERS * CORNERS);
         assert_eq!(heights[0], gen.height(base.x, base.y), "the near corner");
         assert_eq!(
             heights[1],
-            gen.height(base.x + FACET_METRES, base.y),
+            gen.height(base.x + CELL_METRES, base.y),
             "the second sample is one facet along x, not along z"
         );
         assert_eq!(
-            heights[FACET_VERTS],
-            gen.height(base.x, base.y + FACET_METRES),
+            heights[CORNERS],
+            gen.height(base.x, base.y + CELL_METRES),
             "the second row is one facet along z"
         );
         assert_eq!(
-            heights[FACET_VERTS * FACET_VERTS - 1],
+            heights[CORNERS * CORNERS - 1],
             gen.height(base.x + CHUNK_METRES, base.y + CHUNK_METRES),
             "the far corner is the chunk's far corner, not one facet short of it"
         );
@@ -3829,16 +3835,14 @@ mod tests {
         // other — so the ground has no seam to show wherever a client puts the
         // two meshes next to each other.
         let (_, gen) = generator(2, 1, 5);
-        let left = facet_heights(Vec2::ZERO, |wx, wz| gen.height(wx, wz));
-        let right = facet_heights(Vec2::new(CHUNK_METRES, 0.0), |wx, wz| gen.height(wx, wz));
+        let left = corner_heights(Vec2::ZERO, |wx, wz| gen.height(wx, wz));
+        let right = corner_heights(Vec2::new(CHUNK_METRES, 0.0), |wx, wz| gen.height(wx, wz));
 
         let column = |grid: &[f32], ix: usize| -> Vec<f32> {
-            (0..FACET_VERTS)
-                .map(|iz| grid[iz * FACET_VERTS + ix])
-                .collect()
+            (0..CORNERS).map(|iz| grid[iz * CORNERS + ix]).collect()
         };
         assert_eq!(
-            column(&left, FACET_VERTS - 1),
+            column(&left, CORNERS - 1),
             column(&right, 0),
             "chunks disagree along their seam"
         );
@@ -3865,7 +3869,7 @@ mod tests {
             for ix in (0..config.tiles().x).step_by(2) {
                 let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
                 let height = gen.height(wx, wz);
-                seen.insert(gen.surface(wx, wz, height, gen.normal(wx, wz)) as u8);
+                seen.insert(gen.material(wx, wz, height, gen.normal(wx, wz)) as u8);
             }
         }
 
@@ -4033,7 +4037,7 @@ mod tests {
         // steps covers that without hiding a real leak — a broken fade shows
         // up in decimetres, not centimetres.
         let slack = 3.0 * protocol::ground::HEIGHT_STEP;
-        let step = FACET_METRES;
+        let step = CELL_METRES;
         let mut wet = 0usize;
         for seed in [20_040_112u32, 1, 7, 99, 808, 2_024, 31_337] {
             let (config, gen) = generator(8, 8, seed);
@@ -4091,7 +4095,12 @@ mod tests {
         // to the margin rather than to this rule — and above *that* the lake
         // has no say at all and the hillside is painted as its height asks,
         // which near the sea may quite properly be sand.
-        let fresh = [Tone::Silt, Tone::Shoal, Tone::Marsh, Tone::RockDark];
+        let fresh = [
+            Material::Silt,
+            Material::Shoal,
+            Material::Marsh,
+            Material::RockDark,
+        ];
         let mut painted = 0usize;
         for seed in [20_040_112u32, 1, 7, 99, 808] {
             let (config, gen) = generator(8, 8, seed);
@@ -4101,7 +4110,7 @@ mod tests {
                 let mut wx = -half.x;
                 while wx < half.x {
                     let here = wx;
-                    wx += FACET_METRES;
+                    wx += CELL_METRES;
                     let Some(level) = gen.lake_level(here, wz) else {
                         continue;
                     };
@@ -4109,7 +4118,7 @@ mod tests {
                     if height >= level {
                         continue;
                     }
-                    let tone = gen.surface(here, wz, height, gen.normal(here, wz));
+                    let tone = gen.material(here, wz, height, gen.normal(here, wz));
                     painted += 1;
                     assert!(
                         fresh.contains(&tone),
@@ -4118,7 +4127,7 @@ mod tests {
                         level - height
                     );
                 }
-                wz += FACET_METRES;
+                wz += CELL_METRES;
             }
         }
         assert!(
@@ -4147,8 +4156,8 @@ mod tests {
             let half = config.chunks.as_vec2() * CHUNK_METRES / 2.0;
             let fresh = |wx: f32, wz: f32| {
                 let height = gen.height(wx, wz);
-                let tone = gen.surface(wx, wz, height, gen.normal(wx, wz));
-                matches!(tone, Tone::Marsh | Tone::RockDark)
+                let tone = gen.material(wx, wz, height, gen.normal(wx, wz));
+                matches!(tone, Material::Marsh | Material::RockDark)
             };
             let drowned = |wx: f32, wz: f32| {
                 gen.lake_level(wx, wz)
@@ -4157,18 +4166,18 @@ mod tests {
 
             let mut wz = -half.y;
             while wz < half.y {
-                let mut wx = -half.x + FACET_METRES;
-                while wx < half.x - 4.0 * FACET_METRES {
+                let mut wx = -half.x + CELL_METRES;
+                while wx < half.x - 4.0 * CELL_METRES {
                     let here = wx;
-                    wx += FACET_METRES;
+                    wx += CELL_METRES;
                     // The first dry step out of a lake, walking east.
-                    if !drowned(here - FACET_METRES, wz) || drowned(here, wz) {
+                    if !drowned(here - CELL_METRES, wz) || drowned(here, wz) {
                         continue;
                     }
                     crossings += 1;
-                    deep += usize::from(fresh(here, wz) && fresh(here + FACET_METRES, wz));
+                    deep += usize::from(fresh(here, wz) && fresh(here + CELL_METRES, wz));
                 }
-                wz += FACET_METRES;
+                wz += CELL_METRES;
             }
         }
         assert!(
@@ -4186,17 +4195,16 @@ mod tests {
     #[test]
     fn a_chunk_carries_water_only_where_there_is_water_in_it() {
         let base = Vec2::new(-64.0, 32.0);
-        let corner = |i: usize| {
-            base + Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32) * FACET_METRES
-        };
+        let corner =
+            |i: usize| base + Vec2::new((i % CORNERS) as f32, (i / CORNERS) as f32) * CELL_METRES;
 
         // Ground at 10 m with a lake at 12 m over the near half of it: water
         // to draw, so the grid travels — on the same grid as the heights, and
         // carrying the level at every corner the lakes answered for.
-        let heights = vec![10.0f32; FACET_VERTS * FACET_VERTS];
-        let water = facet_water(base, &heights, |_, wz| (wz < base.y + 60.0).then_some(12.0))
+        let heights = vec![10.0f32; CORNERS * CORNERS];
+        let water = corner_water(base, &heights, |_, wz| (wz < base.y + 60.0).then_some(12.0))
             .expect("a chunk with a lake on it");
-        assert_eq!(water.len(), FACET_VERTS * FACET_VERTS);
+        assert_eq!(water.len(), CORNERS * CORNERS);
         for (i, level) in water.iter().enumerate() {
             let want = if corner(i).y < base.y + 60.0 {
                 protocol::ground::quantize(12.0)
@@ -4209,14 +4217,14 @@ mod tests {
         // The same lake, but the ground stands above it everywhere in this
         // chunk — the overhang past a neighbouring lake's edge. Nothing to
         // draw, so nothing is sent.
-        let dry = vec![20.0f32; FACET_VERTS * FACET_VERTS];
+        let dry = vec![20.0f32; CORNERS * CORNERS];
         assert_eq!(
-            facet_water(base, &dry, |_, wz| (wz < base.y + 60.0).then_some(12.0)),
+            corner_water(base, &dry, |_, wz| (wz < base.y + 60.0).then_some(12.0)),
             None
         );
 
         // And ground with no lake anywhere near it.
-        assert_eq!(facet_water(base, &heights, |_, _| None), None);
+        assert_eq!(corner_water(base, &heights, |_, _| None), None);
     }
 }
 

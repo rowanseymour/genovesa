@@ -34,7 +34,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use protocol::ground::FACET_METRES;
+use protocol::ground::CELL_METRES;
 use protocol::BoatKind;
 
 use crate::bindings::{Action, KeyBindings};
@@ -112,7 +112,7 @@ const LANDING_REACH: f32 = 6.0;
 /// Spacing of the probe's samples: half the facet the heights are drawn on,
 /// derived so a strip of walkable ground one facet wide is never stepped
 /// over, whatever the facet becomes.
-const LANDING_STEP: f32 = FACET_METRES / 2.0;
+const LANDING_STEP: f32 = CELL_METRES / 2.0;
 /// How many directions are tried at each radius, bow first — a boat is
 /// usually nosed *at* the shore, so the first ray is the likely one and the
 /// rest cover a hull lying alongside a beach.
@@ -425,10 +425,10 @@ fn footing(ground: Option<&Ground>, at: Vec2) -> Option<f32> {
 /// and past the landing it is [`climb`] that says where a walker may go.
 fn tilt(ground: &Ground, at: Vec2) -> Option<f32> {
     // Half a facet either side of the spot, so each difference spans one.
-    let reach = FACET_METRES / 2.0;
+    let reach = CELL_METRES / 2.0;
     let across = |step: Vec2| {
         let (behind, ahead) = (at - step, at + step);
-        Some((ground.height(ahead.x, ahead.y)? - ground.height(behind.x, behind.y)?) / FACET_METRES)
+        Some((ground.height(ahead.x, ahead.y)? - ground.height(behind.x, behind.y)?) / CELL_METRES)
     };
     Some(Vec2::new(across(Vec2::X * reach)?, across(Vec2::Y * reach)?).length())
 }
@@ -837,7 +837,7 @@ fn walk(
         // because then the limit owes nothing to that clamp being where it is,
         // or to WALK_SPEED being what it is: raise either and the rule still
         // holds rather than quietly starting to slip.
-        let strides = (advance.length() / (FACET_METRES / 2.0)).ceil().max(1.0);
+        let strides = (advance.length() / (CELL_METRES / 2.0)).ceil().max(1.0);
         let stride = advance / strides;
         for _ in 0..strides as usize {
             let (from, to) = (
@@ -1773,7 +1773,7 @@ mod tests {
     /// closes the ring — a cone with no water recorded round it is a coast
     /// that has not been shown to end.
     fn a_chart_with_an_island_at(middle: Vec2) -> Chart {
-        use protocol::ground::{CHUNK_METRES, FACET_VERTS};
+        use protocol::ground::{CHUNK_METRES, CORNERS};
         use protocol::survey::survey;
 
         // Comfortably past [`protocol::survey::LEAST_ISLAND`], so the ring is
@@ -1783,10 +1783,9 @@ mod tests {
 
         let heights = |chunk: IVec2| -> Vec<f32> {
             let base = chunk.as_vec2() * CHUNK_METRES;
-            (0..FACET_VERTS * FACET_VERTS)
+            (0..CORNERS * CORNERS)
                 .map(|i| {
-                    let local = Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32)
-                        * FACET_METRES;
+                    let local = Vec2::new((i % CORNERS) as f32, (i / CORNERS) as f32) * CELL_METRES;
                     REACH - (base + local).distance(middle)
                 })
                 .collect()

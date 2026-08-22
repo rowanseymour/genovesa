@@ -30,7 +30,7 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use protocol::ground::FACET_METRES;
+use protocol::ground::CELL_METRES;
 use protocol::{BoatId, BoatKind, PlayerId};
 
 use crate::bindings::{Action, KeyBindings};
@@ -243,7 +243,7 @@ impl Hull {
 
     /// How many points along this keel are asked about the bottom. Spread
     /// from the forefoot to the heel inclusive, derived so the gap between
-    /// them never exceeds [`FACET_METRES`]: no facet of the height field can
+    /// them never exceeds [`CELL_METRES`]: no facet of the height field can
     /// lie wholly between two probes, so ground that rises across a facet is
     /// read on the way up rather than stepped over. Derived rather than
     /// picked, because the constant this used to be was tuned to a 2 m facet
@@ -263,7 +263,7 @@ impl Hull {
     /// bottom carried out to the beam would need probes out there too.
     fn keel_probes(&self) -> usize {
         let keel = self.heel_station - self.forefoot_station;
-        (keel / FACET_METRES).ceil() as usize + 1
+        (keel / CELL_METRES).ceil() as usize + 1
     }
 
     /// Where somebody aboard stands, in the hull's own frame — see
@@ -2116,7 +2116,7 @@ fn settled(eased: f32, target: f32, within: f32) -> f32 {
 /// alone.
 ///
 /// This is the whole of collision. The ground is a height field sampled every
-/// [`FACET_METRES`] and the boat is a keel line above it, so "is there water enough
+/// [`CELL_METRES`] and the boat is a keel line above it, so "is there water enough
 /// here" is a handful of lookups rather than triangle intersection —
 /// [`Ground::height`] answers on exactly the facets the mesh was built from,
 /// which is what makes the ground the boat is stopped by the ground the player
@@ -2220,7 +2220,7 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
 /// comparison carries no tolerance: a hair a frame is a metre a second up a
 /// hillside.
 ///
-/// Poses are judged every [`FACET_METRES`] along the advance, not only at its
+/// Poses are judged every [`CELL_METRES`] along the advance, not only at its
 /// end. An ordinary frame is one pose — seventeen centimetres of way at sixty
 /// frames a second — but the quarter second Bevy clamps a stalled frame to is
 /// two and a half metres, several probe spacings, and judged in one leap that
@@ -2311,7 +2311,7 @@ fn steer(
         let advance = transform.forward() * way * time.delta_secs();
         // One pose per facet of advance — see the swept-path paragraph above.
         // Ordinary frames advance far less than a facet and take one step.
-        let steps = (advance.length() / FACET_METRES).ceil().max(1.0);
+        let steps = (advance.length() / CELL_METRES).ceil().max(1.0);
         let step = advance / steps;
         let mut here = grounding(&hull, ground, &transform);
         let mut walked = 0.0;
@@ -2361,7 +2361,7 @@ fn steer(
 
 #[cfg(test)]
 mod tests {
-    use protocol::ground::FACET_METRES;
+    use protocol::ground::CELL_METRES;
 
     use super::*;
     use crate::bindings::Action;
@@ -4407,8 +4407,8 @@ mod tests {
             let spacing =
                 (hull.heel_station - hull.forefoot_station) / (hull.keel_probes() - 1) as f32;
             assert!(
-                spacing <= FACET_METRES,
-                "{spacing} m between probes leaves room for a {FACET_METRES} m facet to hide in"
+                spacing <= CELL_METRES,
+                "{spacing} m between probes leaves room for a {CELL_METRES} m facet to hide in"
             );
         }
     }

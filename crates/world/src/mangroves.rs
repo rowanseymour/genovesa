@@ -18,7 +18,7 @@
 //! digests pin.
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{Kind, Plant, Tone, CHUNK_METRES};
+use protocol::ground::{Kind, Material, Plant, CHUNK_METRES};
 
 use crate::archipelago::Island;
 use crate::plants::{draw, mix};
@@ -185,9 +185,9 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
     // why the tone is asked for rather than a depth: out in the weed a cell
     // has to beat [`OFFSHORE`] of the threshold it has already beaten, so the
     // stand crowds the waterline and straggles away from it.
-    let thinner = match island.surface(at.x, at.y, height, normal) {
-        Tone::Marsh => 1.0,
-        Tone::Shoal => OFFSHORE,
+    let thinner = match island.material(at.x, at.y, height, normal) {
+        Material::Marsh => 1.0,
+        Material::Shoal => OFFSHORE,
         _ => return None,
     };
     if dice > DENSITY * thickness * thinner {
@@ -305,8 +305,8 @@ mod tests {
             );
             assert!(
                 matches!(
-                    island.surface(at.x, at.y, height, island.normal(at.x, at.y)),
-                    Tone::Marsh | Tone::Shoal
+                    island.material(at.x, at.y, height, island.normal(at.x, at.y)),
+                    Material::Marsh | Material::Shoal
                 ),
                 "a mangrove stands on ground a lake has no say over"
             );

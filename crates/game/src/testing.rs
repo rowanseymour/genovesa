@@ -20,7 +20,7 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
 use protocol::ground::{
-    quantize, ChunkPayload, Tone, CHUNK_METRES, FACET_CELLS, FACET_METRES, FACET_VERTS, OCEAN_DEPTH,
+    quantize, ChunkPayload, Material, CELL_COUNT, CELL_METRES, CHUNK_METRES, CORNERS, OCEAN_DEPTH,
 };
 
 use crate::bindings::{Action, KeyBindings};
@@ -319,11 +319,10 @@ fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
         for cx in -reach..=reach {
             let chunk = IVec2::new(cx, cz);
             let base = chunk.as_vec2() * CHUNK_METRES;
-            let heights: Vec<u16> = (0..FACET_VERTS * FACET_VERTS)
+            let heights: Vec<u16> = (0..CORNERS * CORNERS)
                 .map(|i| {
-                    let corner = base
-                        + Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32)
-                            * FACET_METRES;
+                    let corner =
+                        base + Vec2::new((i % CORNERS) as f32, (i / CORNERS) as f32) * CELL_METRES;
                     quantize(height(corner))
                 })
                 .collect();
@@ -335,7 +334,7 @@ fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
                 .any(|h| *h != quantize(-OCEAN_DEPTH))
                 .then(|| ChunkPayload {
                     heights,
-                    surfaces: vec![Tone::Grass; FACET_CELLS],
+                    materials: vec![Material::Grass; CELL_COUNT],
                     // Both test islands are smooth shapes with nothing to
                     // enclose a basin, so there is no lake on either to draw.
                     water: None,

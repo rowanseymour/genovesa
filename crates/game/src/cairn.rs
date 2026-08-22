@@ -97,7 +97,7 @@ const SKEW: f32 = 0.5;
 /// Bleached coral rag: an island in this ocean has it, one person can carry
 /// it, and it is nearly white, which is the part that does the work. Nothing
 /// the ground is drawn in goes above sand at `0.86` — see
-/// [`protocol::ground::TONES`] — so a pillar this pale is the lightest thing
+/// [`protocol::ground::PALETTE`] — so a pillar this pale is the lightest thing
 /// on any island, and light in a way no ground here is. That is what replaces
 /// the banner: at the range this is meant to be found at, the eye is looking
 /// for something that is not the palette, and a white mark against green is

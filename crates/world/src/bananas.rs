@@ -18,7 +18,7 @@
 //! two habitats rather than as one scatter in two shapes.
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{Kind, Plant, Tone, CHUNK_METRES};
+use protocol::ground::{Kind, Material, Plant, CHUNK_METRES};
 
 use crate::archipelago::Island;
 use crate::plants::{draw, mix, AROUND};
@@ -130,13 +130,13 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
     // the reason the palms' sand test gives: what a plant stands on has to be
     // the ground a player can *see*, and there is one thing that decides that.
     if !matches!(
-        island.surface(at.x, at.y, height, normal),
-        Tone::Forest
-            | Tone::GrassDark
-            | Tone::Grass
-            | Tone::GrassLight
-            | Tone::Meadow
-            | Tone::Marsh
+        island.material(at.x, at.y, height, normal),
+        Material::Forest
+            | Material::GrassDark
+            | Material::Grass
+            | Material::GrassLight
+            | Material::Meadow
+            | Material::Marsh
     ) {
         return None;
     }

@@ -64,7 +64,7 @@ use std::collections::{HashMap, HashSet};
 
 use glam::{IVec2, Vec2};
 
-use crate::ground::{chunk_at, CHUNK_METRES, FACET_METRES, FACET_QUADS, FACET_VERTS};
+use crate::ground::{chunk_at, CELLS, CELL_METRES, CHUNK_METRES, CORNERS};
 
 // ---------------------------------------------------------------------------
 // What the survey is agreed to be
@@ -320,7 +320,7 @@ pub fn in_sight_along(chunk: IVec2, from: Vec2, to: Vec2) -> bool {
 ///
 /// A level's contour runs along the edges of the facet grid, and every
 /// crossing belongs to exactly one run, so a level's marks are at most the
-/// edges there are: [`FACET_QUADS`] × [`FACET_VERTS`] of them each way. A run
+/// edges there are: [`CELLS`] × [`CORNERS`] of them each way. A run
 /// that is kept holds at least two marks, so the runs are at most half that
 /// again, and the worst case is where both bounds are tight at once. Two
 /// levels of it, and the two counts on the front.
@@ -330,7 +330,7 @@ pub fn in_sight_along(chunk: IVec2, from: Vec2, to: Vec2) -> bool {
 /// ground crossed the waterline at every facet of it. That is the point — a
 /// ceiling that only holds for plausible ground is not a ceiling.
 pub const SOUNDINGS_BYTES: usize = {
-    let crossings = FACET_QUADS * FACET_VERTS * 2;
+    let crossings = CELLS * CORNERS * 2;
     2 * (crossings * 2 + crossings / 2 * 3) + 4
 };
 
@@ -918,7 +918,7 @@ enum Axis {
 impl Crossing {
     /// Where the given level cuts this edge, in chunk-local metres.
     fn at(self, heights: &[f32], level: f32) -> Vec2 {
-        let corner = |ix: usize, iz: usize| heights[iz * FACET_VERTS + ix];
+        let corner = |ix: usize, iz: usize| heights[iz * CORNERS + ix];
         let near = corner(self.ix, self.iz);
         let far = match self.along {
             Axis::X => corner(self.ix + 1, self.iz),
@@ -932,7 +932,7 @@ impl Crossing {
             Axis::X => Vec2::new(t, 0.0),
             Axis::Z => Vec2::new(0.0, t),
         };
-        (Vec2::new(self.ix as f32, self.iz as f32) + along) * FACET_METRES
+        (Vec2::new(self.ix as f32, self.iz as f32) + along) * CELL_METRES
     }
 }
 
@@ -958,7 +958,7 @@ fn is_above(height: f32, level: f32) -> bool {
 /// thing to asking the height field what is actually in the middle of it.
 fn segments(cell: (usize, usize), heights: &[f32], level: f32) -> Vec<(Crossing, Crossing)> {
     let (ix, iz) = cell;
-    let corner = |cx: usize, cz: usize| heights[cz * FACET_VERTS + cx];
+    let corner = |cx: usize, cz: usize| heights[cz * CORNERS + cx];
     let (tl, tr) = (corner(ix, iz), corner(ix + 1, iz));
     let (bl, br) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
 
@@ -1030,8 +1030,8 @@ fn contour(heights: &[f32], level: f32) -> Vec<Coast> {
     // Kept in grid order so that two runs of the same shape come out in the
     // same order every time, whatever a hash map felt like doing.
     let mut starts: Vec<Crossing> = Vec::new();
-    for iz in 0..FACET_QUADS {
-        for ix in 0..FACET_QUADS {
+    for iz in 0..CELLS {
+        for ix in 0..CELLS {
             for (from, to) in segments((ix, iz), heights, level) {
                 next.insert(from, to);
                 previous.insert(to);
@@ -1213,14 +1213,14 @@ mod tests {
     /// The grid's z runs south as it increases, as the world's does, so a
     /// height falling with `iz` puts the land at the top of the grid.
     fn a_north_shore(shore: f32) -> Vec<f32> {
-        (0..FACET_VERTS * FACET_VERTS)
-            .map(|i| shore - (i / FACET_VERTS) as f32 * FACET_METRES)
+        (0..CORNERS * CORNERS)
+            .map(|i| shore - (i / CORNERS) as f32 * CELL_METRES)
             .collect()
     }
 
     /// A grid that is all one thing.
     fn all(height: f32) -> Vec<f32> {
-        vec![height; FACET_VERTS * FACET_VERTS]
+        vec![height; CORNERS * CORNERS]
     }
 
     /// A cone standing out of the water: land above the waterline within
@@ -1229,10 +1229,9 @@ mod tests {
     /// test wants one, spanning however many chunks the radius reaches.
     fn a_cone(chunk: IVec2, middle: Vec2, radius: f32) -> Vec<f32> {
         let base = chunk.as_vec2() * CHUNK_METRES;
-        (0..FACET_VERTS * FACET_VERTS)
+        (0..CORNERS * CORNERS)
             .map(|i| {
-                let local =
-                    Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32) * FACET_METRES;
+                let local = Vec2::new((i % CORNERS) as f32, (i / CORNERS) as f32) * CELL_METRES;
                 radius - (base + local).distance(middle)
             })
             .collect()
@@ -1654,10 +1653,9 @@ mod tests {
         // opposite ways round, which is the whole test of whether the sign
         // does its job — a lagoon must fail however big it is.
         let middle = Vec2::splat(CHUNK_METRES / 2.0);
-        let heights: Vec<f32> = (0..FACET_VERTS * FACET_VERTS)
+        let heights: Vec<f32> = (0..CORNERS * CORNERS)
             .map(|i| {
-                let at =
-                    Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32) * FACET_METRES;
+                let at = Vec2::new((i % CORNERS) as f32, (i / CORNERS) as f32) * CELL_METRES;
                 at.distance(middle) - 55.0
             })
             .collect();
@@ -1761,10 +1759,9 @@ mod tests {
     /// the inner one running round the lagoon the other way about.
     fn an_atoll(chunk: IVec2, middle: Vec2, lagoon: f32, shore: f32) -> Vec<f32> {
         let base = chunk.as_vec2() * CHUNK_METRES;
-        (0..FACET_VERTS * FACET_VERTS)
+        (0..CORNERS * CORNERS)
             .map(|i| {
-                let local =
-                    Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32) * FACET_METRES;
+                let local = Vec2::new((i % CORNERS) as f32, (i / CORNERS) as f32) * CELL_METRES;
                 let out = (base + local).distance(middle);
                 (shore - out).min(out - lagoon)
             })

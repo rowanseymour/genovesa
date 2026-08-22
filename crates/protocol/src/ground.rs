@@ -3,20 +3,19 @@
 //!
 //! A client generates nothing, so everything it needs in order to *draw* a
 //! chunk is spelled out here in a form that says nothing about how the ground
-//! was arrived at: corner heights on a fixed grid, and one palette entry per
-//! triangle.
+//! was arrived at: corner heights on a fixed grid, and one material per cell.
 //!
-//! The **grid is the format**. [`FACET_METRES`] is how finely the ground is
+//! The **grid is the format**. [`CELL_METRES`] is how finely the ground is
 //! drawn, and moving it would move the payload, so it lives here rather than in
 //! the generator that samples it. Drawing at some other density — level of
 //! detail, say — is a change to the wire.
 //!
-//! What travels for the ground's *appearance* is a [`Tone`] per cell, one
-//! byte, naming a material rather than a colour. That much is the format: two
-//! builds numbering the tones differently would read each other's beaches as
-//! moorland.
+//! What travels for the ground's *appearance* is a [`Material`] per cell, one
+//! byte, naming a substance rather than a colour. That much is the format: two
+//! builds numbering the materials differently would read each other's beaches
+//! as moorland.
 //!
-//! [`Tone::color`] is **not** the format. It is a reference rendering — the
+//! [`Material::color`] is **not** the format. It is a reference rendering — the
 //! flat palette this world is authored in, which mapgen draws maps out of and
 //! a client may draw ground out of if it wants to. A client that paints its
 //! ground some other way, from textures say, is not disagreeing with anything;
@@ -70,16 +69,16 @@ pub const OCEAN_DEPTH: f32 = 8.0;
 /// detail down to a few metres' wavelength, which a 2 m mesh could only
 /// alias. The move is wire-wide: it quadrupled the payload, which is what
 /// pushed the frame prefix to a u32.
-pub const FACET_METRES: f32 = 1.0;
+pub const CELL_METRES: f32 = 1.0;
 
 /// Cells along one edge of a chunk's ground grid.
-pub const FACET_QUADS: usize = (CHUNK_METRES / FACET_METRES) as usize;
+pub const CELLS: usize = (CHUNK_METRES / CELL_METRES) as usize;
 
 /// Corners along one edge of that grid — one more than the cells, since the
 /// corners at both ends are shared.
-pub const FACET_VERTS: usize = FACET_QUADS + 1;
+pub const CORNERS: usize = CELLS + 1;
 
-/// Cells in one chunk, each of which carries a [`Tone`].
+/// Cells in one chunk, each of which carries a [`Material`].
 ///
 /// The wire says what a square metre of ground *is* and stops there. How that
 /// square is drawn — two triangles split one way or the other, a textured
@@ -87,7 +86,7 @@ pub const FACET_VERTS: usize = FACET_QUADS + 1;
 /// the format deliberately holds no opinion about it. That is what lets one
 /// client flat-shade the ground and another paint it while both draw the same
 /// world.
-pub const FACET_CELLS: usize = FACET_QUADS * FACET_QUADS;
+pub const CELL_COUNT: usize = CELLS * CELLS;
 
 // --- Heights ----------------------------------------------------------------
 
@@ -138,20 +137,21 @@ pub fn dequantize(stored: u16) -> f32 {
 /// because flat shading has no texture or gradient to carry the picture and
 /// the colour has to do that work on its own.
 ///
-/// The order is the wire's: a tone travels as its own number, so adding to the
-/// end is the cheap change and anything shuffled or removed repaints the world
-/// of every build that disagrees. Either way it is a change to the format —
-/// re-record `the_wire_is_a_format` and rebuild both ends together, because a
-/// client that has never heard of a tone cannot draw the triangle it names.
+/// The order is the wire's: a material travels as its own number, so adding to
+/// the end is the cheap change and anything shuffled or removed repaints the
+/// world of every build that disagrees. Either way it is a change to the
+/// format — re-record `the_wire_is_a_format` and rebuild both ends together,
+/// because a client that has never heard of a material cannot draw the cell
+/// it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
-pub enum Tone {
+pub enum Material {
     /// The deep bed, seen through the water.
     Seabed = 0,
     /// The bright shelf that gives a coast its turquoise ring.
     Shallow = 1,
     Sand = 2,
-    /// Pebble and boulder foreshore. Warmer and lighter than [`Tone::Rock`],
+    /// Pebble and boulder foreshore. Warmer and lighter than [`Material::Rock`],
     /// so a shingle beach reads as its own thing next to the cliffs rather
     /// than as more of them.
     Shingle = 3,
@@ -160,8 +160,8 @@ pub enum Tone {
     Grass = 6,
     GrassLight = 7,
     Meadow = 8,
-    /// Moorland, above the trees and below the bare rock. [`Tone::Heath`] and
-    /// [`Tone::Fell`] are what the darkest and lightest lowland parcels turn
+    /// Moorland, above the trees and below the bare rock. [`Material::Heath`] and
+    /// [`Material::Fell`] are what the darkest and lightest lowland parcels turn
     /// into as they climb — the one still half green, the other already most
     /// of the way to stone — so that the upland reads as the same country
     /// drained of colour rather than as a different map laid over the top.
@@ -173,11 +173,11 @@ pub enum Tone {
     /// Bare stone bleached by the weather — the palest the summits get.
     Scree = 14,
     /// The bed of standing fresh water, deep enough to be dark. Green where
-    /// [`Tone::Seabed`] is blue, and darker than it: a lake bottoms out in
+    /// [`Material::Seabed`] is blue, and darker than it: a lake bottoms out in
     /// silt and drowned vegetation rather than in sand, and it is what a lake
     /// is *seen through* that has to say fresh water rather than sea.
     Silt = 15,
-    /// The weedy shallows of a lake — what [`Tone::Shallow`] is to the sea,
+    /// The weedy shallows of a lake — what [`Material::Shallow`] is to the sea,
     /// except that it deliberately refuses the turquoise. A ring of bright
     /// water is the strongest thing that says *coast* in this palette, so a
     /// lake wearing one reads as an arm of the sea that happens to be inland.
@@ -189,8 +189,8 @@ pub enum Tone {
     Marsh = 17,
 }
 
-/// The sRGB the tones stand for, in the order they are numbered.
-const TONES: [Vec3; 18] = [
+/// The sRGB the materials stand for, in the order they are numbered.
+const PALETTE: [Vec3; 18] = [
     Vec3::new(0.16, 0.34, 0.38), // Seabed
     Vec3::new(0.46, 0.68, 0.62), // Shallow
     // A step darker than it once was (0.90, 0.83, 0.58): the surf paints
@@ -230,18 +230,19 @@ const TONES: [Vec3; 18] = [
 pub const SEA_WATER: Vec3 = Vec3::new(0.10, 0.42, 0.62);
 pub const LAKE_WATER: Vec3 = Vec3::new(0.12, 0.34, 0.38);
 
-impl Tone {
-    /// The tone a stored number names, or `None` for one this build has never
+impl Material {
+    /// The material a stored number names, or `None` for one this build has
+    /// never
     /// heard of.
     fn from_byte(byte: u8) -> Option<Self> {
         // The table and the enum are numbered together, so anything inside the
-        // table is a tone and the transmute-free way to say so is a match on
+        // table is a material and the transmute-free way to say so is a match on
         // the count.
-        if byte as usize >= TONES.len() {
+        if byte as usize >= PALETTE.len() {
             return None;
         }
         // SAFETY-free equivalent of a cast: an explicit table, so adding a
-        // tone without adding it here fails to compile.
+        // a material without adding it here fails to compile.
         Some(match byte {
             0 => Self::Seabed,
             1 => Self::Shallow,
@@ -264,17 +265,17 @@ impl Tone {
         })
     }
 
-    /// The byte this tone travels as.
+    /// The byte this material travels as.
     pub fn to_byte(self) -> u8 {
         self as u8
     }
 
-    /// The sRGB this tone is drawn in, in the reference palette.
+    /// The sRGB this material is drawn in, in the reference palette.
     ///
     /// See the module docs: this is a rendering the wire ships alongside the
     /// materials, not a thing the two ends have to agree about.
     pub fn color(self) -> Vec3 {
-        TONES[self as usize]
+        PALETTE[self as usize]
     }
 }
 
@@ -283,9 +284,9 @@ impl Tone {
 /// One chunk of ground, as it crosses the wire.
 ///
 /// Everything a renderer needs and nothing else. The corners are a
-/// [`FACET_VERTS`]-square grid sampled from the chunk's lower corner outwards
-/// at [`FACET_METRES`] spacing, row-major; the tones are one per cell on the
-/// [`FACET_QUADS`]-square grid those corners bound, also row-major. The two
+/// [`CORNERS`]-square grid sampled from the chunk's lower corner outwards
+/// at [`CELL_METRES`] spacing, row-major; the materials are one per cell on the
+/// [`CELLS`]-square grid those corners bound, also row-major. The two
 /// grids are offset half a cell from each other, which is simply what it means
 /// for corners to bound cells.
 ///
@@ -293,12 +294,12 @@ impl Tone {
 /// [`crate::ToClient::Chunk`]. What arrives here is ground worth drawing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChunkPayload {
-    /// `FACET_VERTS * FACET_VERTS` corner heights, quantised — see
+    /// `CORNERS * CORNERS` corner heights, quantised — see
     /// [`quantize`].
     pub heights: Vec<u16>,
-    /// [`FACET_CELLS`] tones, one per cell, row-major from the chunk's lower
+    /// [`CELL_COUNT`] materials, one per cell, row-major from the chunk's lower
     /// corner.
-    pub surfaces: Vec<Tone>,
+    pub materials: Vec<Material>,
     /// Where standing water above sea level covers this chunk, and how high
     /// it stands: one quantised level per corner on the same grid as
     /// [`ChunkPayload::heights`], or `None` for a chunk with no lake on or
@@ -333,7 +334,7 @@ pub struct ChunkPayload {
     /// palms and a lake margin spend itself on mangroves.
     ///
     /// Here for the same reason a lake's level is: there is no arithmetic a
-    /// client could do on the heights and surfaces it already has that would
+    /// client could do on the heights and materials it already has that would
     /// find them. Where a plant stands is a decision made against the seed —
     /// which the client has never seen and has no use for — so it travels, or
     /// two players anchored off the same beach would see different trees on
@@ -354,7 +355,7 @@ pub struct ChunkPayload {
 ///
 /// The tree itself is the drawing end's business — this says where one is and
 /// how it is turned, not what a palm looks like, in the same way the wire
-/// names a [`Tone`] rather than sending a colour per cell.
+/// names a [`Material`] rather than sending a colour per cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plant {
     /// Which kind is standing here, and so which model a client puts on the
@@ -510,16 +511,16 @@ impl Plant {
 /// collide with.
 pub const NO_WATER: u16 = 0;
 
-/// Bytes a chunk's heights and tones occupy on the wire: two per corner
+/// Bytes a chunk's heights and materials occupy on the wire: two per corner
 /// height, one per cell. Nothing is compressed — see the module docs on the
 /// grid being the format, and note that delta-coding the heights and
-/// run-coding the tones would take most of this back if the wire ever needs
+/// run-coding the materials would take most of this back if the wire ever needs
 /// it to.
-pub const PAYLOAD_BYTES: usize = FACET_VERTS * FACET_VERTS * 2 + FACET_CELLS;
+pub const PAYLOAD_BYTES: usize = CORNERS * CORNERS * 2 + CELL_COUNT;
 
 /// Bytes a chunk's water grid adds when it carries one — two per corner,
 /// like the heights it is compared against.
-pub const WATER_BYTES: usize = FACET_VERTS * FACET_VERTS * 2;
+pub const WATER_BYTES: usize = CORNERS * CORNERS * 2;
 
 /// What one payload occupies on the wire, which depends on the two things
 /// about a chunk that are not fixed: whether it carries standing water, and
@@ -535,9 +536,9 @@ impl ChunkPayload {
     /// What a reader checks before believing a frame, and what a builder can
     /// assert against.
     pub fn well_formed(&self) -> bool {
-        let corners = FACET_VERTS * FACET_VERTS;
+        let corners = CORNERS * CORNERS;
         self.heights.len() == corners
-            && self.surfaces.len() == FACET_CELLS
+            && self.materials.len() == CELL_COUNT
             && self
                 .water
                 .as_ref()
@@ -553,7 +554,7 @@ impl ChunkPayload {
     /// surface, then the water grid where there is one.
     ///
     /// The water goes after them, and the plants after that, so that a reader
-    /// of any kind of chunk finds the heights and the surfaces at the same
+    /// of any kind of chunk finds the heights and the materials at the same
     /// offsets — a lake and a stand of palms are things a chunk carries in
     /// addition, never a rearrangement of what it already carried.
     pub(crate) fn put(&self, out: &mut Vec<u8>) {
@@ -561,7 +562,7 @@ impl ChunkPayload {
         for height in &self.heights {
             out.extend_from_slice(&height.to_le_bytes());
         }
-        out.extend(self.surfaces.iter().map(|tone| tone.to_byte()));
+        out.extend(self.materials.iter().map(|material| material.to_byte()));
         for level in self.water.iter().flatten() {
             out.extend_from_slice(&level.to_le_bytes());
         }
@@ -573,7 +574,7 @@ impl ChunkPayload {
     /// Reads a payload from exactly [`payload_bytes`] of them — `water` and
     /// `plants` say which length, and come from the flag and the count the
     /// caller has already read. `None` if the bytes are not that many, or if
-    /// any tone or plant byte names nothing this build knows.
+    /// any material or plant byte names nothing this build knows.
     ///
     /// The length is checked rather than asserted because it is the one thing
     /// here a *frame* can be wrong about: the flag, the count and the length
@@ -590,14 +591,14 @@ impl ChunkPayload {
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect::<Vec<u16>>()
         };
-        let (heights, rest) = bytes.split_at(FACET_VERTS * FACET_VERTS * 2);
-        let (surfaces, rest) = rest.split_at(FACET_CELLS);
+        let (heights, rest) = bytes.split_at(CORNERS * CORNERS * 2);
+        let (materials, rest) = rest.split_at(CELL_COUNT);
         let (water, plants) = rest.split_at(rest.len() - plants * PLANT_BYTES);
         Some(Self {
             heights: levels(heights),
-            surfaces: surfaces
+            materials: materials
                 .iter()
-                .map(|byte| Tone::from_byte(*byte))
+                .map(|byte| Material::from_byte(*byte))
                 .collect::<Option<_>>()?,
             water: (!water.is_empty()).then(|| levels(water)),
             plants: plants
@@ -614,9 +615,9 @@ mod tests {
 
     #[test]
     fn the_grid_divides_a_chunk_exactly() {
-        assert_eq!(FACET_QUADS as f32 * FACET_METRES, CHUNK_METRES);
-        assert_eq!(FACET_VERTS, 129);
-        assert_eq!(FACET_CELLS, 16_384);
+        assert_eq!(CELLS as f32 * CELL_METRES, CHUNK_METRES);
+        assert_eq!(CORNERS, 129);
+        assert_eq!(CELL_COUNT, 16_384);
         assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_384);
         assert_eq!(WATER_BYTES, 129 * 129 * 2);
         assert_eq!(payload_bytes(false, 0), PAYLOAD_BYTES);
@@ -662,15 +663,15 @@ mod tests {
     }
 
     #[test]
-    fn every_tone_survives_its_byte() {
-        for byte in 0..TONES.len() as u8 {
-            let tone = Tone::from_byte(byte).expect("a tone");
-            assert_eq!(tone.to_byte(), byte);
-            assert_eq!(Tone::from_byte(tone.to_byte()), Some(tone));
+    fn every_material_survives_its_byte() {
+        for byte in 0..PALETTE.len() as u8 {
+            let material = Material::from_byte(byte).expect("a material");
+            assert_eq!(material.to_byte(), byte);
+            assert_eq!(Material::from_byte(material.to_byte()), Some(material));
         }
         // One past the end of the table names nothing.
-        assert_eq!(Tone::from_byte(TONES.len() as u8), None);
-        assert_eq!(Tone::from_byte(u8::MAX), None);
+        assert_eq!(Material::from_byte(PALETTE.len() as u8), None);
+        assert_eq!(Material::from_byte(u8::MAX), None);
     }
 
     #[test]
@@ -679,26 +680,26 @@ mod tests {
         // way it likes. It is a claim about the palette this world is
         // authored in, which mapgen renders straight out of: a colour outside
         // the unit cube is one somebody has typed wrong.
-        for byte in 0..TONES.len() as u8 {
-            let tone = Tone::from_byte(byte).expect("a tone");
-            let c = tone.color();
+        for byte in 0..PALETTE.len() as u8 {
+            let material = Material::from_byte(byte).expect("a material");
+            let c = material.color();
             assert!(
                 c.cmpge(Vec3::ZERO).all() && c.cmple(Vec3::ONE).all(),
-                "{tone:?} is {c}"
+                "{material:?} is {c}"
             );
         }
     }
 
     #[test]
-    fn no_two_tones_are_the_same_colour() {
+    fn no_two_materials_are_the_same_colour() {
         // Eighteen materials that a reader cannot tell apart would be
         // eighteen materials for nothing. Sharpest pair in the palette is
         // some way above this, so it is a guard against a typo rather than a
         // threshold anything is tuned against.
-        for (a, first) in TONES.iter().enumerate() {
-            for (b, second) in TONES.iter().enumerate().skip(a + 1) {
+        for (a, first) in PALETTE.iter().enumerate() {
+            for (b, second) in PALETTE.iter().enumerate().skip(a + 1) {
                 let apart = (*first - *second).length();
-                assert!(apart > 0.02, "tones {a} and {b} are {apart} apart");
+                assert!(apart > 0.02, "materials {a} and {b} are {apart} apart");
             }
         }
     }
@@ -727,14 +728,14 @@ mod tests {
     /// transposed or truncated one of its grids would show.
     fn a_payload(water: bool, plants: usize) -> ChunkPayload {
         ChunkPayload {
-            heights: (0..FACET_VERTS * FACET_VERTS)
+            heights: (0..CORNERS * CORNERS)
                 .map(|i| (i * 7 % 65_535) as u16)
                 .collect(),
-            surfaces: (0..FACET_CELLS)
-                .map(|i| Tone::from_byte((i % TONES.len()) as u8).expect("a tone"))
+            materials: (0..CELL_COUNT)
+                .map(|i| Material::from_byte((i % PALETTE.len()) as u8).expect("a material"))
                 .collect(),
             water: water.then(|| {
-                (0..FACET_VERTS * FACET_VERTS)
+                (0..CORNERS * CORNERS)
                     .map(|i| (i * 11 % 65_533) as u16)
                     .collect()
             }),
@@ -761,7 +762,7 @@ mod tests {
                 // another sort would be a different tree entirely.
                 let back = ChunkPayload::take(&bytes, water, plants).expect("a payload");
                 assert_eq!(back.heights, payload.heights);
-                assert_eq!(back.surfaces, payload.surfaces);
+                assert_eq!(back.materials, payload.materials);
                 assert_eq!(back.water, payload.water);
                 assert_eq!(back.plants.len(), payload.plants.len());
                 for (got, sent) in back.plants.iter().zip(&payload.plants) {
@@ -823,7 +824,7 @@ mod tests {
     #[test]
     fn the_water_grid_is_the_only_thing_a_lake_adds() {
         // A watered payload is a dry one with a grid on the end: the heights
-        // and the surfaces encode to exactly the same bytes in the same
+        // and the materials encode to exactly the same bytes in the same
         // places, so a reader of either finds them without knowing which it
         // has until it reaches the tail.
         let (mut dry, mut wet) = (Vec::new(), Vec::new());
@@ -834,10 +835,10 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_with_a_tone_from_the_future_is_refused() {
-        // The last tone byte, which is the last byte of a dry payload and
+    fn a_payload_with_a_material_from_the_future_is_refused() {
+        // The last material byte, which is the last byte of a dry payload and
         // sits in the middle of a watered one — so this also catches a reader
-        // that stopped checking tones once it knew there was water to come.
+        // that stopped checking materials once it knew there was water to come.
         for water in [false, true] {
             let mut bytes = Vec::new();
             a_payload(water, 2).put(&mut bytes);
@@ -849,7 +850,7 @@ mod tests {
     #[test]
     fn a_payload_is_malformed_if_its_grids_are_the_wrong_size() {
         // What a builder is held to. A short water grid is the one worth
-        // naming: heights and surfaces have been fixed-size since there was a
+        // naming: heights and materials have been fixed-size since there was a
         // wire, but the water is built per chunk from whatever ground has a
         // lake on it, and a payload carrying half a grid would encode to a
         // frame no reader could believe.

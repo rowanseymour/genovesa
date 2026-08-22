@@ -686,13 +686,13 @@ impl Index<Kind> for WildlifeModels {
 
 fn load_the_models(
     mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut paints: ResMut<Assets<StandardMaterial>>,
     assets: Res<AssetServer>,
 ) {
     // One white material between them, because a bird's colours ride on its
     // own vertices and a material that let them through is the same material
     // whichever bird it is.
-    let painted = materials.add(matte(Color::WHITE));
+    let painted = paints.add(matte(Color::WHITE));
     commands.insert_resource(WildlifeModels(KINDS.map(|file| Creature {
         mesh: assets.load(model_mesh(file, 0)),
         material: painted.clone(),
@@ -730,7 +730,7 @@ mod tests {
 
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
-    use protocol::ground::{quantize, ChunkPayload, Tone, FACET_CELLS, FACET_METRES, FACET_VERTS};
+    use protocol::ground::{quantize, ChunkPayload, Material, CELL_COUNT, CELL_METRES, CORNERS};
 
     use crate::testing::{
         assert_model_draws, assert_model_is_painted, creature_named_by, span, test_ground,
@@ -748,14 +748,14 @@ mod tests {
     /// `peak`, falling off with distance, over a low plain.
     fn a_hill(peak: (usize, usize), height: f32) -> ChunkPayload {
         ChunkPayload {
-            heights: (0..FACET_VERTS * FACET_VERTS)
+            heights: (0..CORNERS * CORNERS)
                 .map(|i| {
-                    let dx = (i % FACET_VERTS) as f32 - peak.0 as f32;
-                    let dz = (i / FACET_VERTS) as f32 - peak.1 as f32;
+                    let dx = (i % CORNERS) as f32 - peak.0 as f32;
+                    let dz = (i / CORNERS) as f32 - peak.1 as f32;
                     quantize((height - (dx * dx + dz * dz).sqrt()).max(1.0))
                 })
                 .collect(),
-            surfaces: vec![Tone::Grass; FACET_CELLS],
+            materials: vec![Material::Grass; CELL_COUNT],
             water: None,
             plants: Vec::new(),
         }
@@ -771,8 +771,8 @@ mod tests {
                 ground.deliver(
                     IVec2::new(cx, cz),
                     Some(ChunkPayload {
-                        heights: vec![quantize(-depth); FACET_VERTS * FACET_VERTS],
-                        surfaces: vec![Tone::Sand; FACET_CELLS],
+                        heights: vec![quantize(-depth); CORNERS * CORNERS],
+                        materials: vec![Material::Sand; CELL_COUNT],
                         water: None,
                         plants: Vec::new(),
                     }),
@@ -798,9 +798,9 @@ mod tests {
         assert_eq!(
             centre,
             Vec3::new(
-                20.0 * FACET_METRES,
+                20.0 * CELL_METRES,
                 80.0 + SOAR_CLEARANCE,
-                40.0 * FACET_METRES
+                40.0 * CELL_METRES
             )
         );
     }
