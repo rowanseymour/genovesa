@@ -112,11 +112,12 @@ landfall is a matter of sailing at random until one turns up. It is an
 instrument for sailing and goes dark once the player steps ashore, there being
 nothing it could point at from a beach that the island is not already showing.
 
-The look is flat-shaded facets in a small fixed palette — no textures and no
-gradients anywhere. The mesh is built in 128 m chunks on a metre grid, fine
-enough to carry the ground's own character: rugged country breaks into crests
-and gullies, meadows and beaches lie calm, and the difference is the terrain's
-rather than the mesh's.
+The look is flat-shaded ground in a small fixed palette — no textures and no
+gradients anywhere. The server names what each square metre is made of and
+leaves the drawing of it to the client; the mesh is built in 128 m chunks on
+that metre grid, fine enough to carry the ground's own character: rugged
+country breaks into crests and gullies, meadows and beaches lie calm, and the
+difference is the terrain's rather than the mesh's.
 
 A bigger island means more landscape, not stretched landscape: wavelengths
 are fixed in metres, so a large island holds more ranges, more coast and more
@@ -207,10 +208,12 @@ Every world is a served world. The server generates the ocean and hands it out
 a chunk at a time; a client asks for the chunks near its camera and draws what
 comes back, and is told nothing else — not the seed, not the layout, not which
 chunks are worth asking for. An answer is either open water, which carries no
-data at all, or ground, which arrives as corner heights and one palette entry
-per triangle — and, on the minority of chunks holding a lake, the level its
+data at all, or ground, which arrives as corner heights and a material per
+square metre — and, on the minority of chunks holding a lake, the level its
 water stands at, since that is the one thing about a chunk no client could
-work out from the ground it was sent.
+work out from the ground it was sent. The materials reach a metre past the
+chunk on every side, so a client can draw one the moment it lands without
+waiting to see what its neighbours are made of.
 
 That leaves the client small enough to be worth rewriting in another language
 against the protocol's documentation alone, which is the point of the

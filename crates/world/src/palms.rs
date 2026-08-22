@@ -20,7 +20,7 @@
 //! lose one between them.
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{Kind, Plant, Tone, CHUNK_METRES};
+use protocol::ground::{Kind, Material, Plant, CHUNK_METRES};
 
 use crate::archipelago::Island;
 use crate::plants::{draw, mix};
@@ -180,7 +180,7 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
 /// closes the gap between the two.
 fn is_sand(island: &Island, at: Vec2, height: f32) -> bool {
     let normal = island.normal(at.x, at.y);
-    island.surface(at.x, at.y, height, normal).tone == Tone::Sand
+    island.material(at.x, at.y, height, normal) == Material::Sand
 }
 
 #[cfg(test)]

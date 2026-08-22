@@ -33,7 +33,7 @@ use std::io::{self, Read, Write};
 
 use glam::{IVec2, Vec2};
 
-pub use ground::{ChunkPayload, Shade, Surface, Tone};
+pub use ground::{ChunkPayload, Material};
 
 /// The dialect spoken here. A client leads with it in [`ToServer::Hello`],
 /// and a server that speaks a different one answers [`ToClient::Refused`]
@@ -183,7 +183,7 @@ pub fn surveyed_bytes(found: &survey::Soundings) -> usize {
 /// that one chunk's soundings are never split across two messages, so a chunk
 /// more torn than the whole budget still has to travel whole. That is what
 /// [`survey::SOUNDINGS_BYTES`] is for, and it is the term that wins: the
-/// ceiling stands where a coast crossing every facet of a chunk would put it,
+/// ceiling stands where a coast crossing every cell of a chunk would put it,
 /// rather than where a real coast happens to.
 ///
 /// Derived rather than picked, so that a message which outgrew it fails to
@@ -1423,7 +1423,7 @@ impl<'a> Payload<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::ground::{Shade, Surface, Tone, FACET_TRIS, FACET_VERTS};
+    use super::ground::{Material, CORNERS, MATERIAL_COUNT};
     use super::survey::{Coast, Mark, Soundings};
     use super::*;
 
@@ -1466,21 +1466,18 @@ mod tests {
     /// shows up rather than round-tripping perfectly.
     fn a_chunk() -> ChunkPayload {
         ChunkPayload {
-            heights: (0..FACET_VERTS * FACET_VERTS)
+            heights: (0..CORNERS * CORNERS)
                 .map(|i| (i * 601 % 65_521) as u16)
                 .collect(),
-            surfaces: (0..FACET_TRIS)
+            materials: (0..MATERIAL_COUNT)
                 .map(|i| {
-                    Surface::new(
-                        [
-                            Tone::Seabed,
-                            Tone::Sand,
-                            Tone::Forest,
-                            Tone::Fell,
-                            Tone::Marsh,
-                        ][i % 5],
-                        [Shade::Dark, Shade::Plain, Shade::Light][i % 3],
-                    )
+                    [
+                        Material::Seabed,
+                        Material::Sand,
+                        Material::Forest,
+                        Material::Fell,
+                        Material::Marsh,
+                    ][i % 5]
                 })
                 .collect(),
             water: None,
@@ -1495,7 +1492,7 @@ mod tests {
     fn a_chunk_with_a_lake() -> ChunkPayload {
         ChunkPayload {
             water: Some(
-                (0..FACET_VERTS * FACET_VERTS)
+                (0..CORNERS * CORNERS)
                     .map(|i| (i * 907 % 65_519) as u16)
                     .collect(),
             ),
@@ -2211,7 +2208,7 @@ mod tests {
         // Ground: too long to write out, so the head, the length and a
         // handful of interior bytes at known offsets. Between them they pin
         // the layout — where the heights start, that they are little-endian
-        // pairs, where the surfaces start, and how a surface packs.
+        // pairs, where the materials start, and how a surface packs.
         let ground = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::new(5, -3),
             ground: Some(a_chunk()),
@@ -2244,21 +2241,22 @@ mod tests {
         // 1202 — little-endian pairs.
         assert_eq!(ground[15..21], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
 
-        // Surfaces start once the heights are done. The first is Seabed dark
-        // — tone 0 in the high bits, shade 0 in the low two — and the second
-        // Sand plain: tone 2, shade 1.
-        let surfaces = 15 + FACET_VERTS * FACET_VERTS * 2;
+        // Materials start once the heights are done, one byte per cell naming a
+        // material and nothing else — the low bits used to carry a brightness
+        // step, which is why a material is its own number now rather than one
+        // shifted up by two.
+        let materials = 15 + CORNERS * CORNERS * 2;
         assert_eq!(
-            ground[surfaces..surfaces + 3],
-            [0b0000_0000, 0b0000_1001, 0b0001_0010],
-            "seabed/dark, sand/plain, forest/light"
+            ground[materials..materials + 3],
+            [0, 2, 4],
+            "seabed, sand, forest"
         );
 
-        // And the same chunk with a lake on it. The heights and the surfaces
+        // And the same chunk with a lake on it. The heights and the materials
         // must land at exactly the offsets they land at above — water is
         // something a chunk carries in addition, not a rearrangement of what
         // it carried already — so the two answers agree byte for byte up to
-        // the end of the surfaces and differ only in the flag and the tail.
+        // the end of the materials and differ only in the flag and the tail.
         let lake = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::new(5, -3),
             ground: Some(a_chunk_with_a_lake()),
@@ -2282,15 +2280,15 @@ mod tests {
         );
         assert_eq!(lake[13], 2, "the flag says there is water on this ground");
         assert_eq!(
-            lake[14..surfaces + FACET_TRIS],
-            ground[14..surfaces + FACET_TRIS],
-            "the water moved the heights or the surfaces"
+            lake[14..materials + MATERIAL_COUNT],
+            ground[14..materials + MATERIAL_COUNT],
+            "the water moved the heights or the materials"
         );
 
-        // The water grid starts once the surfaces are done, little-endian
+        // The water grid starts once the materials are done, little-endian
         // pairs like the heights: level 0 is 0, level 1 is 907, level 2 is
         // 1814.
-        let water = surfaces + FACET_TRIS;
+        let water = materials + MATERIAL_COUNT;
         assert_eq!(lake[water..water + 6], [0, 0, 0x8B, 0x03, 0x16, 0x07]);
 
         // And a plant, which goes on the end of everything else: its kind

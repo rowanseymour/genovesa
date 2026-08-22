@@ -11,8 +11,9 @@
 //! What green means is the *model's* business, not this module's. A plant's
 //! colours ride on its own vertices and the material here is white, so
 //! nothing in this file knows a frond from a trunk. The ground's palette is
-//! the other way about for a reason that does not apply here: a tone is a
-//! number on the wire, shared by two machines that must agree, while a mesh
+//! the other way about for a reason that does not apply here: a ground
+//! material is a number on the wire, shared by two machines that must agree,
+//! while a mesh
 //! is an asset the client already holds and can perfectly well be handed
 //! painted.
 //!

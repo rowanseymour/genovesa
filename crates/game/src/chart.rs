@@ -1735,8 +1735,9 @@ const POINT_ORDERS: [(f32, f32, f32, f32); 3] = [
 /// Two flat tones meeting on each point's axis gives the same reading with
 /// nothing shaded: every point turns its dark half the same way round the card.
 ///
-/// Two sinks rather than one because a tone is a material and a material is a
-/// mesh, so the sheet costs two meshes however many roses stand on it.
+/// Two sinks rather than one because each colour is its own Bevy material and
+/// each material its own mesh, so the sheet costs two meshes however many
+/// roses stand on it.
 fn star(dark: &mut Strokes, light: &mut Strokes, centre: Vec2, radius: f32) {
     for (first, step, reach, width) in POINT_ORDERS {
         let mut turns = first;
@@ -2414,7 +2415,7 @@ mod tests {
     use crate::testing::{run_frames, FRAME};
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
-    use protocol::ground::{CHUNK_METRES, FACET_METRES, FACET_VERTS};
+    use protocol::ground::{CELL_METRES, CHUNK_METRES, CORNERS};
     use protocol::survey::{survey, SIGHT_RADIUS};
     // How near a point drawn from a survey can be asked to land: the survey's
     // own two roundings, and no promise finer than them.
@@ -2426,10 +2427,9 @@ mod tests {
     /// test wants one, spanning however many chunks the radius reaches.
     fn a_cone(chunk: IVec2, middle: Vec2, radius: f32) -> Vec<f32> {
         let base = chunk.as_vec2() * CHUNK_METRES;
-        (0..FACET_VERTS * FACET_VERTS)
+        (0..CORNERS * CORNERS)
             .map(|i| {
-                let local =
-                    Vec2::new((i % FACET_VERTS) as f32, (i / FACET_VERTS) as f32) * FACET_METRES;
+                let local = Vec2::new((i % CORNERS) as f32, (i / CORNERS) as f32) * CELL_METRES;
                 radius - (base + local).distance(middle)
             })
             .collect()

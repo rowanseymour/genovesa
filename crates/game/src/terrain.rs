@@ -32,15 +32,14 @@ use bevy::asset::RenderAssetUsages;
 use bevy::light::{
     CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver,
 };
-use bevy::mesh::PrimitiveTopology;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, facets, ChunkPayload, Plant, Surface, Tone, CHUNK_METRES, FACET_METRES,
-    FACET_QUADS, FACET_TRIS, FACET_VERTS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH,
-    SEA_WATER,
+    chunk_at, dequantize, material_index, ChunkPayload, Material, Plant, CELLS, CELL_COUNT,
+    CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
 };
 
 use crate::camera::{MapCamera, View};
@@ -202,7 +201,7 @@ pub struct Ground {
 struct Arrival {
     chunk: IVec2,
     heights: Arc<[f32]>,
-    surfaces: Vec<Surface>,
+    materials: Vec<Material>,
     /// The chunk's standing water, still quantised: it is only ever compared
     /// against [`NO_WATER`] and turned into a height once per quad drawn, so
     /// there is nothing to be gained by dequantising a whole grid of it the
@@ -292,7 +291,7 @@ impl Ground {
                 self.arrived.push(Arrival {
                     chunk,
                     heights,
-                    surfaces: payload.surfaces,
+                    materials: payload.materials,
                     water: payload.water,
                     plants: payload.plants,
                 });
@@ -404,10 +403,7 @@ impl Ground {
             .copied()
             .enumerate()
             .max_by(|a, b| a.1.total_cmp(&b.1))?;
-        let local = Vec2::new(
-            (highest % FACET_VERTS) as f32,
-            (highest / FACET_VERTS) as f32,
-        ) * FACET_METRES;
+        let local = Vec2::new((highest % CORNERS) as f32, (highest / CORNERS) as f32) * CELL_METRES;
         Some((chunk.as_vec2() * CHUNK_METRES + local, height))
     }
 
@@ -426,40 +422,107 @@ impl Ground {
     }
 }
 
-/// The height of one point inside a chunk, interpolated across the very facet
-/// the mesh draws there.
+/// A cell's four corners, in the order everything here names them.
 ///
-/// Which triangle a point falls in has to be worked out the same way the mesh
-/// splits its quads — see [`facets`] — or a hull crossing a quad would step
-/// where the picture slopes. `local` is metres from the chunk's own corner.
+/// Not an enum: these are indices into the four-corner arrays either side of
+/// this, and into the four vertices [`chunk_mesh`] pushes per cell, so what
+/// they have to be is small numbers that agree.
+const SW: usize = 0;
+const SE: usize = 1;
+const NW: usize = 2;
+const NE: usize = 3;
+
+/// Where a cell's corners sit inside it, in cell widths from its own lower
+/// corner — the frame [`height_at`] does its arithmetic in.
+const CORNER_AT: [Vec2; 4] = [
+    Vec2::new(0.0, 0.0),
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.0, 1.0),
+    Vec2::new(1.0, 1.0),
+];
+
+/// The two triangles cell `(ix, iz)` is drawn as, each named by three of the
+/// cell's own four corners and wound counter-clockwise seen from above.
+///
+/// **The one place the cut is decided.** Two things read it and they have to
+/// agree: [`chunk_mesh`] draws these triangles, and [`height_at`] interpolates
+/// across them to say where the ground is underfoot. A quad is not planar, so
+/// the two diagonals give genuinely different heights down the middle of a
+/// cell — pick different ones and a hull crossing a quad steps where the
+/// picture slopes. This used to be a walk in `protocol`, which the wire no
+/// longer carries; written here once rather than twice, it cannot drift.
+///
+/// Which diagonal alternates like a checkerboard. Cutting every cell the same
+/// way lines them up into an obvious herringbone across open ground, and
+/// alternating breaks that up for nothing. The parity runs off the cell's
+/// index within the chunk, and [`CELLS`] is even, so the pattern carries
+/// across a chunk boundary without a phase step.
+const fn split(ix: usize, iz: usize) -> [[usize; 3]; 2] {
+    if (ix + iz).is_multiple_of(2) {
+        [[SW, NW, SE], [SE, NW, NE]]
+    } else {
+        [[SW, NW, NE], [SW, NE, SE]]
+    }
+}
+
+/// Where the plane of `tri` stands over `at`, and whether `at` is on it —
+/// `None` for a point outside the triangle.
+///
+/// Barycentric rather than a case for each diagonal: the weights are what say
+/// *both* whether the point is inside and what the height there is, so the
+/// two answers cannot disagree about which triangle is being talked about.
+/// The triangles are half unit squares, so the determinant is ±1 and there is
+/// no degenerate case to guard.
+fn on_triangle(tri: [usize; 3], heights: [f32; 4], at: Vec2) -> Option<f32> {
+    let [a, b, c] = tri.map(|corner| CORNER_AT[corner]);
+    let cross = |p: Vec2, q: Vec2| p.x * q.y - p.y * q.x;
+
+    let area = cross(b - a, c - a);
+    let v = cross(at - a, c - a) / area;
+    let w = cross(b - a, at - a) / area;
+    let u = 1.0 - v - w;
+
+    // A point on the shared edge belongs to both, and both answer the same —
+    // the plane is continuous across the cut — so the tolerance only decides
+    // which of two equal answers is given, never whether one is given.
+    (u >= -1.0e-6 && v >= -1.0e-6 && w >= -1.0e-6)
+        .then(|| u * heights[tri[0]] + v * heights[tri[1]] + w * heights[tri[2]])
+}
+
+/// The height of one point inside a chunk, interpolated across the very
+/// triangle the mesh draws there.
+///
+/// Which triangle a point falls in comes from [`split`], which is also what
+/// [`chunk_mesh`] builds from — so the ground underfoot is the ground on
+/// screen by construction rather than by two functions happening to agree.
+/// `local` is metres from the chunk's own corner.
 fn height_at(heights: &[f32], local: Vec2) -> f32 {
-    let cell = local / FACET_METRES;
+    let cell = local / CELL_METRES;
     // Clamped rather than trusted: a point exactly on a chunk's far edge
     // belongs to the next chunk, but the arithmetic that got here is `f32` and
     // is entitled to land on the boundary itself.
-    let ix = (cell.x.floor().max(0.0) as usize).min(FACET_QUADS - 1);
-    let iz = (cell.y.floor().max(0.0) as usize).min(FACET_QUADS - 1);
-    let u = (cell.x - ix as f32).clamp(0.0, 1.0);
-    let v = (cell.y - iz as f32).clamp(0.0, 1.0);
+    let ix = (cell.x.floor().max(0.0) as usize).min(CELLS - 1);
+    let iz = (cell.y.floor().max(0.0) as usize).min(CELLS - 1);
+    let at = Vec2::new(
+        (cell.x - ix as f32).clamp(0.0, 1.0),
+        (cell.y - iz as f32).clamp(0.0, 1.0),
+    );
 
-    let corner = |cx: usize, cz: usize| heights[cz * FACET_VERTS + cx];
-    let (tl, tr) = (corner(ix, iz), corner(ix + 1, iz));
-    let (bl, br) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
+    let corner = |cx: usize, cz: usize| heights[cz * CORNERS + cx];
+    let corners = [
+        corner(ix, iz),
+        corner(ix + 1, iz),
+        corner(ix, iz + 1),
+        corner(ix + 1, iz + 1),
+    ];
 
-    if (ix + iz).is_multiple_of(2) {
-        // Split along the anti-diagonal, from the near-far corner to the
-        // far-near one.
-        if u + v <= 1.0 {
-            tl + u * (tr - tl) + v * (bl - tl)
-        } else {
-            br + (1.0 - u) * (bl - br) + (1.0 - v) * (tr - br)
-        }
-    } else if v >= u {
-        // Split along the main diagonal.
-        tl + v * (bl - tl) + u * (br - bl)
-    } else {
-        tl + u * (tr - tl) + v * (br - tr)
-    }
+    let [first, second] = split(ix, iz);
+    on_triangle(first, corners, at)
+        .or_else(|| on_triangle(second, corners, at))
+        // The two triangles cover the cell and `at` is clamped inside it, so
+        // this is unreachable by anything but arithmetic that has already gone
+        // wrong. Answering with the cell's mean beats a panic under a boat.
+        .unwrap_or_else(|| corners.iter().sum::<f32>() / 4.0)
 }
 
 /// Marks a terrain chunk entity, and records which world chunk it is.
@@ -499,47 +562,97 @@ struct OceanFloor;
 
 /// Builds one chunk's mesh from what the server sent about it.
 ///
-/// The geometry is flat shaded: every triangle carries its own normal and its
-/// own single colour, so no vertex is shared between two triangles. That costs
-/// three vertices per triangle instead of roughly one — the price of flat
-/// shading with per-facet colour, paid in vertices rather than in the
-/// texture and gradient machinery the look exists to refuse. It also
-/// means chunks need no border samples to meet cleanly — there are no shared
-/// normals to disagree about.
+/// The wire hands over a height per corner and a material per cell, and stops
+/// there — how a square metre of ground becomes triangles is this client's
+/// decision and nobody else's. This one splits every cell in two and
+/// flat-shades the pair: both triangles carry the cell's own colour and the
+/// normal of the square they came from, so a cell reads as one flat lozenge
+/// of ground rather than as two triangles that happen to match.
 ///
-/// Deliberately un-indexed: with no vertex shared between triangles an index
-/// buffer would be 0, 1, 2, 3, … and save nothing.
-fn chunk_mesh(heights: &[f32], surfaces: &[Surface]) -> Mesh {
-    let count = FACET_TRIS * 3;
-    let mut positions = Vec::with_capacity(count);
-    let mut normals = Vec::with_capacity(count);
-    let mut colors = Vec::with_capacity(count);
+/// Which diagonal a cell is split on alternates like a checkerboard. Splitting
+/// every cell the same way lines them up into an obvious herringbone across
+/// open ground; alternating breaks that up and costs nothing. The parity runs
+/// off the cell's index within the chunk, and [`CELLS`] is even, so the
+/// pattern carries across a chunk boundary without a phase step.
+///
+/// A cell's four corners are shared between its own two triangles and with
+/// nothing else. Flat shading means a corner carries the normal and the colour
+/// of the cell it belongs to, so the same point of ground is four different
+/// vertices where four cells meet — that much is the price of the look, paid
+/// in vertices rather than in the texture and gradient machinery the look
+/// exists to refuse. It also means chunks need no border samples to meet
+/// cleanly, there being no shared normals to disagree about.
+///
+/// *Within* a cell, though, the two triangles agree about everything, so the
+/// cell is four vertices and six indices rather than six vertices. That is a
+/// third off the vertex count, and the shadow pass — which rasterises this
+/// geometry once per cascade it falls into, and does nothing per vertex but
+/// transform it — is the half of the frame that feels it. It only became
+/// possible when the colour moved from the triangle to the cell: while each
+/// triangle had its own palette entry the two halves disagreed, and an index
+/// buffer would have been 0, 1, 2, 3, … and saved nothing.
+fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
+    let mut positions = Vec::with_capacity(CELL_COUNT * 4);
+    let mut normals = Vec::with_capacity(CELL_COUNT * 4);
+    let mut colors = Vec::with_capacity(CELL_COUNT * 4);
+    let mut indices = Vec::with_capacity(CELL_COUNT * 6);
 
-    for (facet, surface) in facets().zip(surfaces) {
-        let tri = facet.corners.map(|(cx, cz)| {
-            Vec3::new(
-                cx as f32 * FACET_METRES,
-                heights[cz * FACET_VERTS + cx],
-                cz as f32 * FACET_METRES,
-            )
-        });
-        // The corners are wound counter-clockwise seen from above, which is
-        // what puts the face normal upwards.
-        let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
+    let corner = |cx: usize, cz: usize| {
+        Vec3::new(
+            cx as f32 * CELL_METRES,
+            heights[cz * CORNERS + cx],
+            cz as f32 * CELL_METRES,
+        )
+    };
 
-        // Vertex colours are consumed in linear space by the PBR shader; the
-        // palette is authored in sRGB.
-        let srgb = surface.color();
-        let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
-        let color = [linear.red, linear.green, linear.blue, 1.0];
+    // The chunk's own cells only. The payload's grid reaches a cell further
+    // out on every side — see [`ChunkPayload::materials`] — and that ring
+    // belongs to the neighbouring chunks, which draw it themselves. Drawing
+    // it here would lay a one-metre skirt of duplicate ground over every
+    // boundary in the world.
+    for iz in 0..CELLS {
+        for ix in 0..CELLS {
+            let material = materials[material_index(ix as i32, iz as i32)
+                .expect("a cell of the chunk is on its own material grid")];
+            let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
+            let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
 
-        // No UVs: nothing binds a texture to the ground, and at a hundred
-        // thousand vertices a chunk an attribute carried "for later" is
-        // three-quarters of a megabyte of dead weight on every copy.
-        for corner in tri {
-            positions.push([corner.x, corner.y, corner.z]);
-            normals.push([normal.x, normal.y, normal.z]);
-            colors.push(color);
+            // The square's own normal, not each triangle's. The generator
+            // classified the cell by this same normal — the mean slope of its
+            // four corners — so lighting it this way is what makes a crag
+            // look as steep as the palette says it is. It also stops a cell
+            // whose diagonal folds reading as two facets of different
+            // brightness.
+            let along = (se.y + ne.y - sw.y - nw.y) / (2.0 * CELL_METRES);
+            let across = (nw.y + ne.y - sw.y - se.y) / (2.0 * CELL_METRES);
+            let normal = Vec3::new(-along, 1.0, -across).normalize();
+
+            // Vertex colours are consumed in linear space by the PBR shader;
+            // the reference palette is authored in sRGB.
+            let srgb = material.color();
+            let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
+            let color = [linear.red, linear.green, linear.blue, 1.0];
+
+            // No UVs: nothing binds a texture to the ground, and at sixty-odd
+            // thousand vertices a chunk an attribute carried "for later" is
+            // half a megabyte of dead weight on every copy.
+            // Pushed in [`SW`], [`SE`], [`NW`], [`NE`] order, which is what
+            // [`split`]'s corner numbers index.
+            let first = positions.len() as u32;
+            for vertex in [sw, se, nw, ne] {
+                positions.push([vertex.x, vertex.y, vertex.z]);
+                normals.push([normal.x, normal.y, normal.z]);
+                colors.push(color);
+            }
+
+            // Cut the way [`split`] says, which is also the way [`height_at`]
+            // reads the ground underfoot.
+            indices.extend(
+                split(ix, iz)
+                    .into_iter()
+                    .flatten()
+                    .map(|corner| first + corner as u32),
+            );
         }
     }
 
@@ -550,12 +663,15 @@ fn chunk_mesh(heights: &[f32], surfaces: &[Surface]) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    // Thirty-two bit, and not by preference: a chunk is 65,536 vertices, which
+    // is one past what sixteen bits can name.
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 /// Builds the surface of one chunk's standing water, or `None` where the
 /// chunk carries none — see [`ChunkPayload::water`].
 ///
-/// One flat quad per facet quad, at the level the payload gives it, plus
+/// One flat quad per cell, at the level the payload gives it, plus
 /// [`OFF_LATTICE`] — a lake's level is quantised on the same lattice its bed is,
 /// so a shore flat at exactly the lake's height would otherwise be coplanar
 /// with the sheet standing on it. No colour, because water is one colour and
@@ -573,8 +689,8 @@ fn water_mesh(water: &[u16]) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
 
-    for iz in 0..FACET_QUADS {
-        for ix in 0..FACET_QUADS {
+    for iz in 0..CELLS {
+        for ix in 0..CELLS {
             let (tl, tr) = ((ix, iz), (ix + 1, iz));
             let (bl, br) = ((ix, iz + 1), (ix + 1, iz + 1));
 
@@ -584,7 +700,7 @@ fn water_mesh(water: &[u16]) -> Option<Mesh> {
             // them is entitled to hide.
             let Some(level) = [tl, tr, bl, br]
                 .iter()
-                .map(|(cx, cz)| water[cz * FACET_VERTS + cx])
+                .map(|(cx, cz)| water[cz * CORNERS + cx])
                 .filter(|level| *level != NO_WATER)
                 .max()
             else {
@@ -593,7 +709,7 @@ fn water_mesh(water: &[u16]) -> Option<Mesh> {
             let y = dequantize(level) + OFF_LATTICE;
 
             for (cx, cz) in [tl, bl, tr, tr, bl, br] {
-                positions.push([cx as f32 * FACET_METRES, y, cz as f32 * FACET_METRES]);
+                positions.push([cx as f32 * CELL_METRES, y, cz as f32 * CELL_METRES]);
                 // Dead flat, so every normal is the same one and there is
                 // nothing for the light to pick out — which is what makes a
                 // lake read as a sheet of water rather than as ground.
@@ -622,7 +738,7 @@ struct ChunkMeshes {
 
 fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
     ChunkMeshes {
-        ground: chunk_mesh(&arrival.heights, &arrival.surfaces),
+        ground: chunk_mesh(&arrival.heights, &arrival.materials),
         water: arrival.water.as_ref().and_then(|water| water_mesh(water)),
     }
 }
@@ -634,7 +750,7 @@ fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
 fn enter_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut paints: ResMut<Assets<StandardMaterial>>,
     mut seas: ResMut<Assets<SeaMaterial>>,
     mut images: ResMut<Assets<Image>>,
     view: Res<View>,
@@ -647,7 +763,7 @@ fn enter_world(
 
     // Terrain material. Base colour is white so the vertex colours come
     // through unmodified — StandardMaterial multiplies the two together.
-    commands.insert_resource(GroundMaterial(materials.add(matte(Color::WHITE))));
+    commands.insert_resource(GroundMaterial(paints.add(matte(Color::WHITE))));
 
     // Ocean floor. The sea is translucent, so without something opaque beneath
     // it the water beyond the terrain meshes blends against the sky and reads
@@ -668,7 +784,7 @@ fn enter_world(
     // buffer — which read as a faint darker banding drifting across the open
     // sea as the camera moved. A couple of metres of parallax at the seam is
     // invisible with the colours matched; a shimmer is not.
-    let seabed = Tone::Seabed.color();
+    let seabed = Material::Seabed.color();
     commands.spawn((
         Name::new("Ocean floor"),
         OceanFloor,
@@ -684,7 +800,7 @@ fn enter_world(
         // edge of every island's chunk rectangle.
         NotShadowReceiver,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
-        MeshMaterial3d(materials.add(matte(Color::srgb(seabed.x, seabed.y, seabed.z)))),
+        MeshMaterial3d(paints.add(matte(Color::srgb(seabed.x, seabed.y, seabed.z)))),
         Transform::from_xyz(0.0, -OCEAN_DEPTH - SEA_FLOOR_CLEARANCE, 0.0),
     ));
 
@@ -702,7 +818,7 @@ fn enter_world(
         alpha_mode: AlphaMode::Blend,
         ..matte(Color::srgba(tint.x, tint.y, tint.z, WATER_ALPHA))
     };
-    commands.insert_resource(LakeMaterial(materials.add(still(LAKE_WATER))));
+    commands.insert_resource(LakeMaterial(paints.add(still(LAKE_WATER))));
 
     // The sea alone wears the swell on top — a lake is sheltered water, and
     // stiller than the sea is most of what makes it read as one. The swell
@@ -976,7 +1092,7 @@ fn within(chunk: IVec2, focus: Vec2, radius: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::ground::{quantize, Shade};
+    use protocol::ground::{quantize, MATERIAL_COUNT};
 
     /// A payload of ground with a distinctive shape: a plane tilted along both
     /// axes, so that every corner has a different height and any transposed or
@@ -984,29 +1100,29 @@ mod tests {
     /// one.
     fn a_slope() -> ChunkPayload {
         ChunkPayload {
-            heights: (0..FACET_VERTS * FACET_VERTS)
+            heights: (0..CORNERS * CORNERS)
                 .map(|i| {
-                    let (ix, iz) = (i % FACET_VERTS, i / FACET_VERTS);
+                    let (ix, iz) = (i % CORNERS, i / CORNERS);
                     quantize(ix as f32 + 10.0 * iz as f32)
                 })
                 .collect(),
-            surfaces: vec![Surface::new(Tone::Grass, Shade::Plain); FACET_TRIS],
+            materials: vec![Material::Grass; MATERIAL_COUNT],
             water: None,
             plants: Vec::new(),
         }
     }
 
     #[test]
-    fn a_chunk_mesh_is_two_flat_triangles_per_quad() {
+    fn a_chunk_mesh_is_one_flat_lozenge_per_cell() {
         let payload = a_slope();
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
-        let mesh = chunk_mesh(&heights, &payload.surfaces);
+        let mesh = chunk_mesh(&heights, &payload.materials);
 
-        assert_eq!(mesh.count_vertices(), FACET_TRIS * 3);
-        assert!(
-            mesh.indices().is_none(),
-            "flat shading needs no index buffer"
-        );
+        // Four vertices to a cell and six indices, not six vertices: the two
+        // triangles of a cell agree about everything, so they share corners.
+        assert_eq!(mesh.count_vertices(), CELL_COUNT * 4);
+        let indices = mesh.indices().expect("a cell shares its corners");
+        assert_eq!(indices.len(), CELL_COUNT * 6);
 
         let normals = mesh
             .attribute(Mesh::ATTRIBUTE_NORMAL)
@@ -1018,30 +1134,101 @@ mod tests {
             other => panic!("colours came out as {other:?}"),
         };
 
-        for tri in 0..normals.len() / 3 {
-            let i = tri * 3;
-            for corner in 1..3 {
+        // All four agree — which is the whole point of the cell being the
+        // unit. A cell lit as two triangles would show the diagonal the wire
+        // deliberately stopped carrying.
+        for cell in 0..CELL_COUNT {
+            let i = cell * 4;
+            for vertex in 1..4 {
                 assert_eq!(
                     normals[i],
-                    normals[i + corner],
-                    "triangle {tri} has a varying normal"
+                    normals[i + vertex],
+                    "cell {cell} is lit as two triangles"
                 );
                 assert_eq!(
                     colors[i],
-                    colors[i + corner],
-                    "triangle {tri} has a varying colour"
+                    colors[i + vertex],
+                    "cell {cell} is painted as two triangles"
                 );
             }
-            // A heightfield can never overhang, so every facet faces upwards.
-            assert!(normals[i][1] > 0.0, "triangle {tri} faces downwards");
+            // A heightfield can never overhang, so every cell faces upwards.
+            assert!(normals[i][1] > 0.0, "cell {cell} faces downwards");
+        }
+
+        // And every index is some cell's own corner. An index that strayed
+        // into the neighbouring cell would draw ground of the wrong colour
+        // and be almost impossible to see.
+        for (triangle, corners) in indices
+            .iter()
+            .collect::<Vec<_>>()
+            .chunks_exact(3)
+            .enumerate()
+        {
+            let cell = triangle / 2;
+            for corner in corners {
+                assert_eq!(
+                    corner / 4,
+                    cell,
+                    "triangle {triangle} reaches out of cell {cell}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_cell_is_split_on_the_diagonal_its_parity_calls_for() {
+        // The split alternates like a checkerboard, and the indices are where
+        // it shows. A cell's six indices name its four corners either way;
+        // which corner is named *twice* says which diagonal was cut, and it
+        // has to alternate or the ground grows a herringbone.
+        let heights: Vec<f32> = (0..CORNERS * CORNERS)
+            .map(|i| (i % CORNERS) as f32)
+            .collect();
+        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
+        let indices: Vec<usize> = mesh
+            .indices()
+            .expect("a cell shares its corners")
+            .iter()
+            .collect();
+
+        // The order the corners are pushed in, which the indices are relative
+        // to — south-west, south-east, north-west, north-east.
+        const SW: usize = 0;
+        const SE: usize = 1;
+        const NW: usize = 2;
+        const NE: usize = 3;
+
+        for (ix, iz) in [(0, 0), (1, 0), (0, 1), (1, 1), (CELLS - 1, 0)] {
+            let cell = iz * CELLS + ix;
+            let mut counts = std::collections::BTreeMap::new();
+            for at in &indices[cell * 6..cell * 6 + 6] {
+                *counts.entry(at - cell * 4).or_insert(0) += 1;
+            }
+            assert_eq!(
+                counts.len(),
+                4,
+                "cell ({ix}, {iz}) used something other than its four corners"
+            );
+            let shared: Vec<usize> = counts
+                .iter()
+                .filter(|(_, n)| **n == 2)
+                .map(|(corner, _)| *corner)
+                .collect();
+            let cut = if (ix + iz).is_multiple_of(2) {
+                // The south-west/north-east cut shares the other two.
+                vec![SE, NW]
+            } else {
+                vec![SW, NE]
+            };
+            assert_eq!(shared, cut, "cell ({ix}, {iz}) was cut the wrong way");
         }
     }
 
     #[test]
     fn chunk_positions_are_local_so_the_transform_places_them() {
-        let heights = vec![3.5f32; FACET_VERTS * FACET_VERTS];
-        let surfaces = vec![Surface::plain(Tone::Sand); FACET_TRIS];
-        let mesh = chunk_mesh(&heights, &surfaces);
+        let heights = vec![3.5f32; CORNERS * CORNERS];
+        let materials = vec![Material::Sand; MATERIAL_COUNT];
+        let mesh = chunk_mesh(&heights, &materials);
 
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1082,15 +1269,15 @@ mod tests {
         ground.deliver(IVec2::ZERO, Some(payload));
 
         // Every corner of the grid, at its own world position.
-        for iz in 0..FACET_VERTS {
-            for ix in 0..FACET_VERTS {
+        for iz in 0..CORNERS {
+            for ix in 0..CORNERS {
                 // The far edges belong to the next chunk along, which has not
                 // arrived; inside the chunk, a corner is its own height.
-                if ix == FACET_QUADS || iz == FACET_QUADS {
+                if ix == CELLS || iz == CELLS {
                     continue;
                 }
-                let at = Vec2::new(ix as f32, iz as f32) * FACET_METRES;
-                let want = heights[iz * FACET_VERTS + ix].max(0.0);
+                let at = Vec2::new(ix as f32, iz as f32) * CELL_METRES;
+                let want = heights[iz * CORNERS + ix].max(0.0);
                 let got = ground.surface(at.x, at.y).expect("the chunk arrived");
                 assert!(
                     (got - want).abs() < 1.0e-3,
@@ -1102,13 +1289,129 @@ mod tests {
         // And the middle of a facet is on the plane of that facet: this slope
         // is planar within each quad either way it is split, so the midpoint of
         // a quad is the mean of its four corners.
-        let mid = Vec2::splat(FACET_METRES * 0.5);
-        let mean =
-            (heights[0] + heights[1] + heights[FACET_VERTS] + heights[FACET_VERTS + 1]) / 4.0;
+        let mid = Vec2::splat(CELL_METRES * 0.5);
+        let mean = (heights[0] + heights[1] + heights[CORNERS] + heights[CORNERS + 1]) / 4.0;
         let got = ground.surface(mid.x, mid.y).expect("the chunk arrived");
         assert!(
             (got - mean).abs() < 1.0e-3,
             "{got} m across a facet, not {mean}"
+        );
+    }
+
+    /// Ground with a saddle in every cell: the two diagonals of a quad give
+    /// genuinely different heights down its middle, so anything that reads a
+    /// cell across the wrong one is off by a measurable amount.
+    ///
+    /// `a_slope()` cannot do this job — a plane is planar within each quad
+    /// either way it is cut, so it reads the same across both diagonals and
+    /// would pass whatever the split rule said.
+    fn a_saddle() -> Vec<f32> {
+        (0..CORNERS * CORNERS)
+            .map(|i| {
+                let (ix, iz) = (i % CORNERS, i / CORNERS);
+                // Alternating high and low corners, so each cell is a col
+                // between two ridges rather than a slope.
+                if (ix + iz).is_multiple_of(2) {
+                    4.0
+                } else {
+                    -4.0
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_ground_underfoot_is_read_off_the_triangle_that_is_drawn() {
+        // [`height_at`] and [`chunk_mesh`] both build from [`split`], and this
+        // is what holds them to it: the height reported inside a cell has to
+        // lie on the plane of whichever triangle the mesh actually drew over
+        // that spot. On a saddle the two diagonals disagree by metres down the
+        // middle of every cell, so a rule written twice and changed once would
+        // fail here loudly.
+        let heights = a_saddle();
+        let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("three floats each");
+        let indices: Vec<usize> = mesh
+            .indices()
+            .expect("a cell shares its corners")
+            .iter()
+            .collect();
+
+        // Both parities, and not only the first cell of each.
+        let cells = [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+            (7, 4),
+            (CELLS - 1, CELLS - 1),
+        ];
+        // Points spread across the cell, deliberately including both sides of
+        // either diagonal and the middle, where the two disagree most.
+        let spots = [
+            Vec2::new(0.25, 0.25),
+            Vec2::new(0.75, 0.25),
+            Vec2::new(0.25, 0.75),
+            Vec2::new(0.75, 0.75),
+            Vec2::new(0.5, 0.5),
+            Vec2::new(0.1, 0.6),
+        ];
+
+        let mut checked = 0;
+        for (ix, iz) in cells {
+            let cell = iz * CELLS + ix;
+            for spot in spots {
+                let local = (Vec2::new(ix as f32, iz as f32) + spot) * CELL_METRES;
+                let got = height_at(&heights, local);
+
+                // Whichever of the cell's two drawn triangles covers the spot,
+                // read straight off the mesh's own vertices.
+                let mut drawn = None;
+                for triangle in 0..2 {
+                    let corners: Vec<Vec2> = (0..3)
+                        .map(|k| {
+                            let at = positions[indices[cell * 6 + triangle * 3 + k]];
+                            Vec2::new(at[0], at[2])
+                        })
+                        .collect();
+                    let ys: Vec<f32> = (0..3)
+                        .map(|k| positions[indices[cell * 6 + triangle * 3 + k]][1])
+                        .collect();
+                    let cross = |p: Vec2, q: Vec2| p.x * q.y - p.y * q.x;
+                    let (a, b, c) = (corners[0], corners[1], corners[2]);
+                    let area = cross(b - a, c - a);
+                    let v = cross(local - a, c - a) / area;
+                    let w = cross(b - a, local - a) / area;
+                    let u = 1.0 - v - w;
+                    if u >= -1.0e-6 && v >= -1.0e-6 && w >= -1.0e-6 {
+                        drawn = Some(u * ys[0] + v * ys[1] + w * ys[2]);
+                        break;
+                    }
+                }
+
+                let drawn = drawn.expect("the cell's two triangles cover the cell");
+                assert!(
+                    (got - drawn).abs() < 1.0e-3,
+                    "cell ({ix}, {iz}) at {spot:?}: underfoot says {got} m, \
+                     the mesh draws {drawn} m"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, cells.len() * spots.len());
+
+        // And the saddle really does disagree across its diagonals, or the
+        // whole test would be vacuous — the middle of a cell is one ridge or
+        // the other, never the mean.
+        let middle = height_at(&heights, Vec2::splat(0.5 * CELL_METRES));
+        assert!(
+            middle.abs() > 1.0,
+            "{middle} m in the middle of a saddle cell — this ground is too \
+             flat to tell the two diagonals apart"
         );
     }
 
@@ -1139,10 +1442,10 @@ mod tests {
     /// A water grid with a lake at `level` metres over the square of corners
     /// below `edge`, and nothing anywhere else.
     fn a_lake(level: f32, edge: usize) -> Vec<u16> {
-        let mut water = vec![NO_WATER; FACET_VERTS * FACET_VERTS];
+        let mut water = vec![NO_WATER; CORNERS * CORNERS];
         for iz in 0..edge {
             for ix in 0..edge {
-                water[iz * FACET_VERTS + ix] = quantize(level);
+                water[iz * CORNERS + ix] = quantize(level);
             }
         }
         water
@@ -1198,21 +1501,21 @@ mod tests {
             .fold(0.0f32, f32::max);
         assert_eq!(
             reach,
-            8.0 * FACET_METRES,
+            8.0 * CELL_METRES,
             "the sheet stops at the last wet corner instead of running past it"
         );
     }
 
     #[test]
     fn ground_with_no_lake_on_it_draws_no_water() {
-        assert!(water_mesh(&vec![NO_WATER; FACET_VERTS * FACET_VERTS]).is_none());
+        assert!(water_mesh(&vec![NO_WATER; CORNERS * CORNERS]).is_none());
 
         // And a payload that carries no grid at all never gets as far as
         // asking — the common case, and the one that has to cost nothing.
         let dry = Arrival {
             chunk: IVec2::ZERO,
             heights: a_slope().heights.iter().copied().map(dequantize).collect(),
-            surfaces: a_slope().surfaces,
+            materials: a_slope().materials,
             water: None,
             plants: Vec::new(),
         };
@@ -1223,11 +1526,11 @@ mod tests {
     fn two_lakes_in_one_chunk_each_keep_their_own_level() {
         // A chunk can straddle two basins a hillside apart, which is the
         // whole reason the level travels per corner rather than per chunk.
-        let mut water = vec![NO_WATER; FACET_VERTS * FACET_VERTS];
+        let mut water = vec![NO_WATER; CORNERS * CORNERS];
         for iz in 0..4 {
             for ix in 0..4 {
-                water[iz * FACET_VERTS + ix] = quantize(6.0);
-                water[iz * FACET_VERTS + ix + 20] = quantize(31.0);
+                water[iz * CORNERS + ix] = quantize(6.0);
+                water[iz * CORNERS + ix + 20] = quantize(31.0);
             }
         }
 
@@ -1239,7 +1542,7 @@ mod tests {
             .expect("three floats each");
 
         for point in positions {
-            let want = if point[0] < 10.0 * FACET_METRES {
+            let want = if point[0] < 10.0 * CELL_METRES {
                 6.0 + OFF_LATTICE
             } else {
                 31.0 + OFF_LATTICE

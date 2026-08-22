@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use glam::{UVec2, Vec2, Vec3};
 
-use protocol::ground::{Tone, LAKE_WATER, SEA_WATER};
+use protocol::ground::{Material, LAKE_WATER, SEA_WATER};
 
 use crate::archipelago::{chunk_at, Archipelago, Island, IslandSpec};
 use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES};
@@ -96,9 +96,9 @@ pub fn render(config: &MapConfig, width: u32, height: u32) -> Image {
             let wz = iz as f32 * step.y - half.y;
             let normal = gen.normal(wx, wz);
             let height = gen.height(wx, wz);
-            let surface = gen.surface(wx, wz, height, normal);
+            let material = gen.material(wx, wz, height, normal);
             let lake = gen.lake_level(wx, wz);
-            pixels.extend_from_slice(&shade(surface.color(), height, lake, normal));
+            pixels.extend_from_slice(&shade(material.color(), height, lake, normal));
         }
     }
     Image {
@@ -156,7 +156,7 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
                 // island's own skirt reaches: any difference between the two
                 // would print every island's frame onto the water.
                 None => shade(
-                    Tone::Seabed.color(),
+                    Material::Seabed.color(),
                     -crate::archipelago::OCEAN_DEPTH,
                     None,
                     Vec3::Y,
@@ -164,9 +164,9 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
                 Some(island) => {
                     let normal = island.normal(wx, wz);
                     let height = island.height(wx, wz);
-                    let surface = island.surface(wx, wz, height, normal);
+                    let material = island.material(wx, wz, height, normal);
                     let lake = island.lake_level(wx, wz);
-                    shade(surface.color(), height, lake, normal)
+                    shade(material.color(), height, lake, normal)
                 }
             };
             pixels.extend_from_slice(&pixel);

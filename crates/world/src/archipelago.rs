@@ -22,7 +22,7 @@
 //! World coordinates are `f32` metres, so "endless" has a horizon after all —
 //! not one the layout imposes but one the arithmetic does. Measured against
 //! the two scales that matter, the height field's half-metre steps and the
-//! [`protocol::ground::FACET_METRES`] the ground is drawn at:
+//! [`protocol::ground::CELL_METRES`] the ground is drawn at:
 //!
 //! - out to about **1,280 km** neighbouring `f32` coordinates are 0.15 m
 //!   apart, so a half-metre step in the field still resolves and the ground is
@@ -44,12 +44,12 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, UVec2, Vec2, Vec3};
-use protocol::ground::{quantize, ChunkPayload, Surface};
+use protocol::ground::{quantize, ChunkPayload, Material};
 
 use crate::noise::smoothstep;
 use crate::terrain::{
-    facet_heights, facet_surfaces, facet_water, normal_at, MapConfig, TerrainGenerator,
-    CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
+    cell_materials, corner_heights, corner_water, normal_at, working_heights, MapConfig,
+    TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
 };
 
 pub use protocol::ground::{chunk_at, CHUNK_METRES};
@@ -425,9 +425,9 @@ impl Island {
 
     /// What the ground is painted at a world point, matching
     /// [`Island::height`].
-    pub fn surface(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Surface {
+    pub fn material(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Material {
         let local = Vec2::new(wx, wz) - self.spec.centre();
-        self.generator.surface(local.x, local.y, height, normal)
+        self.generator.material(local.x, local.y, height, normal)
     }
 
     /// Surface normal at a world point, from central differences one tile out.
@@ -811,17 +811,18 @@ impl Archipelago {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
 
-        let heights = facet_heights(base, |wx, wz| island.height(wx, wz));
+        let working = working_heights(base, |wx, wz| island.height(wx, wz));
+        let heights = corner_heights(&working);
         if heights.iter().all(|h| *h == -OCEAN_DEPTH) {
             return None;
         }
 
         Some(ChunkPayload {
-            surfaces: facet_surfaces(base, &heights, |wx, wz, height, normal| {
-                island.surface(wx, wz, height, normal)
+            materials: cell_materials(base, &working, |wx, wz, height, normal| {
+                island.material(wx, wz, height, normal)
             }),
             heights: heights.iter().copied().map(quantize).collect(),
-            water: facet_water(base, &heights, |wx, wz| island.lake_level(wx, wz)),
+            water: corner_water(base, &heights, |wx, wz| island.lake_level(wx, wz)),
             plants: crate::plants::plants(&island, chunk),
         })
     }
@@ -844,7 +845,7 @@ impl Archipelago {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
 
-        let heights = facet_heights(base, |wx, wz| island.height(wx, wz));
+        let heights = corner_heights(&working_heights(base, |wx, wz| island.height(wx, wz)));
         if heights.iter().all(|h| *h == -OCEAN_DEPTH) {
             return None;
         }
@@ -1349,10 +1350,7 @@ mod tests {
                 .heights
                 .iter()
                 .flat_map(|h| h.to_le_bytes())
-                .chain(payload.surfaces.iter().map(|s| {
-                    // Tone and shade in one byte, as the wire packs them.
-                    ((s.tone as u8) << 2) | s.shade as u8
-                }))
+                .chain(payload.materials.iter().map(|tone| tone.to_byte()))
                 .chain(payload.water.iter().flatten().flat_map(|w| w.to_le_bytes())),
         );
 
@@ -1362,7 +1360,7 @@ mod tests {
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0xD15B_BF89_88DF_E229, "the ground changed");
         assert_eq!(
-            sent, 0x280F_62FA_7F47_17E3,
+            sent, 0x8ADD_175F_FE7C_E49E,
             "what a client would be sent changed"
         );
     }
