@@ -427,41 +427,92 @@ pub(crate) enum MenuButton {
 }
 
 impl MenuButton {
-    /// The bare words a `click` line may start with, in the order the error
-    /// that lists them says them: roughly the order a player meets them,
-    /// screen by screen down from the main menu.
+    /// The bare word this button answers to in a `click` line — see
+    /// [`crate::control`].
     ///
-    /// The ones that take an argument are named here without it — what
-    /// [`MenuButton::parse`] wants after them is in [`MenuButton::WANTS`].
-    pub(crate) const NAMES: [&'static str; 27] = [
-        "set-sail",
-        "new-world",
-        "join-world",
-        "options",
-        "display",
-        "controls",
-        "exit",
-        "random-seed",
-        "share",
-        "start",
-        "open-kept",
-        "ask-discard",
-        "discard",
-        "keep-it",
-        "kept-share",
-        "connect",
-        "rebind",
-        "reset-keys",
-        "fullscreen",
-        "resolutions",
-        "resolution",
-        "shut-resolutions",
-        "shadows",
-        "apply",
-        "back",
-        "resume",
-        "leave-world",
+    /// Matched on `self` rather than listed beside the enum, which is the
+    /// whole point: a button added to a screen cannot be added without being
+    /// named, because the compiler asks. [`Action::name`] is the same shape
+    /// for the same reason. The four that carry something are named without
+    /// it; what comes after is [`MenuButton::parse`]'s business.
+    ///
+    /// One word, hyphenated where it needs to be, because a line is split on
+    /// spaces and a name with one in it could not be typed.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::SetSail => "set-sail",
+            Self::NewWorld => "new-world",
+            Self::JoinWorld => "join-world",
+            Self::Options => "options",
+            Self::Display => "display",
+            Self::Controls => "controls",
+            Self::Exit => "exit",
+            Self::RandomSeed => "random-seed",
+            Self::ToggleShare => "share",
+            Self::Start => "start",
+            Self::OpenKept(_) => "open-kept",
+            Self::AskDiscard(_) => "ask-discard",
+            Self::Discard(_) => "discard",
+            Self::KeepIt => "keep-it",
+            Self::ToggleKeptShare => "kept-share",
+            Self::Connect => "connect",
+            Self::Rebind(_) => "rebind",
+            Self::ResetKeys => "reset-keys",
+            Self::ToggleFullscreen => "fullscreen",
+            Self::OpenResolutions => "resolutions",
+            Self::PickResolution(_) => "resolution",
+            Self::ShutResolutions => "shut-resolutions",
+            Self::ToggleShadows => "shadows",
+            Self::ApplyDisplay => "apply",
+            Self::Back => "back",
+            Self::Resume => "resume",
+            Self::LeaveWorld => "leave-world",
+        }
+    }
+
+    /// One of every button, in the order a missed name is offered them:
+    /// roughly the order a player meets them, screen by screen down from the
+    /// main menu.
+    ///
+    /// The arguments here are placeholders and nothing reads them — what this
+    /// list is for is [`MenuButton::name`], which does not look. It is the
+    /// grammar's index rather than the grammar, and a test holds the two to
+    /// agreement.
+    const EVERY: [Self; 27] = [
+        Self::SetSail,
+        Self::NewWorld,
+        Self::JoinWorld,
+        Self::Options,
+        Self::Display,
+        Self::Controls,
+        Self::Exit,
+        Self::RandomSeed,
+        Self::ToggleShare,
+        Self::Start,
+        Self::OpenKept(0),
+        Self::AskDiscard(0),
+        Self::Discard(0),
+        Self::KeepIt,
+        Self::ToggleKeptShare,
+        Self::Connect,
+        Self::Rebind(Action::MoveForward),
+        Self::ResetKeys,
+        Self::ToggleFullscreen,
+        Self::OpenResolutions,
+        Self::PickResolution(Resolution::Native),
+        Self::ShutResolutions,
+        Self::ToggleShadows,
+        Self::ApplyDisplay,
+        Self::Back,
+        Self::Resume,
+        Self::LeaveWorld,
     ];
+
+    /// Every name there is, for the line a missed one is answered with — read
+    /// off [`MenuButton::name`] so the offer and the grammar cannot disagree.
+    pub(crate) fn names() -> Vec<&'static str> {
+        Self::EVERY.iter().map(|button| button.name()).collect()
+    }
 
     /// What the four buttons that carry something want said after their name.
     pub(crate) const WANTS: &'static str = "`open-kept`, `ask-discard` and `discard` want a row \
@@ -470,10 +521,7 @@ impl MenuButton {
 
     /// The button a `click` line names, or `None` for a line that names none.
     ///
-    /// One word and, for the four that carry something, one more. Short
-    /// because it is meant to be typed, and hyphenated for the same reason
-    /// [`Action::name`] is: a line is split on spaces, so a button's name
-    /// cannot have one in it.
+    /// One word and, for the four that carry something, one more.
     pub(crate) fn parse(words: &[&str]) -> Option<Self> {
         Some(match words {
             ["set-sail"] => Self::SetSail,
@@ -501,11 +549,19 @@ impl MenuButton {
             ["fullscreen"] => Self::ToggleFullscreen,
             ["resolutions"] => Self::OpenResolutions,
             ["resolution", "native"] => Self::PickResolution(Resolution::Native),
-            ["resolution", rung] => Self::PickResolution(
+            // The rung by its *rows* and not by the label the button wears.
+            // `label` exists to be read on a screen — it is display text, and
+            // a parser that went through it would break the day it read
+            // "1080p60" or was translated, silently and with nothing to catch
+            // it. What is being asked here is whether the ladder has a rung
+            // that tall, which is a question about the value.
+            ["resolution", rung] => {
+                let wanted = Resolution::Rows(rung.parse().ok()?);
                 settings::LADDER
                     .into_iter()
-                    .find(|it| it.label() == format!("{rung}p"))?,
-            ),
+                    .find(|rung| *rung == wanted)
+                    .map(Self::PickResolution)?
+            }
             ["shut-resolutions"] => Self::ShutResolutions,
             ["shadows"] => Self::ToggleShadows,
             ["apply"] => Self::ApplyDisplay,

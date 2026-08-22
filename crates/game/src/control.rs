@@ -980,7 +980,7 @@ fn button(words: &[&str], on_screen: &Query<&MenuButton>) -> Result<MenuButton, 
     let Some(wanted) = MenuButton::parse(words) else {
         return Err(format!(
             "`click` wants a button — `click new-world`\nbuttons: {}\n{}",
-            MenuButton::NAMES.join(", "),
+            MenuButton::names().join(", "),
             MenuButton::WANTS
         ));
     };
@@ -1447,6 +1447,34 @@ mod tests {
         assert!(why.contains("new-world"), "unhelpful: {why}");
     }
 
+    /// Every button `click` offers can be clicked, and lands on the button it
+    /// named. The listing is an index rather than the grammar — `parse` never
+    /// reads it — so this is what holds the two to agreement, the way
+    /// `server::console`'s `VERBS` is held to `interpret`.
+    ///
+    /// The four that carry something are given one here. A button that grew
+    /// an argument and did not say so would show up as its bare name failing
+    /// to parse.
+    #[test]
+    fn every_button_offered_is_a_button_that_can_be_clicked() {
+        for name in MenuButton::names() {
+            let line: Vec<&str> = match name {
+                "open-kept" | "ask-discard" | "discard" => vec![name, "0"],
+                "rebind" => vec![name, "forward"],
+                "resolution" => vec![name, "native"],
+                _ => vec![name],
+            };
+            let button = MenuButton::parse(&line)
+                .unwrap_or_else(|| panic!("`click {}` is offered and refused", line.join(" ")));
+            assert_eq!(
+                button.name(),
+                name,
+                "`click {}` landed on another button",
+                line.join(" ")
+            );
+        }
+    }
+
     /// The buttons that carry something take it as a second word — a row
     /// number, a control, a rung of the display ladder.
     #[test]
@@ -1477,6 +1505,13 @@ mod tests {
         assert_eq!(MenuButton::parse(&["open-kept", "last"]), None);
         assert_eq!(MenuButton::parse(&["rebind", "sideways"]), None);
         assert_eq!(MenuButton::parse(&["resolution", "1441"]), None, "no rung");
+        // Read as rows and not as the label the button wears, so that
+        // changing what the screen prints cannot quietly stop this parsing.
+        assert_eq!(
+            MenuButton::parse(&["resolution", "1080p"]),
+            None,
+            "the label is not the grammar"
+        );
         assert_eq!(MenuButton::parse(&[]), None);
     }
 
