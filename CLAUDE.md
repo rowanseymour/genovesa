@@ -38,20 +38,25 @@ to agree across machines, and neither pin is legacy baggage to be filed off:
 So inside `world`: no `f32::powf` (use `terrain::pow`), and nothing may depend
 on time, addresses or `HashMap` order.
 
-## The client is meant to be replaceable
+## The client stays thin
 
 `game` generates nothing and knows nothing about how the world is made: it asks
-for chunks and draws the answers. Keep it that way — it should stay portable to
-another language against `protocol`'s documentation alone. Concretely, `game`
-must not depend on `world`, and anything a client needs in order to *draw*
-belongs in `protocol` rather than being recomputed either side.
+for chunks and draws the answers. Keep it that way — `game` must not depend on
+`world`, and anything a client needs in order to *draw* belongs in `protocol`
+rather than being recomputed either side.
+
+This is not a porting plan. There was one — the client rewritten in another
+language, three.js — and it is abandoned: the one Rust client here runs on
+macOS, Windows and whatever else, built from the checkout that built the
+server. So the drift the section above guards against is what one codebase
+does on two operating systems — the libms `terrain::pow` shuts out — never a
+second implementation to be kept in step.
 
 ## Nobody is playing this yet
 
 Every world is served and the server can hold a roster, but what runs is one
-client over the loopback. The split is a bet on a client small enough to
-rewrite in another language, and on company later — it is not a response to
-traffic.
+client over the loopback. The split is a bet on company later — it is not a
+response to traffic.
 
 So the wire's size is not an argument, and neither is anything else about
 load. Justify a shape by what it lets a client do, or by what it stops the two
@@ -110,6 +115,6 @@ not a long one.
 ## Odds and ends
 
 - Only `game` may see Bevy. After moving things between crates, check both that
-  and "The client is meant to be replaceable" (README has the two commands).
+  and "The client stays thin" (README has the two commands).
 - Judge a change to the generator on nine seeds (`mapgen grid`), never on one
   favourite map.

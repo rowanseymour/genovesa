@@ -19,8 +19,10 @@ The first build compiles all of Bevy and takes several minutes. Afterwards
 `cargo run --features dev` is quicker, and watches `assets/` so a model
 re-exported while the game is running is picked up without a restart.
 
-`tools/macos-app.sh` wraps it as `target/Genovesa.app`. Its signature is
-ad-hoc, which opens it on the machine that built it and nowhere else.
+The same client builds and runs on macOS, Windows and Linux; there is no web
+build, and none planned. `tools/macos-app.sh` wraps the macOS one as
+`target/Genovesa.app` — its signature is ad-hoc, which opens it on the machine
+that built it and nowhere else.
 
 ## How it fits together
 
