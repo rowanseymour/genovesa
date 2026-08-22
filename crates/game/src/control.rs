@@ -579,10 +579,9 @@ fn serve_orders(
     mut exit: MessageWriter<AppExit>,
 ) {
     // Copied out and written back so that serving the line can borrow the
-    // rest of the resource — the handle it photographs into, and the switch
-    // `hold` throws. Both halves need it: a line in hand can be a `hold` that
-    // has been waiting for the sky since the frame it arrived.
-    let target = control.target.clone();
+    // rest of the resource. A line in hand can be a `hold` that has been
+    // waiting for the sky since the frame it arrived, so both paths below
+    // write it.
     let mut holding = control.holding;
 
     if let Some(mut doing) = control.doing.take() {
@@ -624,7 +623,9 @@ fn serve_orders(
         &mut hands,
         &mut exit,
         Held {
-            target,
+            // Only a starting line photographs anything; one already in hand
+            // carries the handle it was given.
+            target: control.target.clone(),
             holding: &mut holding,
         },
     );
