@@ -303,8 +303,10 @@ impl Ground {
     }
 
     /// Whether everything asked for has arrived and been handed to a mesh
-    /// builder. What the socket's `shot` and `focus` wait on before they
-    /// answer — the picture is not of the world until the world has turned up.
+    /// builder. What the socket waits on before it answers — `shot`, the view
+    /// verbs, and any line the world answered by putting the player down
+    /// somewhere else — because the picture is not of the world until the
+    /// world has turned up.
     pub fn settled(&self) -> bool {
         self.outstanding.is_empty() && self.to_ask.is_empty() && self.arrived.is_empty()
     }

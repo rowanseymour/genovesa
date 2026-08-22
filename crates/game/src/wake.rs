@@ -192,7 +192,7 @@ impl Track {
 
         // A hull that has covered more ground than it could possibly have
         // sailed has been *put* there rather than got there — a world
-        // entered, a boat launched somewhere on a command line — and the
+        // entered, a `goto` answered — and the
         // track behind it is a place it has never been. Kept, it would be
         // joined to where the boat now is by one straight segment across
         // however much ocean lies between.
@@ -448,8 +448,8 @@ mod tests {
 
     #[test]
     fn a_hull_put_somewhere_does_not_drag_its_wake_along() {
-        // Entering a world, or a boat launched at a point on a command line,
-        // moves a hull further in a frame than any hull can sail. Keeping the
+        // Entering a world, or being taken to a place by `goto`, moves a
+        // hull further in a frame than any hull can sail. Keeping the
         // track across that would join the two places with one straight
         // segment, and paint a wake down however much ocean lies between.
         let mut track = Track::default();

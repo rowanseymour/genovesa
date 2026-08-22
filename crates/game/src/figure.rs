@@ -74,9 +74,10 @@ const SETTLING: f32 = 9.0;
 
 /// How big a step has to be, in metres, before it is not a step at all.
 /// Boarding a boat puts the player from wherever they stood onto its deck,
-/// and the socket's `focus` teleport is a jump in the same transform this reads
-/// — without this, the arithmetic below would take a hundred metres of either
-/// for a hundred metres of walking and spin the legs through a dozen strides.
+/// and a put down — the world moving them, which is what the console's `goto`
+/// asks for — is a jump in the same transform this reads. Without this, the
+/// arithmetic below would take a hundred metres of either for a hundred
+/// metres of walking and spin the legs through a dozen strides.
 ///
 /// A distance rather than a speed, deliberately. Judging it as a speed means
 /// dividing by the frame's own `dt`, and a frame that took longer than the one
