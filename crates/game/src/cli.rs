@@ -1,9 +1,9 @@
 //! The game binary's command line.
 //!
 //! Deliberately short. What a run needs to be *started* with is here — which
-//! world, which screen, whether to join somebody else's — and everything
-//! about how a run behaves once it is going is said down the debug socket
-//! instead, in [`crate::control`]'s grammar.
+//! world, whether to join somebody else's — and everything about how a run
+//! behaves once it is going is said down the debug socket instead, in
+//! [`crate::control`]'s grammar.
 //!
 //! It used to carry the second kind too: a point to look at, a distance, a
 //! bearing, a list of pictures to take, an hour to open at. Each of those
@@ -14,24 +14,33 @@
 //! more, so the options went rather than staying on as a second way of saying
 //! a subset.
 //!
+//! The screens went the same way, and last. They were thirteen names for
+//! *opening on* a screen, which is not the same as reaching one: opening on
+//! the controls screen teleports past the code that opens it, so it could
+//! show that screen but never a row of it armed and waiting for a key, nor
+//! any other state a screen can only be walked into. The socket's `click`
+//! walks in, so the names bought a shortcut past the interesting half and
+//! nothing else.
+//!
 //! What is left is what a socket cannot say, because it is settled before
-//! there is a game to say it to: the world, the screen, whether there is a
-//! window at all, and the port the socket itself listens on.
+//! there is a game to say it to: the world, whether there is a window at
+//! all, and the port the socket itself listens on. Which screen a run opens
+//! on is not among them — it follows from whether a world was asked for.
 
 use bevy::math::{Vec2, Vec3};
 use protocol::DEFAULT_PORT;
 
 use crate::camera::View;
-use crate::{AppState, Helm};
+use crate::AppState;
 use server::{random_seed, WorldConfig};
 
 /// What the command line asked for.
 pub struct Args {
+    /// Where the run opens, which is not chosen but *followed*: a run that
+    /// named a world to be in opens in it, and a run that named none opens on
+    /// the main menu with a socket — if it has one — able to click its way
+    /// wherever it likes.
     pub state: AppState,
-    /// What the player is doing in the world, when the screen asked for is one
-    /// inside a world. Ignored otherwise — there is no helm to be at on a menu
-    /// screen — so it costs the menu screens nothing to carry it.
-    pub helm: Helm,
     pub config: WorldConfig,
     /// Server to join, as `host` or `host:port`. A joined run takes the
     /// world — and where to look — from the server's welcome.
@@ -97,14 +106,10 @@ Genovesa — an endless ocean of generated islands to look around.
 Usage: game [options]
 
 Options:
-  --state <screen>  start on `mainmenu`, `setsail`, `newworld`, `joinworld`,
-                    `options`, `display`, `controls`, `inworld`, `paused`,
-                    `pausedoptions`, `pauseddisplay`, `pausedcontrols` or
-                    `chart`
-                    [default: mainmenu, or inworld when a server or a debug
-                    socket is asked for]
-  --seed <n>        the world to open [default: a new one every run, and the
-                    run says which so it can be asked for again]
+  --seed <n>        a world to open, and the run opens in it rather than on
+                    the menu [default: no world — the menu, where one is
+                    chosen; a world started there says which seed it got, so
+                    it can be asked for again]
   --join <host[:port]>  play in somebody else's world instead of opening one;
                     the server says where the world is entered, and the run
                     starts in that world rather than on a screen
@@ -121,10 +126,15 @@ Debugging:
                     and a blank line. Everything the console takes: `set` for
                     this client's own switches, anything else for the server.
                     Plus the words a keyboard never needed — `shot`, `press`,
-                    `zoom`, `yaw`, `hold` and `quit`. Send `help` for
-                    the whole vocabulary
+                    `click`, `zoom`, `yaw`, `hold` and `quit`. Send `help`
+                    for the whole vocabulary
   --headless        no window: draw off screen and be driven down the socket
                     alone
+
+A debugged run opens where any other run would. There used to be a `--state`
+for the screen to start on, and `click` replaced it: a screen opened outright
+is a screen with none of its history, and the socket can walk to any of them
+— through the transitions, which is where the interesting states are.
 
 The view, the weather, the clock, the controls and the size of the pictures are
 reached down the socket and nowhere else — an option could only ever say them
@@ -148,8 +158,8 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // the ocean is endless and there is nothing special about any seed in it,
     // so a run that says nothing is better off somewhere it has not been.
     let mut args = Args {
+        // Settled at the end, out of what was asked for.
         state: AppState::MainMenu,
-        helm: Helm::Sailing,
         config: WorldConfig {
             seed: random_seed(),
         },
@@ -159,7 +169,6 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         headless: false,
         view: View::default(),
     };
-    let mut state_given = false;
 
     // `--headless` is the one flag that stands on its own; every other option
     // takes a value, so past it an option in the last position is always a
@@ -174,10 +183,6 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
             .next()
             .ok_or_else(|| format!("`{flag}` needs a value"))?;
         match flag.as_str() {
-            "--state" => {
-                (args.state, args.helm) = state(value)?;
-                state_given = true;
-            }
             "--seed" => {
                 args.config.seed = value
                     .parse()
@@ -206,18 +211,6 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         );
     }
 
-    // And a joined session is only a session in the served world. Starting on
-    // any other screen leaves it running behind a menu whose "new world" opens
-    // a second one — the run would go on reporting its position into an ocean
-    // it is no longer standing in, and draw the other players' markers on
-    // ground that isn't theirs.
-    if args.join.is_some() && state_given && args.state != AppState::InWorld {
-        return Err(
-            "`--join` plays in the served world, so a joined run cannot start on another screen"
-                .into(),
-        );
-    }
-
     // Windowless is a thing a debugged run can be, not a thing a run can be on
     // its own: without the socket there would be nothing to drive it and no
     // way to see that it was running at all.
@@ -229,9 +222,17 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
         );
     }
 
-    // Joining a server means playing in its world, and a socket has nothing to
-    // drive on a menu — so save every caller from saying so.
-    if (args.join.is_some() || args.debug.is_some()) && !state_given {
+    // A run that named a world opens in it, and a run that named none opens on
+    // the menu. That is the whole rule, and it is a rule rather than an option
+    // because the two halves of it were never really separable: a `--seed`
+    // that left the run on a menu was a world nobody opened, which is what it
+    // used to be without `--state inworld` beside it.
+    //
+    // A debug socket is not part of it. It used to force a world, on the
+    // grounds that there was nothing to drive on a menu; there is now — see
+    // [`crate::control`]'s `click` — so a debugged run opens where any other
+    // run would and clicks its way in if it wants a world.
+    if args.join.is_some() || args.seed_given {
         args.state = AppState::InWorld;
     }
 
@@ -240,29 +241,6 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // one that can say where it is entered. See [`Args::opened_on`], which the
     // binary calls once a welcome has arrived.
     Ok(args)
-}
-
-/// A screen by name, as the two states it takes to be on one. The screens
-/// inside a world are named in their own right rather than behind a second
-/// flag: opening on the pause menu is as fair a thing to ask for as opening on
-/// any other, and it wants a world drawn behind it.
-fn state(value: &str) -> Result<(AppState, Helm), String> {
-    match value {
-        "mainmenu" => Ok((AppState::MainMenu, Helm::Sailing)),
-        "setsail" => Ok((AppState::SetSail, Helm::Sailing)),
-        "newworld" => Ok((AppState::NewWorld, Helm::Sailing)),
-        "joinworld" => Ok((AppState::JoinWorld, Helm::Sailing)),
-        "options" => Ok((AppState::Options, Helm::Sailing)),
-        "display" => Ok((AppState::Display, Helm::Sailing)),
-        "controls" => Ok((AppState::Controls, Helm::Sailing)),
-        "inworld" => Ok((AppState::InWorld, Helm::Sailing)),
-        "paused" => Ok((AppState::InWorld, Helm::Paused)),
-        "pausedoptions" => Ok((AppState::InWorld, Helm::Options)),
-        "pauseddisplay" => Ok((AppState::InWorld, Helm::Display)),
-        "pausedcontrols" => Ok((AppState::InWorld, Helm::Controls)),
-        "chart" => Ok((AppState::InWorld, Helm::Chart)),
-        other => Err(format!("`{other}` is not a screen\n\n{}", usage())),
-    }
 }
 
 #[cfg(test)]
@@ -286,56 +264,44 @@ mod tests {
         assert!(!args.seed_given);
     }
 
+    /// A seed is a world to open, and opening it is what naming it means.
+    /// It used to need `--state inworld` beside it, without which the run sat
+    /// on the menu and the seed did nothing at all.
     #[test]
-    fn sets_up_the_world() {
-        let args = ok("--state inworld --seed 7");
+    fn a_named_world_is_a_world_the_run_opens_in() {
+        let args = ok("--seed 7");
         assert_eq!(args.state, AppState::InWorld);
         assert_eq!(args.config.seed, 7);
         assert!(args.seed_given);
     }
 
+    /// And a run that named none opens on the menu, socket or no socket. The
+    /// socket used to force a world on the grounds that a menu had nothing to
+    /// drive; `click` drives one.
     #[test]
-    fn opens_on_any_of_the_screens_by_name() {
-        assert_eq!(ok("--state mainmenu").state, AppState::MainMenu);
-        assert_eq!(ok("--state newworld").state, AppState::NewWorld);
-        assert_eq!(ok("--state options").state, AppState::Options);
-        assert_eq!(ok("--state display").state, AppState::Display);
-        assert_eq!(ok("--state controls").state, AppState::Controls);
-        assert_eq!(ok("--state inworld").state, AppState::InWorld);
+    fn a_run_that_named_no_world_opens_on_the_menu() {
+        assert_eq!(ok("--debug 7777").state, AppState::MainMenu);
+        assert_eq!(ok("--debug 7777 --headless").state, AppState::MainMenu);
+        assert_eq!(ok("--seed 7 --debug 7777").state, AppState::InWorld);
     }
 
-    /// The screens inside a world are a world plus what the player is doing in
-    /// it, so naming one has to set both — a pause menu with no world under it
-    /// would be a picture of nothing.
+    /// The screens are the socket's to walk to now, and an option that
+    /// quietly did nothing would be worse than one that is refused.
     #[test]
-    fn the_screens_over_a_world_open_with_the_world_under_them() {
-        assert_eq!(ok("--state inworld").helm, Helm::Sailing);
-
-        let paused = ok("--state paused");
-        assert_eq!(paused.state, AppState::InWorld);
-        assert_eq!(paused.helm, Helm::Paused);
-
-        let controls = ok("--state pausedcontrols");
-        assert_eq!(controls.state, AppState::InWorld);
-        assert_eq!(controls.helm, Helm::Controls);
-
-        let display = ok("--state pauseddisplay");
-        assert_eq!(display.state, AppState::InWorld);
-        assert_eq!(display.helm, Helm::Display);
-    }
-
-    /// Pausing is inside the served world, so it is one of the few screens a
-    /// joined run may start on — unlike the menus, which it may not.
-    #[test]
-    fn a_joined_run_may_start_paused() {
-        assert_eq!(ok("--state paused --join x").helm, Helm::Paused);
+    fn the_screens_are_not_asked_for_here() {
+        for line in ["--state mainmenu", "--state inworld", "--state paused"] {
+            assert!(
+                parse_args(line).is_err(),
+                "`{line}` should be refused — `click` walks there now"
+            );
+        }
     }
 
     /// A spawn and a facing as a server would have named them: afloat, with
     /// land off to one side.
     #[test]
     fn the_view_opens_where_the_world_says_it_is_entered() {
-        let mut args = ok("--seed 777 --state inworld");
+        let mut args = ok("--seed 777");
         args.opened_on(Vec2::new(20.0, -40.0), Vec2::new(120.0, -40.0));
         let view = args.starting_view();
         assert_eq!(view.focus, Vec3::new(20.0, 0.0, -40.0));
@@ -359,10 +325,6 @@ mod tests {
             parse_args("--join x --seed 7").is_err(),
             "a joined run is in a world it did not make"
         );
-        assert!(
-            parse_args("--state mainmenu --join x").is_err(),
-            "and cannot start on a menu over the top of it"
-        );
     }
 
     /// A debugged run takes a port and stays up to be driven.
@@ -372,19 +334,6 @@ mod tests {
         assert!(!ok("--debug 7777").headless);
         assert!(ok("--debug 7777 --headless").headless);
         assert_eq!(ok("--seed 7").debug, None);
-    }
-
-    /// And it opens in a world, the way a joined run does: there is nothing to
-    /// drive on a menu screen, and saying so every time would be a toll on the
-    /// common case.
-    #[test]
-    fn a_debugged_run_opens_in_a_world() {
-        assert_eq!(ok("--debug 7777").state, AppState::InWorld);
-        assert_eq!(
-            ok("--debug 7777 --state mainmenu").state,
-            AppState::MainMenu,
-            "a driver that asked for a menu gets one"
-        );
     }
 
     /// Windowless has to be asked for, and only means something with a socket

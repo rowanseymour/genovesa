@@ -137,6 +137,21 @@ impl Action {
 /// the one step back from wherever the player is — into the pause menu, out of
 /// it again, and out of setting a key; and the backquote is the way into and
 /// out of the debug console — see `crate::console`.
+/// The reserved key a typed line names, for the socket's `press` — see
+/// [`crate::control`]. Only Escape has a name, and the other five do not
+/// because they do not need one: the arrows are a second set of the movement
+/// controls, which `press forward` already says, and the backquote opens the
+/// console a socket line arrived down.
+///
+/// Escape does need one. It is the one step back from wherever the player is
+/// — into the pause menu and out again — and being reserved is exactly what
+/// leaves it with no [`Action`] for a `press` to find it by, so without this
+/// the pause menu and the three screens under it are reachable by a hand at a
+/// keyboard and by nothing else.
+pub fn reserved_key(name: &str) -> Option<KeyCode> {
+    (name == "escape").then_some(KeyCode::Escape)
+}
+
 pub const RESERVED: [KeyCode; 6] = [
     KeyCode::Escape,
     KeyCode::ArrowUp,

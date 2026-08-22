@@ -165,12 +165,10 @@ fn run(args: Args, session: Option<Session>, control: Option<control::Control>) 
 
     app.insert_state(args.state)
         // Comes into being with the world and goes with it, so it cannot be
-        // inserted the way a top-level state is. The pending value is read
-        // when the state is first created as well as on every change after,
-        // which is what lets `--state paused` open on the pause menu; a run
-        // that asked for no such thing sets the default it would have had.
+        // inserted the way a top-level state is. A run always enters a world
+        // at the helm — the pause menu and the screens under it are walked
+        // into, never opened on — so the default is the whole of it.
         .add_sub_state::<Helm>()
-        .insert_resource(NextState::Pending(args.helm))
         .insert_resource(args.starting_view())
         .add_plugins((
             // Before anything that draws a model: it owns the world's tones,
