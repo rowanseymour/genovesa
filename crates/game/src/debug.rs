@@ -595,10 +595,10 @@ struct ShadowLoad {
     cascades: usize,
 }
 
-/// Triangles a mesh draws. The terrain's chunk meshes are un-indexed — flat
-/// shading shares no vertices — so theirs is a vertex count; the sea and
-/// ocean-floor planes are indexed, and an index buffer overrules the vertex
-/// buffer wherever there is one.
+/// Triangles a mesh draws. An index buffer overrules the vertex buffer
+/// wherever there is one, which is everywhere the terrain and the water are —
+/// a mesh with no indices is one whose vertices are its triangles, three at a
+/// time.
 fn triangles_in(mesh: &Mesh) -> usize {
     match mesh.indices() {
         Some(indices) => indices.len() / 3,

@@ -32,7 +32,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::light::{
     CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver,
 };
-use bevy::mesh::PrimitiveTopology;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
@@ -508,19 +508,27 @@ struct OceanFloor;
 /// off the cell's index within the chunk, and [`CELLS`] is even, so the
 /// pattern carries across a chunk boundary without a phase step.
 ///
-/// No vertex is shared between triangles: that costs three vertices per
-/// triangle instead of roughly one — the price of flat shading with per-cell
-/// colour, paid in vertices rather than in the texture and gradient machinery
-/// the look exists to refuse. It also means chunks need no border samples to
-/// meet cleanly, there being no shared normals to disagree about.
+/// A cell's four corners are shared between its own two triangles and with
+/// nothing else. Flat shading means a corner carries the normal and the colour
+/// of the cell it belongs to, so the same point of ground is four different
+/// vertices where four cells meet — that much is the price of the look, paid
+/// in vertices rather than in the texture and gradient machinery the look
+/// exists to refuse. It also means chunks need no border samples to meet
+/// cleanly, there being no shared normals to disagree about.
 ///
-/// Deliberately un-indexed: with no vertex shared between triangles an index
-/// buffer would be 0, 1, 2, 3, … and save nothing.
+/// *Within* a cell, though, the two triangles agree about everything, so the
+/// cell is four vertices and six indices rather than six vertices. That is a
+/// third off the vertex count, and the shadow pass — which rasterises this
+/// geometry once per cascade it falls into, and does nothing per vertex but
+/// transform it — is the half of the frame that feels it. It only became
+/// possible when the colour moved from the triangle to the cell: while each
+/// triangle had its own palette entry the two halves disagreed, and an index
+/// buffer would have been 0, 1, 2, 3, … and saved nothing.
 fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
-    let count = CELL_COUNT * 6;
-    let mut positions = Vec::with_capacity(count);
-    let mut normals = Vec::with_capacity(count);
-    let mut colors = Vec::with_capacity(count);
+    let mut positions = Vec::with_capacity(CELL_COUNT * 4);
+    let mut normals = Vec::with_capacity(CELL_COUNT * 4);
+    let mut colors = Vec::with_capacity(CELL_COUNT * 4);
+    let mut indices = Vec::with_capacity(CELL_COUNT * 6);
 
     let corner = |cx: usize, cz: usize| {
         Vec3::new(
@@ -542,14 +550,6 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
             let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
             let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
 
-            // Counter-clockwise seen from above, which is what puts the face
-            // normals upwards.
-            let split = if (ix + iz).is_multiple_of(2) {
-                [[sw, nw, se], [se, nw, ne]]
-            } else {
-                [[sw, nw, ne], [sw, ne, se]]
-            };
-
             // The square's own normal, not each triangle's. The generator
             // classified the cell by this same normal — the mean slope of its
             // four corners — so lighting it this way is what makes a crag
@@ -566,14 +566,29 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
             let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
             let color = [linear.red, linear.green, linear.blue, 1.0];
 
-            // No UVs: nothing binds a texture to the ground, and at a hundred
+            // No UVs: nothing binds a texture to the ground, and at sixty-odd
             // thousand vertices a chunk an attribute carried "for later" is
-            // three-quarters of a megabyte of dead weight on every copy.
-            for vertex in split.into_iter().flatten() {
+            // half a megabyte of dead weight on every copy.
+            let first = positions.len() as u32;
+            for vertex in [sw, se, nw, ne] {
                 positions.push([vertex.x, vertex.y, vertex.z]);
                 normals.push([normal.x, normal.y, normal.z]);
                 colors.push(color);
             }
+
+            // Wound counter-clockwise seen from above, which is what puts the
+            // face normals upwards. Which diagonal the cell is cut on
+            // alternates like a checkerboard: cutting every cell the same way
+            // lines them up into an obvious herringbone across open ground,
+            // and alternating breaks that up for nothing. The parity runs off
+            // the cell's index within the chunk, and [`CELLS`] is even, so the
+            // pattern carries across a chunk boundary without a phase step.
+            let (sw, se, nw, ne) = (first, first + 1, first + 2, first + 3);
+            indices.extend(if (ix + iz).is_multiple_of(2) {
+                [sw, nw, se, se, nw, ne]
+            } else {
+                [sw, nw, ne, sw, ne, se]
+            });
         }
     }
 
@@ -584,6 +599,9 @@ fn chunk_mesh(heights: &[f32], materials: &[Material]) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    // Thirty-two bit, and not by preference: a chunk is 65,536 vertices, which
+    // is one past what sixteen bits can name.
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 /// Builds the surface of one chunk's standing water, or `None` where the
@@ -1036,11 +1054,11 @@ mod tests {
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
         let mesh = chunk_mesh(&heights, &payload.materials);
 
-        assert_eq!(mesh.count_vertices(), CELL_COUNT * 6);
-        assert!(
-            mesh.indices().is_none(),
-            "flat shading needs no index buffer"
-        );
+        // Four vertices to a cell and six indices, not six vertices: the two
+        // triangles of a cell agree about everything, so they share corners.
+        assert_eq!(mesh.count_vertices(), CELL_COUNT * 4);
+        let indices = mesh.indices().expect("a cell shares its corners");
+        assert_eq!(indices.len(), CELL_COUNT * 6);
 
         let normals = mesh
             .attribute(Mesh::ATTRIBUTE_NORMAL)
@@ -1052,13 +1070,12 @@ mod tests {
             other => panic!("colours came out as {other:?}"),
         };
 
-        // Six vertices to a cell, and all six agree — which is the whole
-        // point of the cell being the unit. Two triangles of one cell lit
-        // differently would show the diagonal the wire deliberately stopped
-        // carrying.
+        // All four agree — which is the whole point of the cell being the
+        // unit. A cell lit as two triangles would show the diagonal the wire
+        // deliberately stopped carrying.
         for cell in 0..CELL_COUNT {
-            let i = cell * 6;
-            for vertex in 1..6 {
+            let i = cell * 4;
+            for vertex in 1..4 {
                 assert_eq!(
                     normals[i],
                     normals[i + vertex],
@@ -1073,51 +1090,72 @@ mod tests {
             // A heightfield can never overhang, so every cell faces upwards.
             assert!(normals[i][1] > 0.0, "cell {cell} faces downwards");
         }
+
+        // And every index is some cell's own corner. An index that strayed
+        // into the neighbouring cell would draw ground of the wrong colour
+        // and be almost impossible to see.
+        for (triangle, corners) in indices
+            .iter()
+            .collect::<Vec<_>>()
+            .chunks_exact(3)
+            .enumerate()
+        {
+            let cell = triangle / 2;
+            for corner in corners {
+                assert_eq!(
+                    corner / 4,
+                    cell,
+                    "triangle {triangle} reaches out of cell {cell}"
+                );
+            }
+        }
     }
 
     #[test]
     fn every_cell_is_split_on_the_diagonal_its_parity_calls_for() {
-        // The split alternates like a checkerboard, and the vertices are the
-        // only place that shows. A cell's six vertices cover its four corners
-        // either way; which corner appears *twice* is what says which diagonal
-        // was cut, and it has to alternate or the ground grows a herringbone.
+        // The split alternates like a checkerboard, and the indices are where
+        // it shows. A cell's six indices name its four corners either way;
+        // which corner is named *twice* says which diagonal was cut, and it
+        // has to alternate or the ground grows a herringbone.
         let heights: Vec<f32> = (0..CORNERS * CORNERS)
             .map(|i| (i % CORNERS) as f32)
             .collect();
         let mesh = chunk_mesh(&heights, &vec![Material::Grass; MATERIAL_COUNT]);
-        let positions = mesh
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .expect("positions")
-            .as_float3()
-            .expect("three floats each");
+        let indices: Vec<usize> = mesh
+            .indices()
+            .expect("a cell shares its corners")
+            .iter()
+            .collect();
+
+        // The order the corners are pushed in, which the indices are relative
+        // to — south-west, south-east, north-west, north-east.
+        const SW: usize = 0;
+        const SE: usize = 1;
+        const NW: usize = 2;
+        const NE: usize = 3;
 
         for (ix, iz) in [(0, 0), (1, 0), (0, 1), (1, 1), (CELLS - 1, 0)] {
-            let i = (iz * CELLS + ix) * 6;
-            let xz: Vec<(u32, u32)> = (0..6)
-                .map(|v| (positions[i + v][0] as u32, positions[i + v][2] as u32))
-                .collect();
+            let cell = iz * CELLS + ix;
             let mut counts = std::collections::BTreeMap::new();
-            for corner in &xz {
-                *counts.entry(*corner).or_insert(0) += 1;
+            for at in &indices[cell * 6..cell * 6 + 6] {
+                *counts.entry(at - cell * 4).or_insert(0) += 1;
             }
             assert_eq!(
                 counts.len(),
                 4,
-                "a cell used something other than 4 corners"
+                "cell ({ix}, {iz}) used something other than its four corners"
             );
-            let shared: Vec<(u32, u32)> = counts
+            let shared: Vec<usize> = counts
                 .iter()
                 .filter(|(_, n)| **n == 2)
-                .map(|(c, _)| *c)
+                .map(|(corner, _)| *corner)
                 .collect();
             let cut = if (ix + iz).is_multiple_of(2) {
-                // sw--ne split: the two corners on that diagonal are shared.
-                vec![(ix as u32 + 1, iz as u32), (ix as u32, iz as u32 + 1)]
+                // The south-west/north-east cut shares the other two.
+                vec![SE, NW]
             } else {
-                vec![(ix as u32, iz as u32), (ix as u32 + 1, iz as u32 + 1)]
+                vec![SW, NE]
             };
-            let mut cut = cut;
-            cut.sort();
             assert_eq!(shared, cut, "cell ({ix}, {iz}) was cut the wrong way");
         }
     }
