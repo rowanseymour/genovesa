@@ -32,7 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{chunk_at, dequantize};
+use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH};
 use protocol::survey::{in_sight_along, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
@@ -1914,12 +1914,17 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     let mut boats = shared.boats.held();
                     // Granted to a player at the helm of a boat that carries
                     // one, and only alongside it — a tender is lowered over
-                    // the side, not sent across the bay. Anything else is
-                    // answered with the usual silence.
+                    // the side, not sent across the bay — and only where the
+                    // ship's anchor holds: see [`ANCHOR_DEPTH`], which is
+                    // what keeps a sloop from being abandoned over the open
+                    // ocean's floor. Anything else is answered with the
+                    // usual silence.
                     let ship = player.aboard.filter(|aboard| {
                         boats.get(aboard).is_some_and(|state| {
                             state.kind == BoatKind::Sloop
                                 && state.position.distance(position) <= BOARD_GRANT
+                                && shared.world.height(state.position.x, state.position.y)
+                                    >= -ANCHOR_DEPTH
                         })
                     });
                     match ship {

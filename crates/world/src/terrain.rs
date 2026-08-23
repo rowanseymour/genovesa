@@ -268,6 +268,18 @@ impl Targets {
 /// that open water reads as open water rather than as one endless shelf.
 const DEEP_FRACTION: f32 = 0.18;
 
+/// What [`DEEP_FRACTION`] grows to on the smallest maps, sliding on the same
+/// taper as [`shoal_shift`]. Their sea has to reach the floor *inside* the
+/// frame: left at the open-water share, the deepest cells all sit in the
+/// falloff ring, the whole visible lagoon stays shallow, and the shelf's
+/// outer edge is drawn by the frame — a rounded rectangle pressed against
+/// the chunk boundary, on every small island alike. Anchoring far more of
+/// the map at full depth pulls the drop-off well inside the frame, where
+/// the noise draws its line; the shelf that survives hugs the land instead,
+/// and a one-chunk islet that comes out a bare rock with no bank at all has
+/// paid the intended price.
+const DEEP_FRACTION_SMALL: f32 = 0.45;
+
 /// Depth the middle of the sea is guaranteed to reach, in metres — the mirror
 /// of [`LOWLAND_FLOOR`]. A minority of seeds run flat just *below* where the
 /// sea lands in the field, which the deep anchor cannot save: it pins one point
@@ -275,7 +287,7 @@ const DEEP_FRACTION: f32 = 0.18;
 /// the surface, and the map comes out one endless bright shelf. Set well past
 /// the last of the shallow-water colours rather than at their edge, a median
 /// pinned on the threshold leaving half the sea painted as shallows.
-const SHALLOWS_FLOOR: f32 = 6.5;
+const SHALLOWS_FLOOR: f32 = 8.0;
 
 /// Height the middle of the land is guaranteed to reach, in metres. A minority
 /// of seeds put nearly all their land within a metre or two of sea level — the
@@ -742,7 +754,7 @@ const LAKE_SHALLOWS: f32 = 22.0;
 
 /// Depths, in metres below sea level, at which the sea bed turns from shore
 /// colours to the bright shelf, and from the shelf to the deep bed.
-const SHALLOW_DEPTH: f32 = 1.8;
+const SHALLOW_DEPTH: f32 = 2.0;
 const SEABED_DEPTH: f32 = 4.5;
 
 /// Slope, as `1.0 - normal.y`, at which ground shows bare rock however high it
@@ -2227,7 +2239,8 @@ impl Calibration {
         // shallower than the floor bends the line. The floor eases with the
         // slide: the shallower the anchored cells, the less depth they have
         // to be guaranteed.
-        let deep = sea_level - quantile(DEEP_FRACTION);
+        let deep_fraction = DEEP_FRACTION + (DEEP_FRACTION_SMALL - DEEP_FRACTION) * shoal;
+        let deep = sea_level - quantile(deep_fraction);
         let depth_gain = MAX_DEPTH / deep.max(1e-4);
         let shallows_floor = SHALLOWS_FLOOR - 1.5 * shoal;
         let sea_knee = sea_level - quantile((1.0 - land) * (0.5 + 0.35 * shoal));
@@ -3471,8 +3484,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x26D2_9EE3_91D2_44AFu64),
-            (99, UVec2::new(3, 2), 0x6896_DA0D_73E9_E3D8u64),
+            (20_040_112u32, UVec2::new(4, 4), 0xCF31_58F8_CAEC_2E18u64),
+            (99, UVec2::new(3, 2), 0x4CCE_40DC_59D0_7DBFu64),
         ];
 
         for (seed, chunks, expected) in cases {

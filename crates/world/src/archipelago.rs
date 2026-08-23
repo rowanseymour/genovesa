@@ -35,7 +35,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, UVec2, Vec2, Vec3};
-use protocol::ground::{quantize, ChunkPayload, Material};
+use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH};
 
 use crate::noise::smoothstep;
 use crate::sunlight::Sunlight;
@@ -140,7 +140,16 @@ const SPAWN_CLEARING: i32 = 2;
 /// margin over a server's [scatter] and the waterline search's own stride.
 ///
 /// [scatter]: Archipelago::spawn
+///
+/// An offing, not a promise: the spawn walk comes back in from it where the
+/// water out there is too deep for the anchor — see [`SPAWN_ANCHORAGE`].
 pub const SPAWN_OFFSHORE: f32 = 48.0;
+
+/// The most water under a fresh arrival, in metres — comfortably inside
+/// [`ANCHOR_DEPTH`], the margin covering the server's scatter of second
+/// arrivals and a boat-length of glide, so that entry never opens on the one
+/// grant the server would refuse.
+const SPAWN_ANCHORAGE: f32 = ANCHOR_DEPTH - 1.5;
 
 /// Coarse parcels a widening island search spans, doubling until one of them
 /// answers. One coarse parcel is five kilometres and half its parcels hold an
@@ -738,6 +747,19 @@ impl Archipelago {
                 while terrain.height(point.x, point.y) >= 0.0 {
                     point -= stride;
                 }
+                // And back towards the shore should the offing lie past
+                // [`SPAWN_ANCHORAGE`]: a world is entered riding at anchor,
+                // and the first thing done there is putting the boat over
+                // the side, which is only granted where the anchor holds —
+                // see [`ANCHOR_DEPTH`]. Stops short of going dry, a wall of
+                // a coast offering nothing better than wet-but-deep.
+                while terrain.height(point.x, point.y) < -SPAWN_ANCHORAGE {
+                    let inshore = point + stride;
+                    if terrain.height(inshore.x, inshore.y) >= 0.0 {
+                        break;
+                    }
+                    point = inshore;
+                }
                 point
             }
             // An island with no land on the lattice — the map is nearly all
@@ -929,6 +951,25 @@ mod tests {
 
     fn specs(world: &Archipelago) -> Vec<IslandSpec> {
         world.islands_within(Vec2::splat(-WINDOW), Vec2::splat(WINDOW))
+    }
+
+    #[test]
+    fn a_world_is_entered_where_the_anchor_holds() {
+        // The world is entered riding at anchor, and the first grant anyone
+        // asks for — the boat over the side — is only given where the
+        // anchor holds. So the spawn owes its arrival water that is wet and
+        // no deeper than [`SPAWN_ANCHORAGE`], on every seed, whatever shape
+        // of coast the walk came in on.
+        for seed in [1, 7, 99, 20_040_112] {
+            let world = world(seed);
+            let spawn = world.spawn().expect("a world has an entry");
+            let depth = -world.height(spawn.point.x, spawn.point.y);
+            assert!(depth > 0.0, "seed {seed} enters on dry ground");
+            assert!(
+                depth <= SPAWN_ANCHORAGE,
+                "seed {seed} enters in {depth} m, past its own anchorage"
+            );
+        }
     }
 
     #[test]
@@ -1384,9 +1425,9 @@ mod tests {
             "layout digests to {layout:#018X}, ground to {ground:#018X}, sent to {sent:#018X}"
         );
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
-        assert_eq!(ground, 0xD15B_BF89_88DF_E229, "the ground changed");
+        assert_eq!(ground, 0x811F_02CF_E62B_C2B9, "the ground changed");
         assert_eq!(
-            sent, 0xBBEE_58B1_4C82_F896,
+            sent, 0x98A5_D80B_583F_5735,
             "what a client would be sent changed"
         );
     }

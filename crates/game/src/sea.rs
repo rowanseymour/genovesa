@@ -170,6 +170,20 @@ const SHADING_TILT: f32 = 4.0;
 /// [`OCEAN_DEPTH`]: protocol::ground::OCEAN_DEPTH
 const SHOAL: (f32, f32) = (6.5, 2.5);
 
+/// The depths across which the water goes blind, in metres: the surface's
+/// alpha climbs from the material's own (`WATER_ALPHA`, where the sea is
+/// built) as the bottom passes the first, and is fully opaque by the second.
+///
+/// The second is [`ANCHOR_DEPTH`] on purpose, and the ocean floor lies below
+/// *that* by construction — see [`OCEAN_DEPTH`] — so the open sea's bed is
+/// never seen at all: mid-ocean water is a surface over nothing, and the eye
+/// can read the anchorage rule straight off the water — ground showing
+/// through, however faintly, is water the anchor holds in.
+///
+/// [`ANCHOR_DEPTH`]: protocol::ground::ANCHOR_DEPTH
+/// [`OCEAN_DEPTH`]: protocol::ground::OCEAN_DEPTH
+const MURK: (f32, f32) = (5.0, protocol::ground::ANCHOR_DEPTH);
+
 /// Metres of *depth* between one shore crest and the next. The shore wave's
 /// phase is the depth itself, so this is its wavelength measured down the
 /// beach profile rather than across the water — on a typical island skirt it
@@ -415,7 +429,7 @@ pub struct SeaExtension {
     /// read the bottom's grade.
     #[uniform(100)]
     stagger: Vec4,
-    /// `xy` is [`FOAM_FEED`]; `zw` is padding.
+    /// `xy` is [`FOAM_FEED`]; `zw` is [`MURK`].
     #[uniform(100)]
     feed: Vec4,
     /// `xyz` is [`WHITECAP`]; `w` is padding.
@@ -515,7 +529,7 @@ impl SeaExtension {
             ),
             surf: Vec4::new(SHOAL.0, SHOAL.1, RUNUP, FOAM_CREST),
             stagger: Vec4::new(stagger_vector().x, stagger_vector().y, FOAM_SLOPE, SPACING),
-            feed: Vec4::new(FOAM_FEED.0, FOAM_FEED.1, 0.0, 0.0),
+            feed: Vec4::new(FOAM_FEED.0, FOAM_FEED.1, MURK.0, MURK.1),
             caps: Vec4::new(WHITECAP.0, WHITECAP.1, WHITECAP.2, 0.0),
             breaking: Vec4::new(BREAKING_FIELD.0, BREAKING_FIELD.1, 0.0, 0.0),
             window: Self::window_uniform(origin),

@@ -74,7 +74,23 @@ pub const NORTH: Vec2 = Vec2::NEG_Y;
 /// level, so the plane and the meshes meet along every coast with nothing to
 /// show for it; a client drawing its backdrop at some other depth would print
 /// a step around every island in the world.
-pub const OCEAN_DEPTH: f32 = 8.0;
+pub const OCEAN_DEPTH: f32 = 10.0;
+
+/// The deepest water a boat's anchor holds in, in metres.
+///
+/// Set short of [`OCEAN_DEPTH`] on purpose: the open ocean's floor is out of
+/// the anchor's reach everywhere, so a ship can only be left riding at anchor
+/// over an island's own shelf — never abandoned in the middle of the sea.
+/// The server holds the line — it is what grants leaving a helm — and it is
+/// written here rather than there because a client wants the same number, to
+/// let a key that cannot be granted do nothing instead of asking.
+pub const ANCHOR_DEPTH: f32 = 8.0;
+
+// The whole reason the two constants are two: a boat can be left at anchor
+// over an island's shelf and nowhere on the open ocean's floor. Were the
+// anchor to reach the floor, "anchored mid-ocean" would stop being impossible
+// and start being where boats get abandoned.
+const _: () = assert!(ANCHOR_DEPTH < OCEAN_DEPTH);
 
 /// Metres between the corners the ground is drawn from.
 ///
