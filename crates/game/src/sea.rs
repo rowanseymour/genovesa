@@ -467,27 +467,28 @@ pub struct SeaExtension {
     /// them to the shader that paints the foam.
     #[uniform(100)]
     pub(crate) wake: [Vec4; crate::wake::TRAIL],
-    /// The hole an open boat cuts in the surface: `xy` the centre of its
+    /// The holes the open boats cut in the surface: `xy` the centre of one's
     /// waterline footprint on the map — its widest station — and `zw` the
-    /// way the hull is pointing, as a unit vector. Written by
-    /// `boat::cut_the_water`, which owns the numbers the way the wake
-    /// module owns its; the fragment shader discards the water inside the
-    /// footprint, which is how a boat that is looked *into* is not drawn
-    /// full of sea.
+    /// way that hull is pointing, as a unit vector. Written by
+    /// `boat::cut_the_water`, which owns the numbers in these last three
+    /// fields the way the wake module owns its; the fragment shader discards
+    /// the water inside each footprint, which is how a boat that is looked
+    /// *into* is not drawn full of sea.
     #[uniform(100)]
-    pub(crate) hole: Vec4,
-    /// The footprint's reach from that centre: `x` forward to the stem, `y`
+    pub(crate) hole: [Vec4; crate::boat::HOLES],
+    /// Each footprint's reach from that centre: `x` forward to the stem, `y`
     /// aft to where its stern piece would close, `z` half its width, and
-    /// `w` 1.0 while there is a boat to cut for — zero closes the hole
-    /// entirely, which is every frame without an open hull afloat.
+    /// `w` 1.0 in a slot that holds a boat. The slots are filled from the
+    /// front, so the first `w` of zero is the end of the list — and all of
+    /// them zero is every frame without an open hull afloat.
     #[uniform(100)]
-    pub(crate) hole_axes: Vec4,
-    /// Its shape: `xy` the bow and stern pieces' fullness — superellipse
+    pub(crate) hole_axes: [Vec4; crate::boat::HOLES],
+    /// Their shapes: `xy` the bow and stern pieces' fullness — superellipse
     /// exponents — and `z` metres from the centre aft to the transom, where
     /// the outline is cut square. See `boat::OpenHull`, where each number's
     /// reasoning lives.
     #[uniform(100)]
-    pub(crate) hole_shape: Vec4,
+    pub(crate) hole_shape: [Vec4; crate::boat::HOLES],
     /// The depth window itself — see [`DepthWindow`], which owns the scroll
     /// and the sweep that keep it current.
     #[texture(101)]
@@ -527,9 +528,9 @@ impl SeaExtension {
             boil: Vec4::ZERO,
             wake_bounds: Vec4::new(1.0, 1.0, -1.0, -1.0),
             wake: [Vec4::ZERO; crate::wake::TRAIL],
-            hole: Vec4::ZERO,
-            hole_axes: Vec4::ZERO,
-            hole_shape: Vec4::ZERO,
+            hole: [Vec4::ZERO; crate::boat::HOLES],
+            hole_axes: [Vec4::ZERO; crate::boat::HOLES],
+            hole_shape: [Vec4::ZERO; crate::boat::HOLES],
             depth,
         }
     }
