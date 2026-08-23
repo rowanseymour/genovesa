@@ -1509,6 +1509,11 @@ pub(crate) const HOLES: usize = 8;
 /// The player's own boat is cut for first whatever else is about, being the
 /// one whose bilges the camera is looking straight down into; the rest go in
 /// by how near the eye they lie, and [`HOLES`] says where that stops.
+///
+/// That eye is the world's one [`MapCamera`], so a schedule without exactly
+/// one of those cuts nothing at all and says nothing about it — the same
+/// precondition [`crate::sea::refresh_depth`] takes, and the reason a headless
+/// test of this has to put a camera down before it looks.
 fn cut_the_water(
     hulls: Query<(Entity, &Transform, &OpenHull)>,
     players: Query<&ChildOf, With<Player>>,
