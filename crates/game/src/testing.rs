@@ -307,6 +307,31 @@ fn shore_island_height(at: Vec2) -> f32 {
     }
 }
 
+/// How steeply the plunging shore drops away, in metres of depth per metre
+/// out: several times [`crate::player::WALKABLE_RISE`], so a seabed judged
+/// as ground to be climbed is a wall — which is the whole point of it.
+const PLUNGE_PITCH: f32 = 4.0;
+
+/// A third patch of delivered world: level dry land to the west of `x = 0`,
+/// and east of it a seabed that plunges — straight, steep, and running the
+/// width of the world.
+///
+/// The two islands are both gentle where they meet the sea, and this is the
+/// case they cannot make: a shore a walker can stroll to the edge of and not
+/// a step further into, the water itself falling away faster than anybody
+/// climbs. What happens there is a rule of its own — see
+/// [`crate::player::walk`] — and this is the shape it is written against.
+pub fn plunging_shore() -> Ground {
+    hand_of_chunks(|at| {
+        if at.x <= 0.0 {
+            // Barely a slope, so nothing about the dry half is under test.
+            -at.x * 0.05
+        } else {
+            (-at.x * PLUNGE_PITCH).max(-OCEAN_DEPTH * 4.0)
+        }
+    })
+}
+
 /// A height field turned into the chunks a server would have sent of it: the
 /// island and a ring of open water round it, delivered as answers.
 fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {

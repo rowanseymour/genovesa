@@ -11,8 +11,8 @@ default-run = "game"
 # The words of a served session, and with them everything the game knows about
 # the ground: a chunk arrives as heights and palette entries, and this is what
 # says how to read them. There is deliberately no dependency on `world` — the
-# game generates nothing, and could be rewritten in another language against
-# this crate's documentation alone.
+# game generates nothing, and everything it knows about the ground reached it
+# over the wire.
 protocol = { path = "../protocol" }
 # A world the game hosts for itself. The server is engine-free and headless, so
 # a game that opens a world runs the very same session a dedicated `server`
