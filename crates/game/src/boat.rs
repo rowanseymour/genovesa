@@ -34,7 +34,7 @@ use protocol::ground::CELL_METRES;
 use protocol::{BoatId, BoatKind, PlayerId};
 
 use crate::bindings::{Action, KeyBindings};
-use crate::camera::View;
+use crate::camera::{MapCamera, View};
 use crate::models::above;
 use crate::player::Player;
 use crate::sea;
@@ -1483,58 +1483,93 @@ fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: BoatKind)
     });
 }
 
-/// Tells the sea where not to be: the waterline footprint of any open hull,
+/// How many open hulls the sea can be cut for at once.
+///
+/// A number rather than a bound worth arguing over: eight is a crowded
+/// anchorage — a ship with her boat down, and the hulls of everyone else
+/// lying off the same beach — and the loop that reads them stops at the first
+/// empty slot, so carrying room for eight costs a frame with one boat on it
+/// nothing. What the number decides is only which hulls lose their hole when
+/// there are more than eight in one view, and [`cut_the_water`] spends it on
+/// the ones furthest from the eye, where an open boat is a few pixels of blue.
+///
+/// `the_shader_cuts_for_every_hull` holds the sea's shader to it.
+pub(crate) const HOLES: usize = 8;
+
+/// Tells the sea where not to be: the waterline footprints of the open hulls,
 /// written into the sea's material, whose fragment shader discards the water
-/// inside it. The sea is one sheet drawn straight through everything, so
-/// without the hole it stands in the bilges of any boat looked into.
+/// inside them. The sea is one sheet drawn straight through everything, so
+/// without the holes it stands in the bilges of every boat looked into.
 ///
 /// Written through the same read-compare-write two-step as the wake — see
-/// [`crate::wake::lay_the_wake`] — so a hull lying still re-uploads nothing.
+/// [`crate::wake::lay_the_wake`] — so hulls lying still re-upload nothing.
 ///
-/// The material carries one hole, and a world can hold several open hulls —
-/// tenders lowered, beached, abandoned. The player's own boat is cut for
-/// first, being the one whose bilges the camera actually looks into; any
-/// other open hull in view keeps the sea in its bottom, which at this
-/// camera's distance is a puddle and not worth a second uniform yet.
+/// A world can hold more open hulls than the material has slots for — tenders
+/// lowered, beached, abandoned — so they are ranked before they are written.
+/// The player's own boat is cut for first whatever else is about, being the
+/// one whose bilges the camera is looking straight down into; the rest go in
+/// by how near the eye they lie, and [`HOLES`] says where that stops.
+///
+/// That eye is the world's one [`MapCamera`], so a schedule without exactly
+/// one of those cuts nothing at all and says nothing about it — the same
+/// precondition [`crate::sea::refresh_depth`] takes, and the reason a headless
+/// test of this has to put a camera down before it looks.
 fn cut_the_water(
     hulls: Query<(Entity, &Transform, &OpenHull)>,
     players: Query<&ChildOf, With<Player>>,
+    cameras: Query<&MapCamera>,
     window: Option<Res<sea::DepthWindow>>,
     materials: Option<ResMut<Assets<sea::SeaMaterial>>>,
 ) {
     let (Some(window), Some(mut materials)) = (window, materials) else {
         return;
     };
-    let carrier = players.single().ok().map(ChildOf::parent);
-    let chosen = hulls
-        .iter()
-        .find(|(hull, ..)| Some(*hull) == carrier)
-        .or_else(|| hulls.iter().next());
-    let (hole, axes, shape) = match chosen {
-        Some((_, transform, open)) => {
-            let ahead = transform.forward().xz().normalize_or(Vec2::NEG_Y);
-            // The footprint's own centre — the widest station — rather than
-            // the hull's origin, so the shader tests each half from where
-            // the two meet.
-            let centre = transform.translation.xz() - ahead * open.abaft;
-            (
-                Vec4::new(centre.x, centre.y, ahead.x, ahead.y),
-                Vec4::new(open.semi_bow, open.semi_stern, open.semi_beam, 1.0),
-                Vec4::new(open.bow_fullness, open.stern_fullness, open.transom, 0.0),
-            )
-        }
-        None => (Vec4::ZERO, Vec4::ZERO, Vec4::ZERO),
+    let Ok(camera) = cameras.single() else {
+        return;
     };
+    let carrier = players.single().ok().map(ChildOf::parent);
+
+    let eye = camera.focus.xz();
+    let mut open: Vec<_> = hulls.iter().collect();
+    open.sort_by(|left, right| {
+        let rank = |(hull, transform, _): &(Entity, &Transform, &OpenHull)| {
+            // `false` before `true`, so the player's own hull sorts to the
+            // front of every other boat however far off it is lying.
+            (
+                Some(*hull) != carrier,
+                transform.translation.xz().distance_squared(eye),
+            )
+        };
+        let (left, right) = (rank(left), rank(right));
+        left.0.cmp(&right.0).then(left.1.total_cmp(&right.1))
+    });
+
+    // Filled from the front and left zero past the end, which is how the
+    // shader knows where the list stops.
+    let mut holes = [Vec4::ZERO; HOLES];
+    let mut axes = [Vec4::ZERO; HOLES];
+    let mut shapes = [Vec4::ZERO; HOLES];
+    for (slot, (_, transform, open)) in open.iter().take(HOLES).enumerate() {
+        let ahead = transform.forward().xz().normalize_or(Vec2::NEG_Y);
+        // The footprint's own centre — the widest station — rather than the
+        // hull's origin, so the shader tests each half from where the two
+        // meet.
+        let centre = transform.translation.xz() - ahead * open.abaft;
+        holes[slot] = Vec4::new(centre.x, centre.y, ahead.x, ahead.y);
+        axes[slot] = Vec4::new(open.semi_bow, open.semi_stern, open.semi_beam, 1.0);
+        shapes[slot] = Vec4::new(open.bow_fullness, open.stern_fullness, open.transom, 0.0);
+    }
+
     let stale = materials.get(window.material()).is_some_and(|material| {
-        material.extension.hole != hole
+        material.extension.hole != holes
             || material.extension.hole_axes != axes
-            || material.extension.hole_shape != shape
+            || material.extension.hole_shape != shapes
     });
     if stale {
         if let Some(mut material) = materials.get_mut(window.material()) {
-            material.extension.hole = hole;
+            material.extension.hole = holes;
             material.extension.hole_axes = axes;
-            material.extension.hole_shape = shape;
+            material.extension.hole_shape = shapes;
         }
     }
 }
@@ -2770,16 +2805,11 @@ mod tests {
         assert!(!cut_for(&mut app, ship), "a closed hull needs no hole");
     }
 
-    /// The sea carries one hole and a world can hold several open hulls, so
-    /// which one gets it is a choice — and the one the player is aboard is
-    /// the only one whose bilges the camera is actually looking into.
-    #[test]
-    fn the_hole_in_the_sea_follows_the_boat_the_player_is_aboard() {
-        let mut app = test_app();
-        // A sea to write to. The real one is dressed by the terrain plugin,
-        // which needs a window to draw in; this is that setup with nothing
-        // but the material and its depth window, which is all the hole is
-        // written through.
+    /// A sea for the holes to be cut in. The real one is dressed by the
+    /// terrain plugin, which needs a window to draw in; this is that setup
+    /// with nothing but the material and its depth window, which is all the
+    /// holes are written through — and an eye for them to be ranked from.
+    fn a_sea(app: &mut App, eye: Vec2) -> Handle<sea::SeaMaterial> {
         app.init_asset::<Image>().init_asset::<sea::SeaMaterial>();
         let depth = app
             .world_mut()
@@ -2793,45 +2823,149 @@ mod tests {
                 extension: sea::SeaExtension::new(depth.clone(), Vec2::ZERO),
             });
         app.insert_resource(sea::DepthWindow::new(depth, material.clone(), Vec2::ZERO));
+        app.world_mut().spawn(MapCamera::looking(View {
+            focus: Vec3::new(eye.x, 0.0, eye.y),
+            ..default()
+        }));
+        material
+    }
 
-        // Two open boats a long way apart — the bare hulls the system reads,
-        // no models needed — and the player put aboard the further one.
+    /// A bare open hull — the components [`cut_the_water`] reads, no model
+    /// needed — laid at a point of the map.
+    fn an_open_boat(app: &mut App, at: Vec2) -> Entity {
         let open = ROWBOAT.open_footprint.expect("the rowboat is an open boat");
-        let (first, carrier) = (Vec2::new(-300.0, 0.0), Vec2::new(300.0, 0.0));
-        for at in [first, carrier] {
-            app.world_mut()
-                .spawn((Vessel, open, Transform::from_xyz(at.x, 0.0, at.y)));
-        }
-        let aboard = app
-            .world_mut()
-            .query_filtered::<(Entity, &Transform), With<OpenHull>>()
-            .iter(app.world())
-            .find(|(_, pose)| pose.translation.xz() == carrier)
-            .map(|(hull, _)| hull)
-            .expect("the boats were just spawned");
+        app.world_mut()
+            .spawn((Vessel, open, Transform::from_xyz(at.x, 0.0, at.y)))
+            .id()
+    }
+
+    /// Puts the player aboard a hull, as boarding would.
+    fn put_aboard(app: &mut App, hull: Entity) {
         let player = app
             .world_mut()
             .query_filtered::<Entity, With<Player>>()
             .single(app.world())
             .expect("a match should have a player in it");
-        app.world_mut().entity_mut(player).insert(ChildOf(aboard));
+        app.world_mut().entity_mut(player).insert(ChildOf(hull));
+    }
+
+    /// Where the sea has been cut, in the order the slots were filled. Only
+    /// the live ones: a slot with no boat in it says so in its `w`.
+    fn cuts(app: &App, material: &Handle<sea::SeaMaterial>) -> Vec<Vec2> {
+        let assets = app.world().resource::<Assets<sea::SeaMaterial>>();
+        let sea = &assets.get(material).expect("the sea's material").extension;
+        sea.hole
+            .iter()
+            .zip(sea.hole_axes.iter())
+            .filter(|(_, axes)| axes.w > 0.5)
+            .map(|(hole, _)| Vec2::new(hole.x, hole.y))
+            .collect()
+    }
+
+    /// Whether a hole was cut under a boat lying at a point. The hole's
+    /// centre is the footprint's, a fraction of a metre abaft the hull's own
+    /// origin, so the boats in these tests are laid far enough apart that
+    /// which is which is never in question.
+    fn cut_under(cuts: &[Vec2], at: Vec2) -> bool {
+        let abaft = ROWBOAT
+            .open_footprint
+            .expect("the rowboat is an open boat")
+            .abaft;
+        cuts.iter().any(|cut| cut.distance(at) < abaft + 0.1)
+    }
+
+    /// Two boats lying a beam apart are both looked into, so both are cut
+    /// for — and the player's own comes first, being the one whose bilges
+    /// the camera is looking straight down into.
+    #[test]
+    fn the_sea_is_cut_for_every_open_hull_afloat() {
+        let mut app = test_app();
+        let material = a_sea(&mut app, Vec2::ZERO);
+
+        let (other, carrier) = (Vec2::new(-300.0, 0.0), Vec2::new(300.0, 0.0));
+        an_open_boat(&mut app, other);
+        let aboard = an_open_boat(&mut app, carrier);
+        put_aboard(&mut app, aboard);
         run_frames(&mut app, 1);
 
-        // The hole's centre is the footprint's, a fraction of a metre abaft
-        // the hull's own origin — so which boat it is cut for is not in
-        // question at six hundred metres.
-        let hole = app
-            .world()
-            .resource::<Assets<sea::SeaMaterial>>()
-            .get(&material)
-            .expect("the sea's material")
-            .extension
-            .hole;
-        let cut_at = Vec2::new(hole.x, hole.y);
-        assert!(
-            cut_at.distance(carrier) < open.abaft + 0.1,
-            "the sea was cut at {cut_at}, not under the boat the player is in"
+        let cuts = cuts(&app, &material);
+        assert_eq!(
+            cuts.len(),
+            2,
+            "two boats afloat and {} cut: {cuts:?}",
+            cuts.len()
         );
+        assert!(
+            cut_under(&cuts[..1], carrier),
+            "the first hole is at {:?}, not under the boat the player is in",
+            cuts[0]
+        );
+        assert!(
+            cut_under(&cuts, other),
+            "the boat lying at {other} was left full of sea: {cuts:?}"
+        );
+    }
+
+    #[test]
+    fn the_shader_cuts_for_every_hull() {
+        // The uniform is an array on both sides of the wire between Rust and
+        // WGSL, and only one of them is compiled here. A shader reading
+        // fewer slots than are sent leaves boats standing in water for no
+        // reason anything at runtime could explain.
+        let shader = std::fs::read_to_string(format!(
+            "{}/../../assets/shaders/sea.wgsl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("the sea's shader under assets/shaders/");
+        let declared = format!("const HOLES: i32 = {HOLES};");
+        assert!(
+            shader.contains(&declared),
+            "the shader does not say `{declared}`"
+        );
+    }
+
+    /// More open hulls than the material has slots for: the player's own
+    /// keeps its hole wherever it is lying, and what loses one is whatever
+    /// is furthest from the eye.
+    #[test]
+    fn the_hulls_that_lose_their_hole_are_the_ones_furthest_off() {
+        let mut app = test_app();
+        let material = a_sea(&mut app, Vec2::ZERO);
+
+        // A line of boats standing away from the eye, and the player aboard
+        // the outermost — so the two rules are asked at once, and answering
+        // either one alone fails this.
+        let berths: Vec<Vec2> = (1..=HOLES + 2)
+            .map(|n| Vec2::new(n as f32 * 100.0, 0.0))
+            .collect();
+        let hulls: Vec<Entity> = berths
+            .iter()
+            .map(|at| an_open_boat(&mut app, *at))
+            .collect();
+        let (furthest, aboard) = (berths[HOLES + 1], hulls[HOLES + 1]);
+        put_aboard(&mut app, aboard);
+        run_frames(&mut app, 1);
+
+        let cuts = cuts(&app, &material);
+        assert_eq!(cuts.len(), HOLES, "every slot should be full: {cuts:?}");
+        assert!(
+            cut_under(&cuts, furthest),
+            "the boat the player is in, lying at {furthest}, lost its hole: {cuts:?}"
+        );
+        // The nearest of the rest fill what is left, and the two beyond them
+        // are the ones that go without.
+        for berth in &berths[..HOLES - 1] {
+            assert!(
+                cut_under(&cuts, *berth),
+                "the boat at {berth} was not cut for"
+            );
+        }
+        for berth in &berths[HOLES - 1..HOLES + 1] {
+            assert!(
+                !cut_under(&cuts, *berth),
+                "the boat at {berth} took a slot from one nearer the eye"
+            );
+        }
     }
 
     /// Which side the ship's boat goes in on: the shoreward one, when the
