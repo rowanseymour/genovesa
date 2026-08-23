@@ -422,7 +422,12 @@ pub(crate) struct Shared {
     /// A wind ordered from the console, outranking the world's own weather
     /// for as long as it is set — see [`console`], where the ordering
     /// happens, and [`Shared::wind`], which is where it takes effect.
-    commanded_wind: Mutex<Option<Vec2>>,
+    ///
+    /// The name it was ordered by is kept with the vector because the console
+    /// can be *asked* what stands, and a wind that only knew its own two
+    /// components could answer that with arithmetic rather than with the word
+    /// somebody typed.
+    commanded_wind: Mutex<Option<(&'static str, Vec2)>>,
     /// Beasts the console has summoned and the warden has not yet raised:
     /// each with the spot the command already found water at, absorbed into
     /// the flock on the next beat — see [`beasts::mind_the_beasts`].
@@ -1093,13 +1098,16 @@ impl Shared {
     /// has sat out some of the blow.
     fn wind(&self) -> Vec2 {
         let commanded = *self.commanded_wind.held();
-        commanded.unwrap_or_else(|| world::weather::wind(self.world.seed(), self.age()))
+        commanded.map_or_else(
+            || world::weather::wind(self.world.seed(), self.age()),
+            |(_, wind)| wind,
+        )
     }
 
     /// Orders the wind, or — with `None` — gives the weather back to the
     /// world. The sky thread notices the answer to [`Shared::wind`] moving
     /// and tells everyone, exactly as it does when the real weather turns.
-    fn command_wind(&self, wind: Option<Vec2>) {
+    fn command_wind(&self, wind: Option<(&'static str, Vec2)>) {
         *self.commanded_wind.held() = wind;
     }
 
@@ -1644,7 +1652,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         post(
             newcomer,
             ToClient::Vocabulary {
-                verbs: console::VERBS.iter().map(|verb| verb.to_string()).collect(),
+                phrases: console::PHRASES
+                    .iter()
+                    .map(|phrase| phrase.to_string())
+                    .collect(),
             },
         );
         for (other, existing) in players.iter() {

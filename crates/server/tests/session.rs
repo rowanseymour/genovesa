@@ -693,10 +693,10 @@ fn a_newcomer_is_told_the_sky_before_anything_else_happens() {
     // Then the console's words, before the client has asked anything —
     // completion is only worth having from the first line typed.
     match ToClient::read(&mut &client.0).expect("read") {
-        ToClient::Vocabulary { verbs } => {
+        ToClient::Vocabulary { phrases } => {
             assert!(
-                verbs.iter().any(|verb| verb == "help"),
-                "no `help` among {verbs:?}"
+                phrases.iter().any(|phrase| phrase == "help"),
+                "no `help` among {phrases:?}"
             );
         }
         other => panic!("expected the vocabulary, heard {other:?}"),
@@ -3521,7 +3521,7 @@ fn console_lines_are_answered_and_a_time_command_reaches_everyone() {
     // does the proving: at ten minutes to the day, the clock could not reach
     // evening from noon on its own in under a minute.
     asker.say(ToServer::Command {
-        line: "time 18:00".to_string(),
+        line: "world time 18:00".to_string(),
     });
     assert_eq!(asker.hear_reply(), "the day has run on to 18:00");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

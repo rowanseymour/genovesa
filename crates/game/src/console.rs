@@ -1,15 +1,22 @@
 //! The debug console: the key left of 1, and the two languages typed into it.
 //!
 //! One rule decides where a line runs, and it is syntactic on purpose. A line
-//! that starts `set` names a variable of *this client* — what this machine
-//! draws, listed in [`Toggles`] — and never leaves the machine. Any other
-//! line is an imperative about the *world*, and crosses the wire verbatim as
+//! that starts `client` names a variable of *this machine* — what it draws,
+//! listed in [`Toggles`] — and never leaves it. Any other line is about the
+//! *world*, and crosses the wire verbatim as
 //! [`protocol::ToServer::Command`]: the vocabulary belongs to the server,
 //! this module does not parse a word of it, and whatever text comes back as
-//! [`protocol::ToClient::Reply`] is printed here. So `set shadows off`
+//! [`protocol::ToClient::Reply`] is printed here. So `client shadows off`
 //! doctors one player's picture and admits it on the readout, while
-//! `time 18:00` moves the sun for everyone in the session — and the prompt
-//! itself teaches the difference.
+//! `world time 18:00` moves the sun for everyone in the session.
+//!
+//! The word is `client` because the rule is about *which machine a line runs
+//! on*, and that is the thing the word can say out loud. It used to be `set`,
+//! which was as good a rule and taught nothing: a player had to be told that
+//! the setting words were the local ones, and the server's own dials — which
+//! set things too — had to stay bare verbs to keep out of the way. `client`
+//! against the server's `world` puts the two halves of the split in the
+//! grammar, and leaves the bare verbs to the lines that actually *act*.
 //!
 //! The console is part of every build, unlike the readout it switches on: it is
 //! *how* debug states are reached, and a player who stumbles into it can type
@@ -23,8 +30,8 @@
 //! for the reason the arrows are: it is the way in and out of a mode, and a
 //! key that could be given away could strand whoever gave it.
 //!
-//! Tab completes, but only the words this client can *know*: `set` and its
-//! variables, which are this module's own grammar, and the server's verbs —
+//! Tab completes, but only the words this client can *know*: `client` and its
+//! variables, which are this module's own grammar, and the server's phrases —
 //! which are not guessed at but taught, arriving on joining as
 //! [`protocol::ToClient::Vocabulary`], so completion grows with the server
 //! the way the vocabulary itself does.
@@ -100,10 +107,11 @@ pub struct Console {
     /// Where the up arrow has got to in that history, `None` when the input
     /// is the player's own fresh line.
     recall: Option<usize>,
-    /// The server's verbs, as taught on joining — what tab offers for a
-    /// line's first word alongside `set`. Empty until the teaching arrives,
-    /// when tab knows only the local grammar.
-    verbs: Vec<String>,
+    /// The server's phrases, as taught on joining — what tab offers for
+    /// every word of a line the server's grammar fixes, alongside the local
+    /// `client`. Empty until the teaching arrives, when tab knows only the
+    /// local grammar.
+    phrases: Vec<String>,
 }
 
 impl Console {
@@ -118,10 +126,10 @@ impl Console {
         }
     }
 
-    /// Takes the server's word list — see [`crate::net::receive`], which is
+    /// Takes the server's phrase list — see [`crate::net::receive`], which is
     /// where a [`protocol::ToClient::Vocabulary`] lands.
-    pub fn teach(&mut self, verbs: Vec<String>) {
-        self.verbs = verbs;
+    pub fn teach(&mut self, phrases: Vec<String>) {
+        self.phrases = phrases;
     }
 
     /// What tab does to the line being typed: grows the last word to the
@@ -166,18 +174,40 @@ impl Console {
     }
 
     /// The words that could stand after `before`, which are the ones this
-    /// client can know: for a line's first word, `set` and whatever verbs
-    /// the server taught; after a lone `set`, the variables. Anything deeper
-    /// is the server's business, unknowable here and not guessed at.
+    /// client can know: the local `client` and its variables, which are this
+    /// module's own grammar, and whatever the server taught for that place in
+    /// a line. Where a line's next word is the player's own — a place, an
+    /// hour — nothing was taught for it and nothing is offered, which is the
+    /// same answer as for a word nobody knows.
     fn completions(&self, before: &str) -> Vec<&str> {
-        let mut earlier = before.split_whitespace();
-        match (earlier.next(), earlier.next()) {
-            (None, _) => std::iter::once("set")
-                .chain(self.verbs.iter().map(String::as_str))
+        let earlier: Vec<&str> = before.split_whitespace().collect();
+        match earlier.as_slice() {
+            [] => std::iter::once(LOCAL)
+                .chain(self.taught(&earlier))
                 .collect(),
-            (Some("set"), None) => variables(),
-            _ => Vec::new(),
+            [LOCAL] => variables(),
+            _ => self.taught(&earlier),
         }
+    }
+
+    /// The words the server taught for the place after `earlier`: the next
+    /// word of every phrase opening with exactly those words, each offered
+    /// once however many phrases carry it — `world` is one choice and not
+    /// two, though two phrases begin with it.
+    fn taught(&self, earlier: &[&str]) -> Vec<&str> {
+        let mut offered: Vec<&str> = Vec::new();
+        for phrase in &self.phrases {
+            let mut words = phrase.split_whitespace();
+            if !earlier.iter().all(|word| words.next() == Some(*word)) {
+                continue;
+            }
+            if let Some(next) = words.next() {
+                if !offered.contains(&next) {
+                    offered.push(next);
+                }
+            }
+        }
+        offered
     }
 
     /// Whether a line has been said, word for word — for the tests, which
@@ -187,11 +217,11 @@ impl Console {
         self.lines.iter().any(|said| said == line)
     }
 
-    /// Whether a verb has been taught — for the net tests, which otherwise
+    /// Whether a phrase has been taught — for the net tests, which otherwise
     /// could only see the vocabulary through tab.
     #[cfg(test)]
-    pub(crate) fn knows(&self, verb: &str) -> bool {
-        self.verbs.iter().any(|known| known == verb)
+    pub(crate) fn knows(&self, phrase: &str) -> bool {
+        self.phrases.iter().any(|known| known == phrase)
     }
 
     /// What the console shows: the last few lines said, and the prompt with
@@ -211,39 +241,43 @@ impl Console {
     }
 }
 
+/// The word that keeps a line on this machine — the whole of the local
+/// grammar's first half, and the one word [`dispatch`] looks at.
+const LOCAL: &str = "client";
+
 /// Where a line goes, decided by [`dispatch`]: answered here, or sent to the
 /// server whose world it is about.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Dispatch {
-    /// A `set` line: it ran against [`Toggles`], and this is its answer.
+    /// A `client` line: it ran against [`Toggles`], and this is its answer.
     Local(String),
     /// Anything else: the server's to interpret, verbatim.
     Remote,
 }
 
 /// Runs a line's local half, or says it is not local at all. The one place
-/// the grammar's rule lives: `set` never leaves the machine, nothing else
+/// the grammar's rule lives: `client` never leaves the machine, nothing else
 /// ever stays on it.
 ///
 /// Reached by the keyboard through [`submit`] and by the control socket
 /// through [`crate::control`], which is the point of it being a function of a
 /// line rather than of what is on screen: one grammar, whichever mouth speaks
-/// it, so a `set` variable is not something the socket has to be taught
+/// it, so a `client` variable is not something the socket has to be taught
 /// separately.
 pub(crate) fn dispatch(line: &str, toggles: &mut Toggles) -> Dispatch {
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.split_first() {
-        Some((&"set", rest)) => Dispatch::Local(set(rest, toggles)),
+        Some((&LOCAL, rest)) => Dispatch::Local(client(rest, toggles)),
         _ => Dispatch::Remote,
     }
 }
 
-/// The `set` variables, in the order a bare `set` lists them — what tab
-/// completes after `set`, and what a miss is told to try instead, this being
-/// the half of the grammar that lives on this machine.
+/// The `client` variables, in the order a bare `client` lists them — what tab
+/// completes after `client`, and what a miss is told to try instead, this
+/// being the half of the grammar that lives on this machine.
 ///
 /// Read off [`Toggles::names`] rather than listed again here, so the words
-/// this offers are the words [`set`] serves, always.
+/// this offers are the words [`client`] serves, always.
 fn variables() -> Vec<&'static str> {
     Toggles::names().collect()
 }
@@ -262,10 +296,10 @@ fn shared_lead<'a>(words: &[&'a str]) -> &'a str {
     lead
 }
 
-/// The `set` grammar: `set` lists every variable, `set <var>` reads one,
-/// `set <var> <value>` writes one. Always answered — a console that says
-/// nothing back reads as a console that heard nothing.
-fn set(args: &[&str], toggles: &mut Toggles) -> String {
+/// The `client` grammar: `client` lists every variable, `client <var>` reads
+/// one, `client <var> <value>` writes one. Always answered — a console that
+/// says nothing back reads as a console that heard nothing.
+fn client(args: &[&str], toggles: &mut Toggles) -> String {
     match args {
         [] => {
             let mut said = Vec::new();
@@ -283,7 +317,7 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
             Some(Value::Rows(state)) => resolution(var, value, state),
             None => no_such(var),
         },
-        _ => "one variable, one value — `set reach 450`".to_string(),
+        _ => "one variable, one value — `client reach 450`".to_string(),
     }
 }
 
@@ -340,7 +374,7 @@ fn reach(var: &str, value: &str, state: &mut f32) -> String {
             *state = metres;
             format!("{var} {metres:.0}m")
         }
-        None => format!("`{var}` is metres — `set {var} 450`, or `set {var} default`"),
+        None => format!("`{var}` is metres — `client {var} 450`, or `client {var} default`"),
     }
 }
 
@@ -364,7 +398,7 @@ fn resolution(var: &str, value: &str, state: &mut Option<u32>) -> String {
         None => {
             let offered: Vec<String> = rungs.iter().map(|rows| rows.to_string()).collect();
             format!(
-                "`{var}` is one of {} — `set {var} 1440`",
+                "`{var}` is one of {} — `client {var} 1440`",
                 offered.join(", ")
             )
         }
@@ -537,10 +571,10 @@ mod tests {
     use crate::AppState;
 
     #[test]
-    fn set_never_leaves_the_machine_and_nothing_else_stays() {
+    fn a_client_line_never_leaves_the_machine_and_nothing_else_stays() {
         let mut toggles = Toggles::default();
         assert_eq!(
-            dispatch("set stats on", &mut toggles),
+            dispatch("client stats on", &mut toggles),
             Dispatch::Local("stats on".to_string())
         );
         assert!(toggles.stats);
@@ -549,36 +583,36 @@ mod tests {
         // server's, however local they might sound.
         assert_eq!(dispatch("spawn shark", &mut toggles), Dispatch::Remote);
         assert_eq!(dispatch("help", &mut toggles), Dispatch::Remote);
-        assert_eq!(dispatch("time 18:00", &mut toggles), Dispatch::Remote);
+        assert_eq!(dispatch("world time 18:00", &mut toggles), Dispatch::Remote);
     }
 
     #[test]
     fn every_switch_answers_and_takes() {
         let mut toggles = Toggles::default();
-        assert_eq!(set(&["shadows", "off"], &mut toggles), "shadows off");
+        assert_eq!(client(&["shadows", "off"], &mut toggles), "shadows off");
         assert!(!toggles.shadows);
-        assert_eq!(set(&["haze", "off"], &mut toggles), "haze off");
-        assert_eq!(set(&["wireframe", "on"], &mut toggles), "wireframe on");
-        assert_eq!(set(&["reach", "450"], &mut toggles), "reach 450m");
+        assert_eq!(client(&["haze", "off"], &mut toggles), "haze off");
+        assert_eq!(client(&["wireframe", "on"], &mut toggles), "wireframe on");
+        assert_eq!(client(&["reach", "450"], &mut toggles), "reach 450m");
         assert_eq!(toggles.reach, 450.0);
-        assert_eq!(set(&["reach", "default"], &mut toggles), "reach 900m");
+        assert_eq!(client(&["reach", "default"], &mut toggles), "reach 900m");
         assert_eq!(toggles.reach, crate::HAZE_END);
-        assert_eq!(set(&["shadows", "on"], &mut toggles), "shadows on");
+        assert_eq!(client(&["shadows", "on"], &mut toggles), "shadows on");
         assert!(toggles.shadows);
     }
 
     #[test]
-    fn a_bare_set_reads_and_a_named_one_reads_one() {
+    fn a_bare_client_reads_and_a_named_one_reads_one() {
         let mut toggles = Toggles {
             wireframe: true,
             ..Default::default()
         };
         assert_eq!(
-            set(&[], &mut toggles),
+            client(&[], &mut toggles),
             "stats off / shadows on / haze on / wireframe on / reach 900m / \
              resolution the window's own"
         );
-        assert_eq!(set(&["haze"], &mut toggles), "haze on");
+        assert_eq!(client(&["haze"], &mut toggles), "haze on");
     }
 
     /// A picture is the window in a run that has one, so the variable reads as
@@ -587,10 +621,10 @@ mod tests {
     fn the_picture_size_is_the_windows_until_there_is_no_window() {
         let mut windowed = Toggles::default();
         assert_eq!(
-            set(&["resolution"], &mut windowed),
+            client(&["resolution"], &mut windowed),
             "resolution the window's own"
         );
-        let refused = set(&["resolution", "1080"], &mut windowed);
+        let refused = client(&["resolution", "1080"], &mut windowed);
         assert!(refused.contains("window"), "unhelpful: {refused}");
         assert_eq!(windowed.resolution, None, "a refused size took anyway");
 
@@ -598,9 +632,9 @@ mod tests {
             resolution: Some(1440),
             ..Default::default()
         };
-        assert_eq!(set(&["resolution"], &mut windowless), "resolution 1440p");
+        assert_eq!(client(&["resolution"], &mut windowless), "resolution 1440p");
         assert_eq!(
-            set(&["resolution", "720"], &mut windowless),
+            client(&["resolution", "720"], &mut windowless),
             "resolution 720p"
         );
         assert_eq!(windowless.resolution, Some(720));
@@ -610,30 +644,30 @@ mod tests {
         // windowless run for.
         for rung in crate::settings::rungs() {
             assert_eq!(
-                set(&["resolution", &rung.to_string()], &mut windowless),
+                client(&["resolution", &rung.to_string()], &mut windowless),
                 format!("resolution {rung}p")
             );
         }
         let last = crate::settings::rungs().last().copied();
-        let not_a_rung = set(&["resolution", "1234"], &mut windowless);
+        let not_a_rung = client(&["resolution", "1234"], &mut windowless);
         assert!(not_a_rung.contains("1440"), "unhelpful: {not_a_rung}");
         assert_eq!(windowless.resolution, last, "a refused size took anyway");
     }
 
     #[test]
-    fn a_wrong_set_is_answered_not_swallowed() {
+    fn a_wrong_client_line_is_answered_not_swallowed() {
         let mut toggles = Toggles::default();
-        let unknown = set(&["fog", "off"], &mut toggles);
+        let unknown = client(&["fog", "off"], &mut toggles);
         assert!(unknown.contains("`fog`"), "unhelpful: {unknown}");
 
-        let not_a_switch = set(&["stats", "maybe"], &mut toggles);
+        let not_a_switch = client(&["stats", "maybe"], &mut toggles);
         assert!(
             not_a_switch.contains("on or off"),
             "unhelpful: {not_a_switch}"
         );
         assert!(!toggles.stats, "a refused value took anyway");
 
-        let not_metres = set(&["reach", "far"], &mut toggles);
+        let not_metres = client(&["reach", "far"], &mut toggles);
         assert!(not_metres.contains("metres"), "unhelpful: {not_metres}");
         assert_eq!(toggles.reach, crate::HAZE_END);
     }
@@ -731,19 +765,19 @@ mod tests {
     }
 
     #[test]
-    fn a_set_line_typed_at_the_console_lands_in_the_toggles() {
+    fn a_client_line_typed_at_the_console_lands_in_the_toggles() {
         let mut app = test_app();
         press_backquote(&mut app);
 
-        type_line(&mut app, "set wireframe on");
+        type_line(&mut app, "client wireframe on");
 
         assert!(app.world().resource::<Toggles>().wireframe);
         let console = app.world().resource::<Console>();
         assert_eq!(
             console.lines.iter().cloned().collect::<Vec<_>>(),
-            ["> set wireframe on", "wireframe on"]
+            ["> client wireframe on", "wireframe on"]
         );
-        assert_eq!(console.history, ["set wireframe on"]);
+        assert_eq!(console.history, ["client wireframe on"]);
         assert!(console.input.is_empty());
     }
 
@@ -769,19 +803,19 @@ mod tests {
         let mut app = test_app();
         press_backquote(&mut app);
 
-        type_line(&mut app, "set haze off");
-        type_line(&mut app, "set haze on");
+        type_line(&mut app, "client haze off");
+        type_line(&mut app, "client haze on");
 
         type_key(&mut app, KeyCode::ArrowUp, "");
-        assert_eq!(app.world().resource::<Console>().input, "set haze on");
+        assert_eq!(app.world().resource::<Console>().input, "client haze on");
         type_key(&mut app, KeyCode::ArrowUp, "");
-        assert_eq!(app.world().resource::<Console>().input, "set haze off");
+        assert_eq!(app.world().resource::<Console>().input, "client haze off");
         // The top of the history holds rather than wrapping.
         type_key(&mut app, KeyCode::ArrowUp, "");
-        assert_eq!(app.world().resource::<Console>().input, "set haze off");
+        assert_eq!(app.world().resource::<Console>().input, "client haze off");
 
         type_key(&mut app, KeyCode::ArrowDown, "");
-        assert_eq!(app.world().resource::<Console>().input, "set haze on");
+        assert_eq!(app.world().resource::<Console>().input, "client haze on");
         // And past the newest is the fresh prompt again.
         type_key(&mut app, KeyCode::ArrowDown, "");
         assert_eq!(app.world().resource::<Console>().input, "");
@@ -791,7 +825,7 @@ mod tests {
     /// the teaching itself is the net module's to test.
     fn taught(app: &mut App) {
         app.world_mut().resource_mut::<Console>().teach(
-            ["help", "spawn", "time", "weather"]
+            ["help", "spawn", "world time", "world weather"]
                 .map(String::from)
                 .to_vec(),
         );
@@ -815,32 +849,36 @@ mod tests {
 
         // And the local grammar's variable, after the word that names it.
         type_key(&mut app, KeyCode::Enter, "\r");
-        type_word(&mut app, "set w");
+        type_word(&mut app, "client w");
         type_key(&mut app, KeyCode::Tab, "");
-        assert_eq!(input(&app), "set wireframe ");
+        assert_eq!(input(&app), "client wireframe ");
+
+        // And past a shelf, which is what the phrases are taught for: the
+        // dial behind `world` is as completable as `world` itself.
+        type_key(&mut app, KeyCode::Enter, "\r");
+        type_word(&mut app, "world t");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "world time ");
     }
 
     #[test]
     fn tab_grows_what_it_can_and_offers_what_it_cannot() {
         let mut app = test_app();
-        taught(&mut app);
         press_backquote(&mut app);
-
-        // `s` could still be `set` or `spawn`: nothing grows, so the choices
-        // are said and the line stands.
-        type_key(&mut app, KeyCode::KeyA, "s");
-        type_key(&mut app, KeyCode::Tab, "");
-        assert_eq!(input(&app), "s");
-        assert!(app.world().resource::<Console>().said("set  spawn"));
 
         // `t` grows to the `ti` that `time` and `tide` share, and no further.
         app.world_mut()
             .resource_mut::<Console>()
             .teach(["time", "tide"].map(String::from).to_vec());
-        type_key(&mut app, KeyCode::Backspace, "");
         type_key(&mut app, KeyCode::KeyA, "t");
         type_key(&mut app, KeyCode::Tab, "");
         assert_eq!(input(&app), "ti");
+
+        // And with nothing left to grow, the choices themselves are the
+        // answer and the line stands.
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "ti");
+        assert!(app.world().resource::<Console>().said("time  tide"));
     }
 
     #[test]
@@ -855,16 +893,24 @@ mod tests {
         assert!(app
             .world()
             .resource::<Console>()
-            .said("set  help  spawn  time  weather"));
+            .said("client  help  spawn  world"));
 
-        // After `set `: every variable.
-        type_word(&mut app, "set ");
+        // After `client `: every variable. A shelf offered once, though two
+        // phrases stand behind it.
+        type_word(&mut app, "client ");
         type_key(&mut app, KeyCode::Tab, "");
-        assert_eq!(input(&app), "set ");
+        assert_eq!(input(&app), "client ");
         assert!(app
             .world()
             .resource::<Console>()
             .said("stats  shadows  haze  wireframe  reach  resolution"));
+
+        // And after `world `: every dial behind it.
+        type_key(&mut app, KeyCode::Enter, "\r");
+        type_word(&mut app, "world ");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "world ");
+        assert!(app.world().resource::<Console>().said("time  weather"));
     }
 
     #[test]
@@ -886,9 +932,9 @@ mod tests {
         let mut app = test_app();
         press_backquote(&mut app);
 
-        type_key(&mut app, KeyCode::KeyA, "s");
+        type_key(&mut app, KeyCode::KeyA, "c");
         type_key(&mut app, KeyCode::Tab, "");
-        assert_eq!(input(&app), "set ");
+        assert_eq!(input(&app), "client ");
     }
 
     #[test]

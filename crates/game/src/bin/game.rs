@@ -138,7 +138,7 @@ fn run(args: Args, session: Option<Session>, control: Option<control::Control>) 
 
     // Both in every run, windowed or not. The readout starts hidden and the
     // console starts closed, so neither costs a run that never asks for them —
-    // and a run being driven down the socket can ask: `set stats on` puts the
+    // and a run being driven down the socket can ask: `client stats on` puts the
     // readout up, which is how the frame rate and the chunk counts get into a
     // picture at all. There used to be a `--debug` flag that turned it on from
     // the command line, and it is gone for the reason the rest of them are:

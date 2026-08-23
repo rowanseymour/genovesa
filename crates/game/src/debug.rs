@@ -16,7 +16,7 @@
 //! stand here again.
 //!
 //! The switches are [`Toggles`], and they are set from the console — see
-//! [`crate::console`], whose `set` lines are their only writer. They used to
+//! [`crate::console`], whose `client` lines are their only writer. They used to
 //! be number keys; the console replaced them because a vocabulary outgrows a
 //! number row, but reading a count and changing what is counted are still one
 //! job, which is why the state stays in this module with the readout: the
@@ -102,44 +102,44 @@ struct DebugPanel;
 #[derive(Component)]
 struct DebugText;
 
-/// The variables the console's `set` lines reach — see [`crate::console`],
+/// The variables the console's `client` lines reach — see [`crate::console`],
 /// which owns the grammar, while this module owns making them true of the
 /// scene. None of them reaches the world or anybody else's picture of it,
-/// which is what separates a `set` from the console's other language.
+/// which is what separates a `client` line from the console's other language.
 ///
 /// Most are about what this machine *draws*. `resolution` is the exception
 /// and lives here anyway: it belongs to [`crate::control`], which a run
-/// without a socket has none of, and `set` needs somewhere it can always
+/// without a socket has none of, and `client` needs somewhere it can always
 /// reach.
 #[derive(Resource, PartialEq, Clone, Debug)]
 pub struct Toggles {
-    /// `set stats` — whether the readout itself is on screen. The one switch
+    /// `client stats` — whether the readout itself is on screen. The one switch
     /// here that changes nothing about the picture, so the last line never
     /// mentions it: a readout that is visible has already admitted to being
     /// on.
     pub stats: bool,
-    /// `set shadows` — off, and the sun stops casting. The shadow line
+    /// `client shadows` — off, and the sun stops casting. The shadow line
     /// disappears with it, Bevy clearing the cascade cull when a light's
     /// shadows are off, so the readout cannot claim work that is no longer
     /// being done.
     pub shadows: bool,
-    /// `set haze` — off, and the aerial haze comes away, so what the distant
+    /// `client haze` — off, and the aerial haze comes away, so what the distant
     /// ground is actually doing can be seen. Mostly worth having next to
-    /// `set reach`: judging what a shorter shadow reach costs is impossible
+    /// `client reach`: judging what a shorter shadow reach costs is impossible
     /// while the haze is hiding the far end of it.
     pub haze: bool,
-    /// `set wireframe` — every triangle drawn as lines, which is how the
+    /// `client wireframe` — every triangle drawn as lines, which is how the
     /// fixed 8,192 a chunk carries stops being a number and becomes a
     /// picture.
     pub wireframe: bool,
-    /// `set reach` — how far the sun's cascades go, in metres. The default
+    /// `client reach` — how far the sun's cascades go, in metres. The default
     /// is [`crate::HAZE_END`], where the haze has closed and nothing can be
     /// seen to lose its shadow; the question the switch exists to answer is
     /// whether a shorter reach is *visibly* worse, and walking it in until
     /// the far edge of the shadows sits in plain sight is where the answer
     /// is.
     pub reach: f32,
-    /// `set resolution` — how tall a picture `shot` writes is, in rows off
+    /// `client resolution` — how tall a picture `shot` writes is, in rows off
     /// [`crate::settings::LADDER`]; the width follows from
     /// [`crate::settings::WIDESCREEN`], there being no display to take a
     /// shape from. `None` in a run that has a window, where a picture is the
@@ -239,7 +239,7 @@ impl Toggles {
         }
     }
 
-    /// Every variable there is, in the order a bare `set` lists them — here
+    /// Every variable there is, in the order a bare `client` lists them — here
     /// rather than in the console because this is where they live, and a list
     /// kept beside the grammar would be a second place to add one.
     pub fn names() -> impl Iterator<Item = &'static str> {
@@ -345,7 +345,7 @@ fn apply_toggles(
     for (mut sun, mut cascades) in &mut suns {
         // Two switches over one light, and the `&&` is which of them outranks
         // which: the display setting is what the player asked for and the
-        // console's is a doctoring of it, so `set shadows on` cannot light a
+        // console's is a doctoring of it, so `client shadows on` cannot light a
         // world whose owner has turned the sun's casting off. Kept to one
         // writer for the reason this whole system is written the way it is —
         // two systems setting the same field would each undo the other on
@@ -750,7 +750,7 @@ mod tests {
     }
 
     /// The switches with the readout on, which is what most of these tests
-    /// are looking at. Not what a run starts with — `set stats on` is.
+    /// are looking at. Not what a run starts with — `client stats on` is.
     fn showing() -> Toggles {
         Toggles {
             stats: true,

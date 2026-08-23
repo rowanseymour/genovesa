@@ -8,7 +8,7 @@
 //! it at any point and as often as it likes.
 //!
 //! Nothing here invents a grammar. A line goes to
-//! [`crate::console::dispatch`] exactly as a typed one would — so `set haze
+//! [`crate::console::dispatch`] exactly as a typed one would — so `client haze
 //! off` doctors this client's picture and `weather gale` crosses the wire to
 //! the server, and a verb added to either side is reachable from here the day
 //! it is added. What this module adds is what a *keyboard* never needed words
@@ -85,7 +85,7 @@ const HELP: &str = "shot <path> — write a PNG of the view, once the ground has
                     yaw <deg> — bearing to look from\n\
                     hold on|off — stop the clock where it stands, so the light keeps still\n\
                     quit — close the world and stop the game\n\
-                    set … — this client's own switches; `set` alone lists them";
+                    client … — this machine's own switches; `client` alone lists them";
 
 /// How tall a picture a windowless run writes until the console says
 /// otherwise, in rows off [`crate::settings::LADDER`]. 1440 matches the shots
@@ -367,7 +367,7 @@ impl Plugin for ControlPlugin {
         if self.headless {
             // The one place in the game that knows a run has no window is the
             // one that says how big its pictures are — see
-            // [`crate::debug::Toggles::resolution`], where `set resolution`
+            // [`crate::debug::Toggles::resolution`], where `client resolution`
             // finds it afterwards. The image itself is not made here: making
             // it is what [`dress_the_target`] does every time the answer
             // changes, and doing it once here as well would be the same size
@@ -1398,7 +1398,7 @@ mod tests {
     /// holds the two together. A verb dropped from the match would fall
     /// through to `forward` and be refused by the server, while `help` went
     /// on offering it. The other two vocabularies in this subsystem are each
-    /// pinned the same way: `server::console`'s `VERBS` to `interpret`, and
+    /// pinned the same way: `server::console`'s `PHRASES` to `interpret`, and
     /// `MenuButton::EVERY` to `parse`.
     ///
     /// Every listed word is answered on the frame it arrives when given
@@ -1428,7 +1428,7 @@ mod tests {
     /// Every button `click` offers can be clicked, and lands on the button it
     /// named. The listing is an index rather than the grammar — `parse` never
     /// reads it — so this is what holds the two to agreement, the way
-    /// `server::console`'s `VERBS` is held to `interpret`.
+    /// `server::console`'s `PHRASES` is held to `interpret`.
     ///
     /// The five that carry something are given one here. A button that grew
     /// an argument and did not say so would show up as its bare name failing

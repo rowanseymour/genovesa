@@ -834,10 +834,10 @@ fn receive(
                     control.answered(&text);
                 }
             }
-            // The server's verbs, for tab at the console — see
+            // The server's phrases, for tab at the console — see
             // [`crate::console`], which owns what completion means and
             // still sends every line verbatim.
-            ToClient::Vocabulary { verbs } => told.console.teach(verbs),
+            ToClient::Vocabulary { phrases } => told.console.teach(phrases),
             ToClient::Boat {
                 id,
                 kind,
@@ -2195,7 +2195,7 @@ mod tests {
         let mut app = test_app(connection);
 
         (ToClient::Vocabulary {
-            verbs: vec!["spawn".to_string()],
+            phrases: vec!["spawn".to_string()],
         })
         .write(&mut &server)
         .expect("vocabulary");
