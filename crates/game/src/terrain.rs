@@ -41,7 +41,8 @@ use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
     chunk_at, dequantize, material_index, ChunkPayload, Material, Plant, CELLS, CELL_COUNT,
-    CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, NO_WATER, OCEAN_DEPTH, SEA_WATER,
+    CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, LIT_ALL_DAY, NO_WATER,
+    OCEAN_DEPTH, SEA_WATER,
 };
 
 use crate::camera::{MapCamera, View};
@@ -217,7 +218,7 @@ struct Arrival {
     materials: Vec<Material>,
     /// When each corner sees the sun, exactly as sent — turned into the mesh
     /// attribute the shader reads by [`chunk_mesh`].
-    lit: Vec<[u8; 2]>,
+    lit: Arc<[[u8; 2]]>,
     /// The chunk's standing water, still quantised: it is only ever compared
     /// against [`NO_WATER`] and turned into a height once per quad drawn, so
     /// there is nothing to be gained by dequantising a whole grid of it the
@@ -268,6 +269,15 @@ enum Chunk {
     /// built from, so anything standing on it stands on what can be seen.
     Land {
         heights: Arc<[f32]>,
+        /// When each corner sees the sun, kept as sent — see
+        /// [`protocol::ground::ChunkPayload::lit`].
+        ///
+        /// The mesh has its own copy in a vertex attribute, and this is not
+        /// that: the *sea* is one plane that never met a chunk's corners, so
+        /// what shades it reads the intervals back out of here by world
+        /// point — see [`crate::sea::refresh_depth`]. Two bytes a corner
+        /// against the heights' four, on chunks that already cost a mesh.
+        lit: Arc<[[u8; 2]]>,
         /// The entity drawing it, once [`spawn_arrivals`] has made one.
         mesh: Option<Entity>,
     },
@@ -297,10 +307,12 @@ impl Ground {
             }
             Some(payload) => {
                 let heights: Arc<[f32]> = payload.heights.iter().copied().map(dequantize).collect();
+                let lit: Arc<[[u8; 2]]> = payload.lit.into();
                 self.chunks.insert(
                     chunk,
                     Chunk::Land {
                         heights: heights.clone(),
+                        lit: lit.clone(),
                         mesh: None,
                     },
                 );
@@ -308,7 +320,7 @@ impl Ground {
                     chunk,
                     heights,
                     materials: payload.materials,
-                    lit: payload.lit,
+                    lit,
                     water: payload.water,
                     plants: payload.plants,
                 });
@@ -391,6 +403,49 @@ impl Ground {
                 Some(height_at(heights, at - chunk.as_vec2() * CHUNK_METRES))
             }
         }
+    }
+
+    /// When the surface at a world point sees the sun, read between the four
+    /// corners around it — see [`protocol::ground::ChunkPayload::lit`].
+    ///
+    /// [`LIT_ALL_DAY`] over open water and `None` for a chunk that has not
+    /// arrived, which are different answers to different questions: the sea
+    /// between islands is lit because nothing stands over it, while a chunk
+    /// still on its way is not yet anything. Both end up drawn as full
+    /// daylight — see [`crate::sea::refresh_depth`], which is what asks —
+    /// because ground that has not arrived cannot be shadowing anything the
+    /// eye can see either.
+    ///
+    /// Bilinear across the corner grid rather than down the facet split
+    /// [`height_at`] uses: an interval belongs to the ground around a point
+    /// rather than to the triangle under it, and how a cell happens to be cut
+    /// has nothing to say about it.
+    pub fn lit(&self, x: f32, z: f32) -> Option<[u8; 2]> {
+        let at = Vec2::new(x, z);
+        let chunk = chunk_at(at);
+        let lit = match self.chunks.get(&chunk)? {
+            Chunk::Ocean => return Some(LIT_ALL_DAY),
+            Chunk::Land { lit, .. } => lit,
+        };
+        let local = (at - chunk.as_vec2() * CHUNK_METRES) / CELL_METRES;
+        // Inside the chunk by construction — `chunk_at` is what put it here —
+        // so the far corner of the cell is the chunk's own, never the
+        // neighbour's, and the two chunks either side of a boundary read the
+        // same value there anyway.
+        let (x0, z0) = (
+            (local.x.floor() as usize).min(CELLS - 1),
+            (local.y.floor() as usize).min(CELLS - 1),
+        );
+        let (tx, tz) = (local.x - x0 as f32, local.y - z0 as f32);
+
+        let mut pair = [0u8; 2];
+        for (side, value) in pair.iter_mut().enumerate() {
+            let corner = |cx: usize, cz: usize| lit[cz * CORNERS + cx][side] as f32;
+            let low = corner(x0, z0) + (corner(x0 + 1, z0) - corner(x0, z0)) * tx;
+            let high = corner(x0, z0 + 1) + (corner(x0 + 1, z0 + 1) - corner(x0, z0 + 1)) * tx;
+            *value = (low + (high - low) * tz).round() as u8;
+        }
+        Some(pair)
     }
 
     /// One chunk's corner heights as they were sent, or `None` for open water
@@ -596,12 +651,15 @@ struct Daylight {
     hour: Vec4,
 }
 
+/// The hour every surface opens at, before the sky has spoken: noon, which
+/// is the daylight the menus are lit by — packed as [`Daylight::hour`] and as
+/// the sea's own copy of it carry it.
+pub(crate) const DAYLIGHT_AT_NOON: Vec4 = Vec4::new(0.5, SHADE_EDGE, 0.0, 0.0);
+
 impl Default for Daylight {
     fn default() -> Self {
         Self {
-            // Noon, for the frame before the sky first speaks — the same
-            // assumption the menus light by.
-            hour: Vec4::new(0.5, SHADE_EDGE, 0.0, 0.0),
+            hour: DAYLIGHT_AT_NOON,
         }
     }
 }
@@ -612,14 +670,21 @@ impl MaterialExtension for Daylight {
     }
 }
 
-/// Carries the drawn hour into the materials the baked shadows are drawn by,
-/// mirrored onto the moon's half of the day when the moon is the body up —
-/// see [`Daylight::hour`].
+/// Carries the drawn hour into every material that shades itself from the
+/// baked intervals, mirrored onto the moon's half of the day when the moon is
+/// the body up — see [`Daylight::hour`].
+///
+/// The sea is written here with the ground and the lakes, though it reads its
+/// intervals from a window rather than from its own vertices: what all three
+/// need is the same hour, and two systems writing it would be two chances for
+/// the water and the shore beside it to be at different times of day.
 fn shade_the_ground(
     sky: Res<crate::sky::Sky>,
     ground: Option<Res<GroundMaterial>>,
     lake: Option<Res<LakeMaterial>>,
+    window: Option<Res<sea::DepthWindow>>,
     mut materials: ResMut<Assets<ShadedMaterial>>,
+    mut seas: ResMut<Assets<SeaMaterial>>,
 ) {
     let phase = sky.phase();
     let hour = if protocol::is_night(phase) {
@@ -632,6 +697,9 @@ fn shade_the_ground(
         if let Some(mut material) = materials.get_mut(&handle) {
             material.extension.hour.x = hour;
         }
+    }
+    if let Some(mut sea) = window.and_then(|window| seas.get_mut(window.material())) {
+        sea.extension.daylight.x = hour;
     }
 }
 
@@ -1387,6 +1455,53 @@ mod tests {
     }
 
     #[test]
+    fn the_light_over_a_point_is_read_between_the_corners_around_it() {
+        // What the sea's window asks, texel by texel — see
+        // [`crate::sea::refresh_depth`]. A corner answers with its own
+        // interval; between corners the answer is read across them, so a
+        // headland's shadow reaches the water as an edge rather than as a
+        // staircase of whole corners.
+        let mut ground = Ground::default();
+        assert_eq!(ground.lit(10.0, 10.0), None, "a chunk that never came");
+
+        ground.deliver(IVec2::ZERO, None);
+        assert_eq!(
+            ground.lit(10.0, 10.0),
+            Some(LIT_ALL_DAY),
+            "open water is lit by a sun nothing stands in front of"
+        );
+
+        // A chunk whose light varies along x alone, so a read between two
+        // corners has one obvious answer and a transposed one does not.
+        let mut payload = a_slope();
+        payload.lit = (0..CORNERS * CORNERS)
+            .map(|i| {
+                let ix = i % CORNERS;
+                [LIT_ALL_DAY[0] + ix as u8 % 8, LIT_ALL_DAY[1]]
+            })
+            .collect();
+        ground.deliver(IVec2::new(1, 0), Some(payload));
+
+        let base = CHUNK_METRES;
+        let corner = |ix: usize| {
+            ground
+                .lit(base + ix as f32 * CELL_METRES, 3.0)
+                .expect("the chunk arrived")
+        };
+        assert_eq!(corner(2), [LIT_ALL_DAY[0] + 2, LIT_ALL_DAY[1]]);
+        assert_eq!(corner(3), [LIT_ALL_DAY[0] + 3, LIT_ALL_DAY[1]]);
+        // And halfway between them, halfway between their answers.
+        let between = ground
+            .lit(base + 2.5 * CELL_METRES, 3.0)
+            .expect("the chunk arrived");
+        assert_eq!(
+            between,
+            [LIT_ALL_DAY[0] + 3, LIT_ALL_DAY[1]],
+            "2.5 rounds up"
+        );
+    }
+
+    #[test]
     fn the_ground_underfoot_is_the_ground_on_screen() {
         // Heights are read off the same grid the mesh is built from and
         // interpolated across the same triangles, so a corner is exactly its
@@ -1573,7 +1688,7 @@ mod tests {
     /// A day nothing shadows, for the meshes whose light is not the thing
     /// under test.
     fn all_day() -> Vec<[u8; 2]> {
-        vec![protocol::ground::LIT_ALL_DAY; CORNERS * CORNERS]
+        vec![LIT_ALL_DAY; CORNERS * CORNERS]
     }
 
     fn a_lake(level: f32, edge: usize) -> Vec<u16> {
@@ -1651,7 +1766,7 @@ mod tests {
             chunk: IVec2::ZERO,
             heights: a_slope().heights.iter().copied().map(dequantize).collect(),
             materials: a_slope().materials,
-            lit: all_day(),
+            lit: all_day().into(),
             water: None,
             plants: Vec::new(),
         };
