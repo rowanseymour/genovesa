@@ -770,7 +770,7 @@ impl Server {
     ///
     /// On a *reopened* world this winds the clock forward to the next
     /// occurrence of that hour rather than setting it, exactly as the
-    /// console's `time` command would: a kept world's day only ever grows
+    /// console's `world time` would: a kept world's day only ever grows
     /// older — the promise [`ToClient::Daylight`] makes — and its weather,
     /// running on the same clock, moves on with it.
     pub fn opening_at(mut self, phase: f32) -> Self {

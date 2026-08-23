@@ -8,11 +8,12 @@
 //! it at any point and as often as it likes.
 //!
 //! Nothing here invents a grammar. A line goes to
-//! [`crate::console::dispatch`] exactly as a typed one would — so `client haze
-//! off` doctors this client's picture and `weather gale` crosses the wire to
-//! the server, and a verb added to either side is reachable from here the day
-//! it is added. What this module adds is what a *keyboard* never needed words
-//! for: `shot`, `press`, `click`, `zoom`, `yaw`, `hold` and `quit`.
+//! [`crate::console::dispatch`] exactly as a typed one would — so `client
+//! haze off` doctors this client's picture and `world weather gale` crosses
+//! the wire to the server, and a verb added to either side is reachable from
+//! here the day it is added. What this module adds is what a *keyboard* never
+//! needed words for: `shot`, `press`, `click`, `zoom`, `yaw`, `hold` and
+//! `quit`.
 //!
 //! Two of those are less obvious than they look. `press` works the bound key
 //! through the real bindings rather than commanding the world, because
@@ -34,7 +35,7 @@
 //! socket usable from a shell with nothing in between:
 //!
 //! ```sh
-//! printf 'weather gale\npress forward 20\nshot gale.png\nquit\n' | nc 127.0.0.1 7777
+//! printf 'world weather gale\npress forward 20\nshot gale.png\nquit\n' | nc 127.0.0.1 7777
 //! ```
 //!
 //! A blank line inside an answer would end it early, so blank lines are
@@ -1181,7 +1182,7 @@ mod tests {
         app.add_systems(Update, (crate::sky::advance_the_day, hold_the_sky));
 
         // A world at one hour, and a server that has just named a very
-        // different one — the shape `time 23:00` leaves behind.
+        // different one — the shape `world time 23:00` leaves behind.
         let mut sky = app.world_mut().resource_mut::<crate::sky::Sky>();
         sky.told(0.35);
         sky.told(0.95);
@@ -1611,8 +1612,8 @@ mod tests {
     }
 
     /// And a line that moved nobody is not made to wait for ground it has no
-    /// reason to want — most lines are that, and a `weather gale` that waited
-    /// on the terrain would be a toll on every one of them.
+    /// reason to want — most lines are that, and a `world weather gale` that
+    /// waited on the terrain would be a toll on every one of them.
     #[test]
     fn a_line_that_moved_nobody_is_answered_as_soon_as_the_server_speaks() {
         let (mut app, _orders) = driven_app();

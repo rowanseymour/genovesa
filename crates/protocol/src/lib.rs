@@ -73,10 +73,10 @@ pub fn is_night(phase: f32) -> bool {
 /// `0.25` six in the morning.
 ///
 /// Here rather than on either side because both ends say the hour out loud —
-/// a server answering `time 18:00` at its console, a client's own readout —
-/// and two spellings of it would have one session disagreeing with itself
-/// about what time it is. What a phase *means* is this crate's, the same way
-/// [`is_night`] is.
+/// a server answering `world time 18:00` at its console, a client's own
+/// readout — and two spellings of it would have one session disagreeing with
+/// itself about what time it is. What a phase *means* is this crate's, the
+/// same way [`is_night`] is.
 ///
 /// Rounded to the minute rather than truncated, and folded back into the day
 /// after: an hour that is a hair under the minute it means — which is what a
@@ -495,11 +495,11 @@ pub enum ToServer {
     /// A debug-console line for the server to interpret: whatever the player
     /// typed, verbatim.
     ///
-    /// Deliberately opaque. The vocabulary — `spawn shark`, `time 6:00` —
-    /// belongs to the *server* and may grow without this crate hearing about
-    /// it: a client has no parsing to do and nothing to know, which keeps a
-    /// client written in any language as capable as the newest server it
-    /// talks to. `help` is the vocabulary's own index, and the server
+    /// Deliberately opaque. The vocabulary — `spawn shark`, `world time
+    /// 6:00` — belongs to the *server* and may grow without this crate
+    /// hearing about it: a client has no parsing to do and nothing to know,
+    /// which keeps a client written in any language as capable as the newest
+    /// server it talks to. `help` is the vocabulary's own index, and the server
     /// answers every line — the ones it did not understand included — with a
     /// [`ToClient::Reply`] to the asker alone.
     ///
