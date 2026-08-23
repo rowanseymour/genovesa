@@ -21,6 +21,8 @@ pub mod console;
 pub mod control;
 pub mod debug;
 pub mod figure;
+pub mod glyph;
+pub mod instruments;
 pub mod logbook;
 pub mod menu;
 pub mod models;
@@ -66,6 +68,19 @@ pub const HAZE_END: f32 = 900.0;
 /// Size of the window the game is played in, in pixels. Captured shots are
 /// sized by `set resolution` instead, having no window to take it from.
 pub const WINDOW: UVec2 = UVec2::new(1280, 720);
+
+/// The ink the instruments over the world are drawn in — the compass, and the
+/// lead and the day's arc beside it — and the same the menus use, so
+/// everything laid over the picture reads as one chart's furniture.
+///
+/// Four colours and no more: one face to sit on, one edge to be bounded by,
+/// one ink to read, and one dimmed ink for what is on the card without being
+/// the reading. An instrument wanting a fifth is usually one that has two
+/// readings where it should have one.
+pub const FACE: Color = Color::srgba(0.09, 0.11, 0.10, 0.60);
+pub const EDGE: Color = Color::srgb(0.70, 0.69, 0.62);
+pub const INK: Color = Color::srgb(0.88, 0.87, 0.80);
+pub const INK_DIM: Color = Color::srgb(0.60, 0.60, 0.55);
 
 /// A surface in `base_color` with nothing polished about it.
 ///
