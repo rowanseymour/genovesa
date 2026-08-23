@@ -6,7 +6,7 @@
 //! line is an imperative about the *world*, and crosses the wire verbatim as
 //! [`protocol::ToServer::Command`]: the vocabulary belongs to the server,
 //! this module does not parse a word of it, and whatever text comes back as
-//! [`protocol::ToClient::Reply`] is printed here. So `set shadows off`
+//! [`protocol::ToClient::Reply`] is printed here. So `set haze off`
 //! doctors one player's picture and admits it on the readout, while
 //! `time 18:00` moves the sun for everyone in the session — and the prompt
 //! itself teaches the difference.
@@ -279,11 +279,10 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
         [var] => read(var, toggles).unwrap_or_else(|| no_such(var)),
         [var, value] => match toggles.variable(var) {
             Some(Value::Switch(state)) => switch(var, value, state),
-            Some(Value::Metres(state)) => reach(var, value, state),
             Some(Value::Rows(state)) => resolution(var, value, state),
             None => no_such(var),
         },
-        _ => "one variable, one value — `set reach 450`".to_string(),
+        _ => "one variable, one value — `set resolution 720`".to_string(),
     }
 }
 
@@ -293,7 +292,6 @@ fn set(args: &[&str], toggles: &mut Toggles) -> String {
 fn read(var: &str, toggles: &mut Toggles) -> Option<String> {
     Some(match toggles.variable(var)? {
         Value::Switch(on) => onoff(var, *on),
-        Value::Metres(metres) => format!("{var} {metres:.0}m"),
         Value::Rows(Some(rows)) => format!("{var} {rows}p"),
         Value::Rows(None) => format!("{var} the window's own"),
     })
@@ -321,27 +319,6 @@ fn switch(var: &str, value: &str, state: &mut bool) -> String {
         _ => return format!("`{var}` is on or off"),
     }
     onoff(var, *state)
-}
-
-/// Sets the shadow reach, in metres. `default` is the world's own — see
-/// [`Toggles::reach`] — and the bounds only refuse what the cascades could
-/// not survive: a reach of nothing, or one so deep the maps are all in the
-/// haze.
-fn reach(var: &str, value: &str, state: &mut f32) -> String {
-    let metres = match value {
-        "default" => Some(crate::HAZE_END),
-        _ => value
-            .parse::<f32>()
-            .ok()
-            .filter(|m| (10.0..=10_000.0).contains(m)),
-    };
-    match metres {
-        Some(metres) => {
-            *state = metres;
-            format!("{var} {metres:.0}m")
-        }
-        None => format!("`{var}` is metres — `set {var} 450`, or `set {var} default`"),
-    }
 }
 
 /// Sets how big a picture `shot` writes, by the rungs the display screen
@@ -555,16 +532,12 @@ mod tests {
     #[test]
     fn every_switch_answers_and_takes() {
         let mut toggles = Toggles::default();
-        assert_eq!(set(&["shadows", "off"], &mut toggles), "shadows off");
-        assert!(!toggles.shadows);
         assert_eq!(set(&["haze", "off"], &mut toggles), "haze off");
+        assert!(!toggles.haze);
         assert_eq!(set(&["wireframe", "on"], &mut toggles), "wireframe on");
-        assert_eq!(set(&["reach", "450"], &mut toggles), "reach 450m");
-        assert_eq!(toggles.reach, 450.0);
-        assert_eq!(set(&["reach", "default"], &mut toggles), "reach 900m");
-        assert_eq!(toggles.reach, crate::HAZE_END);
-        assert_eq!(set(&["shadows", "on"], &mut toggles), "shadows on");
-        assert!(toggles.shadows);
+        assert!(toggles.wireframe);
+        assert_eq!(set(&["haze", "on"], &mut toggles), "haze on");
+        assert!(toggles.haze);
     }
 
     #[test]
@@ -575,8 +548,7 @@ mod tests {
         };
         assert_eq!(
             set(&[], &mut toggles),
-            "stats off / shadows on / haze on / wireframe on / reach 900m / \
-             resolution the window's own"
+            "stats off / haze on / wireframe on / resolution the window's own"
         );
         assert_eq!(set(&["haze"], &mut toggles), "haze on");
     }
@@ -632,10 +604,6 @@ mod tests {
             "unhelpful: {not_a_switch}"
         );
         assert!(!toggles.stats, "a refused value took anyway");
-
-        let not_metres = set(&["reach", "far"], &mut toggles);
-        assert!(not_metres.contains("metres"), "unhelpful: {not_metres}");
-        assert_eq!(toggles.reach, crate::HAZE_END);
     }
 
     /// A headless app at the helm, with the console systems and the states
@@ -864,7 +832,7 @@ mod tests {
         assert!(app
             .world()
             .resource::<Console>()
-            .said("stats  shadows  haze  wireframe  reach  resolution"));
+            .said("stats  haze  wireframe  resolution"));
     }
 
     #[test]

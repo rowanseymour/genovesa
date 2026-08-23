@@ -412,8 +412,6 @@ pub(crate) enum MenuButton {
     /// spread behind the open list, so that a click anywhere else on the
     /// screen is a click on this.
     ShutResolutions,
-    /// Stops the sun casting, or sets it casting again.
-    ToggleShadows,
     /// Makes what the screen is set to what the machine does — and afterwards
     /// stands by it, which is the same button because during a trial there is
     /// nothing else it could mean. See [`settings::OnTrial`].
@@ -462,7 +460,6 @@ impl MenuButton {
             Self::OpenResolutions => "resolutions",
             Self::PickResolution(_) => "resolution",
             Self::ShutResolutions => "shut-resolutions",
-            Self::ToggleShadows => "shadows",
             Self::ApplyDisplay => "apply",
             Self::Back => "back",
             Self::Resume => "resume",
@@ -478,7 +475,7 @@ impl MenuButton {
     /// list is for is [`MenuButton::name`], which does not look. It is the
     /// grammar's index rather than the grammar, and a test holds the two to
     /// agreement.
-    const EVERY: [Self; 27] = [
+    const EVERY: [Self; 26] = [
         Self::SetSail,
         Self::NewWorld,
         Self::JoinWorld,
@@ -501,7 +498,6 @@ impl MenuButton {
         Self::OpenResolutions,
         Self::PickResolution(Resolution::Native),
         Self::ShutResolutions,
-        Self::ToggleShadows,
         Self::ApplyDisplay,
         Self::Back,
         Self::Resume,
@@ -563,7 +559,6 @@ impl MenuButton {
                     .map(Self::PickResolution)?
             }
             ["shut-resolutions"] => Self::ShutResolutions,
-            ["shadows"] => Self::ToggleShadows,
             ["apply"] => Self::ApplyDisplay,
             ["back"] => Self::Back,
             ["resume"] => Self::Resume,
@@ -601,7 +596,6 @@ struct KeyText(Action);
 enum DisplayText {
     Fullscreen,
     Resolution,
-    Shadows,
     /// Not a setting but a word about them: what the display will really do
     /// with the resolution being asked of it, and whether it has been asked
     /// yet at all — see [`settings::available`].
@@ -1749,11 +1743,11 @@ fn close_display(mut on_trial: ResMut<OnTrial>, mut picking: ResMut<Picking>) {
     picking.0 = false;
 }
 
-/// Three rows, and they are three because they are what somebody whose machine
+/// Two rows, and they are two because they are what somebody whose machine
 /// cannot keep up reaches for, in the order they reach for them: fill the
-/// screen, draw fewer pixels, stop casting shadows.
+/// screen, draw fewer pixels.
 ///
-/// None of the three does anything on its own — the screen edits [`Wanted`]
+/// Neither does anything on its own — the screen edits [`Wanted`]
 /// and Apply is what reaches the window, for the reason that resource gives —
 /// so it is built out of what is *wanted* now rather than empty for
 /// [`refresh_display`] to fill in, and is right on the frame it appears rather
@@ -1795,14 +1789,6 @@ fn build_display(
                                 wanted.fullscreen,
                             );
                             spawn_resolution_row(rows, ink, wanted);
-                            spawn_switch_row(
-                                rows,
-                                ink,
-                                "Shadows",
-                                MenuButton::ToggleShadows,
-                                DisplayText::Shadows,
-                                wanted.shadows,
-                            );
                         });
 
                     // Plain punctuation only: the default font has no dash of
@@ -2109,14 +2095,12 @@ fn display_actions(
             // Better to answer nothing until the change on the table is
             // settled, which is one press away either way.
             MenuButton::ToggleFullscreen
-            | MenuButton::ToggleShadows
             | MenuButton::OpenResolutions
             | MenuButton::PickResolution(_)
                 if editing.on_trial.0.is_some() => {}
             MenuButton::ToggleFullscreen => {
                 editing.wanted.0.fullscreen = !editing.wanted.0.fullscreen
             }
-            MenuButton::ToggleShadows => editing.wanted.0.shadows = !editing.wanted.0.shadows,
             // Opens, and only opens: the sheet behind an open list covers the
             // button it dropped from, so the press that shuts it again is a
             // press on that rather than a second one on this.
@@ -2186,7 +2170,6 @@ fn refresh_display(
         let saying = match which {
             DisplayText::Fullscreen => switch_label(wanted.0.fullscreen).to_string(),
             DisplayText::Resolution => wanted.0.resolution.label(),
-            DisplayText::Shadows => switch_label(wanted.0.shadows).to_string(),
             // Three states and a word for each, because a control that says
             // which way it is set is the rule the switches on this screen
             // already follow. Counting down in the button rather than beside
@@ -3838,15 +3821,14 @@ mod tests {
     fn the_display_rows_say_which_way_they_are_set() {
         let mut app = test_app(AppState::Display);
         assert_eq!(row_says(&mut app, DisplayText::Fullscreen), "Off");
-        assert_eq!(row_says(&mut app, DisplayText::Shadows), "On");
 
         click(&mut app, MenuButton::ToggleFullscreen);
         assert!(wanted(&app).fullscreen);
         assert_eq!(row_says(&mut app, DisplayText::Fullscreen), "On");
 
-        click(&mut app, MenuButton::ToggleShadows);
-        assert!(!wanted(&app).shadows);
-        assert_eq!(row_says(&mut app, DisplayText::Shadows), "Off");
+        click(&mut app, MenuButton::ToggleFullscreen);
+        assert!(!wanted(&app).fullscreen);
+        assert_eq!(row_says(&mut app, DisplayText::Fullscreen), "Off");
     }
 
     /// The whole point of the screen editing what is *wanted*: a switch thrown
@@ -3862,7 +3844,6 @@ mod tests {
 
         click(&mut app, MenuButton::ToggleFullscreen);
         click(&mut app, MenuButton::PickResolution(Resolution::Rows(720)));
-        click(&mut app, MenuButton::ToggleShadows);
         assert_eq!(
             display(&app),
             DisplaySettings::default(),
@@ -4025,7 +4006,7 @@ mod tests {
         );
     }
 
-    /// A trial is one question, and the three rows are not it.
+    /// A trial is one question, and the rows are not it.
     ///
     /// There is nowhere on the screen for a fresh edit to show while a trial
     /// runs — the caveat line is the trial's and the button reads Keep — and
@@ -4039,12 +4020,11 @@ mod tests {
         click(&mut app, MenuButton::ToggleFullscreen);
         click(&mut app, MenuButton::ApplyDisplay);
 
-        click(&mut app, MenuButton::ToggleShadows);
+        click(&mut app, MenuButton::ToggleFullscreen);
         assert!(
-            wanted(&app).shadows,
+            wanted(&app).fullscreen,
             "an edit was taken with nothing on the screen to say it had been"
         );
-        assert_eq!(row_says(&mut app, DisplayText::Shadows), "On");
 
         click(&mut app, MenuButton::OpenResolutions);
         assert!(
@@ -4057,15 +4037,14 @@ mod tests {
         // So the trial ends on its own terms, with nothing of anybody's to
         // throw away.
         run_out_the_trial(&mut app);
-        assert!(!display(&app).fullscreen);
         assert!(
-            display(&app).shadows,
+            !display(&app).fullscreen,
             "an edit nobody could see reached the window"
         );
 
         // And with it settled the rows answer again.
-        click(&mut app, MenuButton::ToggleShadows);
-        assert!(!wanted(&app).shadows, "the rows never came back");
+        click(&mut app, MenuButton::ToggleFullscreen);
+        assert!(wanted(&app).fullscreen, "the rows never came back");
     }
 
     /// And stood by when somebody who can evidently still see it says so.
@@ -4094,15 +4073,16 @@ mod tests {
 
         click(&mut app, MenuButton::ToggleFullscreen);
         click(&mut app, MenuButton::ApplyDisplay);
-        click(&mut app, MenuButton::ToggleShadows);
+        click(&mut app, MenuButton::PickResolution(Resolution::Rows(720)));
         click(&mut app, MenuButton::Back);
         assert!(!on_trial(&app));
         assert!(
             display(&app).fullscreen,
             "an applied change was undone by leaving"
         );
-        assert!(
-            display(&app).shadows,
+        assert_eq!(
+            display(&app).resolution,
+            Resolution::Native,
             "a change nobody applied reached the window"
         );
 
@@ -4110,7 +4090,7 @@ mod tests {
         // than what it was last asked for.
         go_to(&mut app, AppState::Display);
         assert_eq!(wanted(&app), display(&app));
-        assert_eq!(row_says(&mut app, DisplayText::Shadows), "On");
+        assert_eq!(row_says(&mut app, DisplayText::Fullscreen), "On");
     }
 
     /// A machine that has reported no monitors cannot promise a resolution
@@ -4148,10 +4128,10 @@ mod tests {
         click(&mut app, MenuButton::Options);
         click(&mut app, MenuButton::Display);
 
-        click(&mut app, MenuButton::ToggleShadows);
+        click(&mut app, MenuButton::ToggleFullscreen);
         click(&mut app, MenuButton::ApplyDisplay);
-        assert!(!display(&app).shadows);
-        assert_eq!(row_says(&mut app, DisplayText::Shadows), "Off");
+        assert!(display(&app).fullscreen);
+        assert_eq!(row_says(&mut app, DisplayText::Fullscreen), "On");
         assert_eq!(state(&app), AppState::InWorld);
     }
 

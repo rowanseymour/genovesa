@@ -1080,6 +1080,7 @@ mod tests {
         ChunkPayload {
             heights: vec![quantize(height); CORNERS * CORNERS],
             materials: vec![Material::Grass; MATERIAL_COUNT],
+            lit: vec![protocol::ground::LIT_ALL_DAY; CORNERS * CORNERS],
             water: None,
             plants: Vec::new(),
         }

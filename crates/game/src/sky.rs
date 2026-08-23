@@ -36,8 +36,6 @@ use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource};
 
-use std::f32::consts::TAU;
-
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
 use crate::clouds::{Clouds, CloudsPlugin};
@@ -70,17 +68,6 @@ const CATCH_UP: f32 = 2.0;
 /// of the ten-minute day, about a third of what the sun crosses between two
 /// tellings, and nothing the eye holds between two pictures.
 const CAUGHT_UP: f32 = 0.0005;
-
-/// How far the sun's arc leans from straight overhead, in radians — a little
-/// over twenty degrees, which puts noon short of the zenith.
-///
-/// The tropics would have it near enough vertical, and vertical is the one
-/// thing this look cannot use: a sun straight overhead lights every facet of
-/// a hillside equally and the relief the whole flat-shaded style is built out
-/// of disappears at midday. Leaning the arc keeps a shadow under everything
-/// at every hour, and it also keeps the light off the pole, where pointing it
-/// at the ground has no unique answer.
-const TILT: f32 = 0.38;
 
 /// What hour a screen with no world behind it is lit and cleared to: noon,
 /// which is the daylight the menus were drawn against when the world had
@@ -326,6 +313,13 @@ impl Sky {
         }
     }
 
+    /// Lets a held sky go again — the inverse of [`Sky::hold`]. The clock
+    /// kept running underneath, so what comes back is the world's own hour,
+    /// not the one the hold began at.
+    pub fn release(&mut self) {
+        self.commanded = None;
+    }
+
     /// Whether it is night as drawn — which is what decides whether there is
     /// a night to offer to wait out, and, in [`crate::clouds`], whether the
     /// light is carrying any weather. One answer for both: the clouds may
@@ -420,19 +414,6 @@ impl Plugin for SkyPlugin {
     }
 }
 
-/// Which way the sun lies from the ground at an hour, as a unit vector: `x`
-/// east, `y` up, `z` south — [`protocol::ground::NORTH`] being `-z`.
-///
-/// The sun rises due east at 0.25, stands at its highest at noon and sets due
-/// west at 0.75; below the horizon the same vector goes on round, and negated
-/// it is where the moon is. The arc is tilted southward by [`TILT`] rather
-/// than passing overhead, so `y` is never quite 1 and the light is never
-/// quite straight down.
-fn towards_the_sun(phase: f32) -> Vec3 {
-    let (up, east) = ((phase - 0.25) * TAU).sin_cos();
-    Vec3::new(east, up * TILT.cos(), up * TILT.sin())
-}
-
 /// Which way the world's light comes from at an hour: the sun through the
 /// day, the moon through the night, and neither of them from underneath.
 ///
@@ -450,7 +431,7 @@ fn towards_the_sun(phase: f32) -> Vec3 {
 /// in nature. So the direction is held at [`GRAZE`] rather than allowed under
 /// it: the last of the sun lies along the water instead of coming up out of it.
 fn light_from(phase: f32) -> Vec3 {
-    let sun = towards_the_sun(phase);
+    let sun = protocol::towards_the_sun(phase);
     let body = if protocol::is_night(phase) { -sun } else { sun };
     Vec3::new(body.x, body.y.max(GRAZE), body.z).normalize()
 }
@@ -482,18 +463,22 @@ fn light_at(phase: f32) -> Hour {
 /// Hangs the one light the world is lit by. Aimed and coloured from the next
 /// frame on by [`light_the_world`]; what is set here is only what does not
 /// change with the hour.
+///
+/// It casts for the things that move and for nothing else. The ground's own
+/// shadows are baked where the ground is made and arrive with each chunk —
+/// see [`protocol::ground::ChunkPayload::lit`] — so the terrain is kept out
+/// of the pass as a caster, and what is left in it is the boat, the plants,
+/// the player and the beasts, whose shadows no baking could answer for
+/// because they are not a function of the hour alone. That is what makes
+/// [`crate::terrain::cascades`] a hundred metres and one cascade rather than
+/// a kilometre and four.
 fn hang_the_light(mut commands: Commands) {
-    // Shadow map resolution. The first cascade spreads its texels over the
-    // whole frustum slice out to its far bound — about a hundred metres of
-    // diagonal at the default zoom — so at Bevy's default 2048 a texel is
-    // around 5 cm of world. The terrain never notices: its facets are metres
-    // across and their shadows are broad shapes. The mast does. It is the
-    // thinnest caster in the world, and at 16 cm its shadow is a stripe three
-    // texels wide, whose edges snap from texel to texel as the boat moves —
-    // a visible flicker along the whole stripe. Doubling the resolution
-    // halves the texel and the stripe stops seething. The cost is GPU memory
-    // (each cascade is one square layer of this size), which is why it stops
-    // at 4096 rather than going further.
+    // Shadow map resolution. One cascade now, so this is a single layer
+    // rather than four — and the reason it is not Bevy's 2048 is the mast.
+    // It is the thinnest caster in the world, and at 16 cm its shadow is a
+    // stripe a few texels wide whose edges snap from texel to texel as the
+    // boat moves, which reads as a flicker along the whole stripe. Halving
+    // the texel stops it seething.
     commands.insert_resource(DirectionalLightShadowMap { size: 4096 });
 
     commands.spawn((
@@ -502,13 +487,13 @@ fn hang_the_light(mut commands: Commands) {
         DespawnOnExit(AppState::InWorld),
         DirectionalLight {
             shadow_maps_enabled: true,
-            // The default biases cause bad self-shadowing acne on a heightfield
-            // this large — dark speckle all over the hillsides.
-            shadow_depth_bias: 0.06,
-            shadow_normal_bias: 2.2,
+            // Bevy's own biases, which are tuned for exactly what is left
+            // casting: models a couple of metres across. The heightfield that
+            // needed them wound far up — dark speckle all over the hillsides
+            // otherwise — is no longer in the pass to self-shadow.
             ..default()
         },
-        crate::terrain::cascades(crate::HAZE_END),
+        crate::terrain::cascades(),
         Transform::default(),
     ));
 }
@@ -990,24 +975,27 @@ mod tests {
     }
 
     #[test]
-    fn the_sun_rises_in_the_east_stands_south_of_overhead_and_sets_in_the_west() {
-        // The world's east is +x and its north is -z — see
-        // `protocol::ground::NORTH` — so this is the whole of what a day
-        // looks like from the ground.
-        let sunrise = towards_the_sun(0.25);
-        assert!(sunrise.x > 0.99, "the sun rose at {sunrise}");
-        assert!(sunrise.y.abs() < 1e-6, "the sun rose {} up", sunrise.y);
+    fn a_sky_let_go_returns_to_the_worlds_own_hour() {
+        // The clock keeps running under a hold, so letting go must hand back
+        // the world's hour and not the one the hold began at — a released
+        // sky that stayed pinned made every picture after the first `hold`
+        // a picture of the same morning.
+        let mut app = sky_app();
+        app.world_mut().resource_mut::<Sky>().told(0.40);
+        app.world_mut().resource_mut::<Sky>().hold();
+        run_frames(&mut app, 300);
+        assert!(
+            (phase(&app) - 0.40).abs() < 1e-4,
+            "the held sky moved to {}",
+            phase(&app)
+        );
 
-        let noon = towards_the_sun(0.5);
-        assert!(noon.y > 0.9, "noon stands {} up", noon.y);
-        assert!(noon.z > 0.0, "noon is not south of overhead: {noon}");
-        assert!(noon.y < 1.0, "noon is straight overhead, which flattens it");
-
-        let sunset = towards_the_sun(0.75);
-        assert!(sunset.x < -0.99, "the sun set at {sunset}");
-
-        let midnight = towards_the_sun(0.0);
-        assert!(midnight.y < -0.9, "the sun at midnight is {midnight}");
+        app.world_mut().resource_mut::<Sky>().release();
+        assert!(
+            phase(&app) > 0.402,
+            "letting go returned the hour the hold began at: {}",
+            phase(&app)
+        );
     }
 
     #[test]
@@ -1031,7 +1019,7 @@ mod tests {
                 "the light at {phase} is not a direction: {light}"
             );
 
-            let sun = towards_the_sun(phase);
+            let sun = protocol::towards_the_sun(phase);
             let side = if protocol::is_night(phase) { -sun } else { sun };
             assert!(
                 light.xz().dot(side.xz()) > 0.0,

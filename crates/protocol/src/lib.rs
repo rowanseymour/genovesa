@@ -6,8 +6,9 @@
 //! not which chunks are worth asking for. An answer is either open water,
 //! which carries no data because the sea and its floor are two flat planes
 //! anyone can draw, or ground, which arrives as a [`ground::ChunkPayload`]:
-//! corner heights on a fixed grid, one palette entry per triangle, and — on
-//! the minority of chunks that hold a lake — the level its water stands at.
+//! corner heights on a fixed grid, one palette entry per triangle, when each
+//! corner stands in the sun, and — on the minority of chunks that hold a
+//! lake — the level its water stands at.
 //!
 //! A deliberate inversion of how this started. A seed used to be a world —
 //! every machine regenerating the same ocean bit for bit — which made the
@@ -31,7 +32,7 @@ pub mod survey;
 
 use std::io::{self, Read, Write};
 
-use glam::{IVec2, Vec2};
+use glam::{IVec2, Vec2, Vec3};
 
 pub use ground::{ChunkPayload, Material};
 
@@ -67,6 +68,56 @@ pub const DAYBREAK: f32 = 0.22;
 /// night — the span from [`NIGHTFALL`] round midnight to [`DAYBREAK`].
 pub fn is_night(phase: f32) -> bool {
     !(DAYBREAK..NIGHTFALL).contains(&phase)
+}
+
+/// Where the sun crosses the horizon: up at [`SUNRISE`], down at [`SUNSET`],
+/// and exactly opposite ends of the day so noon is its middle.
+pub const SUNRISE: f32 = 0.25;
+/// See [`SUNRISE`].
+pub const SUNSET: f32 = 0.75;
+
+/// How far the sun's arc leans from straight overhead, in radians — a little
+/// over twenty degrees, which puts noon short of the zenith.
+///
+/// The tropics would have it near enough vertical, and vertical is the one
+/// thing this look cannot use: a sun straight overhead lights every facet of
+/// a hillside equally and the relief the whole flat-shaded style is built out
+/// of disappears at midday. Leaning the arc keeps a shadow under everything
+/// at every hour, and it also keeps the light off the pole, where pointing it
+/// at the ground has no unique answer.
+pub const SUN_TILT: f32 = 0.38;
+
+/// Which way the sun lies from the ground at an hour, as a unit vector: `x`
+/// east, `y` up, `z` south — [`ground::NORTH`] being `-z`.
+///
+/// The sun rises due east at [`SUNRISE`], stands at its highest at noon and
+/// sets due west at [`SUNSET`]; below the horizon the same vector goes on
+/// round, and negated it is where the moon is. The arc is tilted southward by
+/// [`SUN_TILT`] rather than passing overhead, so `y` is never quite 1 and the
+/// light is never quite straight down.
+///
+/// Part of the wire rather than the drawing, because both ends act on it and
+/// have to agree: a client aims the world's one light down it, and a server
+/// bakes [`ground::ChunkPayload::lit`] against it — the same arc, or the
+/// shadows on the ground would contradict the sun that is supposed to be
+/// casting them.
+pub fn towards_the_sun(phase: f32) -> Vec3 {
+    let (up, east) = ((phase - SUNRISE) * std::f32::consts::TAU).sin_cos();
+    Vec3::new(east, up * SUN_TILT.cos(), up * SUN_TILT.sin())
+}
+
+/// A phase of the day as [`ground::ChunkPayload::lit`] spells it: the day cut
+/// into 256 equal steps, rounded to the nearest, wrapping at midnight —
+/// [`SUNRISE`] is 64 and [`SUNSET`] is 192. [`dequantize_phase`] reads one
+/// back. Pinned here because a server writes these and a client compares the
+/// hour it is drawing against them, and the two must mean the same instant.
+pub fn quantize_phase(phase: f32) -> u8 {
+    ((phase.rem_euclid(1.0) * 256.0).round() as u16 % 256) as u8
+}
+
+/// What a stored phase step means — see [`quantize_phase`].
+pub fn dequantize_phase(step: u8) -> f32 {
+    step as f32 / 256.0
 }
 
 /// A phase of the day as a time on a twenty-four hour clock — `0.0` midnight,
@@ -1424,6 +1475,27 @@ mod tests {
     use super::survey::{Coast, Mark, Soundings};
     use super::*;
 
+    #[test]
+    fn the_sun_rises_in_the_east_stands_south_of_overhead_and_sets_in_the_west() {
+        // The world's east is +x and its north is -z — see
+        // `ground::NORTH` — so this is the whole of what a day
+        // looks like from the ground.
+        let sunrise = towards_the_sun(SUNRISE);
+        assert!(sunrise.x > 0.99, "the sun rose at {sunrise}");
+        assert!(sunrise.y.abs() < 1e-6, "the sun rose {} up", sunrise.y);
+
+        let noon = towards_the_sun(0.5);
+        assert!(noon.y > 0.9, "noon stands {} up", noon.y);
+        assert!(noon.z > 0.0, "noon is not south of overhead: {noon}");
+        assert!(noon.y < 1.0, "noon is straight overhead, which flattens it");
+
+        let sunset = towards_the_sun(SUNSET);
+        assert!(sunset.x < -0.99, "the sun set at {sunset}");
+
+        let midnight = towards_the_sun(0.0);
+        assert!(midnight.y < -0.9, "the sun at midnight is {midnight}");
+    }
+
     /// A chunk's worth of ink whose every byte is a different one, so that
     /// anything which reordered the runs or the marks inside them shows.
     fn a_coast() -> Soundings {
@@ -1476,6 +1548,9 @@ mod tests {
                         Material::Marsh,
                     ][i % 5]
                 })
+                .collect(),
+            lit: (0..CORNERS * CORNERS)
+                .map(|i| [(i * 3 % 251) as u8, (i * 5 % 253) as u8])
                 .collect(),
             water: None,
             plants: Vec::new(),
@@ -2249,11 +2324,17 @@ mod tests {
             "seabed, sand, forest"
         );
 
-        // And the same chunk with a lake on it. The heights and the materials
-        // must land at exactly the offsets they land at above — water is
-        // something a chunk carries in addition, not a rearrangement of what
-        // it carried already — so the two answers agree byte for byte up to
-        // the end of the materials and differ only in the flag and the tail.
+        // The lit grid starts once the materials are done, a from-until pair
+        // per corner: corner 0 is [0, 0], corner 1 [3, 5], corner 2 [6, 10].
+        let lit = materials + MATERIAL_COUNT;
+        assert_eq!(ground[lit..lit + 6], [0, 0, 3, 5, 6, 10]);
+
+        // And the same chunk with a lake on it. The heights, the materials
+        // and the light must land at exactly the offsets they land at above —
+        // water is something a chunk carries in addition, not a rearrangement
+        // of what it carried already — so the two answers agree byte for byte
+        // up to the end of the lit grid and differ only in the flag and the
+        // tail.
         let lake = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::new(5, -3),
             ground: Some(a_chunk_with_a_lake()),
@@ -2277,15 +2358,15 @@ mod tests {
         );
         assert_eq!(lake[13], 2, "the flag says there is water on this ground");
         assert_eq!(
-            lake[14..materials + MATERIAL_COUNT],
-            ground[14..materials + MATERIAL_COUNT],
-            "the water moved the heights or the materials"
+            lake[14..lit + ground::LIT_BYTES],
+            ground[14..lit + ground::LIT_BYTES],
+            "the water moved the heights, the materials or the light"
         );
 
-        // The water grid starts once the materials are done, little-endian
+        // The water grid starts once the lit grid is done, little-endian
         // pairs like the heights: level 0 is 0, level 1 is 907, level 2 is
         // 1814.
-        let water = materials + MATERIAL_COUNT;
+        let water = lit + ground::LIT_BYTES;
         assert_eq!(lake[water..water + 6], [0, 0, 0x8B, 0x03, 0x16, 0x07]);
 
         // And a plant, which goes on the end of everything else: its kind
