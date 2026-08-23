@@ -183,9 +183,12 @@ impl Plugin for InstrumentsPlugin {
         app.add_systems(OnEnter(AppState::InWorld), spawn_instruments)
             .add_systems(
                 Update,
+                // Each on the one resource it reads, so an app that stands
+                // this plugin up without the world's ground or its clock draws
+                // the other instrument rather than falling over.
                 (
                     heave_the_lead.run_if(resource_exists::<Ground>),
-                    cross_the_sky,
+                    cross_the_sky.run_if(resource_exists::<Sky>),
                 )
                     .run_if(in_state(AppState::InWorld)),
             );
@@ -452,10 +455,11 @@ fn figure(metres: f32) -> String {
 
 /// Hangs the lead over the side and reads it.
 ///
-/// Ashore the whole instrument goes out, the compass ring's arrangement and
-/// for its reason: there is no water under a walker, and an instrument left
-/// showing the last sounding of the boat they stepped off is a claim about
-/// where they are standing.
+/// The whole instrument goes out unless there is a sounding to draw — ashore,
+/// the compass ring's arrangement and for its reason, since there is no water
+/// under a walker and one left showing the last sounding of the boat they
+/// stepped off is a claim about where they are standing; and afloat over
+/// ground that has not arrived, for the reason at the `showing` below.
 fn heave_the_lead(
     ground: Res<Ground>,
     player: PlayerPlace,
@@ -466,7 +470,12 @@ fn heave_the_lead(
         (true, Some(at)) => sound(&ground, at),
         _ => Sounding::Nothing,
     };
-    let showing = if player.aboard() {
+    // A sounding and not just a boat: the instrument's furniture is the scale
+    // its reading is read against, and a waterline with graduations under it
+    // and nothing hanging from them reads as a lead that has lost its line
+    // rather than as one with nothing to say. The world opens in exactly that
+    // state — aboard, with the ground under the hull still on its way.
+    let showing = if player.aboard() && sounding != Sounding::Nothing {
         Visibility::Inherited
     } else {
         Visibility::Hidden
@@ -493,8 +502,10 @@ fn heave_the_lead(
     };
     for (part, mut node, mut visibility, text) in &mut parts {
         let (top, height, shown) = match part {
-            LeadPart::Run => (0.0, down, sounding != Sounding::Nothing),
-            LeadPart::Slack => (down, (SCALE - down).max(0.0), sounding != Sounding::Nothing),
+            // The line itself is always drawn: past the return above there is
+            // a sounding, and a sounding is a line in the water.
+            LeadPart::Run => (0.0, down, true),
+            LeadPart::Slack => (down, (SCALE - down).max(0.0), true),
             LeadPart::Weight => (down, PLUMMET.y, matches!(sounding, Sounding::Bottom(_))),
             LeadPart::Figure => (
                 down - FIGURE_RISE,
@@ -743,6 +754,28 @@ mod tests {
         assert!(
             !reading(&mut ashore).0,
             "ashore, the lead was still hanging"
+        );
+    }
+
+    /// The state every world opens in: aboard, with the ground under the hull
+    /// still on its way. The furniture has to wait for the reading it is drawn
+    /// to be read against, or the instrument opens looking like a lead that
+    /// has lost its line.
+    #[test]
+    fn the_lead_waits_for_ground_before_it_shows_its_scale() {
+        let mut app = test_app();
+        // `Ground` present but empty, which is how `terrain` inserts it at
+        // world entry — the chunks arrive after.
+        app.insert_resource(Ground::default());
+        let stood = Transform::from_xyz(0.0, 0.0, 0.0);
+        let hull = app.world_mut().spawn(stood).id();
+        app.world_mut()
+            .spawn((crate::player::Player, stood, ChildOf(hull)));
+        app.update();
+
+        assert!(
+            !reading(&mut app).0,
+            "the lead showed its scale with no ground to sound"
         );
     }
 
