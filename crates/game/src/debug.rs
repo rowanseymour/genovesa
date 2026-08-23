@@ -110,6 +110,13 @@ pub struct Toggles {
     /// mentions it: a readout that is visible has already admitted to being
     /// on.
     pub stats: bool,
+    /// `client shadows` — off, and the sun stops casting. Only what moves is
+    /// in the pass now — the boat, the plants, the player, the beasts; the
+    /// terrain wears its own baked shadow and does not answer to this. So
+    /// what the switch shows is the cast half alone, which is exactly what
+    /// makes it worth having: whether a hull is sitting on its shadow or
+    /// floating over the ground is hard to see until the shadow goes.
+    pub shadows: bool,
     /// `client haze` — off, and the aerial haze comes away, so what the
     /// distant ground is actually doing can be seen.
     pub haze: bool,
@@ -131,6 +138,7 @@ impl Default for Toggles {
     fn default() -> Self {
         Self {
             stats: false,
+            shadows: true,
             haze: true,
             wireframe: false,
             // A window until [`crate::control::ControlPlugin`] says
@@ -158,11 +166,16 @@ pub struct Switch {
     confessed: bool,
 }
 
-pub const SWITCHES: [Switch; 3] = [
+pub const SWITCHES: [Switch; 4] = [
     Switch {
         name: "stats",
         of: |toggles| &mut toggles.stats,
         confessed: false,
+    },
+    Switch {
+        name: "shadows",
+        of: |toggles| &mut toggles.shadows,
+        confessed: true,
     },
     Switch {
         name: "haze",
@@ -287,10 +300,19 @@ fn apply_toggles(
     mut commands: Commands,
     toggles: Res<Toggles>,
     wireframe: Option<ResMut<WireframeConfig>>,
+    mut suns: Query<&mut DirectionalLight, With<crate::sky::SkyLight>>,
     cameras: Query<(Entity, Has<DistanceFog>), With<MapCamera>>,
 ) {
     if !toggles.is_changed() {
         return;
+    }
+
+    // The one writer of this field, which is why the switch can simply say
+    // what it should be: two systems setting it would each undo the other on
+    // alternate frames. The light is hung casting — see
+    // [`crate::sky::hang_the_light`] — and this only doctors it.
+    for mut sun in &mut suns {
+        sun.shadow_maps_enabled = toggles.shadows;
     }
 
     if let Some(mut wireframe) = wireframe {
@@ -935,13 +957,61 @@ mod tests {
         // the wording.
         let all = Toggles {
             stats: true,
+            shadows: false,
             haze: false,
             wireframe: true,
             // Not a doctoring of the picture but the size of it, which a
             // picture cannot hide, so the line never mentions it.
             resolution: Some(1080),
         };
-        assert_eq!(all.line().as_deref(), Some("debug: no haze / wireframe"));
+        assert_eq!(
+            all.line().as_deref(),
+            Some("debug: no shadows / no haze / wireframe")
+        );
+    }
+
+    /// The switch reaches the light, both ways. `apply_toggles` is the one
+    /// writer of the field — see there — so this is the whole of what the
+    /// switch does, and without it a rename or a dropped query would leave
+    /// `client shadows off` answering cheerfully and changing nothing.
+    #[test]
+    fn the_console_takes_the_sun_s_casting_away_and_gives_it_back() {
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::time::TimePlugin,
+            bevy::diagnostic::FrameCountPlugin,
+            DebugOverlayPlugin,
+        ))
+        .insert_resource(Assets::<Mesh>::default());
+
+        // The light as `hang_the_light` hangs it: casting, for the things
+        // that move.
+        app.world_mut().spawn((
+            crate::sky::SkyLight,
+            DirectionalLight {
+                shadow_maps_enabled: true,
+                ..default()
+            },
+        ));
+        app.update();
+        assert!(sun_casts(&mut app), "the sun was hung not casting");
+
+        app.world_mut().resource_mut::<Toggles>().shadows = false;
+        app.update();
+        assert!(!sun_casts(&mut app), "the console lost its own switch");
+
+        app.world_mut().resource_mut::<Toggles>().shadows = true;
+        app.update();
+        assert!(sun_casts(&mut app), "the sun never came back");
+    }
+
+    fn sun_casts(app: &mut App) -> bool {
+        app.world_mut()
+            .query::<&DirectionalLight>()
+            .iter(app.world())
+            .next()
+            .expect("a sun")
+            .shadow_maps_enabled
     }
 
     #[test]
