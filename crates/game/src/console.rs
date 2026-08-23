@@ -582,7 +582,8 @@ mod tests {
         };
         assert_eq!(
             client(&[], &mut toggles),
-            "stats off / haze on / wireframe on / resolution the window's own"
+            "stats off / shadows on / haze on / wireframe on / \
+             resolution the window's own"
         );
         assert_eq!(client(&["haze"], &mut toggles), "haze on");
     }
@@ -871,7 +872,7 @@ mod tests {
         assert!(app
             .world()
             .resource::<Console>()
-            .said("stats  haze  wireframe  resolution"));
+            .said("stats  shadows  haze  wireframe  resolution"));
 
         // And after `world `: every dial behind it.
         type_key(&mut app, KeyCode::Enter, "\r");
