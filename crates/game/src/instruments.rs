@@ -658,12 +658,13 @@ mod tests {
         quantize, ChunkPayload, Material, CELL_METRES, CORNERS, LIT_ALL_DAY, MATERIAL_COUNT,
     };
 
-    /// A chunk of sea bed at one depth all over.
+    /// A chunk of sea bed at one depth all over. Open to the sun everywhere:
+    /// what these tests read off a chunk is its depth, and a sea bed with a
+    /// hillside's shadow on it would be depth plus a distraction.
     fn bed_at(height: f32) -> ChunkPayload {
         ChunkPayload {
             heights: vec![quantize(height); CORNERS * CORNERS],
             materials: vec![Material::Sand; MATERIAL_COUNT],
-            // Open water, which is what a bed with nothing standing on it is.
             lit: vec![LIT_ALL_DAY; CORNERS * CORNERS],
             water: None,
             plants: Vec::new(),

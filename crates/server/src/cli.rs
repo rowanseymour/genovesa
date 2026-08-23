@@ -43,8 +43,9 @@ is named on this side of the wire and nowhere else.
 
 A day turns in {day:.0} seconds, and the hour is the server's: every client in
 the world is under the same sun, however long the world has been up. Which
-hour it is, is the console's `time` — said from inside the world by anyone in
-it, at any point, rather than fixed here before there is a world to say it to.
+hour it is, is the console's `world time` — said from inside the world by
+anyone in it, at any point, rather than fixed here before there is a world to
+say it to.
 ",
         day = protocol::DAY_SECONDS,
     )
@@ -132,8 +133,8 @@ mod tests {
         assert_eq!(parse_args("").expect("should parse").world, None);
     }
 
-    /// The hour is the console's `time`, said from inside the world, and an
-    /// option that quietly did nothing would be worse than one that is
+    /// The hour is the console's `world time`, said from inside the world,
+    /// and an option that quietly did nothing would be worse than one that is
     /// refused.
     #[test]
     fn the_hour_is_not_asked_for_here() {

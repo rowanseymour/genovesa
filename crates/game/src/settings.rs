@@ -161,7 +161,7 @@ pub const LADDER: [Resolution; 5] = [
 ];
 
 /// The rungs as plain rows of pixels, in the order [`LADDER`] lists them —
-/// what the console's `set resolution` takes, native being no answer in a run
+/// what the console's `client resolution` takes, native being no answer in a run
 /// with no display to be native to.
 pub(crate) fn rungs() -> Vec<u32> {
     LADDER

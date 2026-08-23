@@ -14,7 +14,7 @@
 //! stand here again.
 //!
 //! The switches are [`Toggles`], and they are set from the console — see
-//! [`crate::console`], whose `set` lines are their only writer. They used to
+//! [`crate::console`], whose `client` lines are their only writer. They used to
 //! be number keys; the console replaced them because a vocabulary outgrows a
 //! number row, but reading a count and changing what is counted are still one
 //! job, which is why the state stays in this module with the readout: the
@@ -94,30 +94,37 @@ struct DebugPanel;
 #[derive(Component)]
 struct DebugText;
 
-/// The variables the console's `set` lines reach — see [`crate::console`],
+/// The variables the console's `client` lines reach — see [`crate::console`],
 /// which owns the grammar, while this module owns making them true of the
 /// scene. None of them reaches the world or anybody else's picture of it,
-/// which is what separates a `set` from the console's other language.
+/// which is what separates a `client` line from the console's other language.
 ///
 /// Most are about what this machine *draws*. `resolution` is the exception
 /// and lives here anyway: it belongs to [`crate::control`], which a run
-/// without a socket has none of, and `set` needs somewhere it can always
+/// without a socket has none of, and `client` needs somewhere it can always
 /// reach.
 #[derive(Resource, PartialEq, Clone, Debug)]
 pub struct Toggles {
-    /// `set stats` — whether the readout itself is on screen. The one switch
+    /// `client stats` — whether the readout itself is on screen. The one switch
     /// here that changes nothing about the picture, so the last line never
     /// mentions it: a readout that is visible has already admitted to being
     /// on.
     pub stats: bool,
-    /// `set haze` — off, and the aerial haze comes away, so what the distant
-    /// ground is actually doing can be seen.
+    /// `client shadows` — off, and the sun stops casting. Only what moves is
+    /// in the pass now — the boat, the plants, the player, the beasts; the
+    /// terrain wears its own baked shadow and does not answer to this. So
+    /// what the switch shows is the cast half alone, which is exactly what
+    /// makes it worth having: whether a hull is sitting on its shadow or
+    /// floating over the ground is hard to see until the shadow goes.
+    pub shadows: bool,
+    /// `client haze` — off, and the aerial haze comes away, so what the
+    /// distant ground is actually doing can be seen.
     pub haze: bool,
-    /// `set wireframe` — every triangle drawn as lines, which is how the
+    /// `client wireframe` — every triangle drawn as lines, which is how the
     /// fixed 8,192 a chunk carries stops being a number and becomes a
     /// picture.
     pub wireframe: bool,
-    /// `set resolution` — how tall a picture `shot` writes is, in rows off
+    /// `client resolution` — how tall a picture `shot` writes is, in rows off
     /// [`crate::settings::LADDER`]; the width follows from
     /// [`crate::settings::WIDESCREEN`], there being no display to take a
     /// shape from. `None` in a run that has a window, where a picture is the
@@ -131,6 +138,7 @@ impl Default for Toggles {
     fn default() -> Self {
         Self {
             stats: false,
+            shadows: true,
             haze: true,
             wireframe: false,
             // A window until [`crate::control::ControlPlugin`] says
@@ -158,11 +166,16 @@ pub struct Switch {
     confessed: bool,
 }
 
-pub const SWITCHES: [Switch; 3] = [
+pub const SWITCHES: [Switch; 4] = [
     Switch {
         name: "stats",
         of: |toggles| &mut toggles.stats,
         confessed: false,
+    },
+    Switch {
+        name: "shadows",
+        of: |toggles| &mut toggles.shadows,
+        confessed: true,
     },
     Switch {
         name: "haze",
@@ -207,7 +220,7 @@ impl Toggles {
         }
     }
 
-    /// Every variable there is, in the order a bare `set` lists them — here
+    /// Every variable there is, in the order a bare `client` lists them — here
     /// rather than in the console because this is where they live, and a list
     /// kept beside the grammar would be a second place to add one.
     pub fn names() -> impl Iterator<Item = &'static str> {
@@ -287,10 +300,19 @@ fn apply_toggles(
     mut commands: Commands,
     toggles: Res<Toggles>,
     wireframe: Option<ResMut<WireframeConfig>>,
+    mut suns: Query<&mut DirectionalLight, With<crate::sky::SkyLight>>,
     cameras: Query<(Entity, Has<DistanceFog>), With<MapCamera>>,
 ) {
     if !toggles.is_changed() {
         return;
+    }
+
+    // The one writer of this field, which is why the switch can simply say
+    // what it should be: two systems setting it would each undo the other on
+    // alternate frames. The light is hung casting — see
+    // [`crate::sky::hang_the_light`] — and this only doctors it.
+    for mut sun in &mut suns {
+        sun.shadow_maps_enabled = toggles.shadows;
     }
 
     if let Some(mut wireframe) = wireframe {
@@ -619,7 +641,7 @@ mod tests {
     }
 
     /// The switches with the readout on, which is what most of these tests
-    /// are looking at. Not what a run starts with — `set stats on` is.
+    /// are looking at. Not what a run starts with — `client stats on` is.
     fn showing() -> Toggles {
         Toggles {
             stats: true,
@@ -935,13 +957,61 @@ mod tests {
         // the wording.
         let all = Toggles {
             stats: true,
+            shadows: false,
             haze: false,
             wireframe: true,
             // Not a doctoring of the picture but the size of it, which a
             // picture cannot hide, so the line never mentions it.
             resolution: Some(1080),
         };
-        assert_eq!(all.line().as_deref(), Some("debug: no haze / wireframe"));
+        assert_eq!(
+            all.line().as_deref(),
+            Some("debug: no shadows / no haze / wireframe")
+        );
+    }
+
+    /// The switch reaches the light, both ways. `apply_toggles` is the one
+    /// writer of the field — see there — so this is the whole of what the
+    /// switch does, and without it a rename or a dropped query would leave
+    /// `client shadows off` answering cheerfully and changing nothing.
+    #[test]
+    fn the_console_takes_the_sun_s_casting_away_and_gives_it_back() {
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::time::TimePlugin,
+            bevy::diagnostic::FrameCountPlugin,
+            DebugOverlayPlugin,
+        ))
+        .insert_resource(Assets::<Mesh>::default());
+
+        // The light as `hang_the_light` hangs it: casting, for the things
+        // that move.
+        app.world_mut().spawn((
+            crate::sky::SkyLight,
+            DirectionalLight {
+                shadow_maps_enabled: true,
+                ..default()
+            },
+        ));
+        app.update();
+        assert!(sun_casts(&mut app), "the sun was hung not casting");
+
+        app.world_mut().resource_mut::<Toggles>().shadows = false;
+        app.update();
+        assert!(!sun_casts(&mut app), "the console lost its own switch");
+
+        app.world_mut().resource_mut::<Toggles>().shadows = true;
+        app.update();
+        assert!(sun_casts(&mut app), "the sun never came back");
+    }
+
+    fn sun_casts(app: &mut App) -> bool {
+        app.world_mut()
+            .query::<&DirectionalLight>()
+            .iter(app.world())
+            .next()
+            .expect("a sun")
+            .shadow_maps_enabled
     }
 
     #[test]

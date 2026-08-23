@@ -124,10 +124,10 @@ pub fn dequantize_phase(step: u8) -> f32 {
 /// `0.25` six in the morning.
 ///
 /// Here rather than on either side because both ends say the hour out loud —
-/// a server answering `time 18:00` at its console, a client's own readout —
-/// and two spellings of it would have one session disagreeing with itself
-/// about what time it is. What a phase *means* is this crate's, the same way
-/// [`is_night`] is.
+/// a server answering `world time 18:00` at its console, a client's own
+/// readout — and two spellings of it would have one session disagreeing with
+/// itself about what time it is. What a phase *means* is this crate's, the
+/// same way [`is_night`] is.
 ///
 /// Rounded to the minute rather than truncated, and folded back into the day
 /// after: an hour that is a hair under the minute it means — which is what a
@@ -546,11 +546,11 @@ pub enum ToServer {
     /// A debug-console line for the server to interpret: whatever the player
     /// typed, verbatim.
     ///
-    /// Deliberately opaque. The vocabulary — `spawn shark`, `time 6:00` —
-    /// belongs to the *server* and may grow without this crate hearing about
-    /// it: a client has no parsing to do and nothing to know, which keeps a
-    /// client written in any language as capable as the newest server it
-    /// talks to. `help` is the vocabulary's own index, and the server
+    /// Deliberately opaque. The vocabulary — `spawn shark`, `world time
+    /// 6:00` — belongs to the *server* and may grow without this crate
+    /// hearing about it: a client has no parsing to do and nothing to know,
+    /// which keeps a client written in any language as capable as the newest
+    /// server it talks to. `help` is the vocabulary's own index, and the server
     /// answers every line — the ones it did not understand included — with a
     /// [`ToClient::Reply`] to the asker alone.
     ///
@@ -789,8 +789,14 @@ pub enum ToClient {
     Reply {
         text: String,
     },
-    /// The server's console vocabulary: the first word of every line its
-    /// console serves, sent once after [`ToClient::Welcome`].
+    /// The server's console vocabulary: every line its console serves, as far
+    /// as the words are fixed, sent once after [`ToClient::Welcome`].
+    ///
+    /// Phrases rather than first words, so a console can complete a player
+    /// past a shelf — `world` alone would leave tab with nowhere to go, and
+    /// the words behind it are no more guessable here than the shelf itself
+    /// was. Where a line's next word is the player's own (a place, an hour),
+    /// the phrase simply stops.
     ///
     /// Hints, not grammar. A console can offer these while a player types —
     /// completion is what this exists for — but a line still crosses the wire
@@ -799,10 +805,10 @@ pub enum ToClient {
     /// that ignores this message loses nothing but the hinting, which is how
     /// the vocabulary stays the server's to grow.
     ///
-    /// On the wire: a u8 count of verbs, then each verb as a u16 byte count
-    /// and that many bytes of UTF-8.
+    /// On the wire: a u8 count of phrases, then each phrase as a u16 byte
+    /// count and that many bytes of UTF-8.
     Vocabulary {
-        verbs: Vec<String>,
+        phrases: Vec<String>,
     },
     /// Coast this player has surveyed: a batch of chunks, each with what one
     /// walk of its ground found — see [`survey`], which is what a survey *is*
@@ -1102,11 +1108,11 @@ impl ToClient {
                 payload.push(10);
                 put_str(&mut payload, text);
             }
-            Self::Vocabulary { verbs } => {
+            Self::Vocabulary { phrases } => {
                 payload.push(11);
-                payload.push(verbs.len() as u8);
-                for verb in verbs {
-                    put_str(&mut payload, verb);
+                payload.push(phrases.len() as u8);
+                for phrase in phrases {
+                    put_str(&mut payload, phrase);
                 }
             }
             Self::Cairn {
@@ -1225,7 +1231,7 @@ impl ToClient {
                 text: payload.str()?,
             },
             11 => Self::Vocabulary {
-                verbs: (0..payload.u8()?)
+                phrases: (0..payload.u8()?)
                     .map(|_| payload.str())
                     .collect::<io::Result<_>>()?,
             },
@@ -1710,9 +1716,11 @@ mod tests {
                 text: "the clock stands at 06:00".to_string(),
             },
             ToClient::Vocabulary {
-                verbs: vec!["help".to_string(), "spawn".to_string()],
+                phrases: vec!["help".to_string(), "world time".to_string()],
             },
-            ToClient::Vocabulary { verbs: Vec::new() },
+            ToClient::Vocabulary {
+                phrases: Vec::new(),
+            },
             ToClient::Chunk {
                 chunk: IVec2::new(3, -8),
                 ground: None,
@@ -2174,12 +2182,12 @@ mod tests {
         );
         assert_eq!(
             bytes_of_server(&ToClient::Vocabulary {
-                verbs: vec!["hi".to_string(), "yo".to_string()],
+                phrases: vec!["hi".to_string(), "yo".to_string()],
             }),
             [
                 10, 0, 0, 0,  // length
                 11, // tag
-                2,  // two verbs
+                2,  // two phrases
                 2, 0, 0x68, 0x69, // "hi", counted then spelled
                 2, 0, 0x79, 0x6F, // "yo"
             ],

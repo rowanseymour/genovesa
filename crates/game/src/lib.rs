@@ -65,7 +65,7 @@ pub const HAZE_START: f32 = protocol::survey::SIGHT_RADIUS;
 pub const HAZE_END: f32 = 900.0;
 
 /// Size of the window the game is played in, in pixels. Captured shots are
-/// sized by `set resolution` instead, having no window to take it from.
+/// sized by `client resolution` instead, having no window to take it from.
 pub const WINDOW: UVec2 = UVec2::new(1280, 720);
 
 /// The ink the instruments over the world are drawn in — the compass, and the
