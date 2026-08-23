@@ -21,6 +21,8 @@ pub mod console;
 pub mod control;
 pub mod debug;
 pub mod figure;
+pub mod glyph;
+pub mod instruments;
 pub mod logbook;
 pub mod menu;
 pub mod models;
@@ -58,14 +60,26 @@ pub const SKY: Color = Color::srgb(0.63, 0.80, 0.93);
 /// (see [`protocol::survey::SIGHT_RADIUS`]), and the haze follows it.
 pub const HAZE_START: f32 = protocol::survey::SIGHT_RADIUS;
 /// Distance at which the haze has fully replaced the ground with [`SKY`]. This
-/// is the edge of what the camera can see at all, whatever it is pointed at, so
-/// anything the picture depends on has to reach at least this far — the sun's
-/// shadows included.
+/// is the edge of what the camera can see at all, whatever it is pointed at,
+/// so anything the picture depends on has to reach at least this far.
 pub const HAZE_END: f32 = 900.0;
 
 /// Size of the window the game is played in, in pixels. Captured shots are
 /// sized by `client resolution` instead, having no window to take it from.
 pub const WINDOW: UVec2 = UVec2::new(1280, 720);
+
+/// The ink the instruments over the world are drawn in — the compass, and the
+/// lead and the day's arc beside it — and the same the menus use, so
+/// everything laid over the picture reads as one chart's furniture.
+///
+/// Four colours and no more: one face to sit on, one edge to be bounded by,
+/// one ink to read, and one dimmed ink for what is on the card without being
+/// the reading. An instrument wanting a fifth is usually one that has two
+/// readings where it should have one.
+pub const FACE: Color = Color::srgba(0.09, 0.11, 0.10, 0.60);
+pub const EDGE: Color = Color::srgb(0.70, 0.69, 0.62);
+pub const INK: Color = Color::srgb(0.88, 0.87, 0.80);
+pub const INK_DIM: Color = Color::srgb(0.60, 0.60, 0.55);
 
 /// A surface in `base_color` with nothing polished about it.
 ///
@@ -215,8 +229,8 @@ pub enum AppState {
     /// The way to the two screens below, and nothing else — see
     /// [`crate::menu`].
     Options,
-    /// Choosing how the game is drawn: how much screen it takes, how many
-    /// pixels it draws and whether the sun casts. See [`crate::settings`].
+    /// Choosing how the game is drawn: how much screen it takes and how many
+    /// pixels it draws. See [`crate::settings`].
     Display,
     /// Choosing which key does what.
     Controls,

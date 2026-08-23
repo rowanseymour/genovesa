@@ -1,0 +1,76 @@
+// The ground under its own baked shadows.
+//
+// This extends the standard PBR material rather than replacing it — the
+// fragment runs the ordinary standard-material path once, whole, and then
+// blends the result toward the same fragment with the sun's share removed,
+// by how deep into its own shadow the ground stands at this hour.
+//
+// Whether it stands in shadow was decided when the terrain was made: each
+// vertex carries, in the UV channel nothing else uses, the first and last
+// phase of the day at which the sun clears the terrain around it — see
+// `ChunkPayload::lit` in the protocol crate, which owns what the pair means.
+// The thresholds interpolate across each cell like any attribute, so the
+// shadow's edge lands inside cells and sweeps over the ground as the hour
+// turns, with no shadow map drawn by anybody.
+//
+// The hour itself arrives through the uniform below, packed by the Rust side
+// (`terrain.rs`), which is the single authority on it — including the swap
+// onto the moon's half of the day at night.
+
+#import bevy_pbr::{
+    ambient,
+    forward_io::{VertexOutput, FragmentOutput},
+    mesh_view_bindings::view,
+    pbr_fragment::pbr_input_from_standard_material,
+    pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
+}
+
+struct Daylight {
+    // x: the phase of the day to hold the lit intervals against. y: half the
+    // width of the terminator, in phase. zw: padding. The reasoning for all
+    // of them lives on `terrain::Daylight`.
+    hour: vec4<f32>,
+}
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> daylight: Daylight;
+
+@fragment
+fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    var pbr_input = pbr_input_from_standard_material(in, is_front);
+    pbr_input.material.base_color =
+        alpha_discard(pbr_input.material, pbr_input.material.base_color);
+
+    let full = apply_pbr_lighting(pbr_input);
+
+    // How much of the sun reaches this fragment: inside its interval all of
+    // it, outside none, with the crossing softened so the terminator sweeps
+    // rather than snaps.
+    let lit = in.uv;
+    let edge = daylight.hour.y;
+    let hour = daylight.hour.x;
+    let sun = smoothstep(lit.x - edge, lit.x + edge, hour)
+        * (1.0 - smoothstep(lit.y - edge, lit.y + edge, hour));
+
+    // The same fragment with the sun's share gone: the sky's own fill, which
+    // is the ambient term the full path also used — bevy's own formula, so
+    // shadowed ground is exactly the indirect light it would have had, and a
+    // shadow reads as a second flat tone rather than as darkness. The ground
+    // is matte: no metal, no reflectance, so the specular arguments are
+    // nothing and the diffuse colour is the base colour whole.
+    let ndotv = max(dot(pbr_input.N, pbr_input.V), 0.0001);
+    let shaded = ambient::ambient_light(
+        pbr_input.world_position,
+        pbr_input.N,
+        pbr_input.V,
+        ndotv,
+        pbr_input.material.base_color.rgb,
+        vec3(0.0),
+        1.0,
+        pbr_input.diffuse_occlusion,
+    ) * view.exposure;
+
+    var out: FragmentOutput;
+    out.color = mix(vec4(shaded, full.a), full, sun);
+    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+    return out;
+}

@@ -43,10 +43,8 @@
 //! was already sent.
 use std::f32::consts::TAU;
 
-use bevy::asset::RenderAssetUsages;
-use bevy::image::{Image, ImageSampler};
+use bevy::image::Image;
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::text::{FontSize, FontSource};
 use bevy::ui::{UiTransform, Val2};
 
@@ -57,7 +55,7 @@ use crate::chart::{Chart, READERS_MARK};
 use crate::player::PlayerPlace;
 use crate::sea::{SeaConditions, WIND_NAMED};
 use crate::terrain::Ground;
-use crate::AppState;
+use crate::{AppState, EDGE, FACE, INK, INK_DIM};
 
 /// Diameter of the face, in pixels — an instrument, not a map: big enough to
 /// read a letter off at a glance, small enough to sit in the corner unnoticed.
@@ -76,9 +74,14 @@ use crate::AppState;
 /// mark standing at its centre has something for the room to be room *for*, so
 /// the width the earlier trial gave back is taken again — and a little more,
 /// to give the wind's stream a run worth watching either side of the mark.
-const FACE_SIZE: f32 = 176.0;
-/// How far the face sits in from the corner of the window.
-const MARGIN: f32 = 12.0;
+///
+/// Public because the instruments beside it are placed off it — see
+/// [`crate::instruments`], which stands the lead and the day's arc clear of
+/// the card rather than writing down where the corner's furniture ends.
+pub(crate) const FACE_SIZE: f32 = 176.0;
+/// How far the face sits in from the corner of the window. Shared with the
+/// instruments beside it, for [`FACE_SIZE`]'s reason.
+pub(crate) const MARGIN: f32 = 12.0;
 /// The cardinal letters' size. Not scaled with the face — see [`FACE_SIZE`] —
 /// so it moves only when a letter has stopped being comfortable to read, and
 /// not by whatever ratio the face last grew by.
@@ -153,12 +156,6 @@ const DRIFT: f32 = 4.0;
 /// pool circulates without a mark ever popping into place.
 const END_FADE: f32 = 12.0;
 
-// The same furniture the menus are drawn with — one edge colour, one ink, one
-// dimmed ink — so the instrument reads as a piece of the same chart.
-const FACE: Color = Color::srgba(0.09, 0.11, 0.10, 0.60);
-const EDGE: Color = Color::srgb(0.70, 0.69, 0.62);
-const INK: Color = Color::srgb(0.88, 0.87, 0.80);
-const INK_DIM: Color = Color::srgb(0.60, 0.60, 0.55);
 /// The cross is furniture behind the letters, not a reading, so it is fainter
 /// than either ink.
 const CROSS: Color = Color::srgba(0.60, 0.60, 0.55, 0.45);
@@ -875,41 +872,11 @@ fn mark_measure() -> (f32, f32) {
 /// any rotation the card puts the glyph through.
 fn bow_image() -> Image {
     let (reach, _) = mark_measure();
-    const SUB: u32 = 4;
-    let mut texels = Vec::with_capacity((BOW_TEXELS * BOW_TEXELS * 4) as usize);
-    for row in 0..BOW_TEXELS {
-        for column in 0..BOW_TEXELS {
-            let mut hits = 0;
-            for down in 0..SUB {
-                for across in 0..SUB {
-                    let texel = Vec2::new(
-                        column as f32 + (across as f32 + 0.5) / SUB as f32,
-                        row as f32 + (down as f32 + 0.5) / SUB as f32,
-                    );
-                    let sample = (texel / BOW_TEXELS as f32 * 2.0 - 1.0) * reach;
-                    // The texture's y runs down and the mark's runs up.
-                    if covered(Vec2::new(sample.x, -sample.y)) {
-                        hits += 1;
-                    }
-                }
-            }
-            let alpha = (hits * 255 / (SUB * SUB)) as u8;
-            texels.extend_from_slice(&[255, 255, 255, alpha]);
-        }
-    }
-    let mut image = Image::new(
-        Extent3d {
-            width: BOW_TEXELS,
-            height: BOW_TEXELS,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        texels,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.sampler = ImageSampler::linear();
-    image
+    crate::glyph::raster(BOW_TEXELS, BOW_TEXELS, |at| {
+        let sample = (at * 2.0 - 1.0) * reach;
+        // The texture's y runs down and the mark's runs up.
+        covered(Vec2::new(sample.x, -sample.y))
+    })
 }
 
 /// Whether a point in the mark's own units lies under its ink.
@@ -1113,6 +1080,7 @@ mod tests {
         ChunkPayload {
             heights: vec![quantize(height); CORNERS * CORNERS],
             materials: vec![Material::Grass; MATERIAL_COUNT],
+            lit: vec![protocol::ground::LIT_ALL_DAY; CORNERS * CORNERS],
             water: None,
             plants: Vec::new(),
         }

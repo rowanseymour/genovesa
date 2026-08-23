@@ -61,6 +61,8 @@ use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
 
+use protocol::ground::LIT_ALL_DAY;
+
 use crate::camera::MapCamera;
 use crate::terrain::Ground;
 
@@ -427,6 +429,19 @@ pub struct SeaExtension {
     /// [`DEPTH_RANGE`]. Rewritten whenever the window scrolls.
     #[uniform(100)]
     window: Vec4,
+    /// The hour to hold the window's lit intervals against, and how wide the
+    /// gaining and losing of the sun is drawn: `x` and `y` exactly as
+    /// `crate::terrain`'s `Daylight` carries them, written by the same system
+    /// so the water and the ground beside it are never at different times of
+    /// day. `zw` padding.
+    ///
+    /// Beside [`SeaExtension::window`] because the two are one answer: that
+    /// says where the texels lie, this says what hour to read them at. The
+    /// order of these fields *is* the uniform's layout, and the shader's
+    /// `SeaParams` has to name them in the same order or every field after
+    /// the difference is read as its neighbour.
+    #[uniform(100)]
+    pub(crate) daylight: Vec4,
     /// The wake's band: `x` the half-width of the water a hull turns over at
     /// its stem, `y` how far the arms open per metre run, `z` how thick an
     /// arm is, `w` how long a wake lasts.
@@ -503,6 +518,8 @@ impl SeaExtension {
             caps: Vec4::new(WHITECAP.0, WHITECAP.1, WHITECAP.2, 0.0),
             breaking: Vec4::new(BREAKING_FIELD.0, BREAKING_FIELD.1, 0.0, 0.0),
             window: Self::window_uniform(origin),
+            // Noon until the sky says otherwise, as the ground opens too.
+            daylight: crate::terrain::DAYLIGHT_AT_NOON,
             // No boat has been anywhere yet. The empty box is what makes the
             // rest of this safe to leave at zero: nothing reads a track it is
             // never allowed to be inside the bounds of.
@@ -954,8 +971,24 @@ impl DepthWindow {
     }
 }
 
-/// A depth window with nothing in it yet: every texel deep, so the sea wears
-/// the open swell everywhere until the sweep has read the actual ground.
+/// Bytes a texel of the window occupies: the depth, the two ends of the lit
+/// interval, and one the format asks for and nothing reads.
+const TEXEL_BYTES: usize = 4;
+
+/// What an unread texel says: water too deep to break, lit the whole day.
+/// Both are the answer for ground the client has not been told about — it
+/// wears the open sea's swell until it learns better, and nothing it has
+/// never heard of can be casting a shadow it could see.
+const UNREAD: [u8; TEXEL_BYTES] = [u8::MAX, LIT_ALL_DAY[0], LIT_ALL_DAY[1], u8::MAX];
+
+/// A window with nothing in it yet — see [`UNREAD`].
+///
+/// Four channels rather than one because the sea has two things to learn
+/// from the ground under it, and they are learned in the same sweep over the
+/// same texels: how deep the water is, which decides how it breaks, and when
+/// the ground around it lets the sun through, which decides whether it is in
+/// a headland's shadow. A second window would be a second scroll, a second
+/// sweep and a second staleness test, all of them in step with this one.
 pub fn depth_image() -> Image {
     let mut image = Image::new_fill(
         Extent3d {
@@ -964,23 +997,27 @@ pub fn depth_image() -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[u8::MAX],
-        TextureFormat::R8Unorm,
+        &UNREAD,
+        TextureFormat::Rgba8Unorm,
         RenderAssetUsages::default(),
     );
     // Bilinear, so a facet between two texels gets water between their
-    // depths rather than one or the other's.
+    // depths rather than one or the other's — and a shadow's edge crossing
+    // the window arrives as an edge rather than as a staircase of texels.
     image.sampler = ImageSampler::linear();
     image
 }
 
-/// One texel's worth of depth. Ground the client has not been sent reads as
-/// the deepest water a byte can say — see [`DEPTH_RANGE`].
-fn depth_byte(height: Option<f32>) -> u8 {
-    match height {
-        None => u8::MAX,
+/// One texel's worth of what the sea needs to know about the ground beneath
+/// it: how deep the water is — [`DEPTH_RANGE`] — and when that water sees
+/// the sun. Ground the client has not been sent reads as [`UNREAD`].
+fn texel(height: Option<f32>, lit: Option<[u8; 2]>) -> [u8; TEXEL_BYTES] {
+    let depth = match height {
+        None => UNREAD[0],
         Some(height) => ((-height).clamp(0.0, DEPTH_RANGE) / DEPTH_RANGE * 255.0).round() as u8,
-    }
+    };
+    let lit = lit.unwrap_or(LIT_ALL_DAY);
+    [depth, lit[0], lit[1], UNREAD[3]]
 }
 
 /// Keeps the depth window under the camera and its texels agreeing with the
@@ -1030,15 +1067,17 @@ pub(crate) fn refresh_depth(
     // The sweep. Read into a scratch first and compare, so a frame that
     // changed nothing marks nothing changed and re-uploads nothing. The
     // sweep never straddles the wrap — see `the_sweep_divides_the_window`.
-    let mut rows = [0u8; DEPTH_TEXELS * SWEEP_ROWS];
+    let mut rows = [0u8; DEPTH_TEXELS * SWEEP_ROWS * TEXEL_BYTES];
     for r in 0..SWEEP_ROWS {
         let row = window.sweep + r;
         for x in 0..DEPTH_TEXELS {
             let at = window.origin + Vec2::new(x as f32 + 0.5, row as f32 + 0.5) * SPACING;
-            rows[r * DEPTH_TEXELS + x] = depth_byte(ground.height(at.x, at.y));
+            let texel = texel(ground.height(at.x, at.y), ground.lit(at.x, at.y));
+            let into = (r * DEPTH_TEXELS + x) * TEXEL_BYTES;
+            rows[into..into + TEXEL_BYTES].copy_from_slice(&texel);
         }
     }
-    let start = window.sweep * DEPTH_TEXELS;
+    let start = window.sweep * DEPTH_TEXELS * TEXEL_BYTES;
     let stale = |data: &[u8]| data[start..start + rows.len()] != rows[..];
     if images
         .get(&window.image)
@@ -1062,14 +1101,20 @@ pub(crate) fn refresh_depth(
 fn scroll(data: &mut [u8], step: IVec2) {
     let n = DEPTH_TEXELS as i32;
     let old = data.to_vec();
+    let texel = |x: i32, y: i32| (y * n + x) as usize * TEXEL_BYTES;
     for y in 0..n {
         for x in 0..n {
             let from = IVec2::new(x, y) + step;
-            data[(y * n + x) as usize] = if (0..n).contains(&from.x) && (0..n).contains(&from.y) {
-                old[(from.y * n + from.x) as usize]
-            } else {
-                u8::MAX
-            };
+            let into = texel(x, y);
+            // The index is only worked out once the texel is known to be on
+            // the old window: a coordinate that slid in from beyond it is
+            // negative, and negative has no place in an index.
+            let carried = ((0..n).contains(&from.x) && (0..n).contains(&from.y))
+                .then(|| texel(from.x, from.y));
+            data[into..into + TEXEL_BYTES].copy_from_slice(match carried {
+                Some(was) => &old[was..was + TEXEL_BYTES],
+                None => &UNREAD,
+            });
         }
     }
 }
@@ -1612,19 +1657,89 @@ mod tests {
     }
 
     #[test]
+    fn the_shader_reads_the_uniform_in_the_order_it_is_written() {
+        // The order of the fields *is* the uniform's layout, and only one
+        // side of it is compiled here. A shader naming them in a different
+        // order reads every field after the difference as its neighbour's —
+        // which draws a picture that is wrong everywhere and blames nothing:
+        // the sea dimmed by a wake bound read as an hour, say.
+        //
+        // Both lists are taken from the source rather than written out here,
+        // so this holds them to each other rather than to a third copy that
+        // could go stale on its own.
+        let shader = std::fs::read_to_string(format!(
+            "{}/../../assets/shaders/sea.wgsl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("the sea's shader under assets/shaders/");
+        let rust = include_str!("sea.rs");
+
+        let fields = |source: &str, from: &str, ends: &str| -> Vec<String> {
+            source
+                .split_once(from)
+                .expect("the struct the uniform is packed from")
+                .1
+                .split_once(ends)
+                .expect("the end of it")
+                .0
+                .lines()
+                .filter_map(|line| {
+                    let line = line
+                        .trim()
+                        .strip_prefix("pub(crate) ")
+                        .unwrap_or(line.trim());
+                    let (name, rest) = line.split_once(':')?;
+                    // A field, not a doc line or an attribute: a bare name
+                    // followed by a type.
+                    let named = !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit());
+                    (named && !rest.trim().is_empty()).then(|| name.to_string())
+                })
+                .collect()
+        };
+
+        // The texture and its sampler are bindings of their own rather than
+        // part of the packed block, so the Rust side runs one longer.
+        let packed = fields(rust, "pub struct SeaExtension {", "\n}");
+        let read = fields(&shader, "struct SeaParams {", "\n}");
+        assert!(
+            !read.is_empty(),
+            "no fields found in the shader's SeaParams"
+        );
+        assert_eq!(
+            packed[..read.len()],
+            read[..],
+            "Rust packs {packed:?} and the shader reads {read:?}"
+        );
+    }
+
+    #[test]
     fn a_depth_survives_its_texel() {
         // A byte holds the whole working range to better than the height
         // quantisation; dry land is zero water, and ground the client has
         // not been sent reads as the deepest water there is.
-        assert_eq!(depth_byte(Some(2.0)), 0);
-        assert_eq!(depth_byte(None), u8::MAX);
+        assert_eq!(texel(Some(2.0), None)[0], 0);
+        assert_eq!(texel(None, None)[0], u8::MAX);
         let depth = 3.7;
-        let byte = depth_byte(Some(-depth));
+        let byte = texel(Some(-depth), None)[0];
         let decoded = byte as f32 / 255.0 * DEPTH_RANGE;
         assert!(
             (decoded - depth).abs() < 0.03,
             "{depth} m came back {decoded} m"
         );
+    }
+
+    #[test]
+    fn a_texel_carries_the_light_beside_the_depth() {
+        // The two things the sea learns from the ground under it, in one
+        // texel. Ground the client has not been sent is lit the whole day:
+        // what it has never heard of cannot be shadowing water it can see.
+        let shadowed = [80, 150];
+        assert_eq!(texel(Some(-3.0), Some(shadowed))[1..3], shadowed);
+        assert_eq!(texel(None, None)[1..3], LIT_ALL_DAY);
+        assert_eq!(texel(Some(-3.0), None)[1..3], LIT_ALL_DAY);
     }
 
     #[test]
@@ -1641,16 +1756,21 @@ mod tests {
         // texel now over a world point holds the byte the old texel over
         // that point held, and the strip that slid in from beyond is deep.
         let n = DEPTH_TEXELS;
-        let mut data: Vec<u8> = (0..n * n).map(|i| (i % 251) as u8).collect();
+        let mut data: Vec<u8> = (0..n * n * TEXEL_BYTES).map(|i| (i % 251) as u8).collect();
         let before = data.clone();
         let step = IVec2::new(3, -2);
         scroll(&mut data, step);
 
-        // A texel well inside both windows.
-        let (x, y) = (100, 100);
-        let from = ((y + step.y) as usize * n) + (x + step.x) as usize;
-        assert_eq!(data[y as usize * n + x as usize], before[from]);
-        // A texel the scroll exposed.
-        assert_eq!(data[n - 1], u8::MAX);
+        // A texel well inside both windows — the whole texel, so a scroll
+        // that carried the depth and dropped the light would show.
+        let texel = |x: usize, y: usize| (y * n + x) * TEXEL_BYTES;
+        let (x, y) = (100usize, 100usize);
+        let to = texel(x, y);
+        let from = texel((x as i32 + step.x) as usize, (y as i32 + step.y) as usize);
+        assert_eq!(data[to..to + TEXEL_BYTES], before[from..from + TEXEL_BYTES]);
+        // A texel the scroll exposed, which reads as water nothing is known
+        // about: deep, and lit the whole day.
+        let exposed = texel(n - 1, 0);
+        assert_eq!(data[exposed..exposed + TEXEL_BYTES], UNREAD);
     }
 }

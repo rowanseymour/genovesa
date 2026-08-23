@@ -16,6 +16,7 @@
 // same.
 
 #import bevy_pbr::{
+    ambient,
     forward_io::{Vertex, VertexOutput, FragmentOutput},
     mesh_functions,
     mesh_view_bindings::{globals, view},
@@ -61,6 +62,10 @@ struct SeaParams {
     // The depth window: xy the world coordinates of its corner, z one over
     // its extent, w the depth a full texel encodes.
     window: vec4<f32>,
+    // The hour to hold the window's lit intervals against, and half the
+    // width of the terminator: x and y, exactly as the ground's own shader
+    // carries them. zw padding.
+    daylight: vec4<f32>,
     // The wake's band: x the half-width of the water a hull turns over at its
     // stem, y how far the arms open per metre run, z how thick an arm is, w
     // how long a wake lasts.
@@ -99,6 +104,36 @@ struct SeaParams {
 fn depth_at(at: vec2<f32>) -> f32 {
     let uv = (at - sea.window.xy) * sea.window.z;
     return textureSampleLevel(sea_depth, sea_depth_sampler, uv, 0.0).r * sea.window.w;
+}
+
+// A byte of the window read back as a phase of the day. The window stores
+// the wire's own 256ths of a day (`protocol::quantize_phase`), and a Unorm
+// texture hands them back over 255 — so the step count comes back first and
+// is then read the way the wire means it.
+const PHASE_STEPS: f32 = 256.0;
+fn phase_of(channel: f32) -> f32 {
+    return channel * 255.0 / PHASE_STEPS;
+}
+
+// How much of the sun reaches the water at a point: none before the ground
+// around it lets the sun through, none after it takes it away, and the
+// crossings softened so a headland's shadow sweeps over the water rather
+// than snapping across it.
+//
+// This is the sea's half of what `ground.wgsl` does with the same intervals.
+// It reads them from the window rather than from its own vertices because
+// the sea is one plane that follows the camera and never met a chunk's
+// corners — see `sea::refresh_depth`, which fills the window's other two
+// channels.
+fn sunlight_at(at: vec2<f32>) -> f32 {
+    let uv = (at - sea.window.xy) * sea.window.z;
+    let lit = textureSampleLevel(sea_depth, sea_depth_sampler, uv, 0.0).gb;
+    let first = phase_of(lit.x);
+    let last = phase_of(lit.y);
+    let hour = sea.daylight.x;
+    let edge = sea.daylight.y;
+    return smoothstep(first - edge, first + edge, hour)
+        * (1.0 - smoothstep(last - edge, last + edge, hour));
 }
 
 // How much of the swell at a depth is the shore wave rather than the open
@@ -494,7 +529,25 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
     var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
+    let full = apply_pbr_lighting(pbr_input);
+
+    // The same fragment with the sun's share gone — the sky's own light,
+    // which is what water in a headland's shadow is lit by. Bevy's own
+    // formula, so shaded water is exactly the indirect light it would have
+    // had; the sea is matte enough that its specular arguments are nothing.
+    let ndotv = max(dot(pbr_input.N, pbr_input.V), 0.0001);
+    let shaded = ambient::ambient_light(
+        pbr_input.world_position,
+        pbr_input.N,
+        pbr_input.V,
+        ndotv,
+        pbr_input.material.base_color.rgb,
+        vec3(0.0),
+        1.0,
+        pbr_input.diffuse_occlusion,
+    ) * view.exposure;
+
+    out.color = mix(vec4(shaded, full.a), full, sunlight_at(at));
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }

@@ -27,6 +27,7 @@ use game::compass::CompassPlugin;
 use game::console::ConsolePlugin;
 use game::control::{self, ControlPlugin};
 use game::debug::DebugOverlayPlugin;
+use game::instruments::InstrumentsPlugin;
 use game::logbook::{self, LogbookPlugin};
 use game::menu::MenuPlugin;
 use game::models::ModelsPlugin;
@@ -190,7 +191,9 @@ fn run(args: Args, session: Option<Session>, control: Option<control::Control>) 
             WakePlugin,
             PlayerPlugin,
             MapCameraPlugin,
-            CompassPlugin,
+            // The card in the corner, and the two readings that stand beside
+            // it. Paired only because a plugin tuple holds fifteen.
+            (CompassPlugin, InstrumentsPlugin),
             ChartPlugin,
             // The logbook — harmless in a world nobody remembers, its systems
             // conditioning on a book being open — then the sheet the menus
