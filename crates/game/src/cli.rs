@@ -123,8 +123,9 @@ the same session a dedicated `server` serves.
 Debugging:
   --debug <port>    take console lines on 127.0.0.1:<port>, one per line,
                     answering each — once its work is done — with what it did
-                    and a blank line. Everything the console takes: `set` for
-                    this client's own switches, anything else for the server.
+                    and a blank line. Everything the console takes: `client`
+                    for this machine's own switches, anything else for the
+                    server.
                     Plus the words a keyboard never needed — `shot`, `press`,
                     `click`, `zoom`, `yaw`, `hold` and `quit`. Send `help`
                     for the whole vocabulary
@@ -141,7 +142,7 @@ reached down the socket and nowhere else — an option could only ever say them
 once, and before anything existed:
 
   game --seed 7 --debug 7777 --headless
-  printf 'set resolution 1080\\ngoto 98 -317\\nshot near.png\\nquit\\n' | nc 127.0.0.1 7777
+  printf 'client resolution 1080\\ngoto 98 -317\\nshot near.png\\nquit\\n' | nc 127.0.0.1 7777
 "
     )
 }

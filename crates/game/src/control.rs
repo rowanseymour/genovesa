@@ -8,11 +8,12 @@
 //! it at any point and as often as it likes.
 //!
 //! Nothing here invents a grammar. A line goes to
-//! [`crate::console::dispatch`] exactly as a typed one would — so `set haze
-//! off` doctors this client's picture and `weather gale` crosses the wire to
-//! the server, and a verb added to either side is reachable from here the day
-//! it is added. What this module adds is what a *keyboard* never needed words
-//! for: `shot`, `press`, `click`, `zoom`, `yaw`, `hold` and `quit`.
+//! [`crate::console::dispatch`] exactly as a typed one would — so `client
+//! haze off` doctors this client's picture and `world weather gale` crosses
+//! the wire to the server, and a verb added to either side is reachable from
+//! here the day it is added. What this module adds is what a *keyboard* never
+//! needed words for: `shot`, `press`, `click`, `zoom`, `yaw`, `hold` and
+//! `quit`.
 //!
 //! Two of those are less obvious than they look. `press` works the bound key
 //! through the real bindings rather than commanding the world, because
@@ -34,7 +35,7 @@
 //! socket usable from a shell with nothing in between:
 //!
 //! ```sh
-//! printf 'weather gale\npress forward 20\nshot gale.png\nquit\n' | nc 127.0.0.1 7777
+//! printf 'world weather gale\npress forward 20\nshot gale.png\nquit\n' | nc 127.0.0.1 7777
 //! ```
 //!
 //! A blank line inside an answer would end it early, so blank lines are
@@ -85,7 +86,7 @@ const HELP: &str = "shot <path> — write a PNG of the view, once the ground has
                     yaw <deg> — bearing to look from\n\
                     hold on|off — stop the clock where it stands, so the light keeps still\n\
                     quit — close the world and stop the game\n\
-                    set … — this client's own switches; `set` alone lists them";
+                    client … — this machine's own switches; `client` alone lists them";
 
 /// How tall a picture a windowless run writes until the console says
 /// otherwise, in rows off [`crate::settings::LADDER`]. 1440 matches the shots
@@ -367,7 +368,7 @@ impl Plugin for ControlPlugin {
         if self.headless {
             // The one place in the game that knows a run has no window is the
             // one that says how big its pictures are — see
-            // [`crate::debug::Toggles::resolution`], where `set resolution`
+            // [`crate::debug::Toggles::resolution`], where `client resolution`
             // finds it afterwards. The image itself is not made here: making
             // it is what [`dress_the_target`] does every time the answer
             // changes, and doing it once here as well would be the same size
@@ -1187,7 +1188,7 @@ mod tests {
         app.add_systems(Update, (crate::sky::advance_the_day, hold_the_sky));
 
         // A world at one hour, and a server that has just named a very
-        // different one — the shape `time 23:00` leaves behind.
+        // different one — the shape `world time 23:00` leaves behind.
         let mut sky = app.world_mut().resource_mut::<crate::sky::Sky>();
         sky.told(0.35);
         sky.told(0.95);
@@ -1404,7 +1405,7 @@ mod tests {
     /// holds the two together. A verb dropped from the match would fall
     /// through to `forward` and be refused by the server, while `help` went
     /// on offering it. The other two vocabularies in this subsystem are each
-    /// pinned the same way: `server::console`'s `VERBS` to `interpret`, and
+    /// pinned the same way: `server::console`'s `PHRASES` to `interpret`, and
     /// `MenuButton::EVERY` to `parse`.
     ///
     /// Every listed word is answered on the frame it arrives when given
@@ -1434,7 +1435,7 @@ mod tests {
     /// Every button `click` offers can be clicked, and lands on the button it
     /// named. The listing is an index rather than the grammar — `parse` never
     /// reads it — so this is what holds the two to agreement, the way
-    /// `server::console`'s `VERBS` is held to `interpret`.
+    /// `server::console`'s `PHRASES` is held to `interpret`.
     ///
     /// The five that carry something are given one here. A button that grew
     /// an argument and did not say so would show up as its bare name failing
@@ -1617,8 +1618,8 @@ mod tests {
     }
 
     /// And a line that moved nobody is not made to wait for ground it has no
-    /// reason to want — most lines are that, and a `weather gale` that waited
-    /// on the terrain would be a toll on every one of them.
+    /// reason to want — most lines are that, and a `world weather gale` that
+    /// waited on the terrain would be a toll on every one of them.
     #[test]
     fn a_line_that_moved_nobody_is_answered_as_soon_as_the_server_speaks() {
         let (mut app, _orders) = driven_app();

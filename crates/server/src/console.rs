@@ -9,9 +9,18 @@
 //!
 //! Everything here changes the *world*, for everyone in it — the game's own
 //! console keeps purely local switches (what one machine draws) on its side
-//! of the wire, under a `set` prefix this parser will never see. Anyone in a
-//! session may command; [`interpret`] is told who asked so that a later gate
-//! has somewhere to stand, and the host's log names the asker either way.
+//! of the wire, under a `client` prefix this parser will never see. Anyone in
+//! a session may command; [`interpret`] is told who asked so that a later
+//! gate has somewhere to stand, and the host's log names the asker either
+//! way.
+//!
+//! Two shapes of line, and the first word says which. `goto` and `spawn`
+//! act, and answer with what happened. `world` is the dials the world itself
+//! stands on — the hour, the wind — in the three forms `client` has on the
+//! other side: the bare word lists them, a dial alone reads it, a dial and a
+//! value turns it. Reading is the half that was missing while these were
+//! verbs: a console could order a gale but never ask whether one was still
+//! ordered, and `natural` could be given back to a sky that already had it.
 
 use std::collections::HashMap;
 
@@ -24,17 +33,31 @@ use crate::{
 };
 
 /// What `help` says. One line per command, in the imperative the commands
-/// themselves are written in.
+/// themselves are written in, and the blank line between the two kinds — the
+/// acts above, the dials below.
 const HELP: &str = "goto <x> <z> — be taken to a place, in whatever can be there\n\
                     spawn shark|dolphins|whale [count] — raise beasts in your waters\n\
-                    time <hh:mm> — run the world's clock forward to that hour\n\
-                    weather calm|breeze|gale|natural — order the wind, or give it back";
+                    \n\
+                    world — every dial as it stands; a dial alone reads that one\n\
+                    world time <hh:mm> — run the clock forward to that hour\n\
+                    world weather calm|breeze|gale|natural — order the wind, or give it back";
 
-/// The first word of every line [`interpret`] serves — taught to each client
-/// on joining as [`ToClient::Vocabulary`], so a console can complete them as
-/// a player types. The grammar's index, not the grammar: `interpret` never
-/// reads this, and a test holds the two to agreement.
-pub(crate) const VERBS: [&str; 5] = ["goto", "help", "spawn", "time", "weather"];
+/// Every line [`interpret`] serves, as far as its words are fixed — taught to
+/// each client on joining as [`ToClient::Vocabulary`], so a console can
+/// complete them as a player types. Whole phrases and not first words alone,
+/// because `world` is a shelf and a client that knew only the shelf would
+/// complete a player into a dead end.
+///
+/// The grammar's index, not the grammar: `interpret` never reads this, and a
+/// test holds the two to agreement.
+pub(crate) const PHRASES: [&str; 5] = ["goto", "help", "spawn", "world time", "world weather"];
+
+/// The dials `world` turns, in the order a bare `world` reads them out.
+/// Named here once because three places want them: the listing, the reading,
+/// and what a miss is told to try instead.
+const TIME: &str = "time";
+const WEATHER: &str = "weather";
+const DIALS: [&str; 2] = [TIME, WEATHER];
 
 /// The winds the console can order up. The strengths are the sea's landmarks
 /// rather than round numbers: a flat calm, the reference breeze the wave
@@ -80,8 +103,7 @@ pub(crate) fn interpret(shared: &Shared, from: PlayerId, line: &str) -> Served {
         [] | ["help"] => HELP.to_string().into(),
         ["goto", rest @ ..] => goto(shared, from, rest),
         ["spawn", rest @ ..] => spawn(shared, from, rest).into(),
-        ["time", rest @ ..] => time(shared, rest).into(),
-        ["weather", rest @ ..] => weather(shared, rest).into(),
+        ["world", rest @ ..] => world(shared, rest).into(),
         [verb, ..] => format!("`{verb}` is not a command here — `help` lists what is").into(),
     }
 }
@@ -454,16 +476,62 @@ fn spawn(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
     format!("{announced}, the nearest {nearest:.0} m away")
 }
 
-/// `time <hh:mm>`: the world's clock run forward to the next time it reads
-/// that hour — never backwards, which is [`ToClient::Daylight`]'s promise —
-/// and everyone told at once rather than on the sky thread's next beat,
-/// because the one who asked is watching for it.
-fn time(shared: &Shared, args: &[&str]) -> String {
-    let [given] = args else {
-        return "`time` wants an hour to make it — `time 6:30`".to_string();
-    };
+/// The `world` grammar: `world` reads every dial, `world <dial>` reads one,
+/// `world <dial> <value>` turns one. The same three forms the client's own
+/// `client` lines have, for the same reason — a dial nobody can read is a
+/// switch you have to remember the state of.
+fn world(shared: &Shared, args: &[&str]) -> String {
+    match args {
+        [] => DIALS
+            .iter()
+            .filter_map(|dial| reading(shared, dial))
+            .collect::<Vec<_>>()
+            .join(" / "),
+        [dial] => reading(shared, dial).unwrap_or_else(|| no_such(dial)),
+        [dial, value] => match *dial {
+            TIME => time(shared, value),
+            WEATHER => weather(shared, value),
+            _ => no_such(dial),
+        },
+        _ => "one dial, one value — `world time 6:30`".to_string(),
+    }
+}
+
+/// What one dial reads as, or `None` for a name that is not a dial at all.
+///
+/// A reading names the value that could be written back — `gale`, an hour —
+/// so nothing has to be remembered to know what a dial would take. The
+/// weather's reading is word for word what its write answered with, since
+/// there is nothing more to say about an order than that it stands; the
+/// clock's differs because a write there also says the day *moved*, and
+/// forward.
+fn reading(shared: &Shared, dial: &str) -> Option<String> {
+    Some(match dial {
+        TIME => format!("the day stands at {}", clock(shared.phase())),
+        WEATHER => match *shared.commanded_wind.held() {
+            Some((name, _)) => ordered(name),
+            None => "the weather is the world's own".to_string(),
+        },
+        _ => return None,
+    })
+}
+
+/// What a name that is not a dial is told, which is every dial there is —
+/// the same answer whether it was read or written to.
+fn no_such(dial: &str) -> String {
+    format!(
+        "the world has no dial called `{dial}` — {}",
+        DIALS.join(" or ")
+    )
+}
+
+/// `world time <hh:mm>`: the world's clock run forward to the next time it
+/// reads that hour — never backwards, which is [`ToClient::Daylight`]'s
+/// promise — and everyone told at once rather than on the sky thread's next
+/// beat, because the one who asked is watching for it.
+fn time(shared: &Shared, given: &str) -> String {
     let Some(target) = parse_clock(given) else {
-        return format!("`{given}` is not an hour on a 24-hour clock — `time 6:30`");
+        return format!("`{given}` is not an hour on a 24-hour clock — `world time 6:30`");
     };
 
     let phase = shared.wind_forward_to(target);
@@ -474,30 +542,34 @@ fn time(shared: &Shared, args: &[&str]) -> String {
     format!("the day has run on to {}", clock(phase))
 }
 
-/// `weather <wind>`: the sky taken in hand for everyone, or — `natural` —
-/// given back to the world. No word is sent from here: the sky thread
-/// notices the wind moving and tells the roster, exactly as it does when the
-/// real weather turns, so an ordered gale arrives the way any gale does.
-fn weather(shared: &Shared, args: &[&str]) -> String {
-    let [named] = args else {
-        return "`weather` wants a wind — calm, breeze, gale or natural".to_string();
-    };
-    if *named == "natural" {
+/// `world weather <wind>`: the sky taken in hand for everyone, or —
+/// `natural` — given back to the world. No word is sent from here: the sky
+/// thread notices the wind moving and tells the roster, exactly as it does
+/// when the real weather turns, so an ordered gale arrives the way any gale
+/// does.
+fn weather(shared: &Shared, named: &str) -> String {
+    if named == "natural" {
         shared.command_wind(None);
         return "the weather is the world's own again".to_string();
     }
-    match WINDS.iter().find(|(name, _)| name == named) {
-        Some((name, wind)) => {
-            shared.command_wind(Some(*wind));
-            format!("the wind is ordered {name}")
+    match WINDS.iter().find(|(name, _)| *name == named) {
+        Some(&(name, wind)) => {
+            shared.command_wind(Some((name, wind)));
+            ordered(name)
         }
         None => format!("no wind called `{named}` — calm, breeze, gale or natural"),
     }
 }
 
-/// `hh:mm` on a 24-hour clock as a phase of the day, or a bare hour — `time
-/// 6` is a morning nobody should have to punctuate. `None` for anything that
-/// is not a time of some day.
+/// How a standing order reads, said in one place because the write and the
+/// read both say it.
+fn ordered(name: &str) -> String {
+    format!("the wind is ordered {name}")
+}
+
+/// `hh:mm` on a 24-hour clock as a phase of the day, or a bare hour — `world
+/// time 6` is a morning nobody should have to punctuate. `None` for anything
+/// that is not a time of some day.
 fn parse_clock(given: &str) -> Option<f32> {
     let (hours, minutes) = match given.split_once(':') {
         Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
@@ -543,7 +615,7 @@ mod tests {
         // A world in its afternoon, asked for a morning: the only honest way
         // there is through the night — the clock may never run backwards.
         let shared = a_world(0.5);
-        let reply = answer(&shared, PlayerId(1), "time 6:00");
+        let reply = answer(&shared, PlayerId(1), "world time 6:00");
         assert_eq!(reply, "the day has run on to 06:00");
         let phase = shared.phase();
         assert!(
@@ -563,8 +635,8 @@ mod tests {
     #[test]
     fn time_wants_an_hour_it_can_read() {
         let shared = a_world(0.5);
-        assert!(answer(&shared, PlayerId(1), "time").contains("6:30"));
-        assert!(answer(&shared, PlayerId(1), "time dusk").contains("dusk"));
+        let refused = answer(&shared, PlayerId(1), "world time dusk");
+        assert!(refused.contains("dusk"), "unhelpful: {refused}");
         // And a refused hour moved nothing.
         assert_eq!(*shared.skipped.held(), 0.0);
     }
@@ -573,19 +645,70 @@ mod tests {
     fn weather_is_ordered_and_given_back() {
         let shared = a_world(0.5);
 
-        answer(&shared, PlayerId(1), "weather gale");
+        answer(&shared, PlayerId(1), "world weather gale");
         assert_eq!(shared.wind(), Vec2::new(11.31, -11.31));
 
-        answer(&shared, PlayerId(1), "weather calm");
+        answer(&shared, PlayerId(1), "world weather calm");
         assert_eq!(shared.wind(), Vec2::ZERO);
 
         // Given back, the wind is the world's own function of the clock
         // again — whatever that is right now, it is not held anywhere.
-        answer(&shared, PlayerId(1), "weather natural");
+        answer(&shared, PlayerId(1), "world weather natural");
         assert_eq!(*shared.commanded_wind.held(), None);
 
-        let refused = answer(&shared, PlayerId(1), "weather sirocco");
+        let refused = answer(&shared, PlayerId(1), "world weather sirocco");
         assert!(refused.contains("sirocco"), "unhelpful: {refused}");
+    }
+
+    /// Every dial reads, and reads back the words its own write answered
+    /// with — the half that was missing while these were verbs. Held to
+    /// [`DIALS`] rather than to a list here, so a dial added without a
+    /// reading fails rather than going quietly missing from a bare `world`.
+    ///
+    /// The round trip is shown on the weather and not on the clock, whose
+    /// reading has moved on by the next line: a day is
+    /// [`protocol::DAY_SECONDS`] long, so the hour keeps changing while the
+    /// test runs, and an equality between two readings of it would be a
+    /// stopwatch dressed as an assertion.
+    #[test]
+    fn every_dial_reads_and_reads_back_what_could_be_written() {
+        let shared = a_world(0.5);
+        for dial in DIALS {
+            let read = answer(&shared, PlayerId(1), &format!("world {dial}"));
+            assert!(
+                !read.contains("no dial called"),
+                "`{dial}` is listed but does not read: {read}"
+            );
+        }
+
+        assert_eq!(
+            answer(&shared, PlayerId(1), "world weather"),
+            "the weather is the world's own"
+        );
+        let ordered = answer(&shared, PlayerId(1), "world weather gale");
+        assert_eq!(answer(&shared, PlayerId(1), "world weather"), ordered);
+
+        // And a bare `world` is the dials together.
+        let listed = answer(&shared, PlayerId(1), "world");
+        assert!(
+            listed.contains(&ordered) && listed.contains("the day stands at"),
+            "a bare `world` said `{listed}`"
+        );
+    }
+
+    #[test]
+    fn a_dial_the_world_does_not_have_is_answered() {
+        let shared = a_world(0.5);
+        for asked in ["world tide", "world tide high"] {
+            let refused = answer(&shared, PlayerId(1), asked);
+            assert!(
+                refused.contains("`tide`") && refused.contains("weather"),
+                "`{asked}` was answered `{refused}`, which teaches nothing"
+            );
+        }
+        let too_many = answer(&shared, PlayerId(1), "world time 6:00 sharp");
+        assert!(too_many.contains("one dial"), "unhelpful: {too_many}");
+        assert_eq!(*shared.skipped.held(), 0.0, "a refused line moved the day");
     }
 
     #[test]
@@ -707,11 +830,11 @@ mod tests {
         // to complete these under players' fingers, and a taught word the
         // server then disowns would make the completion a lie.
         let shared = a_world(0.5);
-        for verb in VERBS {
-            let reply = answer(&shared, PlayerId(1), verb);
+        for phrase in PHRASES {
+            let reply = answer(&shared, PlayerId(1), phrase);
             assert!(
-                !reply.contains("is not a command"),
-                "`{verb}` is advertised but not served: {reply}"
+                !reply.contains("is not a command") && !reply.contains("no dial called"),
+                "`{phrase}` is advertised but not served: {reply}"
             );
         }
     }
@@ -722,9 +845,11 @@ mod tests {
         let unknown = answer(&shared, PlayerId(1), "dance");
         assert!(unknown.contains("`dance`") && unknown.contains("help"));
 
+        // Every phrase but `help` itself, which is what was typed to get
+        // this far and needs no line of its own.
         let help = answer(&shared, PlayerId(1), "help");
-        for verb in ["goto", "spawn", "time", "weather"] {
-            assert!(help.contains(verb), "`help` does not mention {verb}");
+        for phrase in PHRASES.iter().filter(|it| **it != "help") {
+            assert!(help.contains(phrase), "`help` does not mention {phrase}");
         }
     }
 }
