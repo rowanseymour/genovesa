@@ -14,18 +14,17 @@
 //! gate has somewhere to stand, and the host's log names the asker either
 //! way.
 //!
-//! Two shapes of line, and the first word says which. `goto` and `spawn`
-//! act, and answer with what happened. `world` is the dials the world itself
-//! stands on — the hour, the wind — in the three forms `client` has on the
-//! other side: the bare word lists them, a dial alone reads it, a dial and a
-//! value turns it. Reading is the half that was missing while these were
-//! verbs: a console could order a gale but never ask whether one was still
-//! ordered, and `natural` could be given back to a sky that already had it.
-
-use std::collections::HashMap;
+//! Two shapes of line, and the first word says which. `goto`, `grant` and
+//! `spawn` act, and answer with what happened. `world` is the dials the
+//! world itself stands on — the hour, the wind — in the three forms `client`
+//! has on the other side: the bare word lists them, a dial alone reads it, a
+//! dial and a value turns it. Reading is the half that was missing while
+//! these were verbs: a console could order a gale but never ask whether one
+//! was still ordered, and `natural` could be given back to a sky that
+//! already had it.
 
 use glam::Vec2;
-use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Token};
+use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient};
 use world::archipelago::{berth_off, Archipelago, SOUNDING, SPAWN_OFFSHORE};
 
 use crate::{
@@ -35,7 +34,8 @@ use crate::{
 /// What `help` says. One line per command, in the imperative the commands
 /// themselves are written in, and the blank line between the two kinds — the
 /// acts above, the dials below.
-const HELP: &str = "goto <x> <z> — be taken to a place, in whatever can be there\n\
+const HELP: &str = "goto <x> <z> — be taken to a place, however you are travelling\n\
+                    grant sloop|rowboat — a hull of that kind put in the water for you\n\
                     spawn shark|dolphins|whale [count] — raise beasts in your waters\n\
                     \n\
                     world — every dial as it stands; a dial alone reads that one\n\
@@ -50,7 +50,26 @@ const HELP: &str = "goto <x> <z> — be taken to a place, in whatever can be the
 ///
 /// The grammar's index, not the grammar: `interpret` never reads this, and a
 /// test holds the two to agreement.
-pub(crate) const PHRASES: [&str; 5] = ["goto", "help", "spawn", "world time", "world weather"];
+pub(crate) const PHRASES: [&str; 6] = [
+    "goto",
+    "grant",
+    "help",
+    "spawn",
+    "world time",
+    "world weather",
+];
+
+/// The hulls `grant` deals, and the words that ask for them. The naming is
+/// the console's own: [`BoatKind`] carries none, nothing else in the world
+/// being asked for by name, and the prose here calls a rowing boat a tender
+/// or a dinghy depending on what it is doing — none of which is a word to
+/// make somebody guess at.
+///
+/// An index of the grammar and not the grammar: a test holds this and
+/// `help`'s own `grant` line to each other, both ways round. [`grant`] reads
+/// this listing, so it cannot disagree with it — what can is the line, which
+/// is what a client completes a player into.
+const HULLS: [(&str, BoatKind); 2] = [("sloop", BoatKind::Sloop), ("rowboat", BoatKind::Rowboat)];
 
 /// The dials `world` turns, in the order a bare `world` reads them out.
 /// Named here once because three places want them: the listing, the reading,
@@ -102,6 +121,7 @@ pub(crate) fn interpret(shared: &Shared, from: PlayerId, line: &str) -> Served {
     match words.as_slice() {
         [] | ["help"] => HELP.to_string().into(),
         ["goto", rest @ ..] => goto(shared, from, rest),
+        ["grant", rest @ ..] => grant(shared, from, rest).into(),
         ["spawn", rest @ ..] => spawn(shared, from, rest).into(),
         ["world", rest @ ..] => world(shared, rest).into(),
         [verb, ..] => format!("`{verb}` is not a command here — `help` lists what is").into(),
@@ -116,17 +136,20 @@ pub(crate) fn interpret(shared: &Shared, from: PlayerId, line: &str) -> Served {
 /// within a few strides of the nearest is that.
 const BEARINGS: usize = 16;
 
-/// `goto <x> <z>`: the asker taken to a point of the world, in whatever can
-/// be there.
+/// `goto <x> <z>`: the asker taken to a point of the world, however they
+/// happen to be travelling.
 ///
-/// Nobody in this world is anywhere on their own — they are aboard a hull or
-/// on their own feet, and a point that suits one of those suits the other
-/// badly. So the ground under the point decides, and the answer says which
-/// it was:
+/// A hull is the only thing here a point can be wrong for: it cannot sit on
+/// a hillside. Somebody on their own feet is at home anywhere the world has
+/// — they walk it, wade it or swim it — so the ground under the point
+/// decides nothing for them, and the answer says which case it was:
 ///
-/// - Dry land, on foot: they stand on it. Whatever boats they have stay
-///   where they were, because walking away from a boat is already how a
-///   player parts from one, and this is a long walk.
+/// - On foot, anywhere: they are put down on the spot they named, and what
+///   to do about it is theirs. Whatever boats they have stay where they
+///   were, because walking away from a boat is already how a player parts
+///   from one, and this is a long walk — or a long swim. This command deals
+///   nobody a hull: being somewhere and having a boat are two asks, and
+///   [`grant`] is the other one.
 /// - Dry land, at a helm: the hull cannot be there, so it lies off the
 ///   nearest shore to it — [`standing_off`], which is the offing a world is
 ///   entered on. Their crew keeps the helm and sails in, exactly as an
@@ -137,9 +160,6 @@ const BEARINGS: usize = 16;
 ///   never does.
 /// - Water, at a helm: the hull goes, and its crew with it, and lies where
 ///   it is put until somebody sets sail again.
-/// - Water, on foot: a hull is put under them and they take its helm — their
-///   own if one is lying free, minted if not. There is no swimming in this
-///   world, so a walker set down at sea would be standing on the water.
 ///
 /// Which leaves nothing to refuse but a point the world does not have. That
 /// is deliberate, this being a debugging command: what it is for is being
@@ -155,16 +175,15 @@ fn goto(shared: &Shared, from: PlayerId, args: &[&str]) -> Served {
         return format!("`{} {}` is outside the world", asked.x, asked.y).into();
     }
 
-    // Whether the point is land is the whole of what the placement turns on,
-    // and asking costs the island under it being generated if it never has
-    // been — the tens to hundreds of milliseconds this command is worth, and
-    // paid before any lock is taken. The offing goes with it for the same
-    // reason and not because it is always wanted: a walker sent to land
-    // reads nothing off `berth` but its being `Some`, and the sixteen rays
-    // are thrown away. Walking them under the roster's lock to save that
-    // would hold every other connection out of the world while it happened,
-    // which is a worse thing to spend than a walk over heights already in
-    // hand.
+    // Whether the point is land is the whole of what a hull's placement
+    // turns on, and asking costs the island under it being generated if it
+    // never has been — the tens to hundreds of milliseconds this command is
+    // worth, and paid before any lock is taken. The offing goes with it, and
+    // both are wasted on a walker, who is put down wherever they asked. Only
+    // the roster knows which this asker is, and reading it first to save the
+    // sixteen rays would mean either sounding the sea under its lock — every
+    // other connection held out of the world while it happened — or taking
+    // the lock twice around a walk that is heights already in hand.
     let dry = shared.world.height(asked.x, asked.y) >= 0.0;
     let berth = dry.then(|| standing_off(&shared.world, asked));
 
@@ -177,65 +196,35 @@ fn goto(shared: &Shared, from: PlayerId, args: &[&str]) -> Served {
             .to_string()
             .into();
     };
-    let (token, aboard) = (player.token, player.aboard);
+    let aboard = player.aboard;
 
-    let (at, heading, told, said) = {
-        let mut boats = shared.boats.held();
-        match (aboard, berth) {
-            // At a helm: the hull goes, and lies off the shore when the
-            // shore is what was asked for. Facing it, in that case — a hull
-            // anchored stern-on to the island it was brought to see is no
-            // use to whoever asked for it.
-            (Some(boat), berth) => {
-                let at = berth.map_or(asked, |(off, _)| off);
-                let state = boats.get_mut(&boat).expect("a boat once boarded exists");
-                state.position = at;
-                if berth.is_some() {
-                    state.heading = aimed(at, asked);
-                }
-                let heading = state.heading;
-                (at, Some(heading), Some((boat, state.told(boat))), None)
+    let (at, heading, told) = match aboard {
+        // At a helm: the hull goes, and lies off the shore when the shore is
+        // what was asked for. Facing it, in that case — a hull anchored
+        // stern-on to the island it was brought to see is no use to whoever
+        // asked for it.
+        Some(boat) => {
+            let mut boats = shared.boats.held();
+            let at = berth.map_or(asked, |(off, _)| off);
+            let state = boats.get_mut(&boat).expect("a boat once boarded exists");
+            state.position = at;
+            if berth.is_some() {
+                state.heading = aimed(at, asked);
             }
-            // Afoot, and the point is ground to stand on: nothing but the
-            // walker moves, and which way they face is their own business —
-            // see [`ToClient::PutDown`], whose `None` heading this is.
-            (None, Some(_)) => (asked, None, None, None),
-            // Afoot at sea: a hull under them, and the helm of it.
-            (None, None) => {
-                let (boat, minted) = a_hull_for(&mut boats, token, asked);
-                let state = boats.get_mut(&boat).expect("dealt a breath ago");
-                state.occupant = Some(from);
-                (
-                    asked,
-                    Some(state.heading),
-                    Some((boat, state.told(boat))),
-                    Some(if minted {
-                        "a ship is here for you"
-                    } else {
-                        "your ship is here"
-                    }),
-                )
-            }
+            (at, Some(state.heading), Some(state.told(boat)))
         }
+        // Afoot: the point itself, whatever is under it, and which way they
+        // face is their own business — see [`ToClient::PutDown`], whose
+        // `None` heading this is.
+        None => (asked, None, None),
     };
-    // Whether this jump seated somebody who was on their own feet, which is
-    // what decides both halves of what happens next.
-    let seating = aboard.is_none() && told.is_some();
-    if let Some((boat, _)) = told.as_ref().filter(|_| seating) {
-        // The roster's half of it, which is only ever written with the
-        // boat's — see [`crate::Player::aboard`].
-        player.aboard = Some(*boat);
-    }
     player.position = at;
 
     match told {
-        // A seating goes to the whole roster, the asker included, exactly as
-        // a boarding grant does: theirs is the client it seats.
-        Some((_, telling)) if seating => broadcast_all(&players, telling),
-        // Any other word about a hull is news to everyone but the client
-        // steering it, which is the authority on its own hull and is told
-        // where it stands by the put down instead.
-        Some((_, telling)) => broadcast(&players, from, telling),
+        // A word about a hull is news to everyone but the client steering
+        // it, which is the authority on its own hull and is told where it
+        // stands by the put down instead.
+        Some(telling) => broadcast(&players, from, telling),
         None => broadcast(
             &players,
             from,
@@ -256,14 +245,13 @@ fn goto(shared: &Shared, from: PlayerId, args: &[&str]) -> Served {
     }
     drop(players);
 
-    let reply = match (said, berth) {
-        (Some(said), _) => format!("{said}, at {} {}", round(at.x), round(at.y)),
+    let reply = match berth {
         // Measured to the shore rather than to the point that was asked
         // for: what a player wants to know from a deck is how far off the
         // beach they are lying, and the place they named is somewhere
         // inland of it. The coordinates are the berth either way — where
         // they are is where they are.
-        (None, Some((_, shore))) if aboard.is_some() => format!(
+        Some((_, shore)) if aboard.is_some() => format!(
             "the shore is {} m off the bow, at {} {}",
             round(at.distance(shore)),
             round(at.x),
@@ -336,44 +324,137 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
     (asked, asked)
 }
 
-/// The hull a walker at sea is put aboard: one of their own lying free
-/// anywhere in the world, brought to them, or a new one where they stand.
+/// `grant <kind>`: a hull of that kind put in the water for the asker, at
+/// anchor and with nobody aboard.
 ///
-/// Theirs first for the reason the door prefers a spare to a mint — see
-/// [`crate::BoatState::keeper`] and `fresh_hull` in the join path. An evening
-/// of `goto` would otherwise leave a sloop adrift at every place its asker
-/// had stood, each one filed in the world and posted to every future joiner.
-/// Unlike the door's, this search has no berth about it: the point of the
-/// command is being taken somewhere, so the hull comes to the player rather
-/// than the player being handed one that happens to be near.
+/// It deals a boat and stops there. Boarding is walking up to a free helm
+/// and taking it — the one way anybody gets aboard anything — and a command
+/// that seated its asker would be the console doing by fiat what the world
+/// already has a rule for. Being somewhere and having a boat are two asks:
+/// [`goto`] is the first of them and this is the second.
 ///
-/// A sloop either way. A dinghy somebody beached is left on its beach, where
-/// they will want it, and an arrival's story starts at a ship's helm.
-fn a_hull_for(boats: &mut HashMap<BoatId, BoatState>, token: Token, at: Vec2) -> (BoatId, bool) {
-    let theirs = boats
-        .iter()
-        .find(|(_, boat)| {
-            boat.kind == BoatKind::Sloop && boat.occupant.is_none() && boat.keeper == Some(token)
-        })
-        .map(|(&boat, _)| boat);
-    if let Some(boat) = theirs {
-        let state = boats.get_mut(&boat).expect("looked up a breath ago");
-        state.position = at;
-        return (boat, false);
-    }
+/// Where they stand, if that is water. Off the nearest shore if it is not —
+/// [`standing_off`], the offing a world is entered on — because a hull dealt
+/// onto a hillside is the one thing the game itself never does, so a grant
+/// asked for from a summit is answered with a walk and a swim.
+///
+/// Their own hull of that kind comes to them if one is lying free, and one
+/// is minted only if none is — the door's own preference for a spare over a
+/// mint, see [`crate::BoatState::keeper`] and `fresh_hull` in the join path.
+/// That bounds the *asking* and not the fleet: a hull somebody is aboard is
+/// nobody's spare, so boarding what you were dealt and asking again is a
+/// second hull, filed in the world and posted to every future joiner.
+/// Deliberately, that being the only way to come by two — and there is
+/// nothing to hoist in its place the way `Lower` retires a tender, a mint
+/// happening precisely when no free hull of the kind is left to take back.
+fn grant(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
+    let [named] = args else {
+        return format!("`grant` wants a kind of boat — {}", kinds());
+    };
+    let Some(&(_, kind)) = HULLS.iter().find(|(name, _)| name == named) else {
+        return format!("no boat called `{named}` — {}", kinds());
+    };
 
-    let boat = BoatId(keeper::mint());
-    boats.insert(
-        boat,
-        BoatState {
-            kind: BoatKind::Sloop,
-            position: at,
-            heading: 0.0,
-            occupant: None,
-            keeper: Some(token),
-        },
-    );
-    (boat, true)
+    // Where they are, peeked at and given back before the sounding below,
+    // which cannot happen under a lock — see what `goto` says about paying
+    // for an island. The dealing then takes the roster again and keeps it,
+    // so a player who sails on in the moment between is dealt a hull where
+    // they asked from rather than where they now are, which the answer's own
+    // coordinates own up to.
+    let who = {
+        let players = shared.players.held();
+        players
+            .get(&from)
+            .map(|player| (player.token, player.position))
+    };
+    let Some((token, asker)) = who else {
+        // Unreachable from a served connection, whose player is on the
+        // roster for as long as it can speak — the same nobody-by-that-id
+        // case `spawn` answers, and it needs words here too.
+        return "you are nowhere a boat could reach you".to_string();
+    };
+
+    // Sounded before either lock is taken, for the reason `goto` says at
+    // length: the ground under a point may have to be generated to answer
+    // this, and that is not a wait to hold the world through.
+    let offing = (shared.world.height(asker.x, asker.y) >= 0.0)
+        .then(|| standing_off(&shared.world, asker).0);
+    let at = offing.unwrap_or(asker);
+
+    let minted = {
+        // The roster first and the boats under it — the nesting the two
+        // locks allow — so that the hull's new state and the telling of it
+        // leave together. A telling let go of first is one another
+        // connection's boarding can overtake, and then every client but the
+        // one steering the hull holds a helm the world has already given
+        // away.
+        let players = shared.players.held();
+        let (minted, telling) = {
+            let mut boats = shared.boats.held();
+            let theirs = boats
+                .iter()
+                .find(|(_, boat)| {
+                    boat.kind == kind && boat.occupant.is_none() && boat.keeper == Some(token)
+                })
+                .map(|(&boat, _)| boat);
+            match theirs {
+                Some(boat) => {
+                    let state = boats.get_mut(&boat).expect("looked up a breath ago");
+                    state.position = at;
+                    (false, state.told(boat))
+                }
+                None => {
+                    let boat = BoatId(keeper::mint());
+                    // Written whole, on the same reasoning `Lower` gives for
+                    // writing its tender that way: a hull's fields are
+                    // settled in one place or they drift apart. The keeper
+                    // above all — this one is theirs from the moment it
+                    // touches the water, which is what makes the next
+                    // `grant` bring it back rather than mint another.
+                    let state = BoatState {
+                        kind,
+                        position: at,
+                        heading: 0.0,
+                        occupant: None,
+                        keeper: Some(token),
+                    };
+                    let telling = state.told(boat);
+                    boats.insert(boat, state);
+                    (true, telling)
+                }
+            }
+        };
+        // Everyone, the asker included: no client is steering this hull, so
+        // nobody here is the authority on it that a helmsman would be.
+        broadcast_all(&players, telling);
+        minted
+    };
+
+    let whose = if minted {
+        format!("a {named} is")
+    } else {
+        format!("your {named} is")
+    };
+    match offing {
+        // How far they have to go to reach it, which is the whole of what a
+        // grant answered from dry land has to tell somebody.
+        Some(off) => format!(
+            "{whose} in the water {} m off, at {} {}",
+            round(asker.distance(off)),
+            round(at.x),
+            round(at.y)
+        ),
+        None => format!("{whose} here, at {} {}", round(at.x), round(at.y)),
+    }
+}
+
+/// The kinds a `grant` will take, as its refusals list them.
+fn kinds() -> String {
+    HULLS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 /// A distance or a coordinate as the console says it: whole metres, which is
@@ -814,6 +895,34 @@ mod tests {
         // rather than pretending somebody moved.
         let nobody = answer(&shared, PlayerId(9), "goto 0 0");
         assert!(nobody.contains("nowhere"), "unhelpful: {nobody}");
+    }
+
+    #[test]
+    fn every_hull_the_grant_names_can_be_asked_for() {
+        // The line and the listing, held to each other as sequences rather
+        // than by containment. The direction that can actually break is a
+        // kind `help` advertises and the listing has never heard of: a
+        // client completes a player into the word and the world answers
+        // that there is no such boat.
+        let advertised = HELP
+            .lines()
+            .find_map(|line| line.trim_start().strip_prefix("grant "))
+            .and_then(|line| line.split_whitespace().next())
+            .expect("`help` should have a line for `grant`");
+        assert_eq!(
+            advertised.split('|').collect::<Vec<_>>(),
+            HULLS.iter().map(|(named, _)| *named).collect::<Vec<_>>(),
+            "`help` advertises `{advertised}`, which is not what `grant` deals"
+        );
+
+        let shared = a_world(0.5);
+        for asked in ["grant", "grant frigate", "grant sloop rowboat"] {
+            let refused = answer(&shared, PlayerId(1), asked);
+            assert!(
+                HULLS.iter().all(|(named, _)| refused.contains(named)),
+                "`{asked}` was answered `{refused}`, which teaches nothing"
+            );
+        }
     }
 
     #[test]

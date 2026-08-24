@@ -539,8 +539,8 @@ impl Client {
     /// authority on it, so the world tells everybody *but* the asker — and a
     /// telling that wrongly went to the asker too would go out *before* the
     /// put down, since the broadcast comes first. Read for the put down
-    /// alone, as [`Client::hear_put_down`] does, and the mistake would
-    /// already have been skipped past by the time anything looked.
+    /// alone, skipping whatever came before it, and the mistake would
+    /// already be behind the reader by the time anything looked.
     fn hear_put_down_alone(&self) -> (Vec2, Option<f32>) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -550,24 +550,6 @@ impl Client {
                     panic!("the world told this client where its own {id:?} is")
                 }
                 _ => {}
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and nobody was put down anywhere"
-            );
-        }
-    }
-
-    /// The next word putting this player down somewhere, ignoring everything
-    /// else — bounded like the boats' reader, a session going on about
-    /// ground and beasts around a jump.
-    fn hear_put_down(&self) -> (Vec2, Option<f32>) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let ToClient::PutDown { position, heading } =
-                ToClient::read(&mut &self.0).expect("read")
-            {
-                return (position, heading);
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1680,7 +1662,7 @@ fn a_beached_tender_is_still_there_when_its_keeper_walked_out_of_the_world() {
     // fleet, but hoisting it from somebody who left *ashore* would strand
     // them: the entry block deals a returner who left afoot no hull, and the
     // ship they rowed in from is at anchor well offshore, past wading — a
-    // long swim where the dinghy hauled up the beach was the way back out.
+    // swim out to it where the dinghy hauled up the beach was the way back.
     // It has to be lying there when they return — which is also the world's
     // promise that the boats you leave lie where you left them.
     //
@@ -3680,7 +3662,93 @@ fn a_summons_can_raise_a_crowd_worth_timing_the_client_with() {
 }
 
 #[test]
-fn goto_takes_a_player_to_a_place_in_whatever_can_be_there() {
+fn grant_deals_a_hull_and_leaves_the_boarding_to_whoever_asked() {
+    let addr = host(7);
+    let (client, _id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a world is entered at a helm");
+    let world = behind_the_curtain(7);
+    // The welcome introduces this player to their own ship among the rest of
+    // the joining chatter, so everything after here is a word this test
+    // asked for.
+    client.caught_up();
+
+    // A tender, asked for from a helm: put in the water where the asker is,
+    // at anchor with nobody aboard. A grant deals a boat and stops there —
+    // taking its helm is the ordinary business of walking up to a free one.
+    client.say(ToServer::Command {
+        line: "grant rowboat".to_string(),
+    });
+    let (tender, kind, at, _heading, occupant) = client.hear_a_boat_kinded();
+    assert_eq!(kind, BoatKind::Rowboat, "some other hull was dealt");
+    assert_ne!(tender, ship, "the ship they were steering answered a grant");
+    assert_eq!(occupant, None, "the grant seated its asker");
+    assert_eq!(at, spawn, "the hull was dealt somewhere else");
+    let reply = client.hear_reply();
+    assert!(reply.starts_with("a rowboat is here"), "answered: {reply}");
+
+    // Asked for again, and it is that same hull brought back rather than a
+    // second one minted — which is what keeps an evening of this from
+    // filling the world with dinghies.
+    client.say(ToServer::Command {
+        line: "grant rowboat".to_string(),
+    });
+    let (again, ..) = client.hear_a_boat_kinded();
+    assert_eq!(
+        again, tender,
+        "a second rowing boat was minted for a player who had one"
+    );
+    let reply = client.hear_reply();
+    assert!(
+        reply.starts_with("your rowboat is here"),
+        "answered: {reply}"
+    );
+
+    // A sloop, from the deck of the one they already have: a hull somebody
+    // is aboard is nobody's spare, so this one is minted rather than being
+    // taken out from under them.
+    client.say(ToServer::Command {
+        line: "grant sloop".to_string(),
+    });
+    let (other, kind, _at, _heading, occupant) = client.hear_a_boat_kinded();
+    assert_eq!(kind, BoatKind::Sloop, "some other hull was dealt");
+    assert_ne!(other, ship, "the hull under them was dealt back to them");
+    assert_eq!(occupant, None, "the grant seated its asker");
+    let reply = client.hear_reply();
+    assert!(reply.starts_with("a sloop is here"), "answered: {reply}");
+
+    // And from dry land, where a hull cannot be: it lies off the nearest
+    // shore instead, and the answer says how far there is to swim for it.
+    let inland = world.spawn().expect("a world has islands").island.centre();
+    assert!(
+        world.height(inland.x, inland.y) >= 0.0,
+        "the middle of an island should be land for this to be about anything"
+    );
+    client.say(ToServer::Command {
+        line: format!("goto {} {}", inland.x, inland.y),
+    });
+    client.hear_put_down_alone();
+    client.hear_reply();
+    client.say(ToServer::Disembark { position: inland });
+    client.caught_up();
+
+    client.say(ToServer::Command {
+        line: "grant rowboat".to_string(),
+    });
+    let (ashore, _kind, off, _heading, _occupant) = client.hear_a_boat_kinded();
+    assert_eq!(ashore, tender, "the rowing boat they had was left behind");
+    assert!(
+        world.height(off.x, off.y) < 0.0,
+        "a hull was dealt onto dry land at {off}"
+    );
+    let reply = client.hear_reply();
+    assert!(
+        reply.starts_with("your rowboat is in the water") && reply.contains("m off"),
+        "a grant from a hilltop said nothing about the walk: {reply}"
+    );
+}
+
+#[test]
+fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
     // Entry is aboard a ship, so the first jump is a ship's: asked for the
     // middle of an island, which is the one place a hull cannot be.
     let addr = host(7);
@@ -3723,32 +3791,41 @@ fn goto_takes_a_player_to_a_place_in_whatever_can_be_there() {
     );
 
     // Ashore on their own feet, where the ship cannot follow — and a jump
-    // out to sea from there is a jump the ship makes with them, because
-    // there is no swimming in this world. The same ship: one they are
-    // keeping and nobody is aboard comes to them rather than a new one being
-    // conjured, which is what keeps an evening of this from filling the
-    // world with abandoned hulls.
+    // out to sea from there is a swim, not a sailing. The world puts them in
+    // the water they asked for and deals them nothing: a hull is something
+    // to be given, not something to be got at by asking to be somewhere.
     client.say(ToServer::Disembark { position: inland });
     client.caught_up();
-    let afloat = Vec2::new(anchorage.x, anchorage.y);
     client.say(ToServer::Command {
-        line: format!("goto {} {}", afloat.x, afloat.y),
+        line: format!("goto {} {}", anchorage.x, anchorage.y),
     });
-    let (told, kind, at, _heading, occupant) = client.hear_a_boat_kinded();
+    let (afloat, facing) = client.hear_put_down_alone();
     assert_eq!(
-        told, ship,
-        "a second ship was conjured for a player who had one"
+        afloat, anchorage,
+        "the water asked for is the water arrived at"
     );
-    assert_eq!(kind, BoatKind::Sloop, "a walker was put to sea in a dinghy");
-    assert_eq!(occupant, Some(id), "the hull came without its helm");
-    assert_eq!(at, afloat, "the hull came to somewhere else");
-    let (put, _) = client.hear_put_down();
-    assert_eq!(put, afloat, "the water asked for is the water arrived at");
+    assert_eq!(
+        facing, None,
+        "the world had an opinion about a swimmer's bearing"
+    );
     let reply = client.hear_reply();
-    assert!(reply.starts_with("your ship is here"), "answered: {reply}");
+    assert!(reply.starts_with("you are at"), "answered: {reply}");
+    assert!(
+        client.nothing_was_said_about_a_boat(),
+        "a swimmer was dealt a hull"
+    );
 
-    // At a helm now, and asked for open water: the plainest of the four, the
-    // hull simply going where it was sent with its crew aboard. Somewhere
+    // The ship is where they left it, which is the only reason there is a
+    // helm to take back: the swim was out to it, and boarding is how anybody
+    // gets aboard anything now.
+    client.say(ToServer::Board { boat: ship });
+    let (told, at, _heading, occupant) = client.hear_a_boat();
+    assert_eq!(told, ship, "some other hull answered the boarding");
+    assert_eq!(at, anchorage, "the ship had drifted off its anchorage");
+    assert_eq!(occupant, Some(id), "the boarding was refused");
+
+    // At a helm again, and asked for open water: the plainest of the cases,
+    // the hull simply going where it was sent with its crew aboard. Somewhere
     // well clear of everywhere this session has been, so that what the
     // survey says about it cannot be ground charted earlier — sixteen
     // hundred metres is five times `SIGHT_RADIUS`, and nothing between here
