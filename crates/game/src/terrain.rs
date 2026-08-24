@@ -141,7 +141,8 @@ const SEA_SURFACE: f32 = 4.0 * HEIGHT_STEP + OFF_LATTICE;
 /// lives here and the two colours it is applied to live in the protocol. High:
 /// water is a flat tone with the bed showing faintly through it, not a pane of
 /// glass over a lit bottom. What it lets through is enough to darken the deep
-/// and lift the shallows, and no more.
+/// and lift the shallows, and no more — and over the sea it is only the
+/// starting point; see `sea::MURK`.
 const WATER_ALPHA: f32 = 0.84;
 
 /// How far out from the camera's focus chunks are wanted, in metres.

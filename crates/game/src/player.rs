@@ -34,7 +34,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use protocol::ground::CELL_METRES;
+use protocol::ground::{ANCHOR_DEPTH, CELL_METRES};
 use protocol::BoatKind;
 
 use crate::bindings::{Action, KeyBindings};
@@ -632,24 +632,42 @@ fn embark_or_land(
             }
 
             if hull.kind() == BoatKind::Sloop {
-                // The crew furls as the skipper steps down into the boat —
-                // whichever end of the exchange settles the seat, the ship
-                // is left at anchor with its canvas in — and the last of the
-                // glide is taken off with it, so the ship lies where the
-                // gate read it as lying.
-                hull.comes_to_rest();
-                hull.furl();
+                // The anchor has to hold first — [`ANCHOR_DEPTH`]'s own doc
+                // says why the client asks the same question. A chunk that
+                // has not arrived refuses too — water the client knows
+                // nothing about is treated as deep, exactly as the sea draws
+                // it — but no ground *resource* at all is a world with no
+                // terrain in it (the boat tests'), where there is no depth
+                // for the rule to be about.
+                let under = hull_place.translation.xz();
+                let holds = ground.is_none_or(|g| {
+                    g.height(under.x, under.y)
+                        .is_some_and(|height| height >= -ANCHOR_DEPTH)
+                });
+                if !holds {
+                    return;
+                }
+
                 let (berth, heading) = tender_berth(&hull_place, ground);
                 match &online {
                     // A served world's tender is asked for, never assumed:
                     // the player steps down when the telling grants it — see
                     // [`crate::boat::Fleet::told`] — which over the loopback
                     // is the next frame, and across a real sea is a blink.
+                    // Nothing about the ship is touched on the way out: the
+                    // grant strips its [`Boat`] and an unheld hull's canvas
+                    // is furled without asking (see `trim_the_sails`), while
+                    // a refusal — the two machines can disagree about the
+                    // depth by a quantisation step — arrives as silence, and
+                    // a key refused must have done nothing at all.
                     Some(online) => online.connection.lower(berth, heading),
-                    // Offline the whole exchange is local: the rowboat goes
-                    // in the water and the player crosses to its thwarts,
-                    // the ship keeping its own state where it lies.
+                    // Offline the whole exchange is local: the crew furls as
+                    // the skipper steps down, so the ship never lies at
+                    // anchor under canvas, and the last of the glide is
+                    // taken off so it lies where the gate read it as lying.
                     None => {
+                        hull.comes_to_rest();
+                        hull.furl();
                         let tender = spawn_hull(
                             &mut commands,
                             &mut kit,
@@ -1167,14 +1185,18 @@ mod tests {
 
     #[test]
     fn going_ashore_is_refused_over_deep_water() {
-        // At anchor in open ocean the boat still goes in the water — the
-        // crew will lower it anywhere — but rowed off across deep water the
-        // key finds neither footing nor a hull in reach, and does nothing.
+        // Rowed off across deep water, the key finds neither footing nor a
+        // hull in reach, and does nothing. The ground goes in *after* the
+        // lowering: the crew will no longer put the boat down over water the
+        // anchor cannot hold — see [`ANCHOR_DEPTH`] — and what is under test
+        // here is the landing, not the anchorage. A rowboat this far out is
+        // still a state the game reaches — lowered over a shelf and rowed
+        // away from it.
         let mut app = world_app();
-        app.insert_resource(test_shore());
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
 
         press_board(&mut app);
+        app.insert_resource(test_shore());
         assert_eq!(aboard_kind(&mut app), Some(BoatKind::Rowboat));
         tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 250);
@@ -1197,8 +1219,14 @@ mod tests {
         // what makes a cliff coast scenery — a landing has to find footing, and
         // footing is more than shallow water.
         let mut app = world_app();
-        app.insert_resource(test_ground());
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH + 8.0, 0.0));
+
+        // The ground arrives after the lowering, for the reason
+        // `going_ashore_is_refused_over_deep_water` gives — and doubly here,
+        // a cliff island's bed plunging too deep for the anchor everywhere.
+        press_board(&mut app);
+        app.insert_resource(test_ground());
+        assert_eq!(aboard_kind(&mut app), Some(BoatKind::Rowboat));
 
         // The probe's own reach does hold dry land, so what refuses the landing
         // below is the steepness of it and not the distance.
@@ -1208,9 +1236,6 @@ mod tests {
             .height(TEST_ISLAND_REACH - 1.0, 0.0)
             .expect("the cliff island's rim has arrived");
         assert!(dry > 0.0, "the rim is under water, not a cliff");
-
-        press_board(&mut app);
-        assert_eq!(aboard_kind(&mut app), Some(BoatKind::Rowboat));
         row_in(&mut app);
         press_board(&mut app);
         assert_eq!(
@@ -1271,6 +1296,32 @@ mod tests {
     }
 
     #[test]
+    fn the_boat_is_not_lowered_where_the_anchor_cannot_hold() {
+        // The client's half of the server's rule — see [`ANCHOR_DEPTH`]:
+        // over water too deep to anchor in, the gunwale key does nothing at
+        // all, sails and glide untouched, rather than asking for a grant the
+        // server would meet with silence. Back over the shelf the same key
+        // serves, so what refused was the water and not the key.
+        let mut app = world_app();
+        app.insert_resource(test_shore());
+        place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
+        press_board(&mut app);
+        assert_eq!(
+            aboard_kind(&mut app),
+            Some(BoatKind::Sloop),
+            "the boat went over the side where no anchor holds"
+        );
+
+        place_boat(&mut app, Vec2::new(SHORE_WATERLINE + ANCHORAGE, 0.0));
+        press_board(&mut app);
+        assert_eq!(
+            aboard_kind(&mut app),
+            Some(BoatKind::Rowboat),
+            "the anchorage refused the boat too"
+        );
+    }
+
+    #[test]
     fn a_dying_glide_is_let_across_and_stopped_by_the_crossing() {
         // The forgiving half of the gate: furled and gliding at way nobody
         // watching could see, the key works — refusing here read as the key
@@ -1309,10 +1360,12 @@ mod tests {
         // stopped the boat while refusing the crossing would be a brake
         // nobody asked for, wearing a key that claims to have done nothing.
         let mut app = world_app();
-        app.insert_resource(test_shore());
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
 
+        // The ground arrives after the lowering, for the reason
+        // `going_ashore_is_refused_over_deep_water` gives.
         press_board(&mut app);
+        app.insert_resource(test_shore());
         assert_eq!(aboard_kind(&mut app), Some(BoatKind::Rowboat));
         tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 250);

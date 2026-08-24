@@ -32,7 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{chunk_at, dequantize};
+use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH};
 use protocol::survey::{in_sight_along, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
@@ -1296,7 +1296,25 @@ impl Shared {
         let n = id.0 as f32;
         let bearing = n * 137.508_f32.to_radians();
         let out = SPAWN_SCATTER * (0.4 + 0.6 * (n * 0.618_034).fract());
-        self.spawn + Vec2::from_angle(bearing) * out
+        // Halved until the scattered point is still a berth — on a steep
+        // coast a few metres either way is the sand or water the anchor
+        // cannot hold — with the spawn itself the last resort. Asked of
+        // [`Archipelago::ready_height`], this being called with the roster
+        // held on one path: an evicted entry island reads as no answer, and
+        // no answer keeps the scatter rather than generating under a lock.
+        let mut offset = Vec2::from_angle(bearing) * out;
+        for _ in 0..3 {
+            let at = self.spawn + offset;
+            if self
+                .world
+                .ready_height(at.x, at.y)
+                .is_none_or(world::archipelago::a_berth)
+            {
+                return at;
+            }
+            offset *= 0.5;
+        }
+        self.spawn
     }
 }
 
@@ -1907,6 +1925,25 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             Ok(ToServer::Lower { position, heading })
                 if reachable(position) && heading.is_finite() =>
             {
+                // The ship's water is sounded with no lock held, because
+                // [`Archipelago::height`] may have an island to generate —
+                // the same order `survey_the_way` and the console keep. So
+                // the ship is looked up twice, here for where it lies and
+                // below under the grant's own hold; it may drift a position
+                // report between the two, which is inside the slack
+                // [`BOARD_GRANT`] already carries.
+                let ship_at = {
+                    let players = shared.players.held();
+                    let boats = shared.boats.held();
+                    players
+                        .get(&id)
+                        .and_then(|player| player.aboard)
+                        .and_then(|aboard| boats.get(&aboard))
+                        .map(|state| state.position)
+                };
+                let holds =
+                    ship_at.is_some_and(|at| shared.world.height(at.x, at.y) >= -ANCHOR_DEPTH);
+
                 let mut players = shared.players.held();
                 let Some(player) = players.get_mut(&id) else {
                     break;
@@ -1915,12 +1952,14 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     let mut boats = shared.boats.held();
                     // Granted to a player at the helm of a boat that carries
                     // one, and only alongside it — a tender is lowered over
-                    // the side, not sent across the bay. Anything else is
-                    // answered with the usual silence.
+                    // the side, not sent across the bay — and only where the
+                    // ship's anchor holds: see [`ANCHOR_DEPTH`]. Anything
+                    // else is answered with the usual silence.
                     let ship = player.aboard.filter(|aboard| {
                         boats.get(aboard).is_some_and(|state| {
                             state.kind == BoatKind::Sloop
                                 && state.position.distance(position) <= BOARD_GRANT
+                                && holds
                         })
                     });
                     match ship {

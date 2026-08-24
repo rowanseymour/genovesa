@@ -26,6 +26,25 @@ fn chunk_at(point: Vec2) -> IVec2 {
     (point / CHUNK_METRES).floor().as_ivec2()
 }
 
+/// A second anchorage: water [`world::archipelago::a_berth`] accepts — the
+/// same band the spawn and `Lower` are held to — at least `clear` metres
+/// from `near`. Sounded off the world itself in widening rings, because a
+/// fixed offset is a bet about one seed's bathymetry that a generator change
+/// quietly loses.
+fn another_anchorage(world: &Archipelago, near: Vec2, clear: f32) -> Vec2 {
+    for ring in 0..200 {
+        let radius = clear + 4.0 * ring as f32;
+        for step in 0..64 {
+            let angle = step as f32 / 64.0 * std::f32::consts::TAU;
+            let at = near + radius * Vec2::new(angle.cos(), angle.sin());
+            if world::archipelago::a_berth(world.height(at.x, at.y)) {
+                return at;
+            }
+        }
+    }
+    panic!("no second anchorage within reach of {near}");
+}
+
 /// A hosted world on a loopback port of the machine's choosing, running until
 /// the test process ends. Most of what is tested here is a conversation, not a
 /// lifetime — the tests that are about the lifetime host their own.
@@ -1445,6 +1464,56 @@ fn a_boat_is_lowered_from_a_ships_helm_alongside_and_from_nowhere_else() {
 }
 
 #[test]
+fn a_boat_is_not_lowered_where_the_anchor_cannot_hold() {
+    // The ocean's floor lies past [`protocol::ground::ANCHOR_DEPTH`] by
+    // construction, so a ship out there cannot be left at anchor — asking
+    // for the boat gets the usual silence. Back over an anchorage the same
+    // ask serves, so what refused was the water and not the asker.
+    let addr = host(7);
+    let (client, _id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a newcomer's story starts aboard");
+    let (told, ..) = client.hear_a_boat_kinded();
+    assert_eq!(told, ship);
+
+    // Open water past anchoring, sounded off the world rather than assumed:
+    // the flat ocean floor, anywhere no island answers for. Bounded, so a
+    // layout with no such water along this line panics with the message
+    // instead of generating islands forever.
+    let world = behind_the_curtain(7);
+    let deep = (1..64)
+        .map(|ring| spawn + Vec2::new(200.0 * ring as f32, 0.0))
+        .find(|at| world.height(at.x, at.y) < -protocol::ground::ANCHOR_DEPTH)
+        .expect("an ocean has open water in it");
+    client.say(ToServer::Helm {
+        position: deep,
+        heading: 0.0,
+    });
+    client.say(ToServer::Lower {
+        position: deep + Vec2::new(3.0, 0.0),
+        heading: 0.0,
+    });
+    assert!(
+        client.nothing_was_said_about_a_boat(),
+        "a ship was left at anchor over the open ocean"
+    );
+
+    client.say(ToServer::Helm {
+        position: spawn,
+        heading: 0.0,
+    });
+    client.say(ToServer::Lower {
+        position: spawn + Vec2::new(3.0, 0.0),
+        heading: 0.0,
+    });
+    let (_tender, kind, ..) = client.hear_a_boat_kinded();
+    assert_eq!(
+        kind,
+        BoatKind::Rowboat,
+        "the anchorage refused the boat too"
+    );
+}
+
+#[test]
 fn a_boat_lying_free_alongside_is_the_boat_that_goes_over_the_side() {
     // Lower, step out onto the ship's own spot, take her helm again, lower
     // again: the hull floating alongside is the one that is lowered, so the
@@ -1508,7 +1577,9 @@ fn a_boat_left_behind_is_hoisted_when_its_keeper_lowers_another() {
     let _tender_at_anchor = client.hear_a_boat_kinded();
     client.say(ToServer::Board { boat: ship });
     let _her_helm = client.hear_a_boat_kinded();
-    let far = spawn + Vec2::new(400.0, 0.0);
+    // Far enough that the abandoned dinghy is nowhere near the new lowering,
+    // and still water a `Lower` is granted in.
+    let far = another_anchorage(&behind_the_curtain(7), spawn, 40.0);
     client.say(ToServer::Helm {
         position: far,
         heading: 0.0,
