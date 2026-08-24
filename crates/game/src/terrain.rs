@@ -142,8 +142,7 @@ const SEA_SURFACE: f32 = 4.0 * HEIGHT_STEP + OFF_LATTICE;
 /// water is a flat tone with the bed showing faintly through it, not a pane of
 /// glass over a lit bottom. What it lets through is enough to darken the deep
 /// and lift the shallows, and no more — and over the sea it is only the
-/// starting point, the shader raising it to fully opaque where the bottom
-/// falls past anchoring; see `sea::MURK` for the depths and the reasoning.
+/// starting point; see `sea::MURK`.
 const WATER_ALPHA: f32 = 0.84;
 
 /// How far out from the camera's focus chunks are wanted, in metres.

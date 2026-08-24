@@ -26,21 +26,18 @@ fn chunk_at(point: Vec2) -> IVec2 {
     (point / CHUNK_METRES).floor().as_ivec2()
 }
 
-/// A second anchorage in this seed's world: water the anchor holds in — see
-/// [`protocol::ground::ANCHOR_DEPTH`], which is what gates a `Lower` now — at
-/// least `clear` metres from `near`. Sounded off the world itself in widening
-/// rings, because a fixed offset is a bet about one seed's bathymetry that a
-/// generator change quietly loses.
-fn another_anchorage(seed: u32, near: Vec2, clear: f32) -> Vec2 {
-    let world = behind_the_curtain(seed);
+/// A second anchorage: water [`world::archipelago::a_berth`] accepts — the
+/// same band the spawn and `Lower` are held to — at least `clear` metres
+/// from `near`. Sounded off the world itself in widening rings, because a
+/// fixed offset is a bet about one seed's bathymetry that a generator change
+/// quietly loses.
+fn another_anchorage(world: &Archipelago, near: Vec2, clear: f32) -> Vec2 {
     for ring in 0..200 {
         let radius = clear + 4.0 * ring as f32;
         for step in 0..64 {
             let angle = step as f32 / 64.0 * std::f32::consts::TAU;
             let at = near + radius * Vec2::new(angle.cos(), angle.sin());
-            // Deep enough to float a sloop with margin, comfortably inside
-            // the anchor's reach.
-            if (2.5..=6.5).contains(&-world.height(at.x, at.y)) {
+            if world::archipelago::a_berth(world.height(at.x, at.y)) {
                 return at;
             }
         }
@@ -1497,9 +1494,11 @@ fn a_boat_is_not_lowered_where_the_anchor_cannot_hold() {
     assert_eq!(told, ship);
 
     // Open water past anchoring, sounded off the world rather than assumed:
-    // the flat ocean floor, anywhere no island answers for.
+    // the flat ocean floor, anywhere no island answers for. Bounded, so a
+    // layout with no such water along this line panics with the message
+    // instead of generating islands forever.
     let world = behind_the_curtain(7);
-    let deep = (1..)
+    let deep = (1..64)
         .map(|ring| spawn + Vec2::new(200.0 * ring as f32, 0.0))
         .find(|at| world.height(at.x, at.y) < -protocol::ground::ANCHOR_DEPTH)
         .expect("an ocean has open water in it");
@@ -1598,7 +1597,7 @@ fn a_boat_left_behind_is_hoisted_when_its_keeper_lowers_another() {
     let _her_helm = client.hear_a_boat_kinded();
     // Far enough that the abandoned dinghy is nowhere near the new lowering,
     // and still water a `Lower` is granted in.
-    let far = another_anchorage(7, spawn, 40.0);
+    let far = another_anchorage(&behind_the_curtain(7), spawn, 40.0);
     client.say(ToServer::Helm {
         position: far,
         heading: 0.0,

@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Token};
-use world::archipelago::{Archipelago, SOUNDING, SPAWN_OFFSHORE};
+use world::archipelago::{berth_off, Archipelago, SOUNDING, SPAWN_OFFSHORE};
 
 use crate::{
     aimed, beasts, broadcast, broadcast_all, keeper, post, reachable, BoatState, Held, Shared,
@@ -326,18 +326,11 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
             if world.height(shore.x, shore.y) >= 0.0 {
                 continue;
             }
-            // Water: stand off it, and further out still if the offing is
-            // somehow dry — a spit beside the ray, an islet just past the
-            // beach. Bounded, because a ray long enough leaves this island
-            // and the next thing it finds is another one's business.
-            let mut off = shore + *out * SPAWN_OFFSHORE;
-            for _ in 0..steps {
-                if world.height(off.x, off.y) < 0.0 {
-                    return (off, shore);
-                }
-                off += *out * SOUNDING;
-            }
-            return (shore, shore);
+            // Water: the hull is put down at a berth off it — the same
+            // walk [`Archipelago::spawn`] uses, see [`berth_off`], so a
+            // driven ship is left in water its boat can be lowered from
+            // wherever the coast allows one.
+            return (berth_off(shore, *out, |x, z| world.height(x, z)), shore);
         }
     }
     (asked, asked)

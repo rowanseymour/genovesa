@@ -55,8 +55,7 @@ struct SeaParams {
     stagger: vec4<f32>,
     // What must lie behind a breaker for it to be one: x metres to look
     // down the bottom's slope, y the depth that must be found there.
-    // zw is the murk: the depths across which the water's alpha climbs to
-    // fully opaque, so the bed past the second is never seen.
+    // zw is the murk's depths — `sea::MURK`.
     feed: vec4<f32>,
     // The open sea's whitecaps: x how far up the swell's leading face one
     // starts, y the height the sea must be heaping under it, z how far that
@@ -490,12 +489,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let at = in.world_position.xz;
     let depth = depth_at(at);
 
-    // The murk: water over a deep enough bottom is opaque — see `sea::MURK`
-    // for the depths and for why the line is the anchor's. It climbs from
-    // the material's own alpha rather than replacing it, so shallow water
-    // keeps exactly the translucency it always had.
+    // The murk — see `sea::MURK`. It tops out at the foam's own alpha
+    // rather than 1.0: that is already "hides what is under it", it keeps
+    // foam from ever being the *less* opaque thing on the water, and it
+    // stops the surface hard-erasing what swims beneath it.
     let murk = smoothstep(sea.feed.z, sea.feed.w, depth);
-    pbr_input.material.base_color.a = mix(pbr_input.material.base_color.a, 1.0, murk);
+    pbr_input.material.base_color.a = mix(pbr_input.material.base_color.a, 0.97, murk);
 
     let texel = vec2(sea.stagger.w, 0.0);
     let grade = vec2(

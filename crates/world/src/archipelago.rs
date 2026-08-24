@@ -141,15 +141,49 @@ const SPAWN_CLEARING: i32 = 2;
 ///
 /// [scatter]: Archipelago::spawn
 ///
-/// An offing, not a promise: the spawn walk comes back in from it where the
-/// water out there is too deep for the anchor — see [`SPAWN_ANCHORAGE`].
+/// An offing, not a promise: [`berth_off`] takes what of it the coast can
+/// give.
 pub const SPAWN_OFFSHORE: f32 = 48.0;
 
-/// The most water under a fresh arrival, in metres — comfortably inside
-/// [`ANCHOR_DEPTH`], the margin covering the server's scatter of second
-/// arrivals and a boat-length of glide, so that entry never opens on the one
-/// grant the server would refuse.
-const SPAWN_ANCHORAGE: f32 = ANCHOR_DEPTH - 1.5;
+/// The water a hull is put down in, in metres of depth: enough to float it
+/// well clear of its own draft, and comfortably inside [`ANCHOR_DEPTH`] —
+/// a hull is put down to be *left*, at entry and at the console's berth
+/// alike, and the first thing asked of it is the one grant the server
+/// refuses in deep water. The margins on both ends cover the sounding
+/// stride and the server's scatter of arrivals on any shelving coast.
+const BERTH_DEPTHS: (f32, f32) = (2.0, ANCHOR_DEPTH - 1.5);
+
+/// Whether ground standing `height` metres above sea level — negative under
+/// water — is a berth. The one place the sign is turned round, so no caller
+/// re-derives it.
+pub fn a_berth(height: f32) -> bool {
+    (-BERTH_DEPTHS.1..=-BERTH_DEPTHS.0).contains(&height)
+}
+
+/// Where a hull is put down off a coast: the furthest sounding within
+/// [`SPAWN_OFFSHORE`] of `wet` — itself a sounding at or just off the
+/// waterline — along the unit direction `seaward`, that [`a_berth`] accepts.
+/// Dry soundings along the way (a spit, an islet beside the line) are
+/// stepped past rather than ending the walk. Where no sounding qualifies —
+/// a wall of a coast, plunging straight past the band — the deepest wet
+/// sounding stands in: wet-but-deep leaves the hull afloat and sailable,
+/// where dry or ankle-deep leaves it aground.
+pub fn berth_off(wet: Vec2, seaward: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec2 {
+    let stride = seaward * SOUNDING;
+    let (mut fallback, mut deepest) = (wet, height(wet.x, wet.y));
+    let mut berth = None;
+    for i in 0..(SPAWN_OFFSHORE / SOUNDING) as i32 {
+        let at = wet + stride * i as f32;
+        let h = height(at.x, at.y);
+        if a_berth(h) {
+            berth = Some(at);
+        }
+        if h < deepest {
+            (fallback, deepest) = (at, h);
+        }
+    }
+    berth.unwrap_or(fallback)
+}
 
 /// Coarse parcels a widening island search spans, doubling until one of them
 /// answers. One coarse parcel is five kilometres and half its parcels hold an
@@ -738,33 +772,17 @@ impl Archipelago {
                     .find(|at| terrain.height(at.x, at.y) >= 0.0)
                     .unwrap_or(landfall);
 
-                // Off the shore, and further out still if the sample there
-                // is somehow dry — a spit beside the line, say. Bounded
-                // because the walk leaves the frame's skirt eventually, and
-                // past the skirt is flat ocean floor; in practice the first
-                // sample answers.
-                let mut point = shore - stride / SOUNDING * SPAWN_OFFSHORE;
-                while terrain.height(point.x, point.y) >= 0.0 {
-                    point -= stride;
-                }
-                // And back towards the shore should the offing lie past
-                // [`SPAWN_ANCHORAGE`]: a world is entered riding at anchor,
-                // and the first thing done there is putting the boat over
-                // the side, which is only granted where the anchor holds —
-                // see [`ANCHOR_DEPTH`]. Stops short of going dry, a wall of
-                // a coast offering nothing better than wet-but-deep.
-                while terrain.height(point.x, point.y) < -SPAWN_ANCHORAGE {
-                    let inshore = point + stride;
-                    if terrain.height(inshore.x, inshore.y) >= 0.0 {
-                        break;
-                    }
-                    point = inshore;
-                }
-                point
+                // The berth stands off that shore — [`berth_off`], the same
+                // walk the console berths a driven hull with, so entry and
+                // `goto` agree about what water a ship is left in.
+                berth_off(shore - stride, -stride / SOUNDING, |x, z| {
+                    terrain.height(x, z)
+                })
             }
             // An island with no land on the lattice — the map is nearly all
             // water. The frame's nearest edge is then the best "shore" there
-            // is to stand off.
+            // is to stand off; no berth is promised here, there being no
+            // waterline to walk one off.
             None => {
                 let coast = island.frame_point(Vec2::ZERO);
                 coast * (1.0 - SPAWN_OFFSHORE / coast.length())
@@ -954,20 +972,21 @@ mod tests {
     }
 
     #[test]
-    fn a_world_is_entered_where_the_anchor_holds() {
-        // The world is entered riding at anchor, and the first grant anyone
-        // asks for — the boat over the side — is only given where the
-        // anchor holds. So the spawn owes its arrival water that is wet and
-        // no deeper than [`SPAWN_ANCHORAGE`], on every seed, whatever shape
-        // of coast the walk came in on.
+    fn a_world_is_entered_at_a_berth() {
+        // [`berth_off`] only promises [`a_berth`]'s band where the sounding
+        // line offers it, so these seeds are pinned as having ordinary
+        // shelving entry coasts. A generator change that fails one here has
+        // probably not broken the walk: look at the coast first, and re-pick
+        // the seed if it has turned into a wall.
         for seed in [1, 7, 99, 20_040_112] {
             let world = world(seed);
             let spawn = world.spawn().expect("a world has an entry");
-            let depth = -world.height(spawn.point.x, spawn.point.y);
-            assert!(depth > 0.0, "seed {seed} enters on dry ground");
+            let height = world.height(spawn.point.x, spawn.point.y);
+            assert!(height < 0.0, "seed {seed} enters on dry ground");
             assert!(
-                depth <= SPAWN_ANCHORAGE,
-                "seed {seed} enters in {depth} m, past its own anchorage"
+                a_berth(height),
+                "seed {seed} enters in {} m, outside the berth band",
+                -height
             );
         }
     }

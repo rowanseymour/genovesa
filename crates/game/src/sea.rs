@@ -171,17 +171,14 @@ const SHADING_TILT: f32 = 4.0;
 const SHOAL: (f32, f32) = (6.5, 2.5);
 
 /// The depths across which the water goes blind, in metres: the surface's
-/// alpha climbs from the material's own (`WATER_ALPHA`, where the sea is
-/// built) as the bottom passes the first, and is fully opaque by the second.
-///
-/// The second is [`ANCHOR_DEPTH`] on purpose, and the ocean floor lies below
-/// *that* by construction — see [`OCEAN_DEPTH`] — so the open sea's bed is
-/// never seen at all: mid-ocean water is a surface over nothing, and the eye
-/// can read the anchorage rule straight off the water — ground showing
-/// through, however faintly, is water the anchor holds in.
+/// alpha climbs from the material's own as the bottom passes the first, and
+/// by the second — [`ANCHOR_DEPTH`], on purpose — reaches the foam's own
+/// near-opacity. So the open sea's bed is never read at all, the eye can
+/// take the anchorage rule off the water (ground showing through is water
+/// the anchor holds in), and what *swims* under blind water is a last few
+/// per cent of shadow rather than erased outright.
 ///
 /// [`ANCHOR_DEPTH`]: protocol::ground::ANCHOR_DEPTH
-/// [`OCEAN_DEPTH`]: protocol::ground::OCEAN_DEPTH
 const MURK: (f32, f32) = (5.0, protocol::ground::ANCHOR_DEPTH);
 
 /// Metres of *depth* between one shore crest and the next. The shore wave's

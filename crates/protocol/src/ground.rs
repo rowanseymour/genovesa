@@ -86,10 +86,6 @@ pub const OCEAN_DEPTH: f32 = 10.0;
 /// let a key that cannot be granted do nothing instead of asking.
 pub const ANCHOR_DEPTH: f32 = 8.0;
 
-// The whole reason the two constants are two: a boat can be left at anchor
-// over an island's shelf and nowhere on the open ocean's floor. Were the
-// anchor to reach the floor, "anchored mid-ocean" would stop being impossible
-// and start being where boats get abandoned.
 const _: () = assert!(ANCHOR_DEPTH < OCEAN_DEPTH);
 
 /// Metres between the corners the ground is drawn from.

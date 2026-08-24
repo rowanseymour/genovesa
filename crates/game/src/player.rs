@@ -632,14 +632,13 @@ fn embark_or_land(
             }
 
             if hull.kind() == BoatKind::Sloop {
-                // The anchor has to hold before anyone steps off the helm —
-                // see [`ANCHOR_DEPTH`], the server's own line, asked here so
-                // that a key the server would refuse does nothing instead of
-                // asking. A chunk that has not arrived refuses too — water
-                // the client knows nothing about is treated as deep, exactly
-                // as the sea draws it — but no ground *resource* at all is a
-                // world with no terrain in it (the boat tests'), where there
-                // is no depth for the rule to be about.
+                // The anchor has to hold first — [`ANCHOR_DEPTH`]'s own doc
+                // says why the client asks the same question. A chunk that
+                // has not arrived refuses too — water the client knows
+                // nothing about is treated as deep, exactly as the sea draws
+                // it — but no ground *resource* at all is a world with no
+                // terrain in it (the boat tests'), where there is no depth
+                // for the rule to be about.
                 let under = hull_place.translation.xz();
                 let holds = ground.is_none_or(|g| {
                     g.height(under.x, under.y)
@@ -649,24 +648,26 @@ fn embark_or_land(
                     return;
                 }
 
-                // The crew furls as the skipper steps down into the boat —
-                // whichever end of the exchange settles the seat, the ship
-                // is left at anchor with its canvas in — and the last of the
-                // glide is taken off with it, so the ship lies where the
-                // gate read it as lying.
-                hull.comes_to_rest();
-                hull.furl();
                 let (berth, heading) = tender_berth(&hull_place, ground);
                 match &online {
                     // A served world's tender is asked for, never assumed:
                     // the player steps down when the telling grants it — see
                     // [`crate::boat::Fleet::told`] — which over the loopback
                     // is the next frame, and across a real sea is a blink.
+                    // Nothing about the ship is touched on the way out: the
+                    // grant strips its [`Boat`] and an unheld hull's canvas
+                    // is furled without asking (see `trim_the_sails`), while
+                    // a refusal — the two machines can disagree about the
+                    // depth by a quantisation step — arrives as silence, and
+                    // a key refused must have done nothing at all.
                     Some(online) => online.connection.lower(berth, heading),
-                    // Offline the whole exchange is local: the rowboat goes
-                    // in the water and the player crosses to its thwarts,
-                    // the ship keeping its own state where it lies.
+                    // Offline the whole exchange is local: the crew furls as
+                    // the skipper steps down, so the ship never lies at
+                    // anchor under canvas, and the last of the glide is
+                    // taken off so it lies where the gate read it as lying.
                     None => {
+                        hull.comes_to_rest();
+                        hull.furl();
                         let tender = spawn_hull(
                             &mut commands,
                             &mut kit,
