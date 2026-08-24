@@ -36,7 +36,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::window::{
     Monitor, MonitorSelection, PrimaryMonitor, PrimaryWindow, VideoMode, VideoModeSelection,
-    WindowMode, WindowPosition,
+    WindowMode, WindowPosition, WindowResized,
 };
 
 use crate::{AppState, Helm};
@@ -216,6 +216,9 @@ impl Plugin for SettingsPlugin {
             // Normally `UiPlugin`'s, initialised here the way the menu does
             // its shared resources, so the tests have one too.
             .init_resource::<UiScale>()
+            // Normally `WindowPlugin`'s, registered here for the same reason:
+            // [`dress_the_window`] writes it.
+            .add_message::<WindowResized>()
             // Chained so the scale reads the size the window was just asked
             // for rather than last frame's.
             .add_systems(Update, (dress_the_window, scale_the_ui).chain());
@@ -253,12 +256,13 @@ impl Plugin for SettingsPlugin {
 fn dress_the_window(
     settings: Res<DisplaySettings>,
     monitors: Query<(Entity, &Monitor, Has<PrimaryMonitor>)>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut windows: Query<(Entity, &mut Window), With<PrimaryWindow>>,
+    mut resized: MessageWriter<WindowResized>,
     mut asked_for: Local<Option<UVec2>>,
 ) {
     // A windowless run has no window to dress, and asks for the size of its
     // pictures on the command line instead — see [`crate::control`].
-    let Ok(mut window) = windows.single_mut() else {
+    let Ok((entity, mut window)) = windows.single_mut() else {
         return;
     };
     let monitor = showing_on(Some(&window), monitors.iter());
@@ -289,9 +293,20 @@ fn dress_the_window(
     };
     if *asked_for != Some(size) {
         *asked_for = Some(size);
-        window
-            .resolution
-            .set_physical_resolution(size.x.max(1), size.y.max(1));
+        let size = size.max(UVec2::ONE);
+        if window.resolution.physical_size() != size {
+            window.resolution.set_physical_resolution(size.x, size.y);
+            // Announced now rather than left to winit, whose own message lands
+            // a frame late for a resize the app began: the surface follows the
+            // `Window` the frame it changes, but the camera sizes the depth
+            // texture off this message — and one frame of the two disagreeing
+            // is a wgpu validation error the renderer answers by quitting.
+            resized.write(WindowResized {
+                window: entity,
+                width: window.width(),
+                height: window.height(),
+            });
+        }
     }
 }
 
@@ -837,10 +852,20 @@ mod tests {
     fn a_windowed_app(settings: DisplaySettings) -> App {
         let mut app = App::new();
         app.insert_resource(settings)
+            .add_message::<WindowResized>()
             .add_systems(Update, dress_the_window);
         app.world_mut().spawn((Window::default(), PrimaryWindow));
         app.update();
         app
+    }
+
+    /// The sizes [`dress_the_window`] has announced since last asked.
+    fn announced(app: &mut App) -> Vec<Vec2> {
+        app.world_mut()
+            .resource_mut::<Messages<WindowResized>>()
+            .drain()
+            .map(|message| Vec2::new(message.width, message.height))
+            .collect()
     }
 
     fn the_window(app: &mut App) -> Window {
@@ -912,6 +937,35 @@ mod tests {
         app.world_mut().resource_mut::<DisplaySettings>().resolution = Resolution::Rows(1080);
         app.update();
         assert_eq!(the_window(&mut app).resolution.physical_size().y, 1080);
+    }
+
+    /// A resize this system makes has to be announced the frame it is made.
+    /// The camera learns of window sizes by [`WindowResized`] and sizes the
+    /// depth texture from what it hears, while the surface follows the
+    /// `Window` itself — and winit's own message about an app-made resize
+    /// lands a frame late, which was a frame of the two disagreeing: a wgpu
+    /// validation error the renderer answered by quitting the whole game.
+    #[test]
+    fn a_change_of_size_is_announced_the_frame_it_is_made() {
+        let mut app = a_windowed_app(DisplaySettings {
+            resolution: Resolution::Rows(1080),
+            ..DisplaySettings::default()
+        });
+        assert_eq!(announced(&mut app), vec![Vec2::new(1920.0, 1080.0)]);
+
+        // Said once, when it happens: a frame that changed nothing has
+        // nothing to announce.
+        app.update();
+        assert_eq!(announced(&mut app), vec![]);
+
+        app.world_mut().resource_mut::<DisplaySettings>().resolution = Resolution::Rows(720);
+        app.update();
+        assert_eq!(announced(&mut app), vec![Vec2::new(1280.0, 720.0)]);
+
+        // A drag is winit's news and winit has already told it — repeating it
+        // here would be a second report of the same resize.
+        drag_to(&mut app, UVec2::new(1000, 800));
+        assert_eq!(announced(&mut app), vec![]);
     }
 
     /// The width follows from the shape of the screen, and the screen turns up
