@@ -65,8 +65,10 @@ pub(crate) const PHRASES: [&str; 6] = [
 /// or a dinghy depending on what it is doing — none of which is a word to
 /// make somebody guess at.
 ///
-/// An index of the grammar and not the grammar: a test holds it to what
-/// `help` advertises and to what [`grant`] will actually deal.
+/// An index of the grammar and not the grammar: a test holds this and
+/// `help`'s own `grant` line to each other, both ways round. [`grant`] reads
+/// this listing, so it cannot disagree with it — what can is the line, which
+/// is what a client completes a player into.
 const HULLS: [(&str, BoatKind); 2] = [("sloop", BoatKind::Sloop), ("rowboat", BoatKind::Rowboat)];
 
 /// The dials `world` turns, in the order a bare `world` reads them out.
@@ -343,13 +345,15 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
 /// onto a hillside is the one thing the game itself never does, so a grant
 /// asked for from a summit is answered with a walk and a swim.
 ///
-/// Their own hull of that kind comes to them if one is lying free anywhere
-/// in the world, and one is minted only if none is. Theirs first for the
-/// reason the door prefers a spare to a mint — see
-/// [`crate::BoatState::keeper`] and `fresh_hull` in the join path. An
-/// evening of this would otherwise leave a sloop adrift at every place its
-/// asker had stood, each one filed in the world and posted to every future
-/// joiner.
+/// Their own hull of that kind comes to them if one is lying free, and one
+/// is minted only if none is — the door's own preference for a spare over a
+/// mint, see [`crate::BoatState::keeper`] and `fresh_hull` in the join path.
+/// That bounds the *asking* and not the fleet: a hull somebody is aboard is
+/// nobody's spare, so boarding what you were dealt and asking again is a
+/// second hull, filed in the world and posted to every future joiner.
+/// Deliberately, that being the only way to come by two — and there is
+/// nothing to hoist in its place the way `Lower` retires a tender, a mint
+/// happening precisely when no free hull of the kind is left to take back.
 fn grant(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
     let [named] = args else {
         return format!("`grant` wants a kind of boat — {}", kinds());
@@ -358,6 +362,12 @@ fn grant(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
         return format!("no boat called `{named}` — {}", kinds());
     };
 
+    // Where they are, peeked at and given back before the sounding below,
+    // which cannot happen under a lock — see what `goto` says about paying
+    // for an island. The dealing then takes the roster again and keeps it,
+    // so a player who sails on in the moment between is dealt a hull where
+    // they asked from rather than where they now are, which the answer's own
+    // coordinates own up to.
     let who = {
         let players = shared.players.held();
         players
@@ -371,51 +381,61 @@ fn grant(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
         return "you are nowhere a boat could reach you".to_string();
     };
 
-    // Sounded before the boats are locked, for the reason `goto` says at
+    // Sounded before either lock is taken, for the reason `goto` says at
     // length: the ground under a point may have to be generated to answer
     // this, and that is not a wait to hold the world through.
     let offing = (shared.world.height(asker.x, asker.y) >= 0.0)
         .then(|| standing_off(&shared.world, asker).0);
     let at = offing.unwrap_or(asker);
 
-    let (minted, telling) = {
-        let mut boats = shared.boats.held();
-        let theirs = boats
-            .iter()
-            .find(|(_, boat)| {
-                boat.kind == kind && boat.occupant.is_none() && boat.keeper == Some(token)
-            })
-            .map(|(&boat, _)| boat);
-        match theirs {
-            Some(boat) => {
-                let state = boats.get_mut(&boat).expect("looked up a breath ago");
-                state.position = at;
-                (false, state.told(boat))
+    let minted = {
+        // The roster first and the boats under it — the nesting the two
+        // locks allow — so that the hull's new state and the telling of it
+        // leave together. A telling let go of first is one another
+        // connection's boarding can overtake, and then every client but the
+        // one steering the hull holds a helm the world has already given
+        // away.
+        let players = shared.players.held();
+        let (minted, telling) = {
+            let mut boats = shared.boats.held();
+            let theirs = boats
+                .iter()
+                .find(|(_, boat)| {
+                    boat.kind == kind && boat.occupant.is_none() && boat.keeper == Some(token)
+                })
+                .map(|(&boat, _)| boat);
+            match theirs {
+                Some(boat) => {
+                    let state = boats.get_mut(&boat).expect("looked up a breath ago");
+                    state.position = at;
+                    (false, state.told(boat))
+                }
+                None => {
+                    let boat = BoatId(keeper::mint());
+                    // Written whole, on the same reasoning `Lower` gives for
+                    // writing its tender that way: a hull's fields are
+                    // settled in one place or they drift apart. The keeper
+                    // above all — this one is theirs from the moment it
+                    // touches the water, which is what makes the next
+                    // `grant` bring it back rather than mint another.
+                    let state = BoatState {
+                        kind,
+                        position: at,
+                        heading: 0.0,
+                        occupant: None,
+                        keeper: Some(token),
+                    };
+                    let telling = state.told(boat);
+                    boats.insert(boat, state);
+                    (true, telling)
+                }
             }
-            None => {
-                let boat = BoatId(keeper::mint());
-                // Written whole, on the same reasoning `Lower` gives for
-                // writing its tender that way: a hull's fields are settled in
-                // one place or they drift apart. The keeper above all — this
-                // one is theirs from the moment it touches the water, which
-                // is what makes the next `grant` bring it back rather than
-                // mint another.
-                let state = BoatState {
-                    kind,
-                    position: at,
-                    heading: 0.0,
-                    occupant: None,
-                    keeper: Some(token),
-                };
-                let telling = state.told(boat);
-                boats.insert(boat, state);
-                (true, telling)
-            }
-        }
+        };
+        // Everyone, the asker included: no client is steering this hull, so
+        // nobody here is the authority on it that a helmsman would be.
+        broadcast_all(&players, telling);
+        minted
     };
-    // Everyone, the asker included: no client is steering this hull, so
-    // nobody here is the authority on it that a helmsman would be.
-    broadcast_all(&shared.players.held(), telling);
 
     let whose = if minted {
         format!("a {named} is")
@@ -886,22 +906,23 @@ mod tests {
 
     #[test]
     fn every_hull_the_grant_names_can_be_asked_for() {
-        let shared = a_world(0.5);
-        for (named, _) in HULLS {
-            assert!(
-                HELP.contains(named),
-                "`grant` deals a {named} and `help` never says so"
-            );
-            // Nobody is on this world's roster, so the answer is the one
-            // about there being no such asker — which is already past the
-            // parsing, and that is what this is asking about.
-            let answered = answer(&shared, PlayerId(1), &format!("grant {named}"));
-            assert!(
-                !answered.contains("no boat called"),
-                "`{named}` is advertised and not known: {answered}"
-            );
-        }
+        // The line and the listing, held to each other as sequences rather
+        // than by containment. The direction that can actually break is a
+        // kind `help` advertises and the listing has never heard of: a
+        // client completes a player into the word and the world answers
+        // that there is no such boat.
+        let advertised = HELP
+            .lines()
+            .find_map(|line| line.trim_start().strip_prefix("grant "))
+            .and_then(|line| line.split_whitespace().next())
+            .expect("`help` should have a line for `grant`");
+        assert_eq!(
+            advertised.split('|').collect::<Vec<_>>(),
+            HULLS.iter().map(|(named, _)| *named).collect::<Vec<_>>(),
+            "`help` advertises `{advertised}`, which is not what `grant` deals"
+        );
 
+        let shared = a_world(0.5);
         for asked in ["grant", "grant frigate", "grant sloop rowboat"] {
             let refused = answer(&shared, PlayerId(1), asked);
             assert!(

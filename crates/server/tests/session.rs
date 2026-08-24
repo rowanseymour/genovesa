@@ -1591,7 +1591,7 @@ fn a_beached_tender_is_still_there_when_its_keeper_walked_out_of_the_world() {
     // fleet, but hoisting it from somebody who left *ashore* would strand
     // them: the entry block deals a returner who left afoot no hull, and the
     // ship they rowed in from is at anchor well offshore, past wading — a
-    // long swim where the dinghy hauled up the beach was the way back out.
+    // swim out to it where the dinghy hauled up the beach was the way back.
     // It has to be lying there when they return — which is also the world's
     // promise that the boats you leave lie where you left them.
     //
