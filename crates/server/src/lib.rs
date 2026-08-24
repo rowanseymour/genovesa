@@ -1548,18 +1548,19 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     {
                         None
                     }
-                    // Left afoot with nothing there, which is a player on an
-                    // island who cannot leave it. Every other state in this
-                    // world can be undone by playing on; being marooned is the
-                    // one that cannot, and it is reachable without anybody
-                    // cheating — boats have keepers and not owners, so the
-                    // dinghy somebody beached and logged off beside is one
-                    // another player may honestly row away while they are
-                    // gone. So they are dealt a hull, the same way an arrival
-                    // is. What keeps that from repeating on one beach is the
-                    // arm above rather than anything here: a player dealt one
-                    // leaves at a helm, and a helm is resumed rather than
-                    // re-dealt.
+                    // Left afoot with nothing there: a player on an island
+                    // with no way off it but a swim, which is a way out of a
+                    // bay and not a way across open water — the crossings
+                    // between islands are an hour of it and there is nothing
+                    // to make for at the far end but more of the same. And
+                    // it is reachable without anybody cheating: boats have
+                    // keepers and not owners, so the dinghy somebody beached
+                    // and logged off beside is one another player may
+                    // honestly row away while they are gone. So they are
+                    // dealt a hull, the same way an arrival is. What keeps
+                    // that from repeating on one beach is the arm above
+                    // rather than anything here: a player dealt one leaves at
+                    // a helm, and a helm is resumed rather than re-dealt.
                     //
                     // Where they stood, which for somebody who rowed ashore is
                     // the waterline, and inland for somebody who walked. A
@@ -2187,11 +2188,13 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             // lower, step out, board, hang up, leaving a permanent hull behind
             // every handshake.
             //
-            // Both conditions are exceptions that would otherwise strand
-            // somebody. Not afoot: a player who left on their own feet has
+            // Both conditions are exceptions that would otherwise leave
+            // somebody with a longer way back to their ship than they left
+            // themselves. Not afoot: a player who left on their own feet has
             // their ship anchored past wading depth, and the dinghy on the
-            // beach — not a swim — is how they get out to it. And not the
-            // tender itself:
+            // beach is how they meant to get out to it — a swim is a way and
+            // not the way, and hoisting the boat they beached for the job
+            // decides that for them. And not the tender itself:
             // hanging up while rowing is the ordinary way to stop mid-passage,
             // and hoisting the boat they are sitting in leaves the entry block
             // dealing them a fresh sloop per handshake. Whoever comes to
