@@ -291,23 +291,30 @@ fn dress_the_window(
         Resolution::Native => crate::WINDOW,
         Resolution::Rows(rows) => UVec2::new(width_for(shape, rows), rows),
     };
-    if *asked_for != Some(size) {
-        *asked_for = Some(size);
-        let size = size.max(UVec2::ONE);
-        if window.resolution.physical_size() != size {
-            window.resolution.set_physical_resolution(size.x, size.y);
-            // Announced now rather than left to winit, whose own message lands
-            // a frame late for a resize the app began: the surface follows the
-            // `Window` the frame it changes, but the camera sizes the depth
-            // texture off this message — and one frame of the two disagreeing
-            // is a wgpu validation error the renderer answers by quitting.
-            resized.write(WindowResized {
-                window: entity,
-                width: window.width(),
-                height: window.height(),
-            });
-        }
+    if *asked_for == Some(size) {
+        return;
     }
+    *asked_for = Some(size);
+    let size = size.max(UVec2::ONE);
+    // A window already that size — as on the first pass of every default run,
+    // the window having been built at the size Native wants — has nothing to
+    // resize, and must not be told it did: the announcement below would be of
+    // a resize that never happened.
+    if window.resolution.physical_size() == size {
+        return;
+    }
+    window.resolution.set_physical_resolution(size.x, size.y);
+    // Announced now rather than left to winit, whose own message lands a
+    // frame late for a resize the app began: the surface follows the `Window`
+    // the frame it changes, but the camera sizes the depth texture off this
+    // message — and one frame of the two disagreeing is a wgpu validation
+    // error the renderer answers by quitting. Winit still echoes the resize a
+    // frame later; its one reader re-reads the same size, so the echo is idle.
+    resized.write(WindowResized {
+        window: entity,
+        width: window.width(),
+        height: window.height(),
+    });
 }
 
 /// How small the UI will let itself be drawn, as a fraction of its laid-out
@@ -939,12 +946,10 @@ mod tests {
         assert_eq!(the_window(&mut app).resolution.physical_size().y, 1080);
     }
 
-    /// A resize this system makes has to be announced the frame it is made.
-    /// The camera learns of window sizes by [`WindowResized`] and sizes the
-    /// depth texture from what it hears, while the surface follows the
-    /// `Window` itself — and winit's own message about an app-made resize
-    /// lands a frame late, which was a frame of the two disagreeing: a wgpu
-    /// validation error the renderer answered by quitting the whole game.
+    /// A resize this system makes has to be announced the frame it is made,
+    /// and a resize it did not make must not be — the comments at the
+    /// announcement in [`dress_the_window`] say why each half was a crash or
+    /// would be a lie.
     #[test]
     fn a_change_of_size_is_announced_the_frame_it_is_made() {
         let mut app = a_windowed_app(DisplaySettings {
@@ -966,6 +971,11 @@ mod tests {
         // here would be a second report of the same resize.
         drag_to(&mut app, UVec2::new(1000, 800));
         assert_eq!(announced(&mut app), vec![]);
+
+        // And a run whose window opens at the very size it wants — every
+        // default run does — has no resize to announce on its first frame.
+        let mut untouched = a_windowed_app(DisplaySettings::default());
+        assert_eq!(announced(&mut untouched), vec![]);
     }
 
     /// The width follows from the shape of the screen, and the screen turns up
