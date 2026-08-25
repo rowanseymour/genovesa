@@ -32,7 +32,7 @@ use protocol::DEFAULT_PORT;
 
 use crate::camera::View;
 use crate::AppState;
-use server::{random_seed, WorldConfig};
+use server::random_seed;
 
 /// What the command line asked for.
 pub struct Args {
@@ -41,7 +41,9 @@ pub struct Args {
     /// the main menu with a socket — if it has one — able to click its way
     /// wherever it likes.
     pub state: AppState,
-    pub config: WorldConfig,
+    /// The world to open. A seed is a world; what a generator makes of one
+    /// is behind the server, not here.
+    pub seed: u32,
     /// Server to join, as `host` or `host:port`. A joined run takes the
     /// world — and where to look — from the server's welcome.
     pub join: Option<String>,
@@ -161,9 +163,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     let mut args = Args {
         // Settled at the end, out of what was asked for.
         state: AppState::MainMenu,
-        config: WorldConfig {
-            seed: random_seed(),
-        },
+        seed: random_seed(),
         join: None,
         seed_given: false,
         debug: None,
@@ -185,7 +185,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
             .ok_or_else(|| format!("`{flag}` needs a value"))?;
         match flag.as_str() {
             "--seed" => {
-                args.config.seed = value
+                args.seed = value
                     .parse()
                     .map_err(|_| format!("`{value}` is not a seed"))?;
                 args.seed_given = true;
@@ -272,7 +272,7 @@ mod tests {
     fn a_named_world_is_a_world_the_run_opens_in() {
         let args = ok("--seed 7");
         assert_eq!(args.state, AppState::InWorld);
-        assert_eq!(args.config.seed, 7);
+        assert_eq!(args.seed, 7);
         assert!(args.seed_given);
     }
 

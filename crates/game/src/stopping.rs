@@ -44,7 +44,7 @@ fn quit_when_asked(mut exit: MessageWriter<AppExit>) {
 mod tests {
     use std::net::{SocketAddr, TcpListener};
 
-    use server::{Server, WorldConfig};
+    use server::Server;
 
     use super::*;
     use crate::net::Hosting;
@@ -85,7 +85,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp space");
         let path = dir.join("one.world");
 
-        let host = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        let host = Server::bind(("127.0.0.1", 0), 7)
             .expect("bind")
             .keeping_at(path.clone())
             .expect("keeping")

@@ -1627,7 +1627,7 @@ fn span(entropy: u32, salt: u32, span: (u32, u32)) -> u32 {
 mod tests {
     use super::*;
 
-    use crate::{Server, WorldConfig};
+    use crate::Server;
 
     /// The seed the session tests sail, and a world of it with the ground
     /// around the spawn already made: the warden sounds with `ready_height`,
@@ -1635,7 +1635,7 @@ mod tests {
     /// somebody has paid for it. A test that skipped this would be swimming
     /// beasts through a world that reads as unbroken ocean.
     fn a_sea() -> (Arc<Shared>, Vec2, Vec2) {
-        let shared = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+        let shared = Server::bind(("127.0.0.1", 0), 7)
             .expect("a server should bind")
             .shared;
         let (spawn, facing) = (shared.spawn, shared.facing);

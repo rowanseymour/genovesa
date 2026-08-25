@@ -903,7 +903,7 @@ fn parse_clock(given: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Server, WorldConfig};
+    use crate::Server;
 
     /// What a line is answered with, for the tests that care only about the
     /// words — [`Served`]'s other half is the connection's business, and
@@ -921,7 +921,7 @@ mod tests {
     /// A world to command, never served: `interpret` works on the shared
     /// state alone, so nothing here needs a socket.
     fn a_world(opening: f32) -> std::sync::Arc<Shared> {
-        Server::bind(("127.0.0.1", 0), WorldConfig { seed: 20_040_112 })
+        Server::bind(("127.0.0.1", 0), 20_040_112)
             .expect("a server should bind")
             .opening_at(opening)
             .shared

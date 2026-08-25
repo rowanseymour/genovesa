@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use crate::net::{Dialing, Reach};
 use crate::AppState;
 use protocol::DEFAULT_PORT;
-use server::{random_seed, WorldConfig, MAX_SEED};
+use server::{random_seed, MAX_SEED};
 
 use super::kit::{
     button, button_label, cartouche_rule, heading, label, panel, screen, spawn_button, status_line,
@@ -212,9 +212,7 @@ pub(super) fn open_world(
         if *interaction == Interaction::Pressed && *button == MenuButton::Start {
             status.0 = "opening the world...".to_string();
             commands.insert_resource(Dialing::opening(
-                WorldConfig {
-                    seed: settings.seed_value(),
-                },
+                settings.seed_value(),
                 if settings.share {
                     Reach::Shared
                 } else {

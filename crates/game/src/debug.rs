@@ -981,7 +981,7 @@ mod tests {
         // And a world of this machine's own behind it, which is what the seed
         // is read off. Bound and never accepted from: the readout asks the
         // handle which world it is, and nothing here has to join it.
-        let host = server::Server::bind(("127.0.0.1", 0), server::WorldConfig { seed: 4242 })
+        let host = server::Server::bind(("127.0.0.1", 0), 4242)
             .expect("a server should bind")
             .spawn()
             .expect("a server should serve");

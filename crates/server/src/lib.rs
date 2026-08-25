@@ -8,6 +8,32 @@
 //! worth asking for. See the `protocol` crate for why the ground travels
 //! rather than the seed.
 //!
+//! # Nothing here is re-exported from `world`
+//!
+//! A world is asked for by seed and reached through this crate's own types,
+//! so a caller that opens one never learns the generator's name. That is not
+//! cosmetic: `game` may not depend on `world`, and a re-export is exactly how
+//! that rule gets broken without anybody choosing to — the client goes on
+//! naming this crate, the dependency graph goes on looking right, and the
+//! generator's vocabulary is in the client's hands all the same. It began
+//! with a seed's ceiling and a struct wrapping a `u32`, which cost nothing;
+//! what it would have ended with is a menu drawing a preview by sampling the
+//! generator, which is the arrangement the whole split exists to undo.
+//!
+//! No re-export appearing below is the checkable half — the README greps for
+//! one, anchored to the start of a line so that this paragraph is not itself
+//! a hit — and it is worth more than the `cargo tree` line that guard used to
+//! be: that one only ever read the *direct* dependencies, so it could not
+//! have failed however much came through here.
+//!
+//! The other half is not checkable and is written here rather than in the
+//! README because here is where it would be broken. A public signature that
+//! *names* a `world` type hands the generator over exactly as a re-export
+//! does — a caller need never name the crate to call a method on something it
+//! was given — and no grep and no dependency graph will say so. So: nothing
+//! public below takes or returns one, and the way to keep that true is to
+//! notice when a new `pub fn` wants to.
+//!
 //! Concurrency is plain std threading. Per connection: a thread blocking on
 //! its reads, and a writer thread draining a channel onto the socket. Shared
 //! between them: one lock around the roster, and a small pool of workers that
@@ -29,7 +55,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH};
@@ -38,10 +64,45 @@ use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
     SURVEY_BATCH_BYTES,
 };
-use world::archipelago::Archipelago;
+use world::archipelago::{Archipelago, WorldConfig};
 
 pub use keeper::{data_dir, discard, keep_data_in, kept_worlds, KeptWorld};
-pub use world::archipelago::{random_seed, WorldConfig, MAX_SEED};
+
+/// The largest seed this side hands out or takes typed in. Nine digits rather
+/// than the whole of a `u32`, because such a seed is read off a screen,
+/// written down and typed back in, and a tenth digit buys nothing worth that.
+/// A seed named outright — `--seed` — may still be any `u32`: every one of
+/// them is a world, and refusing the wide ones would only be rude.
+pub const MAX_SEED: u32 = 999_999_999;
+
+/// A seed for whoever did not choose one, off the clock. Nothing here wants
+/// randomness that would stand up to being bet on — only that two runs a
+/// moment apart land in different worlds.
+///
+/// The count is what makes that true of two draws in the same *run*, whatever
+/// the clock underneath is worth: not every platform's has nanoseconds in it,
+/// and a coarse one would otherwise hand the same world to a menu button
+/// pressed twice, or to a test that asked for two. Counting into the seed
+/// rather than mixing into it keeps successive draws different even after the
+/// reduction below, which mixing cannot promise.
+///
+/// Here rather than in `world`, where it used to live, and the move is the
+/// point. That crate may not read a clock — a seed has to mean the same
+/// islands on every machine that hosts it, and the rule that keeps it so is
+/// worth more as something checkable by eye than as something argued case by
+/// case. This was the one exception, and it was never generation: picking
+/// which world to open is a question for whoever is opening one, which is
+/// this side.
+pub fn random_seed() -> u32 {
+    static DRAWN: AtomicU32 = AtomicU32::new(0);
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.subsec_nanos() ^ since.as_secs() as u32)
+        .unwrap_or(0);
+    let drawn = DRAWN.fetch_add(1, Ordering::Relaxed);
+    nanos.wrapping_add(drawn) % (MAX_SEED + 1)
+}
 
 /// How long a fresh connection has to say hello. Generous for a slow link,
 /// and the point is only that a connection which arrives and then says
@@ -624,8 +685,14 @@ impl Server {
     /// started: a bound server is a world with a door, and [`Server::spawn`]
     /// is what opens it. The world is ephemeral until [`Server::keeping_in`]
     /// or [`Server::keeping_at`] says otherwise.
-    pub fn bind(addr: impl ToSocketAddrs, config: WorldConfig) -> io::Result<Self> {
-        Self::from_record(addr, keeper::WorldRecord::fresh(config.seed), None, false)
+    ///
+    /// A bare seed rather than the generator's own parameters, and that is
+    /// the whole of what a caller needs to say: a seed *is* a world. What the
+    /// generator makes of one is `world`'s business, and a client asking this
+    /// crate to open a world has no reason to learn that crate's name — see
+    /// this module's header on why nothing here is re-exported from it.
+    pub fn bind(addr: impl ToSocketAddrs, seed: u32) -> io::Result<Self> {
+        Self::from_record(addr, keeper::WorldRecord::fresh(seed), None, false)
     }
 
     /// Reopens the kept world at `path` and binds a listener for it: the
@@ -3216,6 +3283,18 @@ fn broadcast(players: &HashMap<PlayerId, Player>, from: PlayerId, message: ToCli
 mod tests {
     use super::*;
     use protocol::survey::{Coast, Mark};
+
+    #[test]
+    fn an_unchosen_seed_is_a_different_world_every_time() {
+        let drawn: Vec<u32> = (0..8).map(|_| random_seed()).collect();
+        for (i, seed) in drawn.iter().enumerate() {
+            assert!(*seed <= MAX_SEED, "{seed} is wider than a seed is written");
+            assert!(
+                !drawn[i + 1..].contains(seed),
+                "two draws landed in the same world"
+            );
+        }
+    }
 
     /// One chunk's ink of a chosen size: a coast of `marks` points, which is
     /// what a torn shore actually costs on the wire.
