@@ -270,8 +270,10 @@ impl Sky {
         self.commanded.unwrap_or(self.phase)
     }
 
-    /// What the server last said the time was. Where a client sets this and
-    /// why the first word snaps is [`crate::net::receive`].
+    /// What the server last said the time was — see [`take_the_hour`], which
+    /// is the only caller. The first word snaps rather than eases: a client
+    /// has no hour of its own to be moved from, and easing onto the first
+    /// would be a sunrise nobody's world was having.
     pub fn told(&mut self, phase: f32) {
         if self.told.is_none() {
             self.phase = phase;
@@ -385,6 +387,7 @@ impl Plugin for SkyPlugin {
             // drawn by putting that light in the right place — so they come
             // with the sky rather than standing beside it in the binary.
             .add_plugins(CloudsPlugin)
+            .add_message::<crate::net::HourTold>()
             .init_resource::<Sky>()
             .insert_resource(ClearColor(day.sky))
             .insert_resource(GlobalAmbientLight {
@@ -396,13 +399,29 @@ impl Plugin for SkyPlugin {
             .add_systems(OnExit(AppState::InWorld), leave_the_world)
             .add_systems(
                 Update,
-                (advance_the_day, light_the_world, offer_the_night)
+                (
+                    // Heard before the day is advanced, so an hour that
+                    // arrives this frame is the hour this frame eases
+                    // towards.
+                    take_the_hour.in_set(crate::net::Wire::Read),
+                    advance_the_day,
+                    light_the_world,
+                    offer_the_night,
+                )
                     .chain()
                     // After the clouds have moved, since where this puts the
                     // light is where they are: the two read and write one
                     // resource in one schedule, and which frame's weather the
                     // light stands in is not the executor's to choose.
                     .after(crate::clouds::drift_downwind)
+                    // And after the helm, for the same kind of reason one rung
+                    // down: [`offer_the_night`] reads the boat's way to decide
+                    // whether anybody is lying still, and reading it before
+                    // this frame's steering wrote it offers a bed to somebody
+                    // who has just made sail. It went unpinned while the
+                    // executor happened to choose the right order, which is
+                    // exactly as long as that kind of thing ever goes unnoticed.
+                    .after(crate::boat::steer)
                     .run_if(in_state(AppState::InWorld)),
             )
             // Only with the helm: a paused game is a player who is not
@@ -521,6 +540,14 @@ fn hang_the_light(mut commands: Commands) {
 /// reached daybreak and goes on sending `WantDawn`. Harmless: the server tests
 /// `is_night` before it runs anything off, and on screen it reads as the tail
 /// of the night it is.
+/// Takes the hour the server has told. The last word wins — an older telling
+/// in the same batch is a time the world has already been past.
+fn take_the_hour(mut sky: ResMut<Sky>, mut told: MessageReader<crate::net::HourTold>) {
+    for hour in told.read() {
+        sky.told(hour.phase);
+    }
+}
+
 pub(crate) fn advance_the_day(time: Res<Time>, mut sky: ResMut<Sky>) {
     let step = time.delta_secs() / protocol::DAY_SECONDS;
     sky.phase = (sky.phase + step).rem_euclid(1.0);
