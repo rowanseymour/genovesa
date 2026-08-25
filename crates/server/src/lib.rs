@@ -2145,6 +2145,12 @@ enum Went {
     /// ground within sight of it — see [`follow_the_way`].
     To(Vec2),
     /// Nothing left to serve. The session is over and the loop ends.
+    ///
+    /// Which is also what every word below answers for an asker the roster
+    /// has no entry for: reading on would serve nobody, each later word
+    /// finding the same emptiness. It cannot happen while the loop runs — a
+    /// player is seated before it and struck off only in [`depart`] after —
+    /// and is said anyway, so that one condition has one answer.
     Over,
 }
 
@@ -2155,15 +2161,15 @@ enum Went {
 /// that cannot be got wrong by forgetting a `drop`.
 fn walk(shared: &Shared, id: PlayerId, position: Vec2) -> Went {
     let mut players = shared.players.held();
+    let Some(player) = players.get_mut(&id) else {
+        return Went::Over;
+    };
     // Quietly ignored from a player at a helm, on Helm's own terms: a `Move`
     // can honestly cross a boarding grant on the wire, and believing it would
     // walk the player away from a boat everyone else sees them steering.
-    let afoot = players
-        .get_mut(&id)
-        .filter(|player| player.aboard.is_none());
-    let Some(player) = afoot else {
+    if player.aboard.is_some() {
         return Went::Nowhere;
-    };
+    }
     player.position = position;
     broadcast(&players, id, ToClient::Moved { id, position });
     Went::To(position)
@@ -2175,15 +2181,16 @@ fn walk(shared: &Shared, id: PlayerId, position: Vec2) -> Went {
 /// sail covering ground a walker cannot.
 fn take_the_helm(shared: &Shared, id: PlayerId, position: Vec2, heading: f32) -> Went {
     let mut players = shared.players.held();
+    let Some(player) = players.get_mut(&id) else {
+        return Went::Over;
+    };
     // The rider goes with the vehicle: one report moves both. Quietly ignored
     // from a player occupying nothing — see the wire's own doc for how that
     // happens honestly.
-    let steering = players
-        .get_mut(&id)
-        .and_then(|player| player.aboard.inspect(|_| player.position = position));
-    let Some(boat) = steering else {
+    let Some(boat) = player.aboard else {
         return Went::Nowhere;
     };
+    player.position = position;
     let told = {
         let mut boats = shared.boats.held();
         let state = boats.get_mut(&boat).expect("a boat once boarded exists");
@@ -2302,7 +2309,7 @@ struct Boarded {
 fn step_ashore(shared: &Shared, id: PlayerId, position: Vec2) -> Went {
     let mut players = shared.players.held();
     let Some(player) = players.get_mut(&id) else {
-        return Went::Nowhere;
+        return Went::Over;
     };
     // Ignored when not aboard, on Helm's terms.
     let Some(boat) = player.aboard.take() else {
