@@ -1,8 +1,9 @@
 //! The debug console: the key left of 1, and the two languages typed into it.
 //!
 //! One rule decides where a line runs, and it is syntactic on purpose. A line
-//! that starts `client` names a variable of *this machine* — what it draws,
-//! listed in [`Toggles`] — and never leaves it. Any other line is about the
+//! that starts `client` names a variable of *this machine* — what it draws
+//! and the view it draws through, listed in [`Picture`] — and never leaves
+//! it. Any other line is about the
 //! *world*, and crosses the wire verbatim as
 //! [`protocol::ToServer::Command`]: the vocabulary belongs to the server,
 //! this module does not parse a word of it, and whatever text comes back as
@@ -31,7 +32,7 @@
 //! key that could be given away could strand whoever gave it.
 //!
 //! Tab completes, but only the words this client can *know*: the local
-//! grammar, read off [`Toggles`] rather than listed here, and the server's
+//! grammar, read off [`Picture`] rather than listed here, and the server's
 //! phrases — which are not guessed at but taught, arriving on joining as
 //! [`protocol::ToClient::Vocabulary`], so completion grows with the server
 //! the way the vocabulary itself does. Both sides go a word further than
@@ -300,8 +301,13 @@ fn shared_lead(words: &[String]) -> &str {
 }
 
 /// The `client` grammar: `client` lists every variable, `client <var>` reads
-/// one, `client <var> <value>` writes one. Always answered — a console that
-/// says nothing back reads as a console that heard nothing.
+/// one, `client <var> <value>` writes one — the three forms the server's
+/// `world` shelf has, for the reason its own module gives. Always answered:
+/// a console that says nothing back reads as a console that heard nothing.
+///
+/// Not every variable takes all three. `position` reads and does not turn,
+/// which is what a reading is: where somebody is is not a dial, and the ways
+/// to change it are sailing, walking, and being taken.
 fn client(args: &[&str], picture: &mut Picture) -> Result<String, String> {
     match args {
         // Whatever can be read from where this line was typed. A menu screen
