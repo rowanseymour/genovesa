@@ -3868,6 +3868,122 @@ fn grant_deals_a_hull_and_leaves_the_boarding_to_whoever_asked() {
 }
 
 #[test]
+fn where_reads_the_helm_the_water_and_the_hulls_that_are_yours() {
+    let world = behind_the_curtain(7);
+    let addr = host(7);
+    let (client, _id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a newcomer's story starts aboard");
+
+    // Aboard and afloat, which is how every world is entered: the helm names
+    // the hull, and the water under it is the water the world has there.
+    client.say(ToServer::Command {
+        line: "where".to_string(),
+    });
+    let reply = client.hear_reply();
+    let depth = -world.height(spawn.x, spawn.y);
+    assert!(
+        reply.starts_with("at the helm of a sloop at"),
+        "a newcomer at a helm was answered: {reply}"
+    );
+    assert!(
+        reply.contains(&format!("afloat in {depth:.1} m")),
+        "the world has {depth:.1} m at the spawn, and `where` said: {reply}"
+    );
+    // The spawn is a berth, so it is inside the anchor's reach by
+    // construction — see `world::archipelago::a_berth`.
+    assert!(
+        reply.contains("an anchor holds here"),
+        "a world is entered at an anchorage, and `where` said: {reply}"
+    );
+
+    // Ashore on their own feet. The sloop is nobody's occupant now, but it
+    // is still theirs — see `BoatState::keeper` — so it is reported as a
+    // hull they keep rather than dropped from the reading.
+    // The beach the spawn lies off, walked to along the line to the island's
+    // middle: a few dozen metres, so the hull left behind is still alongside
+    // enough to board back from at the end.
+    let inland = world
+        .spawn()
+        .expect("a world has islands in it")
+        .island
+        .centre();
+    let towards = (inland - spawn).normalize();
+    let ashore = (1..200)
+        .map(|out| spawn + towards * out as f32 * 2.0)
+        .find(|at| world.height(at.x, at.y) >= 0.0)
+        .expect("a spawn lies off a shore that can be walked up");
+    client.say(ToServer::Disembark { position: ashore });
+    client.caught_up();
+    client.say(ToServer::Command {
+        line: "where".to_string(),
+    });
+    let reply = client.hear_reply();
+    let up = world.height(ashore.x, ashore.y);
+    assert!(
+        reply.starts_with("afoot at"),
+        "somebody who stepped ashore was answered: {reply}"
+    );
+    assert!(
+        reply.contains(&format!("ashore, {up:.1} m above the water")),
+        "the land stands {up:.1} m up, and `where` said: {reply}"
+    );
+    assert!(
+        reply.contains("your sloop lies"),
+        "a hull left at anchor is still its keeper's, and `where` said: {reply}"
+    );
+
+    // Back out to the hull on their own feet, which is a swim: afoot, but
+    // with water under them rather than beach, and the fifth wording the
+    // reading has. Beside the sloop as well, a boarding being granted only
+    // within `BOARD_GRANT` of a helm.
+    client.say(ToServer::Move { position: spawn });
+    client.caught_up();
+    client.say(ToServer::Command {
+        line: "where".to_string(),
+    });
+    let reply = client.hear_reply();
+    assert!(
+        reply.contains(&format!("in {depth:.1} m of water")),
+        "a swimmer over {depth:.1} m was answered: {reply}"
+    );
+
+    // And back aboard, where the hull is under them again rather than off
+    // in the distance: the same hull must not be read both ways at once.
+    client.say(ToServer::Board { boat: ship });
+    client.caught_up();
+    client.say(ToServer::Command {
+        line: "where".to_string(),
+    });
+    let reply = client.hear_reply();
+    assert!(
+        reply.starts_with("at the helm of a sloop at"),
+        "a boarding was not read back: {reply}"
+    );
+    assert!(
+        !reply.contains("lies"),
+        "the hull under them was also reported as one lying off: {reply}"
+    );
+
+    // And run up the beach, which no `goto` will do — a jump to dry land
+    // stands a hull off the shore instead — but which a client steering for
+    // itself can, the helm being the one thing it is the authority on. That
+    // is the state the reading exists to name.
+    client.say(ToServer::Helm {
+        position: ashore,
+        heading: 0.0,
+    });
+    client.caught_up();
+    client.say(ToServer::Command {
+        line: "where".to_string(),
+    });
+    let reply = client.hear_reply();
+    assert!(
+        reply.contains(&format!("aground, with {up:.1} m of it out of the water")),
+        "a hull run up a beach {up:.1} m above the water was answered: {reply}"
+    );
+}
+
+#[test]
 fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
     // Entry is aboard a ship, so the first jump is a ship's: asked for the
     // middle of an island, which is the one place a hull cannot be.

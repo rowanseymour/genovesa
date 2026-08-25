@@ -36,6 +36,7 @@
 //! world would then disown.
 
 use glam::Vec2;
+use protocol::ground::ANCHOR_DEPTH;
 use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient};
 use world::archipelago::{berth_off, Archipelago, SOUNDING, SPAWN_OFFSHORE};
 
@@ -74,7 +75,7 @@ struct Command {
 
 /// Every command there is, in the order `help` prints them: the acts first,
 /// then the shelf the world's own dials stand on.
-const COMMANDS: [Command; 5] = [
+const COMMANDS: [Command; 6] = [
     Command {
         word: "goto",
         usage: &["<x> <z> — be taken to a place, however you are travelling"],
@@ -92,6 +93,12 @@ const COMMANDS: [Command; 5] = [
         usage: &["shark|dolphins|whale [count] — raise beasts in your waters"],
         tails: || names(&BEASTS),
         run: spawn,
+    },
+    Command {
+        word: "where",
+        usage: &["— where you stand, what you are on or keep, and the water under you"],
+        tails: none,
+        run: whereabouts,
     },
     Command {
         word: "help",
@@ -510,7 +517,7 @@ fn goto(asked: Asked) -> Result<String, String> {
 /// Where the asker stands, or nothing at all for an id the roster has never
 /// heard of — unreachable from a served connection, whose player is on the
 /// roster for as long as it can speak, but every caller needs words for it.
-fn whereabouts(shared: &Shared, from: PlayerId) -> Option<Vec2> {
+fn stands_at(shared: &Shared, from: PlayerId) -> Option<Vec2> {
     let players = shared.players.held();
     players.get(&from).map(|player| player.position)
 }
@@ -622,7 +629,7 @@ fn grant(asked: Asked) -> Result<String, String> {
             .map(|player| (player.token, player.position))
     };
     let Some((token, asker)) = who else {
-        // Nobody by that id — see [`whereabouts`], which is the same miss
+        // Nobody by that id — see [`stands_at`], which is the same miss
         // read without the token this one also wants.
         return Err("you are nowhere a boat could reach you".to_string());
     };
@@ -701,6 +708,20 @@ fn grant(asked: Asked) -> Result<String, String> {
     })
 }
 
+/// What a hull is called when the world brings it up unasked — a `where`
+/// reporting one, where every other mention is the asker's own word handed
+/// back.
+///
+/// A match rather than a lookup in [`HULLS`] so that a kind added to the
+/// lineup cannot compile without a word here; that the two agree on the
+/// words they do share is [`hull_words_match_the_ones_grant_takes`]'s.
+fn named(kind: BoatKind) -> &'static str {
+    match kind {
+        BoatKind::Sloop => "sloop",
+        BoatKind::Rowboat => "rowboat",
+    }
+}
+
 /// The kinds a `grant` will take, as its refusals list them.
 fn kinds() -> String {
     listed(&names(&HULLS))
@@ -761,7 +782,7 @@ fn spawn(asked: Asked) -> Result<String, String> {
         ));
     };
 
-    let Some(near) = whereabouts(shared, from) else {
+    let Some(near) = stands_at(shared, from) else {
         return Err("you are nowhere a beast could join you".to_string());
     };
 
@@ -803,6 +824,103 @@ fn spawn(asked: Asked) -> Result<String, String> {
     };
     shared.summoned.held().extend(raised);
     Ok(format!("{announced}, the nearest {nearest:.0} m away"))
+}
+
+/// `where`: the asker's own situation — where they stand, the hull they are
+/// at the helm of and any others they keep, and what the water is doing under
+/// them.
+///
+/// One reading and not three because they are one question. What it gets
+/// asked in the middle of is *why will this hull not do what I asked* — a
+/// lower refused, a helm that cannot be left — and every one of those turns
+/// on the three together: whose hull, where, and how much water. Three
+/// commands would be three round trips and three chances for the world to
+/// move between them.
+///
+/// A reading of the world rather than of the client, because the numbers a
+/// client could answer from are the ones it was *sent* — quantised, and only
+/// for chunks that have arrived. This side is where [`ANCHOR_DEPTH`] is
+/// actually weighed, in `lower_a_boat`, so a reading taken anywhere else
+/// could disagree with the refusal it is being used to explain.
+fn whereabouts(asked: Asked) -> Result<String, String> {
+    let Asked { shared, from, .. } = asked;
+
+    // Everything off the roster and the boats in one hold, in the order the
+    // crate keeps them, and let go before the world is asked: sounding may
+    // mean generating an island, which is the wait `goto` explains and which
+    // no lock may be held across.
+    let standing = {
+        let players = shared.players.held();
+        let Some(player) = players.get(&from) else {
+            // Unreachable from a served connection — see [`stands_at`].
+            return Err("you are nowhere the world could find you".to_string());
+        };
+        let (at, aboard, token) = (player.position, player.aboard, player.token);
+        let boats = shared.boats.held();
+        let helm = aboard.and_then(|boat| boats.get(&boat).map(|state| state.kind));
+        // Hulls that are theirs but not under them. Keeping is not one
+        // apiece — see [`BoatState::keeper`] — so this is a list, and it is
+        // sorted by distance rather than left in the map's order so that two
+        // readings of one anchorage read the same way round.
+        let mut kept: Vec<(BoatKind, Vec2)> = boats
+            .values()
+            .filter(|state| state.keeper == Some(token) && state.occupant != Some(from))
+            .map(|state| (state.kind, state.position))
+            .collect();
+        kept.sort_by(|a, b| {
+            at.distance(a.1)
+                .total_cmp(&at.distance(b.1))
+                .then(a.1.x.total_cmp(&b.1.x))
+                .then(a.1.y.total_cmp(&b.1.y))
+        });
+        (at, helm, kept)
+    };
+    let (at, helm, kept) = standing;
+    let height = shared.world.height(at.x, at.y);
+
+    let mut lines = vec![match helm {
+        Some(kind) => format!(
+            "at the helm of a {} at {} {}",
+            named(kind),
+            round(at.x),
+            round(at.y)
+        ),
+        None => format!("afoot at {} {}", round(at.x), round(at.y)),
+    }];
+    // A tenth of a metre where the rest of the console rounds to whole ones:
+    // what this line is read for is which side of a mark a hull is on, and
+    // both marks it can answer about — the waterline and [`ANCHOR_DEPTH`] —
+    // sit close enough together on a shelving coast that a metre of rounding
+    // would put the reading on the wrong side of one.
+    lines.push(match (helm.is_some(), height >= 0.0) {
+        (true, true) => format!("aground, with {height:.1} m of it out of the water"),
+        (true, false) if -height <= ANCHOR_DEPTH => {
+            format!("afloat in {:.1} m, and an anchor holds here", -height)
+        }
+        (true, false) => format!("afloat in {:.1} m, too deep to anchor", -height),
+        (false, true) => format!("ashore, {height:.1} m above the water"),
+        (false, false) => format!("in {:.1} m of water", -height),
+    });
+    lines.extend(kept.iter().map(|(kind, lies)| {
+        // Worded as `grant` words the same two cases, so that a hull under
+        // the asker's feet and a hull across the bay do not read as two
+        // different kinds of thing depending on which command asked.
+        match round(at.distance(*lies)) {
+            0 => format!(
+                "your {} is here, at {} {}",
+                named(*kind),
+                round(lies.x),
+                round(lies.y)
+            ),
+            off => format!(
+                "your {} lies {off} m off, at {} {}",
+                named(*kind),
+                round(lies.x),
+                round(lies.y)
+            ),
+        }
+    }));
+    Ok(lines.join("\n"))
 }
 
 /// The `world` grammar: `world` reads every dial, `world <dial>` reads one,
@@ -1075,6 +1193,24 @@ mod tests {
             answer(&shared, PlayerId(9), "spawn shark 40"),
             "you are nowhere a beast could join you"
         );
+    }
+
+    /// [`named`] is a match and [`HULLS`] a table, and they name the same
+    /// hulls: a kind granted as one word and reported as another would read
+    /// as two boats.
+    #[test]
+    fn hull_words_match_the_ones_grant_takes() {
+        for (word, kind) in HULLS {
+            assert_eq!(named(kind), word, "{kind:?} is granted and reported apart");
+        }
+    }
+
+    #[test]
+    fn where_wants_somebody_to_be() {
+        let shared = a_world(0.5);
+        // Nobody by this id is in the world, so there is nowhere to sound.
+        let reply = answer(&shared, PlayerId(9), "where");
+        assert_eq!(reply, "you are nowhere the world could find you");
     }
 
     #[test]
