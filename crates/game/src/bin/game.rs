@@ -185,7 +185,7 @@ fn run(args: Args, session: Option<Session>, control: Option<control::Control>) 
     app.run();
 }
 
-/// Everything in every run, in the order it is built.
+/// The game proper, in the order it is built.
 ///
 /// A group rather than a tuple because a tuple holds fifteen and this is
 /// longer: staying under that meant pairing plugins with nothing to do with
