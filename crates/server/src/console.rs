@@ -16,12 +16,24 @@
 //!
 //! Two shapes of line, and the first word says which. `goto`, `grant` and
 //! `spawn` act, and answer with what happened. `world` is the dials the
-//! world itself stands on — the hour, the wind — in the three forms `client`
-//! has on the other side: the bare word lists them, a dial alone reads it, a
-//! dial and a value turns it. Reading is the half that was missing while
-//! these were verbs: a console could order a gale but never ask whether one
-//! was still ordered, and `natural` could be given back to a sky that
-//! already had it.
+//! world itself stands on — the hour, the wind, the seed — in the three
+//! forms `client` has on the other side: the bare word lists them, a dial
+//! alone reads it, a dial and a value turns it. Reading is the half that was
+//! missing while these were verbs: a console could order a gale but never
+//! ask whether one was still ordered, and `natural` could be given back to a
+//! sky that already had it. The acts do not read: asking where somebody is
+//! is a client's own question — `client position` — and giving `goto` a
+//! second, argumentless meaning would hide a reading behind a verb.
+//!
+//! Every command is a row of [`COMMANDS`]: a word, the `help` lines it
+//! answers for, the fixed words that may follow it, and one function of
+//! [`Asked`] returning what the player is told. That last is the whole
+//! contract — words in, words out, and refusals told apart from answers only
+//! so `?` can be written and a test can ask. Effects a command has it has
+//! through `shared`, like everything else in the crate. What the shape buys
+//! is that `help` and the completion a client is taught are folds over the
+//! table rather than listings beside it, so neither can advertise a word the
+//! world would then disown.
 
 use glam::Vec2;
 use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient};
@@ -31,33 +43,135 @@ use crate::{
     aimed, beasts, broadcast, broadcast_all, keeper, post, reachable, BoatState, Held, Shared,
 };
 
-/// What `help` says. One line per command, in the imperative the commands
-/// themselves are written in, and the blank line between the two kinds — the
-/// acts above, the dials below.
-const HELP: &str = "goto <x> <z> — be taken to a place, however you are travelling\n\
-                    grant sloop|rowboat — a hull of that kind put in the water for you\n\
-                    spawn shark|dolphins|whale [count] — raise beasts in your waters\n\
-                    \n\
-                    world — every dial as it stands; a dial alone reads that one\n\
-                    world time <hh:mm> — run the clock forward to that hour\n\
-                    world weather calm|breeze|gale|natural — order the wind, or give it back";
-
-/// Every line [`interpret`] serves, as far as its words are fixed — taught to
-/// each client on joining as [`ToClient::Vocabulary`], so a console can
-/// complete them as a player types. Whole phrases and not first words alone,
-/// because `world` is a shelf and a client that knew only the shelf would
-/// complete a player into a dead end.
+/// One command, as the table has it: the word that reaches it, what `help`
+/// says about it, the fixed words that may follow it, and what it does.
 ///
-/// The grammar's index, not the grammar: `interpret` never reads this, and a
-/// test holds the two to agreement.
-pub(crate) const PHRASES: [&str; 6] = [
-    "goto",
-    "grant",
-    "help",
-    "spawn",
-    "world time",
-    "world weather",
+/// A table because the alternatives were listings — a `help` string, a phrase
+/// list for completion, and a match — each of which had to be taught the same
+/// word, and none of which could be made to. What holds them together now is
+/// that there is only one of them: [`help`] and [`phrases`] are folds over
+/// this, so a command missing from the listing is a command that does not
+/// exist rather than one a client completes a player into and the world then
+/// disowns.
+struct Command {
+    /// The first word of every line that reaches it.
+    word: &'static str,
+    /// What `help` says, each line printed after the word — several where a
+    /// command has several forms, as a shelf does.
+    usage: &'static [&'static str],
+    /// The words that may follow, for a client completing a line as a player
+    /// types — see [`phrases`]. Empty where what follows is the asker's own:
+    /// a place, an hour, a count.
+    tails: fn() -> Vec<String>,
+    /// What it does, and what the asker is told for it. [`Err`] is a refusal,
+    /// and the asker reads it exactly as they read an answer — the wire
+    /// carries one kind of reply. The distinction is for this side: nothing
+    /// here has to remember which of its own strings were the sorry ones, and
+    /// a test can ask whether a line was refused instead of grepping the
+    /// prose for the apology.
+    run: fn(Asked) -> Result<String, String>,
+}
+
+/// Every command there is, in the order `help` prints them: the acts first,
+/// then the shelf the world's own dials stand on.
+const COMMANDS: [Command; 5] = [
+    Command {
+        word: "goto",
+        usage: &["<x> <z> — be taken to a place, however you are travelling"],
+        tails: none,
+        run: goto,
+    },
+    Command {
+        word: "grant",
+        usage: &["sloop|rowboat — a hull of that kind put in the water for you"],
+        tails: || names(&HULLS),
+        run: grant,
+    },
+    Command {
+        word: "spawn",
+        usage: &["shark|dolphins|whale [count] — raise beasts in your waters"],
+        tails: || names(&BEASTS),
+        run: spawn,
+    },
+    Command {
+        word: "help",
+        usage: &["— every command here, and what it takes"],
+        tails: none,
+        run: |_| Ok(help()),
+    },
+    Command {
+        word: "world",
+        usage: &[
+            "— every dial as it stands; a dial alone reads that one",
+            "time <hh:mm> — run the clock forward to that hour",
+            "weather calm|breeze|gale|natural — order the wind, or give it back",
+            "seed — the number this world was raised on",
+        ],
+        tails: dials,
+        run: world,
+    },
 ];
+
+/// What `help` says: every form of every command, the word and then the line
+/// that form is written as. Read off [`COMMANDS`] rather than kept beside it,
+/// so the listing cannot advertise a word the table has never heard of.
+fn help() -> String {
+    COMMANDS
+        .iter()
+        .flat_map(|command| {
+            command
+                .usage
+                .iter()
+                .map(move |line| format!("{} {line}", command.word))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every phrase [`interpret`] serves, as far as its words are fixed — taught
+/// to each client on joining as [`ToClient::Vocabulary`], so a console can
+/// complete them as a player types.
+///
+/// Whole phrases and not first words alone, because `world` is a shelf and a
+/// client that knew only the shelf would complete a player into a dead end.
+/// The same argument runs one word further out wherever the argument is a
+/// fixed few — the hulls, the beasts, the winds — and stops at the ones that
+/// are the asker's own: there is no completing an hour or a place, and a tab
+/// that guessed at one would be inventing rather than teaching.
+pub(crate) fn phrases() -> Vec<String> {
+    COMMANDS
+        .iter()
+        .flat_map(|command| {
+            std::iter::once(command.word.to_string()).chain(
+                (command.tails)()
+                    .into_iter()
+                    .map(|tail| format!("{} {tail}", command.word)),
+            )
+        })
+        .collect()
+}
+
+/// The tails of a command whose arguments are the asker's own — no word to
+/// offer, which is not the same as a word nobody has got round to listing.
+fn none() -> Vec<String> {
+    Vec::new()
+}
+
+/// The words a table of named things answers to, which is what a client is
+/// taught to complete and what a refusal offers instead. Read off the table
+/// that serves them, so the two cannot disagree.
+fn names<T>(table: &[(&'static str, T)]) -> Vec<String> {
+    table.iter().map(|(name, _)| name.to_string()).collect()
+}
+
+/// A list as a sentence says it: `time, weather or seed`.
+fn listed(words: &[String]) -> String {
+    match words.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
 
 /// The hulls `grant` deals, and the words that ask for them. The naming is
 /// the console's own: [`BoatKind`] carries none, nothing else in the world
@@ -65,18 +179,98 @@ pub(crate) const PHRASES: [&str; 6] = [
 /// or a dinghy depending on what it is doing — none of which is a word to
 /// make somebody guess at.
 ///
-/// An index of the grammar and not the grammar: a test holds this and
-/// `help`'s own `grant` line to each other, both ways round. [`grant`] reads
-/// this listing, so it cannot disagree with it — what can is the line, which
-/// is what a client completes a player into.
+/// [`grant`] reads this listing and so does the completion a client is
+/// taught, so neither can disagree with it. What can is the `help` line,
+/// which is prose — a test holds the two to each other, both ways round.
 const HULLS: [(&str, BoatKind); 2] = [("sloop", BoatKind::Sloop), ("rowboat", BoatKind::Rowboat)];
 
-/// The dials `world` turns, in the order a bare `world` reads them out.
-/// Named here once because three places want them: the listing, the reading,
-/// and what a miss is told to try instead.
-const TIME: &str = "time";
-const WEATHER: &str = "weather";
-const DIALS: [&str; 2] = [TIME, WEATHER];
+/// The beasts `spawn` raises, and the words that ask for them — the same
+/// table [`HULLS`] is, and for the same reasons.
+const BEASTS: [(&str, BeastKind); 3] = [
+    ("shark", BeastKind::Shark),
+    ("dolphins", BeastKind::Dolphins),
+    ("whale", BeastKind::Whale),
+];
+
+/// A dial the world stands on: what it is called, what it reads as, and —
+/// where it turns at all — what turns it and what turning it will take.
+///
+/// The turn is an [`Option`] because reading and writing are separate powers
+/// and one dial has only the first. A world is raised on its seed and keeps
+/// it: there is a number to ask for and nothing to set. Before this was a
+/// table that distinction had nowhere to live, and a read-only dial would
+/// have had to be answered by the shelf's own miss — telling a player that
+/// the world has no dial called `seed` a line after printing its value.
+struct Dial {
+    name: &'static str,
+    read: fn(&Shared) -> String,
+    turn: Option<Turn>,
+    /// The values the turn takes, where they are a fixed few — empty for the
+    /// clock, every hour there is being no listing at all.
+    values: fn() -> Vec<String>,
+}
+
+/// What turning a dial takes, and what it answers with. Named because the
+/// type is two deep where [`Dial`] holds it and reads better with a word on
+/// it.
+type Turn = fn(&Shared, &str) -> Result<String, String>;
+
+/// The dials the world stands on, in the order a bare `world` reads them out.
+///
+/// A reading names the value that could be written back — `gale`, an hour —
+/// so nothing has to be remembered to know what a dial would take. The
+/// weather's reading is word for word what its write answered with, since
+/// there is nothing more to say about an order than that it stands; the
+/// clock's differs because a write there also says the day *moved*, and
+/// forward.
+const DIALS: [Dial; 3] = [
+    Dial {
+        name: "time",
+        read: |shared| format!("the day stands at {}", clock(shared.phase())),
+        turn: Some(time),
+        values: none,
+    },
+    Dial {
+        name: "weather",
+        read: |shared| match *shared.commanded_wind.held() {
+            Some((name, _)) => ordered(name),
+            None => "the weather is the world's own".to_string(),
+        },
+        turn: Some(weather),
+        values: || {
+            names(&WINDS)
+                .into_iter()
+                .chain([NATURAL.to_string()])
+                .collect()
+        },
+    },
+    Dial {
+        name: "seed",
+        read: |shared| format!("this world was raised on seed {}", shared.world.seed()),
+        turn: None,
+        values: none,
+    },
+];
+
+/// The phrases that stand behind `world`: every dial, and every value a dial
+/// takes a fixed few of.
+fn dials() -> Vec<String> {
+    DIALS
+        .iter()
+        .flat_map(|dial| {
+            std::iter::once(dial.name.to_string()).chain(
+                (dial.values)()
+                    .into_iter()
+                    .map(|value| format!("{} {value}", dial.name)),
+            )
+        })
+        .collect()
+}
+
+/// The word that gives the sky back to the world, which is not a wind and so
+/// is not in [`WINDS`] — named once because the turn and the completion both
+/// want it.
+const NATURAL: &str = "natural";
 
 /// The winds the console can order up. The strengths are the sea's landmarks
 /// rather than round numbers: a flat calm, the reference breeze the wave
@@ -106,26 +300,68 @@ pub(crate) struct Served {
     pub(crate) put: Option<Vec2>,
 }
 
-impl From<String> for Served {
-    /// Every command but one moves nobody, and says so by saying nothing.
-    fn from(reply: String) -> Self {
-        Self { reply, put: None }
-    }
+/// What a command is handed: the world it works on, who asked, and the words
+/// after the verb.
+///
+/// The one thing a command hands back that is not words is here too, rather
+/// than in the return type. Commands have effects — a hull dealt, a day run
+/// on, a beast raised — and they work every one of those through `shared`,
+/// like anything else in the crate. The put down is the exception because
+/// what it acts on is the *caller* rather than the world, for the reason
+/// [`Served::put`] gives. Kept here it costs the answer nothing: every
+/// command still answers in words alone.
+pub(crate) struct Asked<'a> {
+    shared: &'a Shared,
+    from: PlayerId,
+    args: &'a [&'a str],
+    /// Where the world has put the asker — see [`Served::put`], which is
+    /// where this comes out.
+    put: &'a mut Option<Vec2>,
 }
 
 /// Serves one console line and says what came of it — every line gets an
 /// answer, the ones nothing here recognises included, because silence at a
 /// console reads as a hang.
+///
+/// An empty line is `help`, which is the friendliest reading of somebody
+/// pressing return at a prompt they have just found.
 pub(crate) fn interpret(shared: &Shared, from: PlayerId, line: &str) -> Served {
+    let mut put = None;
+    // An answer and a refusal are both what the asker reads, and the wire
+    // has one kind of reply to carry them in. The two part company only on
+    // this side of it — see [`serve`].
+    let (Ok(reply) | Err(reply)) = serve(shared, from, line, &mut put);
+    Served { reply, put }
+}
+
+/// The table's answer to a line, refusals still told apart from answers.
+///
+/// Split from [`interpret`] because the difference is worth something here
+/// even though the wire flattens it: a test can ask whether a line was
+/// refused rather than grep the prose for an apology, and a command that
+/// wants to refuse says so with `?` rather than by remembering to return
+/// early.
+fn serve(
+    shared: &Shared,
+    from: PlayerId,
+    line: &str,
+    put: &mut Option<Vec2>,
+) -> Result<String, String> {
     let words: Vec<&str> = line.split_whitespace().collect();
-    match words.as_slice() {
-        [] | ["help"] => HELP.to_string().into(),
-        ["goto", rest @ ..] => goto(shared, from, rest),
-        ["grant", rest @ ..] => grant(shared, from, rest).into(),
-        ["spawn", rest @ ..] => spawn(shared, from, rest).into(),
-        ["world", rest @ ..] => world(shared, rest).into(),
-        [verb, ..] => format!("`{verb}` is not a command here — `help` lists what is").into(),
-    }
+    let (word, args) = words
+        .split_first()
+        .map_or(("help", &[][..]), |(word, args)| (*word, args));
+
+    let command = COMMANDS
+        .iter()
+        .find(|command| command.word == word)
+        .ok_or_else(|| format!("`{word}` is not a command here — `help` lists what is"))?;
+    (command.run)(Asked {
+        shared,
+        from,
+        args,
+        put,
+    })
 }
 
 /// How many bearings [`standing_off`] tries at each radius as it looks
@@ -138,6 +374,11 @@ const BEARINGS: usize = 16;
 
 /// `goto <x> <z>`: the asker taken to a point of the world, however they
 /// happen to be travelling.
+///
+/// It only writes. Asking where somebody *is* is a client's own question —
+/// `client position`, answered off the picture this machine is drawing — and
+/// giving `goto` a second, argumentless meaning would put the reading in the
+/// one place a reader has to know a verb to look.
 ///
 /// A hull is the only thing here a point can be wrong for: it cannot sit on
 /// a hillside. Somebody on their own feet is at home anywhere the world has
@@ -165,14 +406,19 @@ const BEARINGS: usize = 16;
 /// is deliberate, this being a debugging command: what it is for is being
 /// taken to a place to look at it, and *no, not like that* is what sailing
 /// there would have said.
-fn goto(shared: &Shared, from: PlayerId, args: &[&str]) -> Served {
-    let Some(asked) = point(args) else {
-        return "`goto` wants a place to be taken to — `goto 480 -1200`"
-            .to_string()
-            .into();
+fn goto(asked: Asked) -> Result<String, String> {
+    let Asked {
+        shared,
+        from,
+        args,
+        put,
+    } = asked;
+
+    let Some(wanted) = point(args) else {
+        return Err("`goto` wants a place to be taken to — `goto 480 -1200`".to_string());
     };
-    if !reachable(asked) {
-        return format!("`{} {}` is outside the world", asked.x, asked.y).into();
+    if !reachable(wanted) {
+        return Err(format!("`{} {}` is outside the world", wanted.x, wanted.y));
     }
 
     // Whether the point is land is the whole of what a hull's placement
@@ -184,17 +430,15 @@ fn goto(shared: &Shared, from: PlayerId, args: &[&str]) -> Served {
     // sixteen rays would mean either sounding the sea under its lock — every
     // other connection held out of the world while it happened — or taking
     // the lock twice around a walk that is heights already in hand.
-    let dry = shared.world.height(asked.x, asked.y) >= 0.0;
-    let berth = dry.then(|| standing_off(&shared.world, asked));
+    let dry = shared.world.height(wanted.x, wanted.y) >= 0.0;
+    let berth = dry.then(|| standing_off(&shared.world, wanted));
 
     let mut players = shared.players.held();
     let Some(player) = players.get_mut(&from) else {
         // Unreachable from a served connection, whose player is on the roster
         // for as long as it can speak — the same nobody-by-that-id case
         // `spawn` answers, and it needs words here too.
-        return "you are nowhere the world could take you from"
-            .to_string()
-            .into();
+        return Err("you are nowhere the world could take you from".to_string());
     };
     let aboard = player.aboard;
 
@@ -205,18 +449,18 @@ fn goto(shared: &Shared, from: PlayerId, args: &[&str]) -> Served {
         // asked for it.
         Some(boat) => {
             let mut boats = shared.boats.held();
-            let at = berth.map_or(asked, |(off, _)| off);
+            let at = berth.map_or(wanted, |(off, _)| off);
             let state = boats.get_mut(&boat).expect("a boat once boarded exists");
             state.position = at;
             if berth.is_some() {
-                state.heading = aimed(at, asked);
+                state.heading = aimed(at, wanted);
             }
             (at, Some(state.heading), Some(state.told(boat)))
         }
         // Afoot: the point itself, whatever is under it, and which way they
         // face is their own business — see [`ToClient::PutDown`], whose
         // `None` heading this is.
-        None => (asked, None, None),
+        None => (wanted, None, None),
     };
     player.position = at;
 
@@ -259,10 +503,16 @@ fn goto(shared: &Shared, from: PlayerId, args: &[&str]) -> Served {
         ),
         _ => format!("you are at {} {}", round(at.x), round(at.y)),
     };
-    Served {
-        reply,
-        put: Some(at),
-    }
+    *put = Some(at);
+    Ok(reply)
+}
+
+/// Where the asker stands, or nothing at all for an id the roster has never
+/// heard of — unreachable from a served connection, whose player is on the
+/// roster for as long as it can speak, but every caller needs words for it.
+fn whereabouts(shared: &Shared, from: PlayerId) -> Option<Vec2> {
+    let players = shared.players.held();
+    players.get(&from).map(|player| player.position)
 }
 
 /// A place, as two numbers: `goto 480 -1200`.
@@ -347,12 +597,16 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
 /// Deliberately, that being the only way to come by two — and there is
 /// nothing to hoist in its place the way `Lower` retires a tender, a mint
 /// happening precisely when no free hull of the kind is left to take back.
-fn grant(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
+fn grant(asked: Asked) -> Result<String, String> {
+    let Asked {
+        shared, from, args, ..
+    } = asked;
+
     let [named] = args else {
-        return format!("`grant` wants a kind of boat — {}", kinds());
+        return Err(format!("`grant` wants a kind of boat — {}", kinds()));
     };
     let Some(&(_, kind)) = HULLS.iter().find(|(name, _)| name == named) else {
-        return format!("no boat called `{named}` — {}", kinds());
+        return Err(format!("no boat called `{named}` — {}", kinds()));
     };
 
     // Where they are, peeked at and given back before the sounding below,
@@ -368,10 +622,9 @@ fn grant(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
             .map(|player| (player.token, player.position))
     };
     let Some((token, asker)) = who else {
-        // Unreachable from a served connection, whose player is on the
-        // roster for as long as it can speak — the same nobody-by-that-id
-        // case `spawn` answers, and it needs words here too.
-        return "you are nowhere a boat could reach you".to_string();
+        // Nobody by that id — see [`whereabouts`], which is the same miss
+        // read without the token this one also wants.
+        return Err("you are nowhere a boat could reach you".to_string());
     };
 
     // Sounded before either lock is taken, for the reason `goto` says at
@@ -435,7 +688,7 @@ fn grant(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
     } else {
         format!("your {named} is")
     };
-    match offing {
+    Ok(match offing {
         // How far they have to go to reach it, which is the whole of what a
         // grant answered from dry land has to tell somebody.
         Some(off) => format!(
@@ -445,16 +698,12 @@ fn grant(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
             round(at.y)
         ),
         None => format!("{whose} here, at {} {}", round(at.x), round(at.y)),
-    }
+    })
 }
 
 /// The kinds a `grant` will take, as its refusals list them.
 fn kinds() -> String {
-    HULLS
-        .iter()
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>()
-        .join(" or ")
+    listed(&names(&HULLS))
 }
 
 /// A distance or a coordinate as the console says it: whole metres, which is
@@ -483,31 +732,37 @@ const MOST: usize = 100;
 /// an animal in the wrong water sorts itself out within a few beats anyway,
 /// its dwelling being to hold to its own band. Only water it could not be in
 /// at all is refused, which is a summons on dry land.
-fn spawn(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
+fn spawn(asked: Asked) -> Result<String, String> {
+    let Asked {
+        shared, from, args, ..
+    } = asked;
+
     let (named, count) = match args {
         [named] => (named, 1usize),
         [named, count] => match count.parse::<usize>() {
             Ok(count) if (1..=MOST).contains(&count) => (named, count),
-            _ => return format!("`spawn` will raise 1 to {MOST} of a kind, not `{count}`"),
+            _ => {
+                return Err(format!(
+                    "`spawn` will raise 1 to {MOST} of a kind, not `{count}`"
+                ))
+            }
         },
-        _ => return "`spawn` wants a kind of beast — shark, dolphins or whale".to_string(),
+        _ => {
+            return Err(format!(
+                "`spawn` wants a kind of beast — {}",
+                listed(&names(&BEASTS))
+            ))
+        }
     };
-    let kind = match *named {
-        "shark" => BeastKind::Shark,
-        "dolphins" => BeastKind::Dolphins,
-        "whale" => BeastKind::Whale,
-        _ => return format!("no beast called `{named}` — shark, dolphins or whale"),
+    let Some(&(_, kind)) = BEASTS.iter().find(|(name, _)| name == named) else {
+        return Err(format!(
+            "no beast called `{named}` — {}",
+            listed(&names(&BEASTS))
+        ));
     };
 
-    let near = {
-        let players = shared.players.held();
-        players.get(&from).map(|player| player.position)
-    };
-    let Some(near) = near else {
-        // Unreachable from a served connection, whose player is on the
-        // roster for as long as it can speak — but this function cannot know
-        // who calls it, and "nothing happened" needs words either way.
-        return "you are nowhere a beast could join you".to_string();
+    let Some(near) = whereabouts(shared, from) else {
+        return Err("you are nowhere a beast could join you".to_string());
     };
 
     // Decorative randomness, exactly as the beasts' own: nothing about a
@@ -528,7 +783,7 @@ fn spawn(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
         })
         .collect();
     if raised.is_empty() {
-        return format!("no water a {named} could be in near here");
+        return Err(format!("no water a {named} could be in near here"));
     }
 
     let nearest = raised
@@ -547,65 +802,52 @@ fn spawn(shared: &Shared, from: PlayerId, args: &[&str]) -> String {
         (BeastKind::Whale, many) => format!("{many} whales surface"),
     };
     shared.summoned.held().extend(raised);
-    format!("{announced}, the nearest {nearest:.0} m away")
+    Ok(format!("{announced}, the nearest {nearest:.0} m away"))
 }
 
 /// The `world` grammar: `world` reads every dial, `world <dial>` reads one,
 /// `world <dial> <value>` turns one. The same three forms the client's own
 /// `client` lines have, for the same reason — a dial nobody can read is a
 /// switch you have to remember the state of.
-fn world(shared: &Shared, args: &[&str]) -> String {
+fn world(asked: Asked) -> Result<String, String> {
+    let Asked { shared, args, .. } = asked;
     match args {
-        [] => DIALS
+        [] => Ok(DIALS
             .iter()
-            .filter_map(|dial| reading(shared, dial))
+            .map(|dial| (dial.read)(shared))
             .collect::<Vec<_>>()
-            .join(" / "),
-        [dial] => reading(shared, dial).unwrap_or_else(|| no_such(dial)),
-        [dial, value] => match *dial {
-            TIME => time(shared, value),
-            WEATHER => weather(shared, value),
-            _ => no_such(dial),
+            .join(" / ")),
+        [name] => Ok((dial(name)?.read)(shared)),
+        [name, value] => match dial(name)?.turn {
+            Some(turn) => turn(shared, value),
+            // A dial with a reading and no turn, which is the seed: saying
+            // so is the whole reason the turn is an [`Option`] rather than a
+            // name the shelf has simply never been told about.
+            None => Err(format!("`{name}` is a dial that reads and does not turn")),
         },
-        _ => "one dial, one value — `world time 6:30`".to_string(),
+        _ => Err("one dial, one value — `world time 6:30`".to_string()),
     }
 }
 
-/// What one dial reads as, or `None` for a name that is not a dial at all.
-///
-/// A reading names the value that could be written back — `gale`, an hour —
-/// so nothing has to be remembered to know what a dial would take. The
-/// weather's reading is word for word what its write answered with, since
-/// there is nothing more to say about an order than that it stands; the
-/// clock's differs because a write there also says the day *moved*, and
-/// forward.
-fn reading(shared: &Shared, dial: &str) -> Option<String> {
-    Some(match dial {
-        TIME => format!("the day stands at {}", clock(shared.phase())),
-        WEATHER => match *shared.commanded_wind.held() {
-            Some((name, _)) => ordered(name),
-            None => "the weather is the world's own".to_string(),
-        },
-        _ => return None,
+/// The dial a name asks for, or the refusal a name that is not one earns —
+/// which is every dial there is, the same answer whether it was read or
+/// written to.
+fn dial(name: &str) -> Result<&'static Dial, String> {
+    DIALS.iter().find(|dial| dial.name == name).ok_or_else(|| {
+        let every: Vec<String> = DIALS.iter().map(|dial| dial.name.to_string()).collect();
+        format!("the world has no dial called `{name}` — {}", listed(&every))
     })
-}
-
-/// What a name that is not a dial is told, which is every dial there is —
-/// the same answer whether it was read or written to.
-fn no_such(dial: &str) -> String {
-    format!(
-        "the world has no dial called `{dial}` — {}",
-        DIALS.join(" or ")
-    )
 }
 
 /// `world time <hh:mm>`: the world's clock run forward to the next time it
 /// reads that hour — never backwards, which is [`ToClient::Daylight`]'s
 /// promise — and everyone told at once rather than on the sky thread's next
 /// beat, because the one who asked is watching for it.
-fn time(shared: &Shared, given: &str) -> String {
+fn time(shared: &Shared, given: &str) -> Result<String, String> {
     let Some(target) = parse_clock(given) else {
-        return format!("`{given}` is not an hour on a 24-hour clock — `world time 6:30`");
+        return Err(format!(
+            "`{given}` is not an hour on a 24-hour clock — `world time 6:30`"
+        ));
     };
 
     let phase = shared.wind_forward_to(target);
@@ -613,7 +855,7 @@ fn time(shared: &Shared, given: &str) -> String {
         let players = shared.players.held();
         broadcast_all(&players, ToClient::Daylight { phase });
     }
-    format!("the day has run on to {}", clock(phase))
+    Ok(format!("the day has run on to {}", clock(phase)))
 }
 
 /// `world weather <wind>`: the sky taken in hand for everyone, or —
@@ -621,17 +863,23 @@ fn time(shared: &Shared, given: &str) -> String {
 /// thread notices the wind moving and tells the roster, exactly as it does
 /// when the real weather turns, so an ordered gale arrives the way any gale
 /// does.
-fn weather(shared: &Shared, named: &str) -> String {
-    if named == "natural" {
+fn weather(shared: &Shared, given: &str) -> Result<String, String> {
+    if given == NATURAL {
         shared.command_wind(None);
-        return "the weather is the world's own again".to_string();
+        return Ok("the weather is the world's own again".to_string());
     }
-    match WINDS.iter().find(|(name, _)| *name == named) {
+    match WINDS.iter().find(|(name, _)| *name == given) {
         Some(&(name, wind)) => {
             shared.command_wind(Some((name, wind)));
-            ordered(name)
+            Ok(ordered(name))
         }
-        None => format!("no wind called `{named}` — calm, breeze, gale or natural"),
+        None => {
+            let every: Vec<String> = names(&WINDS)
+                .into_iter()
+                .chain([NATURAL.to_string()])
+                .collect();
+            Err(format!("no wind called `{given}` — {}", listed(&every)))
+        }
     }
 }
 
@@ -662,6 +910,12 @@ mod tests {
     /// [`the_console_takes_you_places`] is where it is looked at.
     fn answer(shared: &Shared, from: PlayerId, line: &str) -> String {
         interpret(shared, from, line).reply
+    }
+
+    /// A line's answer as [`serve`] has it, refusal and all — for the tests
+    /// that care which of the two a line earned.
+    fn ask(shared: &Shared, from: PlayerId, line: &str) -> Result<String, String> {
+        serve(shared, from, line, &mut None)
     }
 
     /// A world to command, never served: `interpret` works on the shared
@@ -747,11 +1001,12 @@ mod tests {
     #[test]
     fn every_dial_reads_and_reads_back_what_could_be_written() {
         let shared = a_world(0.5);
-        for dial in DIALS {
-            let read = answer(&shared, PlayerId(1), &format!("world {dial}"));
+        for dial in &DIALS {
+            let name = dial.name;
+            let read = ask(&shared, PlayerId(1), &format!("world {name}"));
             assert!(
-                !read.contains("no dial called"),
-                "`{dial}` is listed but does not read: {read}"
+                read.is_ok(),
+                "`{name}` is listed but does not read: {read:?}"
             );
         }
 
@@ -897,30 +1152,99 @@ mod tests {
         assert!(nobody.contains("nowhere"), "unhelpful: {nobody}");
     }
 
+    /// The alternatives a `help` line offers for a word — `sloop|rowboat`
+    /// read off the prose, which is the one part of a command that a table
+    /// cannot generate and so the one part that can still drift.
+    fn advertised(word: &str) -> Vec<String> {
+        help()
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{word} ")))
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap_or_else(|| panic!("`help` should have a line for `{word}`"))
+            .split('|')
+            .map(String::from)
+            .collect()
+    }
+
+    /// Every alternative a `help` line names is one the command serves, and
+    /// every one it serves is named — held as sequences rather than by
+    /// containment, so an order that reads oddly fails too.
+    ///
+    /// The direction that can actually break is a word `help` advertises and
+    /// the table has never heard of: a client completes a player into it and
+    /// the world answers that there is no such thing. Completion itself
+    /// cannot drift this way any more — it is the table — which leaves the
+    /// prose, and this.
+    #[test]
+    fn every_word_the_usage_names_is_a_word_that_is_served() {
+        assert_eq!(advertised("grant"), names(&HULLS));
+        assert_eq!(advertised("spawn"), names(&BEASTS));
+        assert_eq!(
+            advertised("world weather"),
+            names(&WINDS)
+                .into_iter()
+                .chain([NATURAL.to_string()])
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn every_hull_the_grant_names_can_be_asked_for() {
-        // The line and the listing, held to each other as sequences rather
-        // than by containment. The direction that can actually break is a
-        // kind `help` advertises and the listing has never heard of: a
-        // client completes a player into the word and the world answers
-        // that there is no such boat.
-        let advertised = HELP
-            .lines()
-            .find_map(|line| line.trim_start().strip_prefix("grant "))
-            .and_then(|line| line.split_whitespace().next())
-            .expect("`help` should have a line for `grant`");
-        assert_eq!(
-            advertised.split('|').collect::<Vec<_>>(),
-            HULLS.iter().map(|(named, _)| *named).collect::<Vec<_>>(),
-            "`help` advertises `{advertised}`, which is not what `grant` deals"
-        );
-
         let shared = a_world(0.5);
         for asked in ["grant", "grant frigate", "grant sloop rowboat"] {
             let refused = answer(&shared, PlayerId(1), asked);
             assert!(
                 HULLS.iter().all(|(named, _)| refused.contains(named)),
                 "`{asked}` was answered `{refused}`, which teaches nothing"
+            );
+        }
+    }
+
+    /// The seed reads and cannot be turned, which is the whole of what a
+    /// [`Dial`] with no `turn` is for. What it must not answer is that there
+    /// is no such dial — the shelf's own miss, and a lie a line after it
+    /// printed the number.
+    #[test]
+    fn the_seed_reads_and_does_not_turn() {
+        let shared = a_world(0.5);
+        let read = ask(&shared, PlayerId(1), "world seed").expect("the seed should read");
+        assert!(
+            read.contains(&shared.world.seed().to_string()),
+            "the seed read as `{read}`"
+        );
+        // And a bare `world` carries it, so one line is the whole console's
+        // answer to what world this is.
+        assert!(answer(&shared, PlayerId(1), "world").contains(&read));
+
+        let refused = ask(&shared, PlayerId(1), "world seed 20040112")
+            .expect_err("a seed should not be settable");
+        assert!(
+            refused.contains("does not turn") && !refused.contains("no dial called"),
+            "unhelpful: {refused}"
+        );
+    }
+
+    /// The tails a client is taught are the words the commands themselves
+    /// serve, and they stop where the argument becomes the asker's own.
+    #[test]
+    fn the_phrases_carry_the_words_and_no_more() {
+        let taught = phrases();
+        for wanted in [
+            "goto",
+            "grant sloop",
+            "spawn dolphins",
+            "world seed",
+            "world weather gale",
+            "world weather natural",
+        ] {
+            assert!(taught.iter().any(|it| it == wanted), "`{wanted}` untaught");
+        }
+        // An hour, a place and a count are nobody's to offer: every phrase is
+        // words the console itself knows.
+        for phrase in &taught {
+            assert!(
+                !phrase.contains('<') && !phrase.contains('['),
+                "`{phrase}` offers to complete an argument"
             );
         }
     }
@@ -932,10 +1256,14 @@ mod tests {
         // to complete these under players' fingers, and a taught word the
         // server then disowns would make the completion a lie.
         let shared = a_world(0.5);
-        for phrase in PHRASES {
-            let reply = answer(&shared, PlayerId(1), phrase);
+        for phrase in phrases() {
+            let reply = answer(&shared, PlayerId(1), &phrase);
             assert!(
-                !reply.contains("is not a command") && !reply.contains("no dial called"),
+                !reply.contains("is not a command")
+                    && !reply.contains("no dial called")
+                    && !reply.contains("no boat called")
+                    && !reply.contains("no beast called")
+                    && !reply.contains("no wind called"),
                 "`{phrase}` is advertised but not served: {reply}"
             );
         }
@@ -947,11 +1275,29 @@ mod tests {
         let unknown = answer(&shared, PlayerId(1), "dance");
         assert!(unknown.contains("`dance`") && unknown.contains("help"));
 
-        // Every phrase but `help` itself, which is what was typed to get
-        // this far and needs no line of its own.
+        // And every word a client is taught is a word `help` accounts for,
+        // both being folds over the one table.
         let help = answer(&shared, PlayerId(1), "help");
-        for phrase in PHRASES.iter().filter(|it| **it != "help") {
-            assert!(help.contains(phrase), "`help` does not mention {phrase}");
+        for phrase in phrases() {
+            let word = phrase
+                .split_whitespace()
+                .next()
+                .expect("a phrase has a word");
+            assert!(help.contains(word), "`help` does not mention {word}");
+        }
+
+        // A shelf needs more than its own word said, because a dial is
+        // taught as a phrase and completed into: `world tide` offered to
+        // every client while `help` says only `world` is exactly the drift
+        // the two being folds over one table is supposed to rule out, and
+        // the shelf is the one place the table cannot rule it out by itself
+        // — a dial's `help` line is prose in the `world` row.
+        for dial in &DIALS {
+            let advertised = format!("world {}", dial.name);
+            assert!(
+                help.contains(&advertised),
+                "`{advertised}` is taught to clients and `help` does not mention it"
+            );
         }
     }
 }

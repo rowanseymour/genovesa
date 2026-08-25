@@ -38,8 +38,10 @@ Options:
                  process]
 
 The world is generated here and handed out a chunk at a time. Clients need
-know nothing about it — not the seed, not the layout — which is why the seed
-is named on this side of the wire and nowhere else.
+know nothing about it — not the seed, not the layout — so nothing they are
+sent carries either, and the ground arrives already made. A client that wants
+the number can ask for it: the console's `world seed` answers, that being a
+debugging question rather than something a client draws with.
 
 A day turns in {day:.0} seconds, and the hour is the server's: every client in
 the world is under the same sun, however long the world has been up. Which

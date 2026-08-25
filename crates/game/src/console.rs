@@ -1,8 +1,9 @@
 //! The debug console: the key left of 1, and the two languages typed into it.
 //!
 //! One rule decides where a line runs, and it is syntactic on purpose. A line
-//! that starts `client` names a variable of *this machine* — what it draws,
-//! listed in [`Toggles`] — and never leaves it. Any other line is about the
+//! that starts `client` names a variable of *this machine* — what it draws
+//! and the view it draws through, listed in [`Picture`] — and never leaves
+//! it. Any other line is about the
 //! *world*, and crosses the wire verbatim as
 //! [`protocol::ToServer::Command`]: the vocabulary belongs to the server,
 //! this module does not parse a word of it, and whatever text comes back as
@@ -30,11 +31,14 @@
 //! for the reason the arrows are: it is the way in and out of a mode, and a
 //! key that could be given away could strand whoever gave it.
 //!
-//! Tab completes, but only the words this client can *know*: `client` and its
-//! variables, which are this module's own grammar, and the server's phrases —
-//! which are not guessed at but taught, arriving on joining as
+//! Tab completes, but only the words this client can *know*: the local
+//! grammar, read off [`Picture`] rather than listed here, and the server's
+//! phrases — which are not guessed at but taught, arriving on joining as
 //! [`protocol::ToClient::Vocabulary`], so completion grows with the server
-//! the way the vocabulary itself does.
+//! the way the vocabulary itself does. Both sides go a word further than
+//! their verbs wherever the argument is a fixed few — `client stats on`,
+//! `world weather gale` — and stop where it is the player's own, an hour or a
+//! place being nothing to guess at.
 
 use std::collections::VecDeque;
 
@@ -43,7 +47,8 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::debug::{Toggles, Value, BACKDROP, TEXT};
+use crate::camera::{View, MAX_DISTANCE, MIN_DISTANCE};
+use crate::debug::{Kind, Look, Looking, Machine, Picture, Toggles, Value, BACKDROP, TEXT};
 use crate::net::Online;
 use crate::Helm;
 
@@ -68,6 +73,10 @@ impl Plugin for ConsolePlugin {
             .add_message::<crate::net::VocabularyTaught>()
             .init_resource::<Console>()
             .init_resource::<Toggles>()
+            // The view a `client` line can read and move. Initialised here as
+            // well as by the camera's own plugin — either can be built first,
+            // and a console without a camera still has to answer.
+            .init_resource::<View>()
             .add_systems(Update, open_console.run_if(in_state(Helm::Sailing)))
             // Not gated on the console being up, exactly as the menus' typing
             // systems are not gated on their screens: a message reader that
@@ -178,7 +187,7 @@ impl Console {
             Some(split) => split,
             None => ("", self.input.as_str()),
         };
-        let matches: Vec<&str> = self
+        let matches: Vec<String> = self
             .completions(before)
             .into_iter()
             .filter(|word| word.starts_with(partial))
@@ -191,7 +200,7 @@ impl Console {
             // thing left to type is the next word.
             [word] => format!("{word} "),
             words => {
-                let lead = shared_lead(words);
+                let lead = shared_lead(words).to_string();
                 if lead.len() == partial.len() {
                     // Nothing grows: the choices themselves are the answer,
                     // said where the replies land.
@@ -199,7 +208,7 @@ impl Console {
                     self.say(&choices);
                     return;
                 }
-                lead.to_string()
+                lead
             }
         };
         if keep + grown.len() <= MAX_LINE {
@@ -209,37 +218,29 @@ impl Console {
         }
     }
 
-    /// The words that could stand after `before`, which are the ones this
-    /// client can know: the local `client` and its variables, which are this
-    /// module's own grammar, and whatever the server taught for that place in
-    /// a line. Where a line's next word is the player's own — a place, an
-    /// hour — nothing was taught for it and nothing is offered, which is the
-    /// same answer as for a word nobody knows.
-    fn completions(&self, before: &str) -> Vec<&str> {
+    /// The words that could stand after `before`: the next word of every
+    /// phrase this console knows that opens with exactly those words, each
+    /// offered once however many phrases carry it — `world` is one choice and
+    /// not two, though several phrases begin with it.
+    ///
+    /// The two grammars are walked as one list. A player typing does not care
+    /// which end of the wire will serve the line, and neither half is guessed
+    /// at: the local phrases are [`local`], read off [`Picture`], and the
+    /// server's are what it taught on joining. Where a line's next word is
+    /// the player's own — a place, an hour — no phrase carries it and nothing
+    /// is offered, which is the same answer as for a word nobody knows.
+    fn completions(&self, before: &str) -> Vec<String> {
         let earlier: Vec<&str> = before.split_whitespace().collect();
-        match earlier.as_slice() {
-            [] => std::iter::once(LOCAL)
-                .chain(self.taught(&earlier))
-                .collect(),
-            [LOCAL] => variables(),
-            _ => self.taught(&earlier),
-        }
-    }
-
-    /// The words the server taught for the place after `earlier`: the next
-    /// word of every phrase opening with exactly those words, each offered
-    /// once however many phrases carry it — `world` is one choice and not
-    /// two, though two phrases begin with it.
-    fn taught(&self, earlier: &[&str]) -> Vec<&str> {
-        let mut offered: Vec<&str> = Vec::new();
-        for phrase in &self.phrases {
+        let mine = local();
+        let mut offered: Vec<String> = Vec::new();
+        for phrase in mine.iter().chain(&self.phrases) {
             let mut words = phrase.split_whitespace();
             if !earlier.iter().all(|word| words.next() == Some(*word)) {
                 continue;
             }
             if let Some(next) = words.next() {
-                if !offered.contains(&next) {
-                    offered.push(next);
+                if !offered.iter().any(|it| it == next) {
+                    offered.push(next.to_string());
                 }
             }
         }
@@ -285,8 +286,11 @@ const LOCAL: &str = "client";
 /// server whose world it is about.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Dispatch {
-    /// A `client` line: it ran against [`Toggles`], and this is its answer.
-    Local(String),
+    /// A `client` line: it ran against [`Toggles`], and this is its answer —
+    /// [`Err`] where the line was refused. Both are words the player reads,
+    /// and whoever asked flattens them; the two are told apart this far for
+    /// the reason `server::console` says at its own [`Result`].
+    Local(Result<String, String>),
     /// Anything else: the server's to interpret, verbatim.
     Remote,
 }
@@ -300,10 +304,10 @@ pub(crate) enum Dispatch {
 /// line rather than of what is on screen: one grammar, whichever mouth speaks
 /// it, so a `client` variable is not something the socket has to be taught
 /// separately.
-pub(crate) fn dispatch(line: &str, toggles: &mut Toggles) -> Dispatch {
+pub(crate) fn dispatch(line: &str, picture: &mut Picture) -> Dispatch {
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.split_first() {
-        Some((&LOCAL, rest)) => Dispatch::Local(client(rest, toggles)),
+        Some((&LOCAL, rest)) => Dispatch::Local(client(rest, picture)),
         _ => Dispatch::Remote,
     }
 }
@@ -312,16 +316,16 @@ pub(crate) fn dispatch(line: &str, toggles: &mut Toggles) -> Dispatch {
 /// completes after `client`, and what a miss is told to try instead, this
 /// being the half of the grammar that lives on this machine.
 ///
-/// Read off [`Toggles::names`] rather than listed again here, so the words
+/// Read off [`Picture::names`] rather than listed again here, so the words
 /// this offers are the words [`client`] serves, always.
 fn variables() -> Vec<&'static str> {
-    Toggles::names().collect()
+    Picture::names().collect()
 }
 
 /// The longest lead every word here shares — at least what was typed, each
 /// already starting with that.
-fn shared_lead<'a>(words: &[&'a str]) -> &'a str {
-    let mut lead = words[0];
+fn shared_lead(words: &[String]) -> &str {
+    let mut lead = words[0].as_str();
     for word in &words[1..] {
         while !word.starts_with(lead) {
             let mut shorter = lead.chars();
@@ -333,38 +337,120 @@ fn shared_lead<'a>(words: &[&'a str]) -> &'a str {
 }
 
 /// The `client` grammar: `client` lists every variable, `client <var>` reads
-/// one, `client <var> <value>` writes one. Always answered — a console that
-/// says nothing back reads as a console that heard nothing.
-fn client(args: &[&str], toggles: &mut Toggles) -> String {
+/// one, `client <var> <value>` writes one — the three forms the server's
+/// `world` shelf has, for the reason its own module gives. Always answered:
+/// a console that says nothing back reads as a console that heard nothing.
+///
+/// Not every variable takes all three. `position` reads and does not turn,
+/// which is what a reading is: where somebody is is not a dial, and the ways
+/// to change it are sailing, walking, and being taken.
+fn client(args: &[&str], picture: &mut Picture) -> Result<String, String> {
     match args {
-        [] => {
-            let mut said = Vec::new();
-            for var in variables() {
-                if let Some(reading) = read(var, toggles) {
-                    said.push(reading);
-                }
-            }
-            said.join(" / ")
-        }
-        [var] => read(var, toggles).unwrap_or_else(|| no_such(var)),
-        [var, value] => match toggles.variable(var) {
+        // Whatever can be read from where this line was typed. A screen with
+        // no world under it has no view, so the view's three say nothing
+        // rather than saying three times that there is no view — which is
+        // what somebody who asked for one of them by name is told.
+        [] => Ok(variables()
+            .into_iter()
+            .filter_map(|var| read(var, picture).ok())
+            .collect::<Vec<_>>()
+            .join(" / ")),
+        [var] => read(var, picture),
+        [var, value] => match picture.variable(var) {
             Some(Value::Switch(state)) => switch(var, value, state),
             Some(Value::Rows(state)) => resolution(var, value, state),
-            None => no_such(var),
+            Some(Value::Looking(_, None)) => Err(NO_VIEW.to_string()),
+            Some(Value::Looking(Look::Position, _)) => {
+                Err(format!("`{var}` reads and does not turn"))
+            }
+            Some(Value::Looking(Look::Zoom, Some(looking))) => distance(var, value, looking),
+            Some(Value::Looking(Look::Yaw, Some(looking))) => bearing(var, value, looking),
+            None => Err(no_such(var)),
         },
-        _ => "one variable, one value — `client resolution 720`".to_string(),
+        _ => Err("one variable, one value — `client resolution 720`".to_string()),
     }
 }
 
+/// What a line about the view is told where there is no view: the menus,
+/// which have a console reachable through the socket and no world behind it
+/// — the camera outlives every world, so what is missing there is something
+/// to point it at rather than the camera. See `Machine::afloat`.
+const NO_VIEW: &str = "there is no view on this screen to speak of";
+
+/// The words that can stand after a variable, where they are a fixed few.
+/// What the kinds are called is this module's business, [`Picture`] only
+/// saying which kind a name is; see [`Kind`].
+fn values(var: &str) -> Vec<String> {
+    match Picture::kind(var) {
+        Some(Kind::Switch) => vec![ON.to_string(), OFF.to_string()],
+        // Nothing, though the rungs are a fixed few and `resolution` takes
+        // one of them. The only mouth that completes is the keyboard — the
+        // socket has no tab — and a run with a keyboard is a run with a
+        // window, where [`resolution`] refuses every rung there is. Offering
+        // them would complete a player into the one line this grammar can
+        // never serve where it was typed.
+        Some(Kind::Rows) => Vec::new(),
+        // Metres, a bearing, or nothing at all — none of them a word to
+        // offer, which is not the same as a word nobody has listed.
+        Some(Kind::Looking) | None => Vec::new(),
+    }
+}
+
+/// Every phrase this machine's own grammar serves, as far as its words are
+/// fixed: `client`, its variables, and the values they take. The mirror of
+/// the server's `phrases`, built the same way and for the same reason — tab
+/// offers what the grammar serves because it is reading the grammar, not a
+/// list somebody kept beside it.
+fn local() -> Vec<String> {
+    std::iter::once(LOCAL.to_string())
+        .chain(Picture::names().flat_map(|var| {
+            std::iter::once(format!("{LOCAL} {var}")).chain(
+                values(var)
+                    .into_iter()
+                    .map(move |value| format!("{LOCAL} {var} {value}")),
+            )
+        }))
+        .collect()
+}
+
 /// What one variable reads as — the same words a write answers with, so the
-/// answer to setting is the proof it took. `None` for a name that is not a
-/// variable at all.
-fn read(var: &str, toggles: &mut Toggles) -> Option<String> {
-    Some(match toggles.variable(var)? {
+/// answer to setting is the proof it took.
+///
+/// The view's readings come off the camera rather than off what was last
+/// asked for: what a driver wants to know is where the picture *is*, which
+/// after a put down or a wheel of the mouse is not what anybody typed. See
+/// [`Looking`], which is where the two are told apart.
+fn read(var: &str, picture: &mut Picture) -> Result<String, String> {
+    let Some(value) = picture.variable(var) else {
+        return Err(no_such(var));
+    };
+    Ok(match value {
         Value::Switch(on) => onoff(var, *on),
         Value::Rows(Some(rows)) => format!("{var} {rows}p"),
         Value::Rows(None) => format!("{var} the window's own"),
+        Value::Looking(_, None) => return Err(NO_VIEW.to_string()),
+        Value::Looking(look, Some(looking)) => {
+            let now = looking.now();
+            match look {
+                Look::Zoom => format!("{var} {}", now.distance.round()),
+                Look::Yaw => format!("{var} {}", degrees(now.yaw)),
+                // The place, said as the ground is: two numbers, the height
+                // being the camera's business and not a place anybody names.
+                Look::Position => format!("{var} {} {}", now.focus.x.round(), now.focus.z.round()),
+            }
+        }
     })
+}
+
+/// A bearing as the console says it: whole degrees of the compass. The
+/// camera's own yaw runs unbounded — easing never wants to wrap — so what it
+/// holds after a few turns is not a number anybody would type back.
+///
+/// Rounded before it is folded, not after: 359.7° rounds to 360, and a
+/// compass has no such bearing. Folding last sends it to the 0 the write of
+/// the same heading answers with.
+fn degrees(yaw: f32) -> f32 {
+    yaw.to_degrees().round().rem_euclid(360.0)
 }
 
 fn onoff(var: &str, on: bool) -> String {
@@ -382,13 +468,53 @@ fn no_such(var: &str) -> String {
 
 /// Throws a boolean switch, answering with the state it is now in — the same
 /// words a read gives, so the answer to setting is the proof it took.
-fn switch(var: &str, value: &str, state: &mut bool) -> String {
+fn switch(var: &str, value: &str, state: &mut bool) -> Result<String, String> {
     match value {
-        "on" => *state = true,
-        "off" => *state = false,
-        _ => return format!("`{var}` is on or off"),
+        ON => *state = true,
+        OFF => *state = false,
+        _ => return Err(format!("`{var}` is {ON} or {OFF}")),
     }
-    onoff(var, *state)
+    Ok(onoff(var, *state))
+}
+
+/// The two words a switch takes, named because the writer, the reading and
+/// the completion all say them.
+const ON: &str = "on";
+const OFF: &str = "off";
+
+/// `client zoom <m>`: how far off the camera stands. The bounds are the
+/// camera's own, so a line cannot ask for a view the wheel could not reach.
+fn distance(var: &str, value: &str, mut looking: Looking) -> Result<String, String> {
+    let metres: f32 = value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a distance in metres"))?;
+    if !(MIN_DISTANCE..=MAX_DISTANCE).contains(&metres) {
+        return Err(format!(
+            "`{var}` is between {MIN_DISTANCE} and {MAX_DISTANCE} metres, not {metres}"
+        ));
+    }
+    let wanted = View {
+        distance: metres,
+        ..looking.now()
+    };
+    looking.look(wanted);
+    Ok(format!("{var} {}", metres.round()))
+}
+
+/// `client yaw <deg>`: which way the camera looks from, in degrees of the
+/// compass, kept as the radians the view holds.
+fn bearing(var: &str, value: &str, mut looking: Looking) -> Result<String, String> {
+    let given: f32 = value
+        .parse()
+        .ok()
+        .filter(|degrees: &f32| degrees.is_finite())
+        .ok_or_else(|| format!("`{value}` is not a bearing in degrees"))?;
+    let wanted = View {
+        yaw: given.to_radians(),
+        ..looking.now()
+    };
+    looking.look(wanted);
+    Ok(format!("{var} {}", degrees(wanted.yaw)))
 }
 
 /// Sets how big a picture `shot` writes, by the rungs the display screen
@@ -396,25 +522,24 @@ fn switch(var: &str, value: &str, state: &mut bool) -> String {
 /// screen would have had. There is nothing to set in a run with a window: a
 /// picture of a window is the window, whatever is asked for here, and a
 /// number that quietly did nothing would be worse than a refusal.
-fn resolution(var: &str, value: &str, state: &mut Option<u32>) -> String {
+fn resolution(var: &str, value: &str, state: &mut Option<u32>) -> Result<String, String> {
     let rungs = crate::settings::rungs();
     let Some(rows) = state.as_mut() else {
-        return "a picture is the size of the window in a run that has one — \
-                `resolution` is for a run without"
-            .to_string();
+        return Err(
+            "a picture is the size of the window in a run that has one — \
+                    `resolution` is for a run without"
+                .to_string(),
+        );
     };
     match value.parse::<u32>().ok().filter(|it| rungs.contains(it)) {
         Some(chosen) => {
             *rows = chosen;
-            format!("{var} {chosen}p")
+            Ok(format!("{var} {chosen}p"))
         }
-        None => {
-            let offered: Vec<String> = rungs.iter().map(|rows| rows.to_string()).collect();
-            format!(
-                "`{var}` is one of {} — `client {var} 1440`",
-                offered.join(", ")
-            )
-        }
+        None => Err(format!(
+            "`{var}` is one of {} — `client {var} 1440`",
+            values(var).join(", ")
+        )),
     }
 }
 
@@ -436,7 +561,7 @@ fn console_keys(
     helm: Option<Res<State<Helm>>>,
     mut presses: MessageReader<KeyboardInput>,
     mut console: ResMut<Console>,
-    mut toggles: ResMut<Toggles>,
+    mut machine: Machine,
     online: Option<Res<Online>>,
     mut next: Option<ResMut<NextState<Helm>>>,
 ) {
@@ -460,7 +585,10 @@ fn console_keys(
                 console.recall = None;
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {
-                submit(&mut console, &mut toggles, online.as_deref());
+                // Taken afresh for the line rather than held across the loop:
+                // a `client zoom` moves the camera, and the next line typed
+                // should read what the last one did.
+                submit(&mut console, &mut machine.picture(), online.as_deref());
             }
             // The history, walked with the arrows: up into it, down back out,
             // and past the newest entry is the empty prompt again.
@@ -507,7 +635,7 @@ fn console_keys(
 
 /// Takes the line as typed: echoes it, runs its local half or puts it on the
 /// wire, and remembers it for the up arrow.
-fn submit(console: &mut Console, toggles: &mut Toggles, online: Option<&Online>) {
+fn submit(console: &mut Console, picture: &mut Picture, online: Option<&Online>) {
     let line = console.input.trim().to_string();
     console.input.clear();
     console.recall = None;
@@ -518,8 +646,8 @@ fn submit(console: &mut Console, toggles: &mut Toggles, online: Option<&Online>)
     console.say(&format!("> {line}"));
     console.history.push(line.clone());
 
-    match dispatch(&line, toggles) {
-        Dispatch::Local(reply) => console.say(&reply),
+    match dispatch(&line, picture) {
+        Dispatch::Local(Ok(reply) | Err(reply)) => console.say(&reply),
         Dispatch::Remote => match online {
             // Fire and forget, like everything a connection says: the answer
             // arrives through the reader thread as a Reply, and lands here
@@ -583,30 +711,54 @@ mod tests {
     use super::*;
     use crate::AppState;
 
+    /// What a `client` line answered with, for the tests that care about the
+    /// words and not which of the two kinds of answer it was.
+    fn said(args: &[&str], toggles: &mut Toggles) -> String {
+        let (Ok(reply) | Err(reply)) = client(args, &mut Picture::of(toggles));
+        reply
+    }
+
+    /// What a `client` line refused with — a test that meant to be refused
+    /// and was answered instead fails here rather than on the prose.
+    fn refused(args: &[&str], toggles: &mut Toggles) -> String {
+        client(args, &mut Picture::of(toggles)).expect_err("the line should have been refused")
+    }
+
+    /// A picture with a camera in it, which is what the helm has and no menu
+    /// screen does — the view's variables have nothing to say without one.
+    fn looking_at(view: View) -> (Toggles, View, crate::camera::MapCamera) {
+        (
+            Toggles::default(),
+            view,
+            crate::camera::MapCamera::looking(view),
+        )
+    }
+
     #[test]
     fn a_client_line_never_leaves_the_machine_and_nothing_else_stays() {
         let mut toggles = Toggles::default();
         assert_eq!(
-            dispatch("client stats on", &mut toggles),
-            Dispatch::Local("stats on".to_string())
+            dispatch("client stats on", &mut Picture::of(&mut toggles)),
+            Dispatch::Local(Ok("stats on".to_string()))
         );
         assert!(toggles.stats);
 
         // The rule is the first word and nothing else: these are the
         // server's, however local they might sound.
-        assert_eq!(dispatch("spawn shark", &mut toggles), Dispatch::Remote);
-        assert_eq!(dispatch("help", &mut toggles), Dispatch::Remote);
-        assert_eq!(dispatch("world time 18:00", &mut toggles), Dispatch::Remote);
+        let mut picture = Picture::of(&mut toggles);
+        assert_eq!(dispatch("spawn shark", &mut picture), Dispatch::Remote);
+        assert_eq!(dispatch("help", &mut picture), Dispatch::Remote);
+        assert_eq!(dispatch("world time 18:00", &mut picture), Dispatch::Remote);
     }
 
     #[test]
     fn every_switch_answers_and_takes() {
         let mut toggles = Toggles::default();
-        assert_eq!(client(&["haze", "off"], &mut toggles), "haze off");
+        assert_eq!(said(&["haze", "off"], &mut toggles), "haze off");
         assert!(!toggles.haze);
-        assert_eq!(client(&["wireframe", "on"], &mut toggles), "wireframe on");
+        assert_eq!(said(&["wireframe", "on"], &mut toggles), "wireframe on");
         assert!(toggles.wireframe);
-        assert_eq!(client(&["haze", "on"], &mut toggles), "haze on");
+        assert_eq!(said(&["haze", "on"], &mut toggles), "haze on");
         assert!(toggles.haze);
     }
 
@@ -617,11 +769,82 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            client(&[], &mut toggles),
+            said(&[], &mut toggles),
             "stats off / shadows on / haze on / wireframe on / \
              resolution the window's own"
         );
-        assert_eq!(client(&["haze"], &mut toggles), "haze on");
+        assert_eq!(said(&["haze"], &mut toggles), "haze on");
+    }
+
+    /// The view's three: read off the camera, which is what is actually
+    /// drawn, and written through it. `position` reads and does not turn —
+    /// where somebody is is not a dial, and the ways to change it are sailing,
+    /// walking, and being taken.
+    #[test]
+    fn the_view_reads_off_the_camera_and_the_place_only_reads() {
+        let (mut toggles, mut view, mut camera) = looking_at(View {
+            focus: Vec3::new(98.0, 12.0, -317.0),
+            distance: 240.0,
+            yaw: -std::f32::consts::PI,
+        });
+        {
+            let mut picture = Picture {
+                toggles: &mut toggles,
+                looking: Some(Looking {
+                    view: &mut view,
+                    camera: &mut camera,
+                }),
+            };
+            let mut ask = |args: &[&str]| client(args, &mut picture);
+
+            assert_eq!(ask(&["zoom"]), Ok("zoom 240".to_string()));
+            // Folded to a bearing of the compass, the camera's own running
+            // unbounded.
+            assert_eq!(ask(&["yaw"]), Ok("yaw 180".to_string()));
+            // Two numbers: the height under the camera is nowhere anybody
+            // names.
+            assert_eq!(ask(&["position"]), Ok("position 98 -317".to_string()));
+
+            // A write takes, and the reading follows the camera rather than
+            // repeating back what was asked for.
+            assert_eq!(ask(&["zoom", "120"]), Ok("zoom 120".to_string()));
+            assert_eq!(ask(&["zoom"]), Ok("zoom 120".to_string()));
+
+            // What the camera would refuse, the line refuses.
+            for asked in [["zoom", "5"], ["zoom", "5000"], ["yaw", "sideways"]] {
+                assert!(ask(&asked).is_err(), "`{}` was allowed", asked.join(" "));
+            }
+
+            let refused = ask(&["position", "0"]).expect_err("a place is not settable");
+            assert!(refused.contains("does not turn"), "unhelpful: {refused}");
+        }
+
+        // And it moved the camera itself, not merely the `View` a camera
+        // would be put back to — though that too, or entering a world again
+        // would undo it.
+        assert_eq!(camera.distance, 120.0, "the camera did not move");
+        assert_eq!(view.distance, 120.0, "a camera put back would undo it");
+    }
+
+    /// Every screen but the helm has no world to look at, and says so — a
+    /// variable that exists and has nothing to say is not a variable nobody
+    /// has.
+    #[test]
+    fn a_screen_with_no_view_says_so_rather_than_denying_the_variable() {
+        let mut toggles = Toggles::default();
+        for asked in [vec!["zoom"], vec!["yaw", "90"], vec!["position"]] {
+            let refused = client(&asked, &mut Picture::of(&mut toggles))
+                .expect_err("there is no camera here");
+            assert!(refused.contains("no view"), "unhelpful: {refused}");
+        }
+
+        // And a bare `client` simply leaves them out rather than saying it
+        // three times.
+        let listed = said(&[], &mut toggles);
+        assert!(
+            !listed.contains("zoom") && listed.contains("haze"),
+            "a screen with no view listed one anyway: {listed}"
+        );
     }
 
     /// A picture is the window in a run that has one, so the variable reads as
@@ -630,20 +853,20 @@ mod tests {
     fn the_picture_size_is_the_windows_until_there_is_no_window() {
         let mut windowed = Toggles::default();
         assert_eq!(
-            client(&["resolution"], &mut windowed),
+            said(&["resolution"], &mut windowed),
             "resolution the window's own"
         );
-        let refused = client(&["resolution", "1080"], &mut windowed);
-        assert!(refused.contains("window"), "unhelpful: {refused}");
+        let no_choosing = refused(&["resolution", "1080"], &mut windowed);
+        assert!(no_choosing.contains("window"), "unhelpful: {no_choosing}");
         assert_eq!(windowed.resolution, None, "a refused size took anyway");
 
         let mut windowless = Toggles {
             resolution: Some(1440),
             ..Default::default()
         };
-        assert_eq!(client(&["resolution"], &mut windowless), "resolution 1440p");
+        assert_eq!(said(&["resolution"], &mut windowless), "resolution 1440p");
         assert_eq!(
-            client(&["resolution", "720"], &mut windowless),
+            said(&["resolution", "720"], &mut windowless),
             "resolution 720p"
         );
         assert_eq!(windowless.resolution, Some(720));
@@ -653,12 +876,12 @@ mod tests {
         // windowless run for.
         for rung in crate::settings::rungs() {
             assert_eq!(
-                client(&["resolution", &rung.to_string()], &mut windowless),
+                said(&["resolution", &rung.to_string()], &mut windowless),
                 format!("resolution {rung}p")
             );
         }
         let last = crate::settings::rungs().last().copied();
-        let not_a_rung = client(&["resolution", "1234"], &mut windowless);
+        let not_a_rung = refused(&["resolution", "1234"], &mut windowless);
         assert!(not_a_rung.contains("1440"), "unhelpful: {not_a_rung}");
         assert_eq!(windowless.resolution, last, "a refused size took anyway");
     }
@@ -666,10 +889,10 @@ mod tests {
     #[test]
     fn a_wrong_client_line_is_answered_not_swallowed() {
         let mut toggles = Toggles::default();
-        let unknown = client(&["fog", "off"], &mut toggles);
+        let unknown = refused(&["fog", "off"], &mut toggles);
         assert!(unknown.contains("`fog`"), "unhelpful: {unknown}");
 
-        let not_a_switch = client(&["stats", "maybe"], &mut toggles);
+        let not_a_switch = refused(&["stats", "maybe"], &mut toggles);
         assert!(
             not_a_switch.contains("on or off"),
             "unhelpful: {not_a_switch}"
@@ -866,6 +1089,67 @@ mod tests {
         assert_eq!(input(&app), "world time ");
     }
 
+    /// The values a variable takes complete too, both sides of the wire: the
+    /// local ones off [`Toggles`], the server's off what it taught. This is
+    /// the word past the verb, and it is where a player spends most of their
+    /// typing — `client stats on` is three words of which two are fixed.
+    #[test]
+    fn tab_completes_the_values_as_well_as_the_words() {
+        let mut app = test_app();
+        app.world_mut().resource_mut::<Console>().teach(
+            ["world weather calm", "world weather gale"]
+                .map(String::from)
+                .to_vec(),
+        );
+        press_backquote(&mut app);
+
+        // A switch takes two words, and two letters say which — `o` is the
+        // lead they share, and tab grows a word rather than picking one.
+        type_word(&mut app, "client stats of");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "client stats off ");
+
+        // With nothing typed, tab grows the lead the two share and then
+        // offers them — the same two presses any pair of choices takes.
+        type_key(&mut app, KeyCode::Enter, "\r");
+        type_word(&mut app, "client shadows ");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "client shadows o");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert!(app.world().resource::<Console>().said("on  off"));
+
+        // And the server's values, which are taught in the same phrases its
+        // dials are.
+        type_key(&mut app, KeyCode::Enter, "\r");
+        type_word(&mut app, "world weather g");
+        type_key(&mut app, KeyCode::Tab, "");
+        assert_eq!(input(&app), "world weather gale ");
+    }
+
+    /// What tab offers after a variable is what the grammar would serve
+    /// where tab can be pressed — which is a keyboard, and so a window.
+    ///
+    /// That is why the rungs are not offered though they are a fixed few: a
+    /// run with a window is a run where every one of them is refused, and a
+    /// run without a window has nobody to press tab. A value offered where
+    /// it cannot be taken is worse than no offer at all.
+    #[test]
+    fn the_values_offered_are_the_ones_that_could_be_taken() {
+        assert!(values("stats").iter().any(|it| it == "off"));
+        assert!(
+            values("resolution").is_empty(),
+            "the rungs are offered where every one of them is refused"
+        );
+        assert!(
+            values("zoom").is_empty(),
+            "metres are the player's own, not a word to offer"
+        );
+        assert!(
+            values("fog").is_empty(),
+            "a variable nobody has offers values"
+        );
+    }
+
     #[test]
     fn tab_grows_what_it_can_and_offers_what_it_cannot() {
         let mut app = test_app();
@@ -908,7 +1192,7 @@ mod tests {
         assert!(app
             .world()
             .resource::<Console>()
-            .said("stats  shadows  haze  wireframe  resolution"));
+            .said("stats  shadows  haze  wireframe  resolution  zoom  yaw  position"));
 
         // And after `world `: every dial behind it.
         type_key(&mut app, KeyCode::Enter, "\r");

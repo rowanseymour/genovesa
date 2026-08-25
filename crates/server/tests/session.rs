@@ -3636,6 +3636,16 @@ fn console_lines_are_answered_and_a_time_command_reaches_everyone() {
     let lost = asker.hear_reply();
     assert!(lost.contains("help"), "no way out of: {lost}");
 
+    // The seed, which is the one thing about this world a client is never
+    // sent and so the one thing it could not otherwise say. A guest is every
+    // client here: the ground arrives generated, and nothing on the wire
+    // carries the number it was generated from.
+    asker.say(ToServer::Command {
+        line: "world seed".to_string(),
+    });
+    let seed = asker.hear_reply();
+    assert!(seed.contains('7'), "the seed was answered: {seed}");
+
     // A summons from the shallows, where there is shark water to answer it.
     let world = behind_the_curtain(7);
     let shallows =
