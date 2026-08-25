@@ -651,7 +651,7 @@ fn submit(console: &mut Console, picture: &mut Picture, online: Option<&Online>)
         Dispatch::Remote => match online {
             // Fire and forget, like everything a connection says: the answer
             // arrives through the reader thread as a Reply, and lands here
-            // through `crate::net::receive`.
+            // through `hear_the_server`.
             Some(online) => online.connection.command(line),
             // Unreachable while every world is a served world, but the line
             // was typed and silence would read as a hang.

@@ -184,9 +184,9 @@ type Waiting<'w, 's> = Query<
 
 /// What building a cairn needs in hand — the two asset stores and the pieces
 /// cut from them — bundled so that [`dress`] is one system parameter rather
-/// than three. Nothing else builds a cairn: the telling arrives in
-/// [`crate::net::receive`], which already has both hands on the hulls' kit and
-/// so cannot hold these too, and putting the bare stones up is all it does.
+/// than three. Nothing else builds a cairn: [`raise_the_cairns`] takes the
+/// telling and puts the bare stones up, holding no assets at all, which is
+/// why what a cairn is *made of* is a system of its own.
 #[derive(bevy::ecs::system::SystemParam)]
 struct CairnKit<'w, 's> {
     meshes: ResMut<'w, Assets<Mesh>>,

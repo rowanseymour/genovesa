@@ -984,9 +984,8 @@ impl Fleet {
     }
 
     /// A word about a boat: the first spawns its hull, every later one
-    /// re-moors it or changes whose hands are on the helm. Called by the
-    /// session's [`crate::net::receive`], which is where everything a server
-    /// says lands.
+    /// re-moors it or changes whose hands are on the helm. Called by
+    /// [`take_the_hulls`], which is where a [`crate::net::HullTold`] lands.
     ///
     /// The one word that changes this client's own life is `occupant`
     /// becoming — or no longer being — *us*: boarding is asked of the server
@@ -1232,9 +1231,9 @@ fn stand_off(commands: &mut Commands, players: &crate::player::Players, lying: &
     ));
 }
 
-/// What spawning a hull needs in hand — bundled because the telling arrives
-/// inside [`crate::net::receive`], which is already juggling the markers'
-/// own assets.
+/// What spawning a hull needs in hand — bundled because a hull is spawned
+/// from a telling, and [`take_the_hulls`] cannot hold two asset stores as
+/// separate parameters.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct HullKit<'w, 's> {
     pub(crate) meshes: ResMut<'w, Assets<Mesh>>,
