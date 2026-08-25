@@ -1199,7 +1199,10 @@ mod tests {
     fn driven_app() -> (App, Sender<Order>) {
         let (orders, waiting) = channel();
         let mut app = App::new();
-        app.add_plugins(TimePlugin)
+        // In a world, which is what a driver's lines are about — and what
+        // `Machine` asks about before it offers a view to read or move.
+        app.add_plugins((bevy::state::app::StatesPlugin, TimePlugin))
+            .insert_state(crate::AppState::InWorld)
             .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
             .insert_resource(Control {
                 orders: Mutex::new(waiting),

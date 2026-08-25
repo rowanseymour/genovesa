@@ -189,7 +189,7 @@ impl Console {
     ///
     /// The two grammars are walked as one list. A player typing does not care
     /// which end of the wire will serve the line, and neither half is guessed
-    /// at: the local phrases are [`local`], read off [`Toggles`], and the
+    /// at: the local phrases are [`local`], read off [`Picture`], and the
     /// server's are what it taught on joining. Where a line's next word is
     /// the player's own — a place, an hour — no phrase carries it and nothing
     /// is offered, which is the same answer as for a word nobody knows.
@@ -310,10 +310,10 @@ fn shared_lead(words: &[String]) -> &str {
 /// to change it are sailing, walking, and being taken.
 fn client(args: &[&str], picture: &mut Picture) -> Result<String, String> {
     match args {
-        // Whatever can be read from where this line was typed. A menu screen
-        // has no camera, so the view's three say nothing rather than saying
-        // three times that there is no view — which is what somebody who
-        // asked for one of them by name is told.
+        // Whatever can be read from where this line was typed. A screen with
+        // no world under it has no view, so the view's three say nothing
+        // rather than saying three times that there is no view — which is
+        // what somebody who asked for one of them by name is told.
         [] => Ok(variables()
             .into_iter()
             .filter_map(|var| read(var, picture).ok())
@@ -335,8 +335,10 @@ fn client(args: &[&str], picture: &mut Picture) -> Result<String, String> {
     }
 }
 
-/// What a line about the view is told where there is no view: on the menus,
-/// which have a console reachable through the socket and no camera behind it.
+/// What a line about the view is told where there is no view: the menus,
+/// which have a console reachable through the socket and no world behind it
+/// — the camera outlives every world, so what is missing there is something
+/// to point it at rather than the camera. See `Machine::afloat`.
 const NO_VIEW: &str = "there is no view on this screen to speak of";
 
 /// The words that can stand after a variable, where they are a fixed few.
@@ -345,10 +347,13 @@ const NO_VIEW: &str = "there is no view on this screen to speak of";
 fn values(var: &str) -> Vec<String> {
     match Picture::kind(var) {
         Some(Kind::Switch) => vec![ON.to_string(), OFF.to_string()],
-        Some(Kind::Rows) => crate::settings::rungs()
-            .iter()
-            .map(u32::to_string)
-            .collect(),
+        // Nothing, though the rungs are a fixed few and `resolution` takes
+        // one of them. The only mouth that completes is the keyboard — the
+        // socket has no tab — and a run with a keyboard is a run with a
+        // window, where [`resolution`] refuses every rung there is. Offering
+        // them would complete a player into the one line this grammar can
+        // never serve where it was typed.
+        Some(Kind::Rows) => Vec::new(),
         // Metres, a bearing, or nothing at all — none of them a word to
         // offer, which is not the same as a word nobody has listed.
         Some(Kind::Looking) | None => Vec::new(),
@@ -404,8 +409,12 @@ fn read(var: &str, picture: &mut Picture) -> Result<String, String> {
 /// A bearing as the console says it: whole degrees of the compass. The
 /// camera's own yaw runs unbounded — easing never wants to wrap — so what it
 /// holds after a few turns is not a number anybody would type back.
+///
+/// Rounded before it is folded, not after: 359.7° rounds to 360, and a
+/// compass has no such bearing. Folding last sends it to the 0 the write of
+/// the same heading answers with.
 fn degrees(yaw: f32) -> f32 {
-    yaw.to_degrees().rem_euclid(360.0).round()
+    yaw.to_degrees().round().rem_euclid(360.0)
 }
 
 fn onoff(var: &str, on: bool) -> String {
@@ -781,8 +790,9 @@ mod tests {
         assert_eq!(view.distance, 120.0, "a camera put back would undo it");
     }
 
-    /// Every screen but the helm has no camera, and says so — a variable that
-    /// exists and has nothing to say is not a variable nobody has.
+    /// Every screen but the helm has no world to look at, and says so — a
+    /// variable that exists and has nothing to say is not a variable nobody
+    /// has.
     #[test]
     fn a_screen_with_no_view_says_so_rather_than_denying_the_variable() {
         let mut toggles = Toggles::default();
@@ -1080,20 +1090,24 @@ mod tests {
         assert_eq!(input(&app), "world weather gale ");
     }
 
-    /// The rungs a picture can be written at are values like any other, and
-    /// come from the same ladder the writer measures against — a rung added
-    /// to [`crate::settings`] is completable without anything here being
-    /// told about it.
+    /// What tab offers after a variable is what the grammar would serve
+    /// where tab can be pressed — which is a keyboard, and so a window.
+    ///
+    /// That is why the rungs are not offered though they are a fixed few: a
+    /// run with a window is a run where every one of them is refused, and a
+    /// run without a window has nobody to press tab. A value offered where
+    /// it cannot be taken is worse than no offer at all.
     #[test]
-    fn the_picture_sizes_offered_are_the_ladders_own() {
-        assert_eq!(
-            values("resolution"),
-            crate::settings::rungs()
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-        );
+    fn the_values_offered_are_the_ones_that_could_be_taken() {
         assert!(values("stats").iter().any(|it| it == "off"));
+        assert!(
+            values("resolution").is_empty(),
+            "the rungs are offered where every one of them is refused"
+        );
+        assert!(
+            values("zoom").is_empty(),
+            "metres are the player's own, not a word to offer"
+        );
         assert!(
             values("fog").is_empty(),
             "a variable nobody has offers values"

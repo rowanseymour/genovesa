@@ -37,6 +37,7 @@ use crate::camera::{MapCamera, View};
 use crate::chart::Chart;
 use crate::net::Hosting;
 use crate::terrain::{Ground, Tally};
+use crate::AppState;
 use protocol::survey::SurveyTally;
 
 pub(crate) const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
@@ -209,8 +210,11 @@ const POSITION: &str = "position";
 /// lines from the ones that cross the wire.
 pub struct Picture<'a> {
     pub toggles: &'a mut Toggles,
-    /// `None` where there is no camera — every screen but the helm, which is
-    /// a refusal to read rather than a variable nobody has.
+    /// `None` where there is no world being looked at — every screen but the
+    /// helm, which is a refusal to read rather than a variable nobody has.
+    /// See [`Machine::afloat`], which is what decides it: the camera outlives
+    /// every world, so a reading off it on a menu would be a number about
+    /// nowhere.
     pub looking: Option<Looking<'a>>,
 }
 
@@ -258,8 +262,8 @@ pub enum Value<'a> {
     /// size — see [`Toggles::resolution`].
     Rows(&'a mut Option<u32>),
     /// One of the view's own, and the view to read or move — `None` on a
-    /// screen that has no camera. One variant for the three of them so that
-    /// *there is no view here* is worded once rather than three times.
+    /// screen with no world under it. One variant for the three of them so
+    /// that *there is no view here* is worded once rather than three times.
     Looking(Look, Option<Looking<'a>>),
 }
 
@@ -300,12 +304,26 @@ pub struct Machine<'w, 's> {
     pub toggles: ResMut<'w, Toggles>,
     view: ResMut<'w, View>,
     cameras: Query<'w, 's, &'static mut MapCamera>,
+    /// Whether there is a world being looked at.
+    ///
+    /// The camera is spawned at startup and never despawned, so its existing
+    /// says nothing about whether it is showing anybody anything: on a menu
+    /// screen it is still pointed wherever it was last left. Without this a
+    /// `client position` typed at the title screen would answer `0 0` — a
+    /// place, in the words a place is given, for a player who is nowhere.
+    ///
+    /// `None` in a run with no states at all, which is a test harness rather
+    /// than a screen, and is read as no world for the same reason.
+    afloat: Option<Res<'w, State<AppState>>>,
 }
 
 impl Machine<'_, '_> {
     /// This machine's picture, as a `client` line reaches it.
     pub fn picture(&mut self) -> Picture<'_> {
-        let camera = self.cameras.single_mut().ok();
+        let camera = self
+            .afloat()
+            .then(|| self.cameras.single_mut().ok())
+            .flatten();
         Picture {
             toggles: &mut self.toggles,
             looking: camera.map(|camera| Looking {
@@ -315,15 +333,26 @@ impl Machine<'_, '_> {
         }
     }
 
-    /// The view as it stands, or `None` on a screen with no camera — what a
-    /// line that may have moved the picture is measured against. The camera's
-    /// own rather than the [`View`], for the reason [`Looking`] gives.
+    /// The view as it stands, or `None` where there is no world being looked
+    /// at — what a line that may have moved the picture is measured against.
+    /// The camera's own rather than the [`View`], for the reason [`Looking`]
+    /// gives.
     pub fn seen(&self) -> Option<View> {
+        if !self.afloat() {
+            return None;
+        }
         self.cameras.single().ok().map(|camera| View {
             focus: camera.focus,
             distance: camera.distance,
             yaw: camera.yaw,
         })
+    }
+
+    /// Whether there is a world under the camera — see [`Machine::afloat`].
+    fn afloat(&self) -> bool {
+        self.afloat
+            .as_ref()
+            .is_some_and(|state| *state.get() == AppState::InWorld)
     }
 }
 

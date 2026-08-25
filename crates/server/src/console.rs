@@ -21,8 +21,9 @@
 //! alone reads it, a dial and a value turns it. Reading is the half that was
 //! missing while these were verbs: a console could order a gale but never
 //! ask whether one was still ordered, and `natural` could be given back to a
-//! sky that already had it. `goto` reads too, for the same reason and in the
-//! same words it answers a jump with.
+//! sky that already had it. The acts do not read: asking where somebody is
+//! is a client's own question — `client position` — and giving `goto` a
+//! second, argumentless meaning would hide a reading behind a verb.
 //!
 //! Every command is a row of [`COMMANDS`]: a word, the `help` lines it
 //! answers for, the fixed words that may follow it, and one function of
@@ -1283,6 +1284,20 @@ mod tests {
                 .next()
                 .expect("a phrase has a word");
             assert!(help.contains(word), "`help` does not mention {word}");
+        }
+
+        // A shelf needs more than its own word said, because a dial is
+        // taught as a phrase and completed into: `world tide` offered to
+        // every client while `help` says only `world` is exactly the drift
+        // the two being folds over one table is supposed to rule out, and
+        // the shelf is the one place the table cannot rule it out by itself
+        // — a dial's `help` line is prose in the `world` row.
+        for dial in &DIALS {
+            let advertised = format!("world {}", dial.name);
+            assert!(
+                help.contains(&advertised),
+                "`{advertised}` is taught to clients and `help` does not mention it"
+            );
         }
     }
 }
