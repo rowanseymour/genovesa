@@ -1409,6 +1409,91 @@ fn a_tender_is_lowered_alongside_and_the_ship_left_at_anchor() {
 }
 
 #[test]
+fn a_copy_of_somebodys_papers_lowers_a_boat_without_hoisting_theirs() {
+    // Two clients presenting one token is a player's files opened twice, and
+    // the second is dealt papers of its own rather than being refused. What it
+    // must not go on holding is the *first* player's claim on the hulls: a
+    // tender belongs to the papers its keeper holds, so a session lowering one
+    // under papers it no longer has hoists a boat belonging to whoever does.
+    let addr = host(7);
+
+    // Somebody to watch the coming and going by, since a departure is what
+    // puts papers in the world's memory and nothing else says when it has
+    // landed. A token is only recognised at the door once its holder has left
+    // through it, and two clients cannot be taken for one until then.
+    let (watcher, _w, _spawn, _t, _aboard) = Client::join_aboard(addr, None);
+    watcher.caught_up();
+
+    let (first, first_id, spawn, token, _aboard) = Client::join_aboard(addr, None);
+    first.caught_up();
+    drop(first);
+    while watcher.hear() != (ToClient::Left { id: first_id }) {}
+
+    // The holder, back on those papers and back at that helm.
+    let (alice, _a, _spawn, alices_token, aboard) = Client::join_aboard(addr, Some(token));
+    assert_eq!(alices_token, token, "the holder was not known at the door");
+    let ship = aboard.expect("a returning keeper is seated back at their helm");
+    alice.caught_up();
+
+    // Lowered alongside, then rowed well clear of the spawn and stepped out
+    // of: a rowing boat lying free with Alice's papers on it, and nowhere
+    // near where the second session will lower one. The distance matters —
+    // a free rowboat lying alongside is taken up rather than minted, which is
+    // a different rule and tested elsewhere — and it is rowed rather than
+    // sailed there, a tender going over the side only where an anchor holds.
+    alice.say(ToServer::Lower {
+        position: spawn + Vec2::new(3.0, 0.0),
+        heading: 0.0,
+    });
+    let tender = alice.hear_a_rowboat();
+    assert_ne!(tender, ship);
+    let far = spawn + Vec2::new(400.0, 0.0);
+    alice.say(ToServer::Helm {
+        position: far,
+        heading: 0.0,
+    });
+    alice.say(ToServer::Disembark { position: far });
+    alice.caught_up();
+
+    // The same token again, while she is still in the world.
+    let (bob, _b, bobs_spawn, bobs_token, bobs_ship) = Client::join_aboard(addr, Some(token));
+    assert_ne!(
+        bobs_token, token,
+        "the copy was not dealt papers of its own"
+    );
+    bobs_ship.expect("the copy enters aboard, as any stranger does");
+    bob.caught_up();
+
+    // And a tender of its own, four hundred metres from Alice's.
+    bob.say(ToServer::Lower {
+        position: bobs_spawn + Vec2::new(3.0, 0.0),
+        heading: 0.0,
+    });
+    let lowered = bob.hear_a_rowboat();
+    assert_ne!(
+        lowered, tender,
+        "the copy was handed a boat it was standing nowhere near"
+    );
+    bob.caught_up();
+
+    // Alice's is still in the water. One boat each is the rule, and the copy
+    // has one of its own — hoisting hers would be the world taking a hull off
+    // somebody still sailing, on the strength of papers she alone now holds.
+    alice.say(ToServer::Command {
+        line: "help".to_string(),
+    });
+    loop {
+        match alice.hear() {
+            ToClient::BoatGone { id } => panic!(
+                "the copy's lowering took {id:?} out of the world; Alice's tender is {tender:?}"
+            ),
+            ToClient::Reply { .. } => break,
+            _ => {}
+        }
+    }
+}
+
+#[test]
 fn a_boat_is_lowered_from_a_ships_helm_alongside_and_from_nowhere_else() {
     let addr = host(7);
     let (client, _id, spawn, _token, aboard) = Client::join_aboard(addr, None);
