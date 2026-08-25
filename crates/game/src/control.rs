@@ -221,10 +221,10 @@ enum Stage {
 
 impl Control {
     /// Hands a server's reply to whoever is waiting for one. Called by
-    /// [`crate::net::receive`] on every [`protocol::ToClient::Reply`], which
-    /// may well be answering a line somebody typed at the console instead —
-    /// so a reply arriving while nothing is waiting is dropped here and
-    /// printed there, rather than being anybody's answer.
+    /// [`take_the_answer`] on every [`crate::net::ServerReplied`], which may
+    /// well be answering a line somebody typed at the console instead — so a
+    /// reply arriving while nothing is waiting is dropped here and printed
+    /// there, rather than being anybody's answer.
     ///
     /// Whoever is waiting, not whoever asked: replies carry nothing to match
     /// them against, so a reply that arrives after its own line gave up
@@ -264,8 +264,8 @@ impl Control {
     }
 
     /// Notes that the world has put this player down somewhere — called by
-    /// [`crate::net::receive`] on every [`protocol::ToClient::PutDown`],
-    /// which is the one word that moves this client's own carrier.
+    /// [`note_the_put_down`] on every [`crate::net::PutDown`], which is the
+    /// one word that moves this client's own carrier.
     pub fn put_down(&mut self) {
         self.put_down = true;
     }
@@ -376,8 +376,45 @@ impl Plugin for ControlPlugin {
         // After the input plugin has filled the key state, so that a key this
         // module presses is not cleared by the same frame's real input, and is
         // seen by every system that reads it in `Update`.
-        app.add_systems(PreUpdate, serve_orders.after(InputSystems))
-            .add_systems(Update, hold_the_sky);
+        app.add_message::<crate::net::ServerReplied>()
+            .add_message::<crate::net::PutDown>()
+            .add_systems(PreUpdate, serve_orders.after(InputSystems))
+            .add_systems(Update, hold_the_sky)
+            // Chained, and that order is the wire's rather than a preference:
+            // a `goto` is answered with the put down first and the reply
+            // after — see the server's own console — and
+            // [`Control::answered`] reads what [`Control::put_down`] set. Read
+            // the other way round, a line that moved the player would answer
+            // before the ground at the far end had arrived, which is the whole
+            // thing a settle exists to wait for.
+            .add_systems(
+                Update,
+                (note_the_put_down, take_the_answer)
+                    .chain()
+                    .in_set(crate::net::Wire::Read),
+            );
+    }
+}
+
+/// Notes a world that has moved this player, for the line that asked it to.
+///
+/// The same word [`crate::player`] acts on; what a driver wants from it is
+/// only that it happened, the ground at the far end being what it is really
+/// waiting for.
+fn note_the_put_down(mut control: ResMut<Control>, mut moved: MessageReader<crate::net::PutDown>) {
+    for _ in moved.read() {
+        control.put_down();
+    }
+}
+
+/// Hands the server's replies to whoever down the socket is waiting for one.
+/// The same word the console prints — see [`crate::console`].
+fn take_the_answer(
+    mut control: ResMut<Control>,
+    mut replies: MessageReader<crate::net::ServerReplied>,
+) {
+    for reply in replies.read() {
+        control.answered(&reply.text);
     }
 }
 

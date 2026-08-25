@@ -202,6 +202,8 @@ impl Plugin for TerrainPlugin {
             MaterialPlugin::<SeaMaterial>::default(),
             MaterialPlugin::<ShadedMaterial>::default(),
         ))
+        .add_message::<crate::net::GroundArrived>()
+        .add_message::<crate::net::WindChanged>()
         .init_resource::<sea::Forecast>()
         .init_resource::<sea::SeaConditions>()
         .add_systems(OnEnter(AppState::InWorld), enter_world)
@@ -209,12 +211,18 @@ impl Plugin for TerrainPlugin {
         .add_systems(
             Update,
             (
+                // First, and in the wire's own set: a chunk that arrived this
+                // frame is drawn this frame rather than a frame later.
+                take_the_answers.in_set(crate::net::Wire::Read),
                 ask_for_ground,
                 spawn_arrivals,
                 receive_chunks,
                 stream_out,
                 follow_camera,
                 sea::refresh_depth,
+                // The wind heard, then worn: the sea this module draws is the
+                // sea `sea` keeps, so its two plugins are one.
+                sea::take_the_weather.in_set(crate::net::Wire::Read),
                 sea::settle_conditions,
             )
                 .chain()
@@ -1174,6 +1182,32 @@ fn leave_world(mut commands: Commands) {
 // ---------------------------------------------------------------------------
 // Streaming
 // ---------------------------------------------------------------------------
+
+/// Takes the ground the server has sent since last frame.
+///
+/// Only while a world is open, which the run condition on [`Ground`] is: a
+/// chunk answered after leaving one is about a world that no longer exists
+/// here, and there is nothing left for it to be part of.
+///
+/// Nothing is checked. What arrives is corner heights and palette entries —
+/// see [`crate::net::GroundArrived`], and the note on believing where it is
+/// written.
+///
+/// Drained rather than read, which is the one thing here that is not a
+/// matter of taste. A payload is sixteen thousand corners and a palette entry
+/// a square metre, and an arrival is a couple of hundred of them at once; a
+/// reader hands out `&GroundArrived` and [`Ground::deliver`] wants the
+/// payload itself, so reading would copy the whole burst. Draining is only
+/// safe because this is the sole reader — which is the deal for exactly the
+/// two words that carry a voyage's worth of anything, this and the survey.
+fn take_the_answers(
+    mut ground: ResMut<Ground>,
+    mut arrivals: ResMut<Messages<crate::net::GroundArrived>>,
+) {
+    for arrival in arrivals.drain() {
+        ground.deliver(arrival.chunk, arrival.ground);
+    }
+}
 
 /// Asks for every chunk newly inside the streaming radius.
 ///

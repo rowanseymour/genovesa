@@ -747,6 +747,27 @@ impl SeaConditions {
         self.swell(at, elapsed, depth)
     }
 
+    /// What a floating body rides at over a map point, in metres: the ground
+    /// where it stands proud of the water, and the water itself everywhere
+    /// else — or `None` where the ground has not arrived, which is a caller's
+    /// cue to keep the height it had rather than guess.
+    ///
+    /// One function because two things ask it and mean exactly the same thing
+    /// by it — a hull sits on this surface and another player's marker stands
+    /// its capsule's half-length above it — and because the `None` is the
+    /// half that is easy to get wrong. A body dropped to the waterline
+    /// wherever a chunk has streamed out and climbed back when it returns is
+    /// a body that flickers through the ground, and it looks exactly like a
+    /// physics bug rather than like a chunk that has not been sent.
+    ///
+    /// Not what a beast asks: an animal rides a depth measured *down* from
+    /// the moving surface, which is [`SeaConditions::water_over`] with no
+    /// ground in the answer at all.
+    pub fn surface_over(&self, ground: Option<&Ground>, at: Vec2, elapsed: f32) -> Option<f32> {
+        let standing = ground?.height(at.x, at.y)?;
+        Some(standing.max(self.water_over(ground, at, elapsed)))
+    }
+
     /// Where a thing riding a carrier stands on the map, and where the water
     /// is under it — the opening move of anything drawn as a formation.
     ///
@@ -767,6 +788,21 @@ impl SeaConditions {
         let at =
             carrier.transform_point(Vec3::new(station.translation.x, 0.0, station.translation.z));
         (at, self.water_over(ground, at.xz(), elapsed))
+    }
+}
+
+/// Takes the wind the server has told, which the drawn sea then eases onto —
+/// see [`settle_conditions`], which is the easing.
+///
+/// A target rather than an order, and the last word wins: a batch holding two
+/// tellings is a client that has been away for a frame, and the older of them
+/// is weather that has already happened.
+pub(crate) fn take_the_weather(
+    mut forecast: ResMut<Forecast>,
+    mut told: MessageReader<crate::net::WindChanged>,
+) {
+    for changed in told.read() {
+        forecast.wind = Some(changed.wind);
     }
 }
 
