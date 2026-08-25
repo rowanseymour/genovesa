@@ -219,15 +219,19 @@ impl Client {
     /// hull *is*, where [`Client::hear_a_boat`] only cares where it lies and
     /// whose it is.
     fn hear_a_boat_kinded(&self) -> (protocol::BoatId, BoatKind, Vec2, f32, Option<PlayerId>) {
-        self.hear_a_boat_kinded_by(Instant::now() + PATIENCE)
+        self.hear_a_boat_kinded_by(Instant::now() + PATIENCE, "word of any boat")
     }
 
-    /// The same, on a deadline a caller already started — so that a reader
-    /// looping over this is bounded as a whole rather than granting a fresh
-    /// wait to every hull that is not the one it wants.
+    /// The same, on a deadline a caller already started and in the caller's
+    /// own words — so that a reader looping over this is bounded as a whole
+    /// rather than granting a fresh wait to every hull that is not the one it
+    /// wants, and says what *it* was waiting for when the whole runs out.
+    /// Hulls keep arriving while such a reader waits, so its own "word of any
+    /// boat" is the one thing that did not fail.
     fn hear_a_boat_kinded_by(
         &self,
         deadline: Instant,
+        awaited: &str,
     ) -> (protocol::BoatId, BoatKind, Vec2, f32, Option<PlayerId>) {
         loop {
             if let ToClient::Boat {
@@ -236,7 +240,7 @@ impl Client {
                 position,
                 heading,
                 occupant,
-            } = self.hear_by(deadline, "word of any boat")
+            } = self.hear_by(deadline, awaited)
             {
                 return (id, kind, position, heading, occupant);
             }
@@ -254,7 +258,8 @@ impl Client {
     fn boat_changed_hands(&self, boat: protocol::BoatId, to: Option<PlayerId>) {
         let deadline = Instant::now() + PATIENCE;
         loop {
-            let (told, _kind, _at, _heading, occupant) = self.hear_a_boat_kinded_by(deadline);
+            let (told, _kind, _at, _heading, occupant) =
+                self.hear_a_boat_kinded_by(deadline, "that hull changing hands");
             if told == boat && occupant == to {
                 return;
             }
@@ -270,7 +275,8 @@ impl Client {
     fn hear_a_rowboat(&self) -> protocol::BoatId {
         let deadline = Instant::now() + PATIENCE;
         loop {
-            let (told, kind, ..) = self.hear_a_boat_kinded_by(deadline);
+            let (told, kind, ..) =
+                self.hear_a_boat_kinded_by(deadline, "anything going over the side");
             if kind == BoatKind::Rowboat {
                 return told;
             }
@@ -391,19 +397,19 @@ impl Client {
     /// The next word about a cairn, ignoring everything else — bounded like
     /// the beasts' reader, the session chattering on regardless.
     fn hear_a_cairn(&self) -> (IVec2, Vec2, String, bool) {
-        self.hear_a_cairn_by(Instant::now() + PATIENCE)
+        self.hear_a_cairn_by(Instant::now() + PATIENCE, "word of any cairn")
     }
 
-    /// The same, on a deadline a caller already started — see
+    /// The same, on a caller's deadline and in a caller's words — see
     /// [`Client::hear_a_boat_kinded_by`].
-    fn hear_a_cairn_by(&self, deadline: Instant) -> (IVec2, Vec2, String, bool) {
+    fn hear_a_cairn_by(&self, deadline: Instant, awaited: &str) -> (IVec2, Vec2, String, bool) {
         loop {
             if let ToClient::Cairn {
                 island,
                 at,
                 name,
                 yours,
-            } = self.hear_by(deadline, "word of any cairn")
+            } = self.hear_by(deadline, awaited)
             {
                 return (island, at, name, yours);
             }
@@ -421,7 +427,7 @@ impl Client {
     fn hear_a_cairn_saying(&self, wanted: impl Fn(&str) -> bool) -> (IVec2, Vec2, String, bool) {
         let deadline = Instant::now() + PATIENCE;
         loop {
-            let told = self.hear_a_cairn_by(deadline);
+            let told = self.hear_a_cairn_by(deadline, "a cairn saying the wanted thing");
             if wanted(&told.2) {
                 return told;
             }
