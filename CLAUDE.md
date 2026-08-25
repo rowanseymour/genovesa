@@ -87,10 +87,16 @@ This is not a claim that comments cannot rot; they do. It is that a comment
 rots *in the diff of the change that caused it*, where a reviewer is already
 looking, and a second copy in another directory rots where nobody is.
 
-Which leaves the listings that stand in for a grammar — `HELP`,
-`server::console`'s `VERBS`, `MenuButton::EVERY`. Each is an index and not the
-thing indexed: nothing reads it to serve a line, so each needs a test holding
-it to what it advertises, and a fourth wants one the day it is written. `HELP`
+Which leaves the listings that stand in for a grammar. The answer preferred
+here is not to have one: a command is a row of a table — its word, its `help`
+lines, what may follow it, and one function from the words to what the asker
+is told — and `help` and the completion a client is taught are folds over that
+table. Two listings went that way, and what they used to need a test for
+became a thing that cannot be written.
+
+What the tables cannot generate is the prose inside a `help` line, and
+`MenuButton::EVERY` is an index still. Each of those needs a test holding it to
+what it advertises, and a new one wants a test the day it is written: `HELP`
 went without for a while and nothing showed, which is the whole argument.
 
 ## Comments explain why, and stop

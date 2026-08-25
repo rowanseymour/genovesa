@@ -210,6 +210,19 @@ pub enum Value<'a> {
     Rows(&'a mut Option<u32>),
 }
 
+/// Which of the two a variable is, told without a [`Toggles`] to hand.
+///
+/// [`Value`] answers the same question by handing over the thing itself,
+/// which is what reading and writing want and what completing a line cannot
+/// use: tab is offered while a player types, against no particular state, and
+/// what it needs to know is that `on` and `off` stand after a switch and the
+/// ladder's rungs after `resolution`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    Switch,
+    Rows,
+}
+
 impl Toggles {
     /// The variable a name asks for, whatever kind it holds, or `None` for a
     /// name that is not one.
@@ -220,14 +233,27 @@ impl Toggles {
         }
     }
 
-    /// Every variable there is, in the order a bare `client` lists them — here
-    /// rather than in the console because this is where they live, and a list
-    /// kept beside the grammar would be a second place to add one.
-    pub fn names() -> impl Iterator<Item = &'static str> {
+    /// Every variable there is, in the order a bare `client` lists them, each
+    /// with the kind it holds — here rather than in the console because this
+    /// is where they live, and a list kept beside the grammar would be a
+    /// second place to add one.
+    pub fn every() -> impl Iterator<Item = (&'static str, Kind)> {
         SWITCHES
             .iter()
-            .map(|switch| switch.name)
-            .chain([RESOLUTION])
+            .map(|switch| (switch.name, Kind::Switch))
+            .chain([(RESOLUTION, Kind::Rows)])
+    }
+
+    /// Every variable's name, for the listing and the refusal that offer them.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        Self::every().map(|(name, _)| name)
+    }
+
+    /// What a name holds, or `None` for a name that is not a variable at all.
+    pub fn kind(name: &str) -> Option<Kind> {
+        Self::every()
+            .find(|(it, _)| *it == name)
+            .map(|(_, kind)| kind)
     }
 
     /// The boolean switch a name asks for, or `None` where the name is not

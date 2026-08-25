@@ -3551,6 +3551,16 @@ fn console_lines_are_answered_and_a_time_command_reaches_everyone() {
     let lost = asker.hear_reply();
     assert!(lost.contains("help"), "no way out of: {lost}");
 
+    // The seed, which is the one thing about this world a client is never
+    // sent and so the one thing it could not otherwise say. A guest is every
+    // client here: the ground arrives generated, and nothing on the wire
+    // carries the number it was generated from.
+    asker.say(ToServer::Command {
+        line: "world seed".to_string(),
+    });
+    let seed = asker.hear_reply();
+    assert!(seed.contains('7'), "the seed was answered: {seed}");
+
     // A summons from the shallows, where there is shark water to answer it.
     let world = behind_the_curtain(7);
     let shallows =
@@ -3887,5 +3897,23 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
     assert!(
         client.nothing_was_said_about_a_boat(),
         "a hull followed a walker up the beach"
+    );
+
+    // And where they were put down reads back off the console — the point of
+    // a bare `goto`: a place a driver can ask the world for, rather than one
+    // it had to have been watching the replies to catch. The reply waiting
+    // here is the `help` the bracketing above typed, not the jump's.
+    client.hear_reply();
+    client.say(ToServer::Command {
+        line: "goto".to_string(),
+    });
+    assert_eq!(
+        client.hear_reply(),
+        format!(
+            "you are at {} {}",
+            standing.x.round() as i32,
+            standing.y.round() as i32
+        ),
+        "the console does not say where the world put somebody"
     );
 }

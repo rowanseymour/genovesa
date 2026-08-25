@@ -1671,10 +1671,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         post(
             newcomer,
             ToClient::Vocabulary {
-                phrases: console::PHRASES
-                    .iter()
-                    .map(|phrase| phrase.to_string())
-                    .collect(),
+                phrases: console::phrases(),
             },
         );
         for (other, existing) in players.iter() {

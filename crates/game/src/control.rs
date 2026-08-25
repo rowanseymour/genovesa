@@ -7,13 +7,19 @@
 //! can only say what a run should do *before* it starts, where a socket says
 //! it at any point and as often as it likes.
 //!
-//! Nothing here invents a grammar. A line goes to
-//! [`crate::console::dispatch`] exactly as a typed one would — so `client
+//! Nothing here invents a grammar. A word this end has no [`Verb`] for goes
+//! to [`crate::console::dispatch`] exactly as a typed one would — so `client
 //! haze off` doctors this client's picture and `world weather gale` crosses
 //! the wire to the server, and a verb added to either side is reachable from
 //! here the day it is added. What this module adds is what a *keyboard* never
 //! needed words for: `shot`, `press`, `click`, `zoom`, `yaw`, `hold` and
 //! `quit`.
+//!
+//! Those are [`VERBS`], a row apiece — the word, what `help` says of it, and
+//! one function from the words after it to what should be begun. The three
+//! vocabularies in this game are all shaped that way now, and for the same
+//! reason: what `help` says is a fold over the table rather than a listing
+//! beside it, so it cannot come to advertise a word nothing serves.
 //!
 //! Two of those are less obvious than they look. `press` works the bound key
 //! through the real bindings rather than commanding the world, because
@@ -73,20 +79,6 @@ use crate::menu::MenuButton;
 use crate::net::Online;
 use crate::settings;
 use crate::terrain::{ChunkBuild, Ground};
-
-/// What `help` says about this end of the grammar, before the server's own
-/// answer is appended to it. The server's half is asked for rather than
-/// guessed at, exactly as the console's tab completion asks — so one `help`
-/// down the socket is the whole vocabulary, both sides of the wire.
-const HELP: &str = "shot <path> — write a PNG of the view, once the ground has arrived\n\
-                    press <control> [seconds] — hold a control down, or tap it if no time is given; \
-                     `escape` too, which is nobody's control\n\
-                    click <button> — press a menu button; `click` alone lists them\n\
-                    zoom <m> — camera distance\n\
-                    yaw <deg> — bearing to look from\n\
-                    hold on|off — stop the clock where it stands, so the light keeps still\n\
-                    quit — close the world and stop the game\n\
-                    client … — this machine's own switches; `client` alone lists them";
 
 /// How tall a picture a windowless run writes until the console says
 /// otherwise, in rows off [`crate::settings::LADDER`]. 1440 matches the shots
@@ -256,7 +248,10 @@ impl Control {
                 // exactly as the view verbs are, and is answered when the
                 // picture has stopped changing.
                 self.doing = if std::mem::take(&mut self.put_down) {
-                    Some(settling(said, answer))
+                    Some(Doing {
+                        answer,
+                        work: settling(said),
+                    })
                 } else {
                     let _ = answer.send(said);
                     None
@@ -729,6 +724,126 @@ impl Doing {
 
 /// Starts a line. Answers it outright where it can, and hands back what to go
 /// on doing where it cannot.
+/// One line this end serves: the word that reaches it, what `help` says about
+/// it, and what saying it begins.
+///
+/// A table for the reason `server::console`'s is one — [`help`] is a fold
+/// over it, so the listing and the grammar cannot come apart — and for one
+/// more that is this module's own. Every arm of the match this replaced ended
+/// in the same four lines: parse the words, make a [`Doing`] out of what came
+/// back, and answer the refusal otherwise. A verb now says what it wants
+/// begun and nothing about how a line is answered, which is [`begin`]'s.
+struct Verb {
+    word: &'static str,
+    /// What `help` says, each line printed after the word.
+    usage: &'static [&'static str],
+    run: fn(Spoken<'_, '_, '_>) -> Result<Begun, String>,
+}
+
+/// What a verb is handed: the words after it, the line they were cut from,
+/// and this machine to work on.
+struct Spoken<'a, 'w, 's> {
+    args: &'a [&'a str],
+    /// The line as typed, whole — for `shot`, whose argument is a path and
+    /// may carry spaces. See [`after_verb`].
+    line: &'a str,
+    hands: &'a mut Hands<'w, 's>,
+    held: Held<'a>,
+}
+
+/// What a verb has begun, which is one of five things and never a socket
+/// answer: the answering is [`begin`]'s, and writing it once there is the
+/// point of the table.
+enum Begun {
+    /// Work that outlives the line. The answer comes when it is done —
+    /// see [`Doing::advance`].
+    Working(Work),
+    /// A button pressed on the screen. The stand-in that carries the press is
+    /// spawned by [`begin`], which is where a [`Commands`] is.
+    Clicking(MenuButton),
+    /// An answer on the spot, and nothing left to wait for.
+    Said(String),
+    /// The server's line: put on the wire, its answer given after this much
+    /// of ours. See [`forward`].
+    Asking(String),
+    /// The world closed and the game stopped.
+    Quitting,
+}
+
+/// Every line this end serves, in the order `help` prints them.
+const VERBS: [Verb; 9] = [
+    Verb {
+        word: "shot",
+        usage: &["<path> — write a PNG of the view, once the ground has arrived"],
+        run: shooting,
+    },
+    Verb {
+        word: "press",
+        usage: &[
+            "<control> [seconds] — hold a control down, or tap it if no time is given; \
+             `escape` too, which is nobody's control",
+        ],
+        run: pressing,
+    },
+    Verb {
+        word: "click",
+        usage: &["<button> — press a menu button; `click` alone lists them"],
+        run: clicking,
+    },
+    Verb {
+        word: "zoom",
+        usage: &["[m] — camera distance; the word alone reads it"],
+        run: zooming,
+    },
+    Verb {
+        word: "yaw",
+        usage: &["[deg] — bearing to look from; the word alone reads it"],
+        run: yawing,
+    },
+    Verb {
+        word: "hold",
+        usage: &["on|off — stop the clock where it stands, so the light keeps still"],
+        run: holding,
+    },
+    Verb {
+        word: "quit",
+        usage: &["— close the world and stop the game"],
+        run: quitting,
+    },
+    // Listed by nothing, unlike every other row: the answer to `help` is
+    // both halves of the vocabulary at once, and the server's own line for it
+    // is already in the second half. Saying it here would say it twice.
+    Verb {
+        word: "help",
+        usage: &[],
+        run: |_| Ok(Begun::Asking(help())),
+    },
+    // Served by the fall-through, which is where the rule about what stays on
+    // this machine lives. Listed all the same: a player at the socket has no
+    // other way to learn the word, and `help` is the documentation.
+    Verb {
+        word: "client",
+        usage: &["… — this machine's own switches; `client` alone lists them"],
+        run: elsewhere,
+    },
+];
+
+/// What `help` says about this end of the grammar, before the server's own
+/// answer is appended to it. The server's half is asked for rather than
+/// guessed at, exactly as the console's tab completion asks — so one `help`
+/// down the socket is the whole vocabulary, both sides of the wire.
+fn help() -> String {
+    VERBS
+        .iter()
+        .flat_map(|verb| {
+            verb.usage
+                .iter()
+                .map(move |line| format!("{} {line}", verb.word))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn begin(
     order: Order,
     commands: &mut Commands,
@@ -738,127 +853,171 @@ fn begin(
 ) -> Option<Doing> {
     let Order { line, answer } = order;
     let words: Vec<&str> = line.split_whitespace().collect();
-    match words.split_first() {
-        Some((&"shot", _)) => match shot(after_verb(&line)) {
-            Ok(path) => Some(Doing {
+    let (word, args) = words
+        .split_first()
+        .map_or(("", &[][..]), |(word, args)| (*word, args));
+
+    let run = VERBS.iter().find(|verb| verb.word == word).map_or(
+        elsewhere as fn(Spoken<'_, '_, '_>) -> Result<Begun, String>,
+        |verb| verb.run,
+    );
+    let begun = run(Spoken {
+        args,
+        line: &line,
+        hands,
+        held,
+    });
+
+    match begun {
+        Err(why) => refuse(why, answer),
+        Ok(Begun::Working(work)) => Some(Doing { answer, work }),
+        Ok(Begun::Clicking(button)) => {
+            // A stand-in rather than the button itself. Every menu system
+            // asks for `(&Interaction, &MenuButton)` and none of them cares
+            // which entity carries it, so this goes through the same code a
+            // click does — and the real button cannot be used for it:
+            // `ui_focus_system` sets every *node* it finds pressed back to
+            // `None` the moment the mouse is not down, which in a run with no
+            // mouse is always. A bare entity is no node, so nothing takes the
+            // press away but us.
+            let stand_in = commands.spawn((button, Interaction::Pressed)).id();
+            Some(Doing {
                 answer,
-                work: Work::Shooting {
-                    path,
-                    target: held.target,
-                    stage: Stage::Arriving,
+                work: Work::Settling {
                     waited: 0,
                     age: 0,
+                    said: format!("{} clicked", args.join(" ")),
+                    stand_in: Some(stand_in),
                 },
-            }),
-            Err(why) => refuse(why, answer),
-        },
-        Some((&"press", rest)) => match press(rest) {
-            Ok((pressing, left)) => {
-                // The key the control is *bound* to rather than one of this
-                // module's choosing, so a rebound control is pressed where
-                // the player put it and a press goes down the same path a
-                // hand would.
-                let key = pressing.key(&hands.bindings);
-                hands.keys.press(key);
-                Some(Doing {
-                    answer,
-                    work: Work::Pressing {
-                        key,
-                        left,
-                        said: pressed(pressing, left),
-                    },
-                })
-            }
-            Err(why) => refuse(why, answer),
-        },
-        Some((&"zoom", rest)) => match one(rest, "zoom", "<metres>", zoom) {
-            Ok(distance) => {
-                let wanted = View {
-                    distance,
-                    ..*hands.view
-                };
-                hands.look(wanted);
-                Some(settling(format!("zoom {distance}"), answer))
-            }
-            Err(why) => refuse(why, answer),
-        },
-        Some((&"yaw", rest)) => match one(rest, "yaw", "<degrees>", yaw) {
-            Ok(bearing) => {
-                let wanted = View {
-                    yaw: bearing,
-                    ..*hands.view
-                };
-                hands.look(wanted);
-                Some(settling(
-                    format!("yaw {}", bearing.to_degrees().round()),
-                    answer,
-                ))
-            }
-            Err(why) => refuse(why, answer),
-        },
-        Some((&"click", rest)) => match button(rest, &hands.buttons) {
-            Ok(button) => {
-                // A stand-in rather than the button itself. Every menu system
-                // asks for `(&Interaction, &MenuButton)` and none of them
-                // cares which entity carries it, so this goes through the
-                // same code a click does — and the real button cannot be used
-                // for it: `ui_focus_system` sets every *node* it finds
-                // pressed back to `None` the moment the mouse is not down,
-                // which in a run with no mouse is always. A bare entity is no
-                // node, so nothing takes the press away but us.
-                let stand_in = commands.spawn((button, Interaction::Pressed)).id();
-                Some(Doing {
-                    answer,
-                    work: Work::Settling {
-                        waited: 0,
-                        age: 0,
-                        said: format!("{} clicked", rest.join(" ")),
-                        stand_in: Some(stand_in),
-                    },
-                })
-            }
-            Err(why) => refuse(why, answer),
-        },
-        // Letting go is done the moment it is said — there is nothing to wait
-        // for in handing the hour back to the world. Taking hold is not.
-        Some((&"hold", rest)) => match onoff(rest, "hold") {
-            // No world here, and no word from one ever: there is no clock to
-            // hold, and waiting for an hour that is never coming would stand
-            // a scripted run still for the whole of `PATIENCE` before saying
-            // so. A session that has simply not been told the hour *yet* is
-            // the other case, and that one waits — the word is on its way.
-            Ok(true) if hands.online.is_none() && !hands.sky.heard_the_hour() => refuse(
-                "there is no world here whose clock could be held".to_string(),
-                answer,
-            ),
-            Ok(true) => Some(Doing {
-                answer,
-                work: Work::Holding { age: 0 },
-            }),
-            Ok(false) => {
-                *held.holding = false;
-                let _ = answer.send("the clock runs again".to_string());
-                None
-            }
-            Err(why) => refuse(why, answer),
-        },
-        Some((&"quit", [])) => {
+            })
+        }
+        Ok(Begun::Said(said)) => {
+            let _ = answer.send(said);
+            None
+        }
+        Ok(Begun::Asking(prefix)) => forward(&line, prefix, hands, answer),
+        Ok(Begun::Quitting) => {
             let _ = answer.send("closing the world".to_string());
             exit.write(AppExit::Success);
             None
         }
-        // Both halves of the vocabulary in one answer: this end's, which the
-        // server has never heard of, and the server's, which is the only
-        // place its own verbs are written down.
-        Some((&"help", [])) => forward(&line, HELP.to_string(), hands, answer),
-        _ => match dispatch(&line, &mut hands.toggles) {
-            Dispatch::Local(reply) => {
-                let _ = answer.send(reply);
-                None
-            }
-            Dispatch::Remote => forward(&line, String::new(), hands, answer),
-        },
     }
+}
+
+/// `shot <path>`: a picture of the view, once there is a view to take one of.
+fn shooting(spoken: Spoken) -> Result<Begun, String> {
+    let path = shot(after_verb(spoken.line))?;
+    Ok(Begun::Working(Work::Shooting {
+        path,
+        target: spoken.held.target,
+        stage: Stage::Arriving,
+        waited: 0,
+        age: 0,
+    }))
+}
+
+/// `press <control> [seconds]`: a control held down, or tapped.
+fn pressing(spoken: Spoken) -> Result<Begun, String> {
+    let (control, left) = press(spoken.args)?;
+    // The key the control is *bound* to rather than one of this module's
+    // choosing, so a rebound control is pressed where the player put it and a
+    // press goes down the same path a hand would.
+    let key = control.key(&spoken.hands.bindings);
+    spoken.hands.keys.press(key);
+    Ok(Begun::Working(Work::Pressing {
+        key,
+        left,
+        said: pressed(control, left),
+    }))
+}
+
+/// `click <button>`: a button of the screen pressed.
+fn clicking(spoken: Spoken) -> Result<Begun, String> {
+    Ok(Begun::Clicking(button(spoken.args, &spoken.hands.buttons)?))
+}
+
+/// `zoom [m]`: how far off the camera stands, set or read.
+///
+/// Reading matters more here than the wording suggests. A driver that has
+/// only ever *written* the view knows what it asked for, but a run it did not
+/// start — or one whose camera the player has since moved — it can only ask
+/// about, and the overlay is no answer: a number in a picture is a number
+/// nothing can read.
+fn zooming(spoken: Spoken) -> Result<Begun, String> {
+    if spoken.args.is_empty() {
+        return Ok(Begun::Said(format!("zoom {}", spoken.hands.view.distance)));
+    }
+    let distance = one(spoken.args, "zoom", "<metres>", zoom)?;
+    let wanted = View {
+        distance,
+        ..*spoken.hands.view
+    };
+    spoken.hands.look(wanted);
+    Ok(Begun::Working(settling(format!("zoom {distance}"))))
+}
+
+/// `yaw [deg]`: which way the camera looks from, set or read — see
+/// [`zooming`] for why the reading is worth having.
+///
+/// Folded to a bearing on the way out. The camera's own yaw runs unbounded,
+/// easing never wanting to wrap, so what it holds after a few turns is not a
+/// number anybody would type back.
+fn yawing(spoken: Spoken) -> Result<Begun, String> {
+    if spoken.args.is_empty() {
+        let bearing = spoken.hands.view.yaw.to_degrees().rem_euclid(360.0);
+        return Ok(Begun::Said(format!("yaw {}", bearing.round())));
+    }
+    let bearing = one(spoken.args, "yaw", "<degrees>", yaw)?;
+    let wanted = View {
+        yaw: bearing,
+        ..*spoken.hands.view
+    };
+    spoken.hands.look(wanted);
+    Ok(Begun::Working(settling(format!(
+        "yaw {}",
+        bearing.to_degrees().round()
+    ))))
+}
+
+/// `hold on|off`: the clock stopped where it stands, or let go of.
+///
+/// Letting go is done the moment it is said — there is nothing to wait for in
+/// handing the hour back to the world. Taking hold is not.
+fn holding(spoken: Spoken) -> Result<Begun, String> {
+    match onoff(spoken.args, "hold")? {
+        // No world here, and no word from one ever: there is no clock to
+        // hold, and waiting for an hour that is never coming would stand a
+        // scripted run still for the whole of `PATIENCE` before saying so. A
+        // session that has simply not been told the hour *yet* is the other
+        // case, and that one waits — the word is on its way.
+        true if spoken.hands.online.is_none() && !spoken.hands.sky.heard_the_hour() => {
+            Err("there is no world here whose clock could be held".to_string())
+        }
+        true => Ok(Begun::Working(Work::Holding { age: 0 })),
+        false => {
+            *spoken.held.holding = false;
+            Ok(Begun::Said("the clock runs again".to_string()))
+        }
+    }
+}
+
+/// `quit`: the world closed and the game stopped.
+fn quitting(spoken: Spoken) -> Result<Begun, String> {
+    match spoken.args {
+        [] => Ok(Begun::Quitting),
+        _ => Err("`quit` takes nothing but itself".to_string()),
+    }
+}
+
+/// Everything this end has no verb for: a `client` line, which never leaves
+/// the machine, or the server's, which crosses verbatim. The rule about which
+/// is which is [`dispatch`]'s and is asked for here rather than repeated —
+/// one grammar, whichever mouth speaks it.
+fn elsewhere(spoken: Spoken) -> Result<Begun, String> {
+    Ok(match dispatch(spoken.line, &mut spoken.hands.toggles) {
+        Dispatch::Local(Ok(reply) | Err(reply)) => Begun::Said(reply),
+        Dispatch::Remote => Begun::Asking(String::new()),
+    })
 }
 
 /// Says no, and has done with the line.
@@ -867,17 +1026,14 @@ fn refuse(why: String, answer: SyncSender<String>) -> Option<Doing> {
     None
 }
 
-/// Waits for the world to catch up with a view that has just moved, and says
-/// what was asked for once it has.
-fn settling(said: String, answer: SyncSender<String>) -> Doing {
-    Doing {
-        answer,
-        work: Work::Settling {
-            waited: 0,
-            age: 0,
-            said,
-            stand_in: None,
-        },
+/// The work of waiting for the world to catch up with a view that has just
+/// moved, and saying what was asked for once it has.
+fn settling(said: String) -> Work {
+    Work::Settling {
+        waited: 0,
+        age: 0,
+        said,
+        stand_in: None,
     }
 }
 
@@ -1398,27 +1554,43 @@ mod tests {
         assert!(why.contains("new-world"), "unhelpful: {why}");
     }
 
-    /// Every word `help` offers is a word this end actually serves.
-    ///
-    /// `help` is the only documentation the socket has — see CLAUDE.md — and
-    /// `HELP` is a listing that [`begin`] never reads, so nothing but this
-    /// holds the two together. A verb dropped from the match would fall
-    /// through to `forward` and be refused by the server, while `help` went
-    /// on offering it. The other two vocabularies in this subsystem are each
-    /// pinned the same way: `server::console`'s `PHRASES` to `interpret`, and
-    /// `MenuButton::EVERY` to `parse`.
-    ///
-    /// Every listed word is answered on the frame it arrives when given
-    /// alone — a refusal for the ones that want an argument, which is still
+    /// The view reads as well as writes, and answers on the spot: a reading
+    /// changes nothing, so there is no picture to wait for the way a setting
+    /// has. The yaw comes back folded to a bearing — what the camera holds
+    /// runs unbounded, and a driver that read `-540` and wrote it back would
+    /// be turning the camera rather than leaving it.
+    #[test]
+    fn the_view_reads_back_the_bearing_and_the_distance() {
+        let (mut app, orders) = driven_app();
+        *app.world_mut().resource_mut::<View>() = View {
+            distance: 240.0,
+            yaw: -std::f32::consts::PI,
+            ..default()
+        };
+
+        let asked = say(&orders, "zoom");
+        app.update();
+        assert_eq!(asked.try_recv().expect("nothing to wait for"), "zoom 240");
+
+        let asked = say(&orders, "yaw");
+        app.update();
+        assert_eq!(asked.try_recv().expect("nothing to wait for"), "yaw 180");
+    }
+
+    /// Every word `help` offers is answered by this end, on the frame it
+    /// arrives — a refusal for the ones that want an argument, which is still
     /// this end answering rather than the server.
+    ///
+    /// What `help` says is now a fold over [`VERBS`], so a word it offers and
+    /// nothing serves is no longer a thing that can be written. What is still
+    /// worth holding is the *promptness*: `client` is served through the same
+    /// fall-through that puts a line on the wire, and a verb that quietly
+    /// stopped being one would go on being answered — by the server, a
+    /// network round trip later, with a refusal.
     #[test]
     fn every_word_help_offers_is_a_word_this_end_serves() {
         let (mut app, orders) = driven_app();
-        for line in HELP.lines() {
-            let verb = line
-                .split_whitespace()
-                .next()
-                .expect("every line of the help names its word");
+        for verb in VERBS.iter().map(|verb| verb.word) {
             let answered = say(&orders, verb);
             app.update();
 
@@ -1434,8 +1606,9 @@ mod tests {
 
     /// Every button `click` offers can be clicked, and lands on the button it
     /// named. The listing is an index rather than the grammar — `parse` never
-    /// reads it — so this is what holds the two to agreement, the way
-    /// `server::console`'s `PHRASES` is held to `interpret`.
+    /// reads it — so this is what holds the two to agreement. It is the last
+    /// of this game's vocabularies that needs holding: the other two are
+    /// tables now, and their listings are folds over them.
     ///
     /// The five that carry something are given one here. A button that grew
     /// an argument and did not say so would show up as its bare name failing
