@@ -81,15 +81,17 @@ cargo run --release --bin mapgen -- grid
 ## Debugging
 
 `--debug <port>` keeps a run up on a socket taking the console's own lines,
-plus the ones a keyboard never needed — `shot`, `press`, `click`, `goto`,
-`quit`. `help` lists the lot, both sides of the wire.
+plus the ones a keyboard never needed — `shot`, `press`, `click`, `quit`.
+`help` lists the lot, both sides of the wire. The console answers as well as
+commands: `world seed`, `client position` and `client zoom` say what a run is
+doing, which is how a driver reads what the debug overlay only draws.
 
 ```bash
 cargo run -- --seed 7 --debug 7777 --headless
 ```
 
 ```bash
-printf 'goto 98 -317\nzoom 120\nshot near.png\nquit\n' | nc 127.0.0.1 7777
+printf 'goto 98 -317\nclient zoom 120\nshot near.png\nquit\n' | nc 127.0.0.1 7777
 ```
 
 **Every line is answered when its work is done, and not before.** A line that

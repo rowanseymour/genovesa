@@ -12,8 +12,10 @@
 //! haze off` doctors this client's picture and `world weather gale` crosses
 //! the wire to the server, and a verb added to either side is reachable from
 //! here the day it is added. What this module adds is what a *keyboard* never
-//! needed words for: `shot`, `press`, `click`, `zoom`, `yaw`, `hold` and
-//! `quit`.
+//! needed words for: `shot`, `press`, `click`, `hold` and `quit`. The view
+//! used to be here too, as `zoom` and `yaw`; it is `client zoom` and `client
+//! yaw` now, which is where a variable of this machine belongs — the socket's
+//! part in it is the waiting, not the word.
 //!
 //! Those are [`VERBS`], a row apiece — the word, what `help` says of it, and
 //! one function from the words after it to what should be begun. The three
@@ -32,8 +34,8 @@
 //!
 //! **A line is answered when its work is done, and not before.** That is the
 //! load-bearing property. `press forward 20` answers twenty seconds later; a
-//! `goto` answers once the ground at the new place has arrived and the picture
-//! has stopped moving; `shot` answers when the file is on disk. So a pipe of
+//! `goto` or a `client zoom` answers once the ground has arrived and the
+//! picture has stopped moving; `shot` answers when the file is on disk. So a pipe of
 //! lines is a script rather than a race, and the settling that used to happen
 //! silently in frames nobody could see is now the thing an answer means.
 //!
@@ -72,9 +74,9 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use crate::bindings::{self, Action, KeyBindings};
-use crate::camera::{MapCamera, View, MAX_DISTANCE, MIN_DISTANCE};
+use crate::camera::MapCamera;
 use crate::console::{dispatch, Dispatch};
-use crate::debug::Toggles;
+use crate::debug::{Machine, Toggles};
 use crate::menu::MenuButton;
 use crate::net::Online;
 use crate::settings;
@@ -487,16 +489,16 @@ impl GroundArriving<'_, '_> {
 /// threading the line between them.
 #[derive(SystemParam)]
 struct Hands<'w, 's> {
-    toggles: ResMut<'w, Toggles>,
+    /// The switches and the view a `client` line reaches, which this module
+    /// only passes along — see [`crate::console::dispatch`].
+    machine: Machine<'w, 's>,
     keys: ResMut<'w, ButtonInput<KeyCode>>,
     bindings: Res<'w, KeyBindings>,
     /// Absent until a world is joined, and on the menu screens.
     online: Option<Res<'w, Online>>,
-    view: ResMut<'w, View>,
     /// Read only to know whether it has caught up with the world's clock —
     /// `hold` is the one line that waits on the light rather than the ground.
     sky: Res<'w, crate::sky::Sky>,
-    cameras: Query<'w, 's, &'static mut MapCamera>,
     /// The buttons the screen is showing, read to refuse a `click` at one it
     /// is not — a press nothing is listening for would otherwise be answered
     /// as though it had done something.
@@ -505,16 +507,6 @@ struct Hands<'w, 's> {
 }
 
 impl Hands<'_, '_> {
-    /// Puts the view where a line asked for it. Only ever the *view* — where
-    /// the player is is the server's to say, and the camera follows whatever
-    /// carries them of its own accord.
-    fn look(&mut self, wanted: View) {
-        *self.view = wanted;
-        for mut camera in &mut self.cameras {
-            camera.snap_to(wanted);
-        }
-    }
-
     /// Whether the picture has stopped changing: the ground here has all
     /// arrived, and enough frames have passed for the shadows to agree with
     /// it. The one notion of settled, shared by every line that waits.
@@ -771,7 +763,7 @@ enum Begun {
 }
 
 /// Every line this end serves, in the order `help` prints them.
-const VERBS: [Verb; 9] = [
+const VERBS: [Verb; 7] = [
     Verb {
         word: "shot",
         usage: &["<path> — write a PNG of the view, once the ground has arrived"],
@@ -789,16 +781,6 @@ const VERBS: [Verb; 9] = [
         word: "click",
         usage: &["<button> — press a menu button; `click` alone lists them"],
         run: clicking,
-    },
-    Verb {
-        word: "zoom",
-        usage: &["[m] — camera distance; the word alone reads it"],
-        run: zooming,
-    },
-    Verb {
-        word: "yaw",
-        usage: &["[deg] — bearing to look from; the word alone reads it"],
-        run: yawing,
     },
     Verb {
         word: "hold",
@@ -823,7 +805,7 @@ const VERBS: [Verb; 9] = [
     // other way to learn the word, and `help` is the documentation.
     Verb {
         word: "client",
-        usage: &["… — this machine's own switches; `client` alone lists them"],
+        usage: &["… — this machine's own switches and view; `client` alone lists them"],
         run: elsewhere,
     },
 ];
@@ -936,49 +918,6 @@ fn clicking(spoken: Spoken) -> Result<Begun, String> {
     Ok(Begun::Clicking(button(spoken.args, &spoken.hands.buttons)?))
 }
 
-/// `zoom [m]`: how far off the camera stands, set or read.
-///
-/// Reading matters more here than the wording suggests. A driver that has
-/// only ever *written* the view knows what it asked for, but a run it did not
-/// start — or one whose camera the player has since moved — it can only ask
-/// about, and the overlay is no answer: a number in a picture is a number
-/// nothing can read.
-fn zooming(spoken: Spoken) -> Result<Begun, String> {
-    if spoken.args.is_empty() {
-        return Ok(Begun::Said(format!("zoom {}", spoken.hands.view.distance)));
-    }
-    let distance = one(spoken.args, "zoom", "<metres>", zoom)?;
-    let wanted = View {
-        distance,
-        ..*spoken.hands.view
-    };
-    spoken.hands.look(wanted);
-    Ok(Begun::Working(settling(format!("zoom {distance}"))))
-}
-
-/// `yaw [deg]`: which way the camera looks from, set or read — see
-/// [`zooming`] for why the reading is worth having.
-///
-/// Folded to a bearing on the way out. The camera's own yaw runs unbounded,
-/// easing never wanting to wrap, so what it holds after a few turns is not a
-/// number anybody would type back.
-fn yawing(spoken: Spoken) -> Result<Begun, String> {
-    if spoken.args.is_empty() {
-        let bearing = spoken.hands.view.yaw.to_degrees().rem_euclid(360.0);
-        return Ok(Begun::Said(format!("yaw {}", bearing.round())));
-    }
-    let bearing = one(spoken.args, "yaw", "<degrees>", yaw)?;
-    let wanted = View {
-        yaw: bearing,
-        ..*spoken.hands.view
-    };
-    spoken.hands.look(wanted);
-    Ok(Begun::Working(settling(format!(
-        "yaw {}",
-        bearing.to_degrees().round()
-    ))))
-}
-
 /// `hold on|off`: the clock stopped where it stands, or let go of.
 ///
 /// Letting go is done the moment it is said — there is nothing to wait for in
@@ -1014,9 +953,25 @@ fn quitting(spoken: Spoken) -> Result<Begun, String> {
 /// is which is [`dispatch`]'s and is asked for here rather than repeated —
 /// one grammar, whichever mouth speaks it.
 fn elsewhere(spoken: Spoken) -> Result<Begun, String> {
-    Ok(match dispatch(spoken.line, &mut spoken.hands.toggles) {
-        Dispatch::Local(Ok(reply) | Err(reply)) => Begun::Said(reply),
+    // The view as it stands before the line runs, so that a line which moved
+    // it can be told from one that did not. `client zoom 120` is answered
+    // when the picture has stopped changing, exactly as it was when `zoom`
+    // was a verb of this module's own — the wait belongs to the socket, which
+    // promises a line is answered when its work is done, and not to the
+    // grammar, which is the same grammar a keyboard types.
+    let before = spoken.hands.machine.seen();
+    let line = spoken.line;
+    let answered = dispatch(line, &mut spoken.hands.machine.picture());
+
+    Ok(match answered {
         Dispatch::Remote => Begun::Asking(String::new()),
+        Dispatch::Local(Ok(reply) | Err(reply)) => {
+            if spoken.hands.machine.seen() == before {
+                Begun::Said(reply)
+            } else {
+                Begun::Working(settling(reply))
+            }
+        }
     })
 }
 
@@ -1055,20 +1010,6 @@ fn forward(line: &str, prefix: String, hands: &Hands, answer: SyncSender<String>
     })
 }
 
-/// The verbs that take exactly one value, read the same way: the shape of the
-/// refusal is the same for all of them, so it is written once.
-fn one<T>(
-    args: &[&str],
-    verb: &str,
-    wants: &str,
-    read: impl Fn(&str) -> Result<T, String>,
-) -> Result<T, String> {
-    match args {
-        [value] => read(value),
-        _ => Err(format!("`{verb}` wants one value — `{verb} {wants}`")),
-    }
-}
-
 /// An `on` or an `off`, which is what a switch down this socket looks like.
 fn onoff(args: &[&str], verb: &str) -> Result<bool, String> {
     match args {
@@ -1097,30 +1038,6 @@ fn button(words: &[&str], on_screen: &Query<&MenuButton>) -> Result<MenuButton, 
         return Err(format!("there is no `{}` on this screen", words.join(" ")));
     }
     Ok(wanted)
-}
-
-/// A camera distance, inside what the camera will actually go to.
-fn zoom(value: &str) -> Result<f32, String> {
-    let distance: f32 = value
-        .parse()
-        .map_err(|_| format!("`{value}` is not a distance in metres"))?;
-    if !(MIN_DISTANCE..=MAX_DISTANCE).contains(&distance) {
-        return Err(format!(
-            "`zoom` is between {MIN_DISTANCE} and {MAX_DISTANCE} metres, not {distance}"
-        ));
-    }
-    Ok(distance)
-}
-
-/// A bearing in degrees, kept as radians the way the view holds it.
-fn yaw(value: &str) -> Result<f32, String> {
-    let degrees: f32 = value
-        .parse()
-        .map_err(|_| format!("`{value}` is not a bearing in degrees"))?;
-    if !degrees.is_finite() {
-        return Err(format!("`{value}` is not a bearing in degrees"));
-    }
-    Ok(degrees.to_radians())
 }
 
 /// Everything after the first word of a line, trimmed at both ends and
@@ -1267,6 +1184,7 @@ mod tests {
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
     use super::*;
+    use crate::camera::View;
     use crate::testing::{run_frames, run_until, FRAME};
 
     /// The socket's own end of an order channel, and a headless app with the
@@ -1554,27 +1472,49 @@ mod tests {
         assert!(why.contains("new-world"), "unhelpful: {why}");
     }
 
-    /// The view reads as well as writes, and answers on the spot: a reading
-    /// changes nothing, so there is no picture to wait for the way a setting
-    /// has. The yaw comes back folded to a bearing — what the camera holds
-    /// runs unbounded, and a driver that read `-540` and wrote it back would
-    /// be turning the camera rather than leaving it.
+    /// A `client` line that moved the picture waits for it to stop moving,
+    /// exactly as `zoom` did while it was a verb of this module's own — and
+    /// one that only read it is answered on the frame it arrives.
+    ///
+    /// This is what the socket adds to a grammar it shares with the keyboard:
+    /// the words are the console's, the promise that an answer means the work
+    /// is done is this module's, and the two meet by watching whether the view
+    /// moved rather than by keeping a list of the lines that move it.
     #[test]
-    fn the_view_reads_back_the_bearing_and_the_distance() {
+    fn a_client_line_that_moved_the_view_settles_before_it_answers() {
         let (mut app, orders) = driven_app();
-        *app.world_mut().resource_mut::<View>() = View {
+        app.world_mut().spawn(MapCamera::looking(View {
             distance: 240.0,
             yaw: -std::f32::consts::PI,
             ..default()
-        };
+        }));
 
-        let asked = say(&orders, "zoom");
-        app.update();
-        assert_eq!(asked.try_recv().expect("nothing to wait for"), "zoom 240");
-
-        let asked = say(&orders, "yaw");
+        // A reading changes nothing, so there is nothing to wait for. The
+        // bearing comes back folded — what the camera holds runs unbounded,
+        // and a driver that read `-540` and wrote it back would be turning
+        // the camera rather than leaving it.
+        let asked = say(&orders, "client yaw");
         app.update();
         assert_eq!(asked.try_recv().expect("nothing to wait for"), "yaw 180");
+
+        // A setting does move it, and is not answered on the spot.
+        let asked = say(&orders, "client zoom 120");
+        app.update();
+        assert!(
+            asked.try_recv().is_err(),
+            "the picture was declared still on the frame it started moving"
+        );
+        run_frames(&mut app, SETTLE_FRAMES as usize + 2);
+        assert_eq!(asked.try_recv().expect("the picture settled"), "zoom 120");
+
+        // And it took: the camera is where the line put it, not merely the
+        // `View` a camera would be spawned from.
+        let camera = app
+            .world_mut()
+            .query::<&MapCamera>()
+            .single(app.world())
+            .expect("the camera this test spawned");
+        assert_eq!(camera.distance, 120.0);
     }
 
     /// Every word `help` offers is answered by this end, on the frame it
@@ -1890,28 +1830,6 @@ mod tests {
             pressed(Pressing::Control(Action::Chart), 0.0),
             "chart tapped"
         );
-    }
-
-    /// The view verbs, which took the place of `--zoom` and `--yaw` and have
-    /// to refuse what those refused.
-    #[test]
-    fn the_view_verbs_read_what_the_options_used_to() {
-        assert_eq!(zoom("120"), Ok(120.0));
-        assert_eq!(yaw("90"), Ok(std::f32::consts::FRAC_PI_2));
-
-        assert!(zoom("5").is_err(), "closer than the camera goes");
-        assert!(zoom("5000").is_err(), "further than it goes");
-        assert!(yaw("sideways").is_err());
-    }
-
-    /// A verb that takes one value says so when it is given none or several,
-    /// naming itself and what it wanted.
-    #[test]
-    fn a_verb_wanting_one_value_says_which_it_is() {
-        let why = one(&[], "zoom", "<metres>", zoom).expect_err("no value");
-        assert!(why.contains("`zoom` wants one value"), "{why}");
-        assert!(why.contains("zoom <metres>"), "{why}");
-        assert!(one(&["1", "2"], "zoom", "<metres>", zoom).is_err());
     }
 
     /// A path is whatever is left of the line, and a directory that is not

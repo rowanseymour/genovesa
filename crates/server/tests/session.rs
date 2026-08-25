@@ -3898,22 +3898,4 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
         client.nothing_was_said_about_a_boat(),
         "a hull followed a walker up the beach"
     );
-
-    // And where they were put down reads back off the console — the point of
-    // a bare `goto`: a place a driver can ask the world for, rather than one
-    // it had to have been watching the replies to catch. The reply waiting
-    // here is the `help` the bracketing above typed, not the jump's.
-    client.hear_reply();
-    client.say(ToServer::Command {
-        line: "goto".to_string(),
-    });
-    assert_eq!(
-        client.hear_reply(),
-        format!(
-            "you are at {} {}",
-            standing.x.round() as i32,
-            standing.y.round() as i32
-        ),
-        "the console does not say where the world put somebody"
-    );
 }

@@ -76,10 +76,7 @@ struct Command {
 const COMMANDS: [Command; 5] = [
     Command {
         word: "goto",
-        usage: &[
-            "<x> <z> — be taken to a place, however you are travelling",
-            "— where in the world you are",
-        ],
+        usage: &["<x> <z> — be taken to a place, however you are travelling"],
         tails: none,
         run: goto,
     },
@@ -375,12 +372,12 @@ fn serve(
 const BEARINGS: usize = 16;
 
 /// `goto <x> <z>`: the asker taken to a point of the world, however they
-/// happen to be travelling. `goto` alone reads rather than writes — where
-/// they are now, in the words the move itself answers with, so the reply to a
-/// jump and the answer to *where am I* are one sentence, and a place read off
-/// the one is a place the other will take. Reading was the half missing while
-/// this was a verb and nothing else: a console could put a player on the far
-/// side of the world but never ask where the world had put them.
+/// happen to be travelling.
+///
+/// It only writes. Asking where somebody *is* is a client's own question —
+/// `client position`, answered off the picture this machine is drawing — and
+/// giving `goto` a second, argumentless meaning would put the reading in the
+/// one place a reader has to know a verb to look.
 ///
 /// A hull is the only thing here a point can be wrong for: it cannot sit on
 /// a hillside. Somebody on their own feet is at home anywhere the world has
@@ -416,12 +413,6 @@ fn goto(asked: Asked) -> Result<String, String> {
         put,
     } = asked;
 
-    if args.is_empty() {
-        return match whereabouts(shared, from) {
-            Some(at) => Ok(standing(at)),
-            None => Err("you are nowhere the world knows".to_string()),
-        };
-    }
     let Some(wanted) = point(args) else {
         return Err("`goto` wants a place to be taken to — `goto 480 -1200`".to_string());
     };
@@ -509,17 +500,10 @@ fn goto(asked: Asked) -> Result<String, String> {
             round(at.x),
             round(at.y)
         ),
-        _ => standing(at),
+        _ => format!("you are at {} {}", round(at.x), round(at.y)),
     };
     *put = Some(at);
     Ok(reply)
-}
-
-/// Where somebody is, as the console says it — the answer to a bare `goto`
-/// and the ordinary end of a `goto` that moved them, written once so the two
-/// cannot come to differ.
-fn standing(at: Vec2) -> String {
-    format!("you are at {} {}", round(at.x), round(at.y))
 }
 
 /// Where the asker stands, or nothing at all for an id the roster has never
@@ -1152,9 +1136,7 @@ mod tests {
             "unhelpful: {refused}"
         );
 
-        // Half a place and no place at all. Not a bare `goto`, which is the
-        // reading and asks for nothing.
-        for asked in ["goto 12", "goto north"] {
+        for asked in ["goto", "goto 12", "goto north"] {
             let refused = answer(&shared, PlayerId(1), asked);
             assert!(
                 refused.contains("goto 480 -1200"),
@@ -1164,12 +1146,9 @@ mod tests {
 
         // A place the world does have, asked for by nobody the world knows —
         // as far as this can get without a roster, and the answer says so
-        // rather than pretending somebody moved. The reading of a nobody
-        // says the same, for the same reason.
-        for asked in ["goto 0 0", "goto"] {
-            let nobody = answer(&shared, PlayerId(9), asked);
-            assert!(nobody.contains("nowhere"), "`{asked}`: {nobody}");
-        }
+        // rather than pretending somebody moved.
+        let nobody = answer(&shared, PlayerId(9), "goto 0 0");
+        assert!(nobody.contains("nowhere"), "unhelpful: {nobody}");
     }
 
     /// The alternatives a `help` line offers for a word — `sloop|rowboat`
