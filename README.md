@@ -147,13 +147,18 @@ cargo tree --workspace --invert bevy
 And the game must not reach the generator. It does not depend on `world`,
 which the dependency graph shows — but the graph is the easy half, since
 `world` sits behind `server` and a re-export would put its vocabulary in the
-client's hands with nothing in the tree to say so. So the check is that the
-server hands out none of it:
+client's hands with nothing in the tree to say so. Both, then:
 
 ```bash
 cargo tree -p game --depth 1
 ```
 
 ```bash
-grep -rn 'pub use world' crates/server/src/
+grep -rn '^pub use world' crates/server/src/
 ```
+
+Neither is the whole rule. A public signature in `server` that *names* a
+`world` type hands the generator over just as a re-export does, and no grep
+and no dependency graph will say so — that half is a thing to notice while
+writing a `pub fn`, and is written down where it would be broken, at the head
+of [`crates/server/src/lib.rs`](crates/server/src/lib.rs).

@@ -20,10 +20,19 @@
 //! what it would have ended with is a menu drawing a preview by sampling the
 //! generator, which is the arrangement the whole split exists to undo.
 //!
-//! The check is that `pub use world::` appears nowhere below, and it is worth
-//! more than the `cargo tree` one the README used to name: that command only
-//! ever read the *direct* dependencies, so it could not have failed however
-//! much came through here.
+//! No re-export appearing below is the checkable half — the README greps for
+//! one, anchored to the start of a line so that this paragraph is not itself
+//! a hit — and it is worth more than the `cargo tree` line that guard used to
+//! be: that one only ever read the *direct* dependencies, so it could not
+//! have failed however much came through here.
+//!
+//! The other half is not checkable and is written here rather than in the
+//! README because here is where it would be broken. A public signature that
+//! *names* a `world` type hands the generator over exactly as a re-export
+//! does — a caller need never name the crate to call a method on something it
+//! was given — and no grep and no dependency graph will say so. So: nothing
+//! public below takes or returns one, and the way to keep that true is to
+//! notice when a new `pub fn` wants to.
 //!
 //! Concurrency is plain std threading. Per connection: a thread blocking on
 //! its reads, and a writer thread draining a channel onto the socket. Shared
@@ -46,7 +55,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH};
@@ -55,8 +64,6 @@ use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
     SURVEY_BATCH_BYTES,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use world::archipelago::{Archipelago, WorldConfig};
 
 pub use keeper::{data_dir, discard, keep_data_in, kept_worlds, KeptWorld};
@@ -3275,6 +3282,8 @@ fn broadcast(players: &HashMap<PlayerId, Player>, from: PlayerId, message: ToCli
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::survey::{Coast, Mark};
+
     #[test]
     fn an_unchosen_seed_is_a_different_world_every_time() {
         let drawn: Vec<u32> = (0..8).map(|_| random_seed()).collect();
@@ -3286,8 +3295,6 @@ mod tests {
             );
         }
     }
-
-    use protocol::survey::{Coast, Mark};
 
     /// One chunk's ink of a chosen size: a coast of `marks` points, which is
     /// what a torn shore actually costs on the wire.
