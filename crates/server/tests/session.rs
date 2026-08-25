@@ -11,7 +11,8 @@ use protocol::survey::{in_sight, in_sight_along, Soundings, Survey, SIGHT_RADIUS
 use protocol::{
     BeastId, BeastKind, BoatKind, PlayerId, ToClient, ToServer, Token, PROTOCOL_VERSION,
 };
-use server::{Host, Server, WorldConfig};
+use server::{Host, Server};
+use world::archipelago::WorldConfig;
 use world::archipelago::{Archipelago, IslandSpec};
 
 /// What a seed's world is, to a test that is allowed to know. A client never
@@ -49,7 +50,7 @@ fn another_anchorage(world: &Archipelago, near: Vec2, clear: f32) -> Vec2 {
 /// the test process ends. Most of what is tested here is a conversation, not a
 /// lifetime — the tests that are about the lifetime host their own.
 fn host(seed: u32) -> SocketAddr {
-    forever(Server::bind(("127.0.0.1", 0), WorldConfig { seed }).expect("bind"))
+    forever(Server::bind(("127.0.0.1", 0), seed).expect("bind"))
 }
 
 /// The same, opened at a chosen hour of its day, for the tests that are
@@ -57,7 +58,7 @@ fn host(seed: u32) -> SocketAddr {
 /// at ten minutes to the day from whenever it was bound.
 fn host_at(seed: u32, opening: f32) -> SocketAddr {
     forever(
-        Server::bind(("127.0.0.1", 0), WorldConfig { seed })
+        Server::bind(("127.0.0.1", 0), seed)
             .expect("bind")
             .opening_at(opening),
     )
@@ -79,7 +80,7 @@ fn forever(server: Server) -> SocketAddr {
 /// The same, on a thread the test can end — what a game hosting a world for
 /// its own player holds.
 fn spawn_host(seed: u32) -> Host {
-    Server::bind(("127.0.0.1", 0), WorldConfig { seed })
+    Server::bind(("127.0.0.1", 0), seed)
         .expect("bind")
         .spawn()
         .expect("spawn")
@@ -988,7 +989,7 @@ fn a_port_can_be_hosted_again_once_the_host_is_dropped() {
     // it was serving, which is the harder half: a guest is still connected
     // when the host leaves, so the host is the end that closes first, and a
     // socket closed from this end is the one that lingers.
-    let server = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 1 }).expect("bind");
+    let server = Server::bind(("127.0.0.1", 0), 1).expect("bind");
     let addr = server.local_addr().expect("addr");
     let host = server.spawn().expect("spawn");
     let (guest, _id, _, _) = Client::join(addr);
@@ -998,7 +999,7 @@ fn a_port_can_be_hosted_again_once_the_host_is_dropped() {
         std::io::ErrorKind::UnexpectedEof
     );
 
-    let again = Server::bind(addr, WorldConfig { seed: 2 })
+    let again = Server::bind(addr, 2)
         .expect("the port is still held")
         .spawn()
         .expect("spawn");
@@ -1235,7 +1236,7 @@ fn a_kept_world_reopens_where_it_left_off() {
     // it is the same world, at the same hour, with the player where the
     // world last saw them.
     let path = scratch("kept").join("one.world");
-    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+    let first = Server::bind(("127.0.0.1", 0), 7)
         .expect("bind")
         .opening_at(0.5)
         .keeping_at(path.clone())
@@ -2067,7 +2068,7 @@ fn a_returning_keeper_is_seated_back_at_their_helm() {
     // The single-player story: stop the world at a helm somewhere, reopen
     // it, and be exactly there, aboard exactly that boat.
     let path = scratch("helm").join("one.world");
-    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+    let first = Server::bind(("127.0.0.1", 0), 7)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");
@@ -2381,7 +2382,7 @@ fn joining_and_hanging_up_over_and_over_leaves_one_hull_behind() {
     // something, so it cannot be on minting; it is that the hull the last one
     // walked away from is the hull this one is handed.
     let path = scratch("hulls").join("one.world");
-    let world = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+    let world = Server::bind(("127.0.0.1", 0), 7)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");
@@ -2423,7 +2424,7 @@ fn a_kept_world_reopens_with_its_beasts_where_they_were() {
     // stood — a beast with consequence cannot be escaped by relogging, any
     // more than a gale can.
     let path = scratch("beasts").join("one.world");
-    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+    let first = Server::bind(("127.0.0.1", 0), 7)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");
@@ -2487,7 +2488,7 @@ fn a_kept_world_cannot_be_hosted_twice_at_once() {
     // Two processes writing one file would be two histories under one name;
     // the world's lock makes the second host an error instead.
     let path = scratch("locked").join("one.world");
-    let holding = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 1 })
+    let holding = Server::bind(("127.0.0.1", 0), 1)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");
@@ -2640,7 +2641,7 @@ fn a_returning_player_is_told_back_the_survey_they_left_with() {
     // the file — the ink being derived — so this is also the test that the
     // deriving is stable.
     let path = scratch("surveyed").join("one.world");
-    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+    let first = Server::bind(("127.0.0.1", 0), 7)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");
@@ -2730,7 +2731,7 @@ fn a_world_sailed_to_its_own_edge_opens_again() {
     // would write a world file that this build then refuses to load, for
     // ever, taking the backup with it at the next save.
     let path = scratch("edge").join("one.world");
-    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+    let first = Server::bind(("127.0.0.1", 0), 7)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");
@@ -2788,7 +2789,7 @@ fn a_player_may_hang_up_while_their_survey_is_still_being_told_back() {
     // and it must leave a world that goes on serving rather than one with a
     // thread still grinding out a chart for nobody.
     let path = scratch("backfill").join("one.world");
-    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: 7 })
+    let first = Server::bind(("127.0.0.1", 0), 7)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");
@@ -3244,7 +3245,7 @@ fn what_a_landing_taught_is_still_known_when_the_world_opens_again() {
     // look at it again after a night ashore — that is the whole difference
     // between a chart and a view out of a window.
     let path = scratch("knowing").join("one.world");
-    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: CLAIMABLE })
+    let first = Server::bind(("127.0.0.1", 0), CLAIMABLE)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");
@@ -3478,7 +3479,7 @@ fn a_claim_and_its_name_survive_the_world_being_closed() {
     // exactly: the same island, the same holder, the same cairn, the same
     // word on it.
     let path = scratch("claims").join("one.world");
-    let first = Server::bind(("127.0.0.1", 0), WorldConfig { seed: CLAIMABLE })
+    let first = Server::bind(("127.0.0.1", 0), CLAIMABLE)
         .expect("bind")
         .keeping_at(path.clone())
         .expect("keeping");

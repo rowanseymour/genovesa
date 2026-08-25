@@ -138,13 +138,22 @@ cargo test
 ```
 
 Two things the tests cannot see are worth checking after moving anything
-between crates: Bevy must appear nowhere below the game, and the game must not
-depend on `world` at all.
+between crates. Bevy must appear nowhere below the game:
 
 ```bash
 cargo tree --workspace --invert bevy
 ```
 
+And the game must not reach the generator. It does not depend on `world`,
+which the dependency graph shows — but the graph is the easy half, since
+`world` sits behind `server` and a re-export would put its vocabulary in the
+client's hands with nothing in the tree to say so. So the check is that the
+server hands out none of it:
+
 ```bash
 cargo tree -p game --depth 1
+```
+
+```bash
+grep -rn 'pub use world' crates/server/src/
 ```

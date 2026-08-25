@@ -778,8 +778,6 @@ mod tests {
     use bevy::state::app::StatesPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
 
-    use server::WorldConfig;
-
     use super::*;
     use crate::boat::BoatPlugin;
     use crate::camera::View;
@@ -1147,8 +1145,8 @@ mod tests {
         // asks, the server runs its clock, and this machine's own sky follows
         // it out of the night.
         crate::testing::quarantine_data_dir();
-        let session = Session::open(WorldConfig { seed: 5 }, Reach::Alone, 0.19, false)
-            .expect("a world to lie at anchor in");
+        let session =
+            Session::open(5, Reach::Alone, 0.19, false).expect("a world to lie at anchor in");
         // The session in hand *before* the threshold, as a real join has it:
         // the boat lain at anchor is the one the server tells of, not one
         // the offline entry would have launched beside it.

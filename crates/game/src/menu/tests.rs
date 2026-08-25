@@ -27,8 +27,8 @@ use super::*;
 use crate::net;
 use crate::net::fake_server;
 use crate::testing::run_until;
+use server::random_seed;
 use server::KeptWorld;
-use server::{random_seed, WorldConfig};
 use std::time::SystemTime;
 
 /// A host that accepts a connection and then says nothing — a dial that
@@ -193,7 +193,7 @@ fn paused_app() -> App {
 /// in. An ephemeral port either way, so two test runs cannot collide the
 /// way binding the real shared port would.
 fn fake_host(bind: &str) -> server::Host {
-    server::Server::bind(bind, WorldConfig::default())
+    server::Server::bind(bind, 7)
         .expect("bind")
         .spawn()
         .expect("spawn")

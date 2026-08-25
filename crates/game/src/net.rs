@@ -40,7 +40,7 @@ use protocol::{
     BeastId, BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId,
     DEFAULT_PORT, PROTOCOL_VERSION,
 };
-use server::{Host, Server, WorldConfig};
+use server::{Host, Server};
 
 use crate::player::PlayerPlace;
 use crate::sea;
@@ -371,13 +371,8 @@ impl Session {
     /// offered again from the menu: what the menu asks and the command line
     /// does not, a `--seed` run being a world to look at rather than one to
     /// live in.
-    pub fn open(
-        config: WorldConfig,
-        reach: Reach,
-        opening: f32,
-        keep: bool,
-    ) -> Result<Self, String> {
-        let mut server = Server::bind(reach.bound_to(), config)
+    pub fn open(seed: u32, reach: Reach, opening: f32, keep: bool) -> Result<Self, String> {
+        let mut server = Server::bind(reach.bound_to(), seed)
             .map_err(|error| format!("cannot open a world: {error}"))?
             .opening_at(opening);
         if keep {
@@ -477,9 +472,9 @@ impl Dialing {
 
     /// Starts opening a world on this machine — see [`Session::open`], which
     /// this is the off-the-frame-loop way to reach.
-    pub fn opening(config: WorldConfig, reach: Reach, opening: f32, keep: bool) -> Self {
+    pub fn opening(seed: u32, reach: Reach, opening: f32, keep: bool) -> Self {
         Self::on(reach.described(), move || {
-            Session::open(config, reach, opening, keep)
+            Session::open(seed, reach, opening, keep)
         })
     }
 
@@ -1394,12 +1389,7 @@ mod tests {
         // `Reach::Alone` is — a test run cannot collide with a real server on
         // this machine, and neither can a player.
         crate::testing::quarantine_data_dir();
-        let dialing = Dialing::opening(
-            WorldConfig { seed: 77 },
-            Reach::Alone,
-            server::OPENING,
-            false,
-        );
+        let dialing = Dialing::opening(77, Reach::Alone, server::OPENING, false);
         let session = settle(&dialing).expect("the world should be opened and joined");
 
         assert!(
@@ -1414,20 +1404,10 @@ mod tests {
     #[test]
     fn the_seed_asked_for_is_the_world_that_opens() {
         crate::testing::quarantine_data_dir();
-        let first = settle(&Dialing::opening(
-            WorldConfig { seed: 77 },
-            Reach::Alone,
-            server::OPENING,
-            false,
-        ))
-        .expect("a world should open");
-        let second = settle(&Dialing::opening(
-            WorldConfig { seed: 78 },
-            Reach::Alone,
-            server::OPENING,
-            false,
-        ))
-        .expect("a world should open");
+        let first = settle(&Dialing::opening(77, Reach::Alone, server::OPENING, false))
+            .expect("a world should open");
+        let second = settle(&Dialing::opening(78, Reach::Alone, server::OPENING, false))
+            .expect("a world should open");
         // A host can ask its own server which world it made — that is where
         // the debug readout's seed comes from.
         assert_eq!(first.hosting.as_ref().expect("hosting").seed(), 77);
@@ -1446,12 +1426,7 @@ mod tests {
         // from outside, and whoever arrives is somebody else in the same
         // world rather than the host again.
         crate::testing::quarantine_data_dir();
-        let dialing = Dialing::opening(
-            WorldConfig { seed: 3 },
-            Reach::Alone,
-            server::OPENING,
-            false,
-        );
+        let dialing = Dialing::opening(3, Reach::Alone, server::OPENING, false);
         let session = settle(&dialing).expect("the world should be opened and joined");
         let port = session.hosting.as_ref().expect("hosting").addr().port();
 
@@ -2405,7 +2380,7 @@ mod tests {
         let _server = socket.recv().expect("the fake server keeps its socket");
         let mut app = test_app(connection);
         app.insert_resource(Hosting(
-            Server::bind("127.0.0.1:0", WorldConfig::default())
+            Server::bind("127.0.0.1:0", 7)
                 .expect("bind")
                 .spawn()
                 .expect("spawn"),

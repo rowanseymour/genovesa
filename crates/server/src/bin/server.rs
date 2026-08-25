@@ -42,8 +42,8 @@ fn main() -> ExitCode {
             }
             (Server::reopen(addr, path), None)
         }
-        Some(path) => (Server::bind(addr, args.config), Some(path.clone())),
-        None => (Server::bind(addr, args.config), None),
+        Some(path) => (Server::bind(addr, args.seed), Some(path.clone())),
+        None => (Server::bind(addr, args.seed), None),
     };
     let mut server = match server {
         Ok(server) => server,

@@ -56,7 +56,7 @@ fn main() -> ExitCode {
     // back into, could never be asked for a second time. A joined run is in
     // somebody else's world and has no seed of its own to name.
     if !args.seed_given && args.join.is_none() {
-        println!("world {}", args.config.seed);
+        println!("world {}", args.seed);
     }
 
     // A run that starts in a world gets one before the app exists, because
@@ -71,7 +71,7 @@ fn main() -> ExitCode {
         // or returned to: sharing and keeping are the menu's business, and a
         // dedicated `server` is the other binary.
         (None, AppState::InWorld) => Some(Session::open(
-            args.config,
+            args.seed,
             Reach::Alone,
             server::OPENING,
             false,
