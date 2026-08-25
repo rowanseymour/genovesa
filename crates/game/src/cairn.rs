@@ -134,9 +134,9 @@ impl Cairns {
     /// So a second telling is quietly nothing here.
     ///
     /// The stones go up bare and are [`dress`]ed a moment later, which is the
-    /// beasts' arrangement and for their reason: this is called from the
-    /// session's drain, which already has both hands on the hulls' meshes, and
-    /// two system parameters cannot each hold the asset store.
+    /// beasts' arrangement and for their reason: this spawns from a word off
+    /// the wire and holds no asset store, so what a cairn is *made of* is a
+    /// system of its own.
     pub fn told(&mut self, commands: &mut Commands, island: IVec2, at: Vec2) {
         if self.standing.contains_key(&island) {
             return;
@@ -299,29 +299,46 @@ fn stand_the_cairns(mut commands: Commands, ground: Option<Res<Ground>>, mut wai
 /// being `DespawnOnExit`; what is cleared here is this side of the
 /// bookkeeping, which would otherwise hand out the entity ids of a world
 /// nobody is in any more.
-///
-/// Run from [`crate::net::NetPlugin`] as well as from this one, on the fleet's
-/// terms: `receive` is what writes this resource, so an app with the net
-/// plugin and not this one must still not carry one world's cairns into the
-/// next. Clearing an empty map twice costs nothing.
 pub(crate) fn strike(mut cairns: ResMut<Cairns>) {
     cairns.standing.clear();
+}
+
+/// Stands a stone wherever the world says one is.
+///
+/// The other half of the same word is [`crate::chart`], which letters the
+/// sheet with what the island is called: a name is something the world
+/// carries, so the two hear one sentence and neither had to be told about the
+/// other.
+pub(crate) fn raise_the_cairns(
+    mut commands: Commands,
+    mut cairns: ResMut<Cairns>,
+    mut seen: MessageReader<crate::net::CairnSeen>,
+) {
+    for cairn in seen.read() {
+        cairns.told(&mut commands, cairn.island, cairn.at);
+    }
 }
 
 pub struct CairnPlugin;
 
 impl Plugin for CairnPlugin {
     fn build(&self, app: &mut App) {
-        // Also initialised by `NetPlugin`, whose `receive` writes into it;
-        // initialising a resource twice is free, and each plugin's tests run
-        // it alone.
-        app.init_resource::<Cairns>()
+        app.add_message::<crate::net::CairnSeen>()
+            .init_resource::<Cairns>()
+            .add_systems(
+                Update,
+                // Before the two below, so a stone told this frame is dressed
+                // and stood on its ground in the same one.
+                raise_the_cairns.in_set(crate::net::Wire::Read),
+            )
             .add_systems(
                 Update,
                 // Neither of these is the player's hands, so neither pauses: a
                 // cairn whose ground arrived while the game was paused should
                 // be standing on it when they look back.
-                (dress, stand_the_cairns).run_if(in_state(AppState::InWorld)),
+                (dress, stand_the_cairns)
+                    .after(raise_the_cairns)
+                    .run_if(in_state(AppState::InWorld)),
             )
             .add_systems(OnExit(AppState::InWorld), strike);
     }

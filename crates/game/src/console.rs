@@ -64,7 +64,9 @@ pub struct ConsolePlugin;
 
 impl Plugin for ConsolePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Console>()
+        app.add_message::<crate::net::ServerReplied>()
+            .add_message::<crate::net::VocabularyTaught>()
+            .init_resource::<Console>()
             .init_resource::<Toggles>()
             .add_systems(Update, open_console.run_if(in_state(Helm::Sailing)))
             // Not gated on the console being up, exactly as the menus' typing
@@ -81,12 +83,47 @@ impl Plugin for ConsolePlugin {
             // already said. What it says changes on a keystroke or an
             // arriving reply and at no other time; the panel is spawned
             // holding its first line, so there is no blank frame to cover.
+            // What the server says, taken whether or not the console is up:
+            // a reply that lands on a closed console is waiting in the
+            // scrollback when it opens, which is what makes the console a
+            // record rather than a window.
+            .add_systems(
+                Update,
+                (hear_the_server, learn_the_vocabulary).in_set(crate::net::Wire::Read),
+            )
             .add_systems(
                 Update,
                 refresh_console
                     .after(console_keys)
+                    .after(hear_the_server)
                     .run_if(in_state(Helm::Console).and_then(resource_changed::<Console>)),
             );
+    }
+}
+
+/// Prints whatever the server answered a console line with.
+///
+/// The same word is read by [`crate::control`], where a driver down the debug
+/// socket may be waiting on it — one sentence, two listeners, neither knowing
+/// about the other.
+pub(crate) fn hear_the_server(
+    mut console: ResMut<Console>,
+    mut replies: MessageReader<crate::net::ServerReplied>,
+) {
+    for reply in replies.read() {
+        console.say(&reply.text);
+    }
+}
+
+/// Takes the server's console vocabulary, taught once on joining — what tab
+/// offers past the words this side owns. Hints, not grammar: a line still
+/// crosses the wire verbatim whether it starts with one of these or not.
+pub(crate) fn learn_the_vocabulary(
+    mut console: ResMut<Console>,
+    mut taught: MessageReader<crate::net::VocabularyTaught>,
+) {
+    for lesson in taught.read() {
+        console.teach(lesson.phrases.clone());
     }
 }
 
@@ -126,8 +163,7 @@ impl Console {
         }
     }
 
-    /// Takes the server's phrase list — see [`crate::net::receive`], which is
-    /// where a [`protocol::ToClient::Vocabulary`] lands.
+    /// Takes the server's phrase list — see [`learn_the_vocabulary`].
     pub fn teach(&mut self, phrases: Vec<String>) {
         self.phrases = phrases;
     }
