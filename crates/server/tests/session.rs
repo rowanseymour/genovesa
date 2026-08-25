@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{dequantize, CHUNK_METRES};
@@ -14,6 +14,16 @@ use protocol::{
 use server::{Host, Server};
 use world::archipelago::WorldConfig;
 use world::archipelago::{Archipelago, IslandSpec};
+
+/// How long a reader waits for the message it is after before failing the
+/// test. Long enough that a loaded machine is not mistaken for a session that
+/// has stopped talking, short enough that a wait which will never end still
+/// ends.
+const PATIENCE: Duration = Duration::from_secs(10);
+
+/// The same, for the survey, which is worked out as somebody walks rather
+/// than sent in one burst.
+const SURVEY_PATIENCE: Duration = Duration::from_secs(20);
 
 /// What a seed's world is, to a test that is allowed to know. A client never
 /// gets one of these — that is the whole point of the arrangement — so these
@@ -86,17 +96,45 @@ fn spawn_host(seed: u32) -> Host {
         .expect("spawn")
 }
 
-/// A test client: a socket that speaks the protocol, with a read timeout so a
-/// message that never comes fails the test instead of hanging it.
+/// Whether an error is the read's own clock running out rather than anything
+/// the session did. Unix answers a socket timeout with `WouldBlock` and
+/// Windows with `TimedOut`, and this runs on both.
+fn ran_out_of_time(why: &std::io::Error) -> bool {
+    matches!(
+        why.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// A test client: a socket that speaks the protocol, every read of it bounded
+/// so a message that never comes fails the test instead of hanging it.
 struct Client(TcpStream);
 
 impl Client {
     fn connect(addr: SocketAddr) -> Self {
-        let stream = TcpStream::connect(addr).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("set timeout");
-        Self(stream)
+        Self(TcpStream::connect(addr).expect("connect"))
+    }
+
+    /// The next message of any kind, or the test failing at `deadline` saying
+    /// it never heard `awaited`.
+    ///
+    /// The socket's timeout is set to what is left of the wait, one read at a
+    /// time, rather than the socket keeping a short one of its own. That is
+    /// the whole of this: a frame half-read cannot be asked for again —
+    /// [`ToClient::read`] takes a length and then a body, and a timeout
+    /// between them has already eaten bytes, so a second attempt resyncs
+    /// inside a frame. One read given the whole remaining wait puts the
+    /// failure on the deadline, where `awaited` can say what never came.
+    ///
+    /// It used to be a fixed five seconds on the socket, which is why the
+    /// deadlines the readers below carry could never fire while a session was
+    /// quiet: the socket always gave up first, with a `WouldBlock` naming
+    /// neither the message nor the bound.
+    fn hear_by(&self, deadline: Instant, awaited: &str) -> ToClient {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "waited out {awaited}");
+        self.0.set_read_timeout(Some(left)).expect("set timeout");
+        ToClient::read(&mut &self.0).unwrap_or_else(|why| panic!("waited out {awaited}: {why}"))
     }
 
     fn join(addr: SocketAddr) -> (Self, PlayerId, Vec2, Vec2) {
@@ -162,7 +200,7 @@ impl Client {
     /// The next word about a boat, ignoring everything else — bounded like
     /// the beasts' reader, the session chattering on regardless.
     fn hear_a_boat(&self) -> (protocol::BoatId, Vec2, f32, Option<PlayerId>) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         loop {
             if let ToClient::Boat {
                 id,
@@ -170,14 +208,10 @@ impl Client {
                 heading,
                 occupant,
                 ..
-            } = ToClient::read(&mut &self.0).expect("read")
+            } = self.hear_by(deadline, "word of any boat")
             {
                 return (id, position, heading, occupant);
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and no word of any boat"
-            );
         }
     }
 
@@ -185,7 +219,16 @@ impl Client {
     /// hull *is*, where [`Client::hear_a_boat`] only cares where it lies and
     /// whose it is.
     fn hear_a_boat_kinded(&self) -> (protocol::BoatId, BoatKind, Vec2, f32, Option<PlayerId>) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        self.hear_a_boat_kinded_by(Instant::now() + PATIENCE)
+    }
+
+    /// The same, on a deadline a caller already started — so that a reader
+    /// looping over this is bounded as a whole rather than granting a fresh
+    /// wait to every hull that is not the one it wants.
+    fn hear_a_boat_kinded_by(
+        &self,
+        deadline: Instant,
+    ) -> (protocol::BoatId, BoatKind, Vec2, f32, Option<PlayerId>) {
         loop {
             if let ToClient::Boat {
                 id,
@@ -193,14 +236,10 @@ impl Client {
                 position,
                 heading,
                 occupant,
-            } = ToClient::read(&mut &self.0).expect("read")
+            } = self.hear_by(deadline, "word of any boat")
             {
                 return (id, kind, position, heading, occupant);
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and no word of any boat"
-            );
         }
     }
 
@@ -213,16 +252,12 @@ impl Client {
     /// things and drops can lose the third. Hearing the answer to the last of
     /// them is the proof that nothing is still in flight to be thrown away.
     fn boat_changed_hands(&self, boat: protocol::BoatId, to: Option<PlayerId>) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            let (told, _kind, _at, _heading, occupant) = self.hear_a_boat_kinded();
+            let (told, _kind, _at, _heading, occupant) = self.hear_a_boat_kinded_by(deadline);
             if told == boat && occupant == to {
                 return;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and that hull never changed hands"
-            );
         }
     }
 
@@ -233,16 +268,12 @@ impl Client {
     /// rather than off the top of the inbox is what keeps somebody else's
     /// sloop arriving in the same breath from being mistaken for it.
     fn hear_a_rowboat(&self) -> protocol::BoatId {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            let (told, kind, ..) = self.hear_a_boat_kinded();
+            let (told, kind, ..) = self.hear_a_boat_kinded_by(deadline);
             if kind == BoatKind::Rowboat {
                 return told;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and nothing went over the side"
-            );
         }
     }
 
@@ -259,33 +290,26 @@ impl Client {
         self.say(ToServer::Command {
             line: "help".to_string(),
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         loop {
             if matches!(
-                ToClient::read(&mut &self.0).expect("read"),
+                self.hear_by(deadline, "a word back from the world"),
                 ToClient::Reply { .. }
             ) {
                 return;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and the world said nothing back"
-            );
         }
     }
 
     /// The next word that a boat has left the world, ignoring everything
     /// else — bounded like the boats' own reader.
     fn hear_a_boat_gone(&self) -> protocol::BoatId {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            if let ToClient::BoatGone { id } = ToClient::read(&mut &self.0).expect("read") {
+            if let ToClient::BoatGone { id } = self.hear_by(deadline, "any boat leaving the world")
+            {
                 return id;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and no boat left the world"
-            );
         }
     }
 
@@ -320,8 +344,9 @@ impl Client {
     /// anybody takes may put more ink on their own chart, and the tests that
     /// are about that read for it with [`Client::hear_the_survey`].
     fn hear(&self) -> ToClient {
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            match ToClient::read(&mut &self.0).expect("read") {
+            match self.hear_by(deadline, "a message about anything") {
                 ToClient::Weather { .. }
                 | ToClient::Daylight { .. }
                 | ToClient::Beast { .. }
@@ -348,43 +373,40 @@ impl Client {
         mut charted: HashMap<IVec2, Soundings>,
         enough: impl Fn(&HashMap<IVec2, Soundings>) -> bool,
     ) -> HashMap<IVec2, Soundings> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + SURVEY_PATIENCE;
         if enough(&charted) {
             return charted;
         }
         loop {
-            if let ToClient::Surveyed { found } = ToClient::read(&mut &self.0).expect("read") {
+            let awaited = format!("a survey past its {} chunks", charted.len());
+            if let ToClient::Surveyed { found } = self.hear_by(deadline, &awaited) {
                 charted.extend(found);
                 if enough(&charted) {
                     return charted;
                 }
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "twenty seconds and the survey never came to {} chunks",
-                charted.len()
-            );
         }
     }
 
     /// The next word about a cairn, ignoring everything else — bounded like
     /// the beasts' reader, the session chattering on regardless.
     fn hear_a_cairn(&self) -> (IVec2, Vec2, String, bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        self.hear_a_cairn_by(Instant::now() + PATIENCE)
+    }
+
+    /// The same, on a deadline a caller already started — see
+    /// [`Client::hear_a_boat_kinded_by`].
+    fn hear_a_cairn_by(&self, deadline: Instant) -> (IVec2, Vec2, String, bool) {
         loop {
             if let ToClient::Cairn {
                 island,
                 at,
                 name,
                 yours,
-            } = ToClient::read(&mut &self.0).expect("read")
+            } = self.hear_by(deadline, "word of any cairn")
             {
                 return (island, at, name, yours);
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and no word of any cairn"
-            );
         }
     }
 
@@ -397,16 +419,12 @@ impl Client {
     /// about how many of the first happened to have arrived first, which
     /// depends on where the world put somebody down.
     fn hear_a_cairn_saying(&self, wanted: impl Fn(&str) -> bool) -> (IVec2, Vec2, String, bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            let told = self.hear_a_cairn();
+            let told = self.hear_a_cairn_by(deadline);
             if wanted(&told.2) {
                 return told;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and no cairn ever said the wanted thing"
-            );
         }
     }
 
@@ -421,8 +439,9 @@ impl Client {
         self.say(ToServer::Command {
             line: "help".to_string(),
         });
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            match ToClient::read(&mut &self.0).expect("read") {
+            match self.hear_by(deadline, "the reply that brackets the ask") {
                 ToClient::Cairn { .. } => return false,
                 ToClient::Reply { .. } => return true,
                 _ => {}
@@ -444,8 +463,9 @@ impl Client {
         self.say(ToServer::Command {
             line: "help".to_string(),
         });
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            match ToClient::read(&mut &self.0).expect("read") {
+            match self.hear_by(deadline, "the reply that brackets the ask") {
                 ToClient::Boat { .. } | ToClient::BoatGone { .. } => return false,
                 ToClient::Reply { .. } => return true,
                 _ => {}
@@ -465,8 +485,9 @@ impl Client {
             line: "help".to_string(),
         });
         let mut told = Vec::new();
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            match ToClient::read(&mut &self.0).expect("read") {
+            match self.hear_by(deadline, "the reply that ends the welcome") {
                 ToClient::Boat { kind, .. } => told.push(kind),
                 ToClient::Reply { .. } => return told,
                 _ => {}
@@ -479,7 +500,8 @@ impl Client {
     /// regardless and a world that raises no such beast would otherwise keep
     /// this reading forever.
     fn hear_a_beast(&self, wanted: BeastKind) -> (BeastId, Vec2, Vec2) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
+        let awaited = format!("a {wanted:?} in these waters");
         loop {
             if let ToClient::Beast {
                 id,
@@ -487,16 +509,12 @@ impl Client {
                 position,
                 velocity,
                 ..
-            } = ToClient::read(&mut &self.0).expect("read")
+            } = self.hear_by(deadline, &awaited)
             {
                 if kind == wanted {
                     return (id, position, velocity);
                 }
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds in these waters and no {wanted:?}"
-            );
         }
     }
 
@@ -513,22 +531,18 @@ impl Client {
     /// that whale and the one they were going to raise anyway, and "the next
     /// whale" is then a question with two right answers.
     fn hear_the_flock(&self) -> Vec<(BeastId, BeastKind, Vec2)> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         let mut beat: Vec<(BeastId, BeastKind, Vec2)> = Vec::new();
         loop {
             if let ToClient::Beast {
                 id, kind, position, ..
-            } = ToClient::read(&mut &self.0).expect("read")
+            } = self.hear_by(deadline, "a whole beat of the beasts")
             {
                 if beat.iter().any(|(told, ..)| *told == id) {
                     return beat;
                 }
                 beat.push((id, kind, position));
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds in these waters and no beat of them"
-            );
         }
     }
 
@@ -543,19 +557,15 @@ impl Client {
     /// alone, skipping whatever came before it, and the mistake would
     /// already be behind the reader by the time anything looked.
     fn hear_put_down_alone(&self) -> (Vec2, Option<f32>) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            match ToClient::read(&mut &self.0).expect("read") {
+            match self.hear_by(deadline, "anybody being put down anywhere") {
                 ToClient::PutDown { position, heading } => return (position, heading),
                 ToClient::Boat { id, .. } => {
                     panic!("the world told this client where its own {id:?} is")
                 }
                 _ => {}
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ten seconds and nobody was put down anywhere"
-            );
         }
     }
 
@@ -563,8 +573,10 @@ impl Client {
     /// session goes on introducing players and telling the sky around a
     /// command, and none of that is what a reply is about.
     fn hear_reply(&self) -> String {
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            if let ToClient::Reply { text } = ToClient::read(&mut &self.0).expect("read") {
+            if let ToClient::Reply { text } = self.hear_by(deadline, "an answer to a console line")
+            {
                 return text;
             }
         }
@@ -572,8 +584,9 @@ impl Client {
 
     /// The next word on what time it is, ignoring everything else.
     fn hear_the_time(&self) -> f32 {
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            if let ToClient::Daylight { phase } = ToClient::read(&mut &self.0).expect("read") {
+            if let ToClient::Daylight { phase } = self.hear_by(deadline, "the time of day") {
                 return phase;
             }
         }
@@ -583,10 +596,21 @@ impl Client {
     /// already said is drained first: a client that has not been listening is
     /// still owed its messages, and the question here is only how the
     /// conversation ends.
+    ///
+    /// A read that merely ran out of time is not the line giving out, and is
+    /// the one error this must not return: a session still perfectly open
+    /// would otherwise be reported as having hung up, and every test asking
+    /// *how* it ended would be handed a `WouldBlock` to answer with.
     fn until_hung_up(&self) -> std::io::Error {
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            if let Err(error) = ToClient::read(&mut &self.0) {
-                return error;
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "the session never hung up");
+            self.0.set_read_timeout(Some(left)).expect("set timeout");
+            match ToClient::read(&mut &self.0) {
+                Ok(_) => {}
+                Err(why) if ran_out_of_time(&why) => panic!("the session never hung up"),
+                Err(why) => return why,
             }
         }
     }
@@ -659,16 +683,16 @@ fn a_newcomer_is_told_the_sky_before_anything_else_happens() {
     client.say(ToServer::Hello {
         version: PROTOCOL_VERSION,
     });
-    match ToClient::read(&mut &client.0).expect("read") {
+    match client.hear_by(Instant::now() + PATIENCE, "which world") {
         ToClient::World { .. } => {}
         other => panic!("expected to hear which world, heard {other:?}"),
     }
     client.say(ToServer::Papers { token: None });
-    match ToClient::read(&mut &client.0).expect("read") {
+    match client.hear_by(Instant::now() + PATIENCE, "a welcome") {
         ToClient::Welcome { .. } => {}
         other => panic!("expected a welcome, heard {other:?}"),
     }
-    match ToClient::read(&mut &client.0).expect("read") {
+    match client.hear_by(Instant::now() + PATIENCE, "the weather") {
         ToClient::Weather { wind } => {
             assert!(wind.is_finite(), "the wind blows {wind}");
             // The same answer the pure function gives for this seed at the
@@ -685,7 +709,7 @@ fn a_newcomer_is_told_the_sky_before_anything_else_happens() {
     }
     // And the hour, for the same reason: a world drawn at an assumed midday
     // would correct itself to a night moments after the player arrived in it.
-    match ToClient::read(&mut &client.0).expect("read") {
+    match client.hear_by(Instant::now() + PATIENCE, "the time of day") {
         ToClient::Daylight { phase } => assert!(
             (phase - server::OPENING).abs() < 0.01,
             "a world seconds old opened at {phase} rather than its morning"
@@ -694,7 +718,7 @@ fn a_newcomer_is_told_the_sky_before_anything_else_happens() {
     }
     // Then the console's words, before the client has asked anything —
     // completion is only worth having from the first line typed.
-    match ToClient::read(&mut &client.0).expect("read") {
+    match client.hear_by(Instant::now() + PATIENCE, "the console's vocabulary") {
         ToClient::Vocabulary { phrases } => {
             assert!(
                 phrases.iter().any(|phrase| phrase == "help"),
@@ -844,7 +868,7 @@ fn the_wrong_dialect_is_refused() {
             version: PROTOCOL_VERSION
         }
     );
-    assert!(ToClient::read(&mut &client.0).is_err(), "still connected");
+    client.until_hung_up();
 }
 
 #[test]
@@ -3599,14 +3623,12 @@ fn a_shark_is_forgotten_when_everyone_leaves_its_waters() {
     // not killed, and no longer anybody's business to hear about. Not at
     // once, though: leaving an animal's waters is given a few seconds to turn
     // out to have been a tack rather than a departure.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        match ToClient::read(&mut &client.0).expect("read") {
-            ToClient::BeastGone { id } if id == shark => break,
-            _ => assert!(
-                std::time::Instant::now() < deadline,
-                "the shark was never let go"
-            ),
+        if let ToClient::BeastGone { id } = client.hear_by(deadline, "the shark being let go") {
+            if id == shark {
+                break;
+            }
         }
     }
 }
@@ -3705,15 +3727,12 @@ fn pods_and_whales_share_the_open_water() {
     });
 
     let mut kinds = std::collections::HashSet::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while kinds != [BeastKind::Shark, BeastKind::Dolphins, BeastKind::Whale].into() {
-        if let ToClient::Beast { kind, .. } = ToClient::read(&mut &client.0).expect("read") {
+        let awaited = format!("a kind at anchor beyond the {kinds:?} offered so far");
+        if let ToClient::Beast { kind, .. } = client.hear_by(deadline, &awaited) {
             kinds.insert(kind);
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "fifteen seconds at anchor and the sea only offered {kinds:?}"
-        );
     }
 }
 
@@ -3742,18 +3761,17 @@ fn a_summons_can_raise_a_crowd_worth_timing_the_client_with() {
     // claim. Counted over a couple of beats, since one beat's worth of
     // tellings is exactly what a client is redrawing from.
     let mut pods = std::collections::HashSet::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while pods.len() < CROWD {
-        if let ToClient::Beast { id, kind, .. } = ToClient::read(&mut &client.0).expect("read") {
+        let awaited = format!(
+            "the rest of {CROWD} summoned pods, {} told of so far",
+            pods.len()
+        );
+        if let ToClient::Beast { id, kind, .. } = client.hear_by(deadline, &awaited) {
             if kind == BeastKind::Dolphins {
                 pods.insert(id);
             }
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "fifteen seconds after summoning {CROWD} pods, {} had been told of",
-            pods.len()
-        );
     }
 }
 
