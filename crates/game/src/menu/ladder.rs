@@ -169,10 +169,6 @@ pub(super) fn options_keys(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Display
-// ---------------------------------------------------------------------------
-
 /// The pause menu, over the world rather than instead of it.
 ///
 /// A panel like the dialogs, on the dimmed [`screen`] they all stand on, so
@@ -265,7 +261,3 @@ pub(super) fn helm_keys(
         Helm::Options | Helm::Display | Helm::Controls | Helm::Console | Helm::Chart => {}
     }
 }
-
-// ---------------------------------------------------------------------------
-// Shared widgets
-// ---------------------------------------------------------------------------

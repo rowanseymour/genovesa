@@ -256,7 +256,3 @@ pub(super) fn refresh_settings(
 pub(super) fn cancel_rebinding(mut rebinding: ResMut<Rebinding>) {
     rebinding.0 = None;
 }
-
-// ---------------------------------------------------------------------------
-// In world
-// ---------------------------------------------------------------------------

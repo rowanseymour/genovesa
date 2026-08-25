@@ -377,7 +377,3 @@ pub(super) fn discard_kept(harbour: &mut Harbour, row: usize, status: &mut Statu
         Err(problem) => status.0 = format!("the world could not be discarded: {problem}"),
     }
 }
-
-// ---------------------------------------------------------------------------
-// New world dialog
-// ---------------------------------------------------------------------------

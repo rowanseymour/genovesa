@@ -29,6 +29,13 @@ pub(super) const SUBTITLE_SIZE: f32 = 19.0;
 /// How far the rules either side of the title run out.
 pub(super) const TITLE_RULE: f32 = 64.0;
 
+/// The front screen.
+///
+/// One way to a world of one's own, not two: "Set Sail" and "New World" both
+/// read as *start playing*, and a player made to tell them apart before they
+/// have seen either is being asked about the machinery. So setting sail is the
+/// whole of it — the worlds this machine keeps and the way to a fresh one are
+/// one screen, because they answer one question.
 pub(super) fn spawn_main_menu(mut commands: Commands) {
     // The whole menu goes inside the cartouche, which is where an engraved
     // chart carries its title and everything said about it.
@@ -162,7 +169,3 @@ pub(super) fn main_menu_actions(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Set sail: the kept worlds
-// ---------------------------------------------------------------------------

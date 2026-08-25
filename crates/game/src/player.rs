@@ -203,8 +203,8 @@ fn find_footing(mut commands: Commands, ground: Option<Res<Ground>>, mut walkers
 }
 
 /// The player and whatever they are aboard, as a query. The one shape every
-/// system that has to answer "what is carrying the player" reads it in —
-/// [`crate::net::receive`] included, which passes it on to the fleet.
+/// system that has to answer "what is carrying the player" reads it in — the
+/// readers of the wire's own words included, which pass it on to the fleet.
 pub type Players<'w, 's> = Query<'w, 's, (Entity, Option<&'static ChildOf>), With<Player>>;
 
 /// The entity carrying the player through the world: the vehicle they are

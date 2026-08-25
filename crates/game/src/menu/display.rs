@@ -55,10 +55,6 @@ pub(super) struct DisplayScreen;
 #[derive(Component)]
 pub(super) struct Resolutions;
 
-// ---------------------------------------------------------------------------
-// Main menu
-// ---------------------------------------------------------------------------
-
 /// The display screen as reached from the main menu.
 pub(super) fn spawn_display(commands: Commands, wanted: Res<Wanted>) {
     build_display(
@@ -579,7 +575,3 @@ pub(super) fn refresh_display(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Controls
-// ---------------------------------------------------------------------------
