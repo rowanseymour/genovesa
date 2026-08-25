@@ -146,7 +146,3 @@ cargo tree --workspace --invert bevy
 ```bash
 cargo tree -p game --depth 1
 ```
-
-## Licence
-
-GPL-3.0 — see [LICENSE](LICENSE).
