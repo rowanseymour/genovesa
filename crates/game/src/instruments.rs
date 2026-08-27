@@ -655,7 +655,7 @@ mod tests {
     use super::*;
     use crate::terrain::Ground;
     use protocol::ground::{
-        quantize, ChunkPayload, Material, CELL_METRES, CORNERS, LIT_ALL_DAY, MATERIAL_COUNT,
+        quantize, ChunkPayload, Material, CELL_COUNT, CELL_METRES, CORNERS, LIT_ALL_DAY,
     };
 
     /// A chunk of sea bed at one depth all over. Open to the sun everywhere:
@@ -664,7 +664,7 @@ mod tests {
     fn bed_at(height: f32) -> ChunkPayload {
         ChunkPayload {
             heights: vec![quantize(height); CORNERS * CORNERS],
-            materials: vec![Material::Sand; MATERIAL_COUNT],
+            materials: vec![Material::Sand; CELL_COUNT],
             lit: vec![LIT_ALL_DAY; CORNERS * CORNERS],
             water: None,
             plants: Vec::new(),
