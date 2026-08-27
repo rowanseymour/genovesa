@@ -36,11 +36,13 @@
 //! may be a ridge many chunks away that a client has never been sent, so only
 //! whoever holds the whole island can say — the generator bakes the pair per
 //! corner and it crosses the wire as [`ChunkPayload::lit`]. It is what lets a
-//! client draw the terrain's own shadows without a shadow map: thresholds
-//! interpolate across a cell exactly as heights do, so a shadow's edge still
-//! moves smoothly over the ground as the day turns, and the same pair asked
-//! with `phase + 0.5` answers for the moon, which rides the same arc half a
-//! day out of phase.
+//! client draw the terrain's own shadows without a shadow map: the pairs read
+//! back anywhere on the grid by interpolation, exactly as heights do, and how
+//! finely a drawing end cuts its shadow from them is its own business, like
+//! the grid itself — the one client here holds each cell to the pair at its
+//! centre, so shade lands cell by cell on the mosaic the materials paint.
+//! The same pair asked with `phase + 0.5` answers for the moon, which rides
+//! the same arc half a day out of phase.
 
 use glam::{IVec2, Vec2, Vec3};
 

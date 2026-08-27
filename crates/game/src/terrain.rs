@@ -1167,10 +1167,10 @@ fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]], detail: 
             fz as f32 * CELL_METRES,
         )
     };
-    // Off the same payload corner the height above was, by the same stride.
-    // A coarse sheet is then shaded by intervals the ground actually has, for
-    // the reason [`Detail`] decimates corners rather than averaging them: a
-    // blended threshold is an hour no corner ever saw the sun at.
+    // Off the same payload corner the height above was, by the same stride,
+    // so a coarse sheet reads intervals the ground actually has at the
+    // corners it draws — [`Detail`] decimates here exactly as it does the
+    // heights.
     let daylight = |cx: usize, cz: usize| {
         let (fx, fz) = (cx * stride, cz * stride);
         lit_uv(lit[fz * CORNERS + fx])
@@ -1209,21 +1209,32 @@ fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]], detail: 
             let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
             let color = [linear.red, linear.green, linear.blue, 1.0];
 
-            // The UV channel carries no texture coordinates — nothing binds a
-            // texture to the ground — it carries each corner's lit interval,
-            // as phases of the day. Free spatial interpolation is the point:
-            // the thresholds vary across a cell exactly as heights do, so the
-            // shadow's edge lands *inside* cells and sweeps smoothly over the
-            // ground as the hour turns. See `assets/shaders/ground.wgsl`.
+            // The UV channel carries no texture coordinates — nothing binds
+            // a texture to the ground — it carries the cell's lit interval,
+            // as phases of the day: the corners' pairs met in the middle,
+            // one value for all four vertices. Flat on purpose, like the
+            // normal and the colour: a cell stands in the sun or does not,
+            // whole, so a shadow's edge lands on cell boundaries — the grid
+            // everything else about a cell is drawn on — instead of sweeping
+            // through cells as a gradient the texels cannot follow. It was
+            // interpolated for a long time, and read as a shadow airbrushed
+            // over the mosaic. What stays smooth is time: the shader eases
+            // each cell over the hour — see `assets/shaders/ground.wgsl`.
             // Pushed in [`SW`], [`SE`], [`NW`], [`NE`] order, which is what
             // [`split`]'s corner numbers index.
             let first = positions.len() as u32;
             let corners = [(ix, iz), (ix + 1, iz), (ix, iz + 1), (ix + 1, iz + 1)];
-            for (vertex, (cx, cz)) in [sw, se, nw, ne].into_iter().zip(corners) {
+            let mut lit_pair = [0.0f32; 2];
+            for (cx, cz) in corners {
+                let uv = daylight(cx, cz);
+                lit_pair[0] += uv[0] / 4.0;
+                lit_pair[1] += uv[1] / 4.0;
+            }
+            for vertex in [sw, se, nw, ne] {
                 positions.push([vertex.x, vertex.y, vertex.z]);
                 normals.push([normal.x, normal.y, normal.z]);
                 colors.push(color);
-                uvs.push(daylight(cx, cz));
+                uvs.push(lit_pair);
             }
 
             // Cut the way [`split`] says, which is also the way [`height_at`]
@@ -1969,13 +1980,16 @@ mod tests {
     }
 
     #[test]
-    fn a_coarse_cut_is_lit_by_the_corners_it_draws() {
-        // The light is decimated with the heights and by the same stride, so
-        // a drawn corner is shaded by the interval the ground actually has
-        // there — the reason [`Detail`] takes corners rather than averaging
-        // them, applied to the other thing a corner carries. Reading the
-        // drawn cell's index instead would shade the coarse sheet with the
-        // intervals of the chunk's first few metres, stretched over all of it.
+    fn a_cell_is_lit_whole_by_the_interval_at_its_middle() {
+        // Every vertex of a drawn cell carries one pair — the mean of the
+        // cell's own four corners, which is the interpolated value at its
+        // centre — so the shadow shades whole cells on the same grid the
+        // materials are painted on; see the UV note in [`chunk_mesh`]. The
+        // corners are decimated with the heights and by the same stride, so
+        // a coarse cut is still lit by intervals the ground actually has at
+        // the corners it draws: reading the drawn cell's index instead would
+        // shade the coarse sheet with the intervals of the chunk's first few
+        // metres, stretched over all of it.
         let mut payload = a_slope();
         payload.lit = (0..CORNERS * CORNERS)
             .map(|i| {
@@ -1999,16 +2013,22 @@ mod tests {
             other => panic!("the lit intervals came back as {other:?}"),
         };
 
-        // The south-west corner of a few drawn cells: first of the cell's
-        // four vertices, in the order [`chunk_mesh`] pushes them.
         let across = detail.cells();
         for (ix, iz) in [(0, 0), (1, 0), (0, 1), (3, 5), (across - 1, across - 1)] {
-            let want = lit_uv(payload.lit[(iz * stride) * CORNERS + ix * stride]);
-            let got = uvs[(iz * across + ix) * 4];
-            assert_eq!(
-                got, want,
-                "drawn cell ({ix}, {iz}) is lit by some corner other than its own"
-            );
+            let mut want = [0.0f32; 2];
+            for (cx, cz) in [(ix, iz), (ix + 1, iz), (ix, iz + 1), (ix + 1, iz + 1)] {
+                let uv = lit_uv(payload.lit[(cz * stride) * CORNERS + cx * stride]);
+                want[0] += uv[0] / 4.0;
+                want[1] += uv[1] / 4.0;
+            }
+            for vertex in 0..4 {
+                let got = uvs[(iz * across + ix) * 4 + vertex];
+                assert_eq!(
+                    got, want,
+                    "vertex {vertex} of drawn cell ({ix}, {iz}) is lit by \
+                     something other than the cell's own middle"
+                );
+            }
         }
     }
 
