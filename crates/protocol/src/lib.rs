@@ -1477,7 +1477,7 @@ impl<'a> Payload<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::ground::{Material, CORNERS, MATERIAL_COUNT};
+    use super::ground::{Material, CELL_COUNT, CORNERS};
     use super::survey::{Coast, Mark, Soundings};
     use super::*;
 
@@ -1544,7 +1544,7 @@ mod tests {
             heights: (0..CORNERS * CORNERS)
                 .map(|i| (i * 601 % 65_521) as u16)
                 .collect(),
-            materials: (0..MATERIAL_COUNT)
+            materials: (0..CELL_COUNT)
                 .map(|i| {
                     [
                         Material::Seabed,
@@ -2334,7 +2334,7 @@ mod tests {
 
         // The lit grid starts once the materials are done, a from-until pair
         // per corner: corner 0 is [0, 0], corner 1 [3, 5], corner 2 [6, 10].
-        let lit = materials + MATERIAL_COUNT;
+        let lit = materials + CELL_COUNT;
         assert_eq!(ground[lit..lit + 6], [0, 0, 3, 5, 6, 10]);
 
         // And the same chunk with a lake on it. The heights, the materials

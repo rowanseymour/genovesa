@@ -524,8 +524,7 @@ impl Ground {
         let local = ((at - chunk.as_vec2() * CHUNK_METRES) / CELL_METRES).floor();
         // Clamped for the same reason [`Ground::lit`] clamps: a point a whisker
         // under the chunk's far edge can round its local coordinate up to the
-        // edge itself, which indexes the apron — the neighbour's cell — and
-        // answers a whisker wrong with nothing to say so.
+        // edge itself, which is off the grid and would panic below.
         let edge = CELLS as i32 - 1;
         let index = material_index((local.x as i32).min(edge), (local.y as i32).min(edge))
             .expect("a point of the chunk is on its own material grid");
@@ -1172,11 +1171,9 @@ fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]], detail: 
         lit_uv(lit[fz * CORNERS + fx])
     };
 
-    // The chunk's own cells only. The payload's grid reaches a cell further
-    // out on every side — see [`ChunkPayload::materials`] — and that ring
-    // belongs to the neighbouring chunks, which draw it themselves. Drawing
-    // it here would lay a one-metre skirt of duplicate ground over every
-    // boundary in the world.
+    // The payload's grid is exactly the chunk's own cells — a neighbour's
+    // ground, where a drawing decision wants it, is the neighbour's own
+    // delivered grid, reached by world point; see [`ChunkPayload::materials`].
     for iz in 0..cells {
         for ix in 0..cells {
             // The material nearest the middle of what this cell covers. A
@@ -1786,7 +1783,7 @@ fn within(chunk: IVec2, focus: Vec2, radius: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::ground::{quantize, MATERIAL_COUNT};
+    use protocol::ground::{quantize, CELL_COUNT};
 
     /// A payload of ground with a distinctive shape: a plane tilted along both
     /// axes, so that every corner has a different height and any transposed or
@@ -1800,7 +1797,7 @@ mod tests {
                     quantize(ix as f32 + 10.0 * iz as f32)
                 })
                 .collect(),
-            materials: vec![Material::Grass; MATERIAL_COUNT],
+            materials: vec![Material::Grass; CELL_COUNT],
             lit: vec![protocol::ground::LIT_ALL_DAY; CORNERS * CORNERS],
             water: None,
             plants: Vec::new(),
@@ -1895,7 +1892,7 @@ mod tests {
         for detail in [Detail::FINEST, Detail::new(2), Detail::COARSEST] {
             let mesh = chunk_mesh(
                 &heights,
-                &vec![Material::Grass; MATERIAL_COUNT],
+                &vec![Material::Grass; CELL_COUNT],
                 &all_day(),
                 detail,
             );
@@ -2087,7 +2084,7 @@ mod tests {
         let heights = a_saddle();
         let coarse = chunk_mesh(
             &heights,
-            &vec![Material::Grass; MATERIAL_COUNT],
+            &vec![Material::Grass; CELL_COUNT],
             &all_day(),
             Detail::new(1),
         );
@@ -2115,7 +2112,7 @@ mod tests {
     #[test]
     fn chunk_positions_are_local_so_the_transform_places_them() {
         let heights = vec![3.5f32; CORNERS * CORNERS];
-        let materials = vec![Material::Sand; MATERIAL_COUNT];
+        let materials = vec![Material::Sand; CELL_COUNT];
         let mesh = chunk_mesh(&heights, &materials, &all_day(), Detail::FINEST);
 
         let positions = mesh
@@ -2271,7 +2268,7 @@ mod tests {
         let heights = a_saddle();
         let mesh = chunk_mesh(
             &heights,
-            &vec![Material::Grass; MATERIAL_COUNT],
+            &vec![Material::Grass; CELL_COUNT],
             &all_day(),
             Detail::FINEST,
         );
