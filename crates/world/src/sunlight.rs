@@ -19,21 +19,28 @@
 //! name between sunrise and sunset, and for each the raster is swept once in
 //! the sun's own direction, carrying a running shadow height that each point
 //! either ducks under or clears — a pass over the raster per sampled hour,
-//! not a ray march per point. The raster is coarser than the wire's grid
-//! ([`STEP_METRES`]); the thresholds it stores vary smoothly along the
-//! ground, so chunk corners read them back bilinearly the same way a client
-//! interpolates them across a cell.
+//! not a ray march per point. The raster shares the wire's own grid
+//! ([`STEP_METRES`]); chunk corners read the thresholds back bilinearly the
+//! same way a client interpolates them across a cell.
 
 use glam::Vec2;
 
-use protocol::ground::LIT_ALL_DAY;
+use protocol::ground::{CELL_METRES, LIT_ALL_DAY};
 
-/// Metres between raster points. Coarser than the wire's one-metre grid
-/// because a lit threshold is a property of the landform around a point, not
-/// of the point's own facet: it varies over tens of metres, and paying the
-/// island-times-arc sweep at full grid resolution would buy sixteen times the
-/// work for detail the thresholds do not hold.
-const STEP_METRES: f32 = 4.0;
+/// Metres between raster points — the wire's own grid, [`CELL_METRES`].
+///
+/// It was 4 m, on the theory that a lit threshold is a property of the
+/// landform around a point and varies over tens of metres. Over open slopes
+/// it does; what the coarse raster missed is the *casting* side. A crag a
+/// couple of metres wide falls between 4 m samples, and with its crest
+/// clipped the shadow it throws comes out hours short: measured against a
+/// ray march of the same surface, a knoll's lee read as lit until 16:00
+/// where the truth was shade from 14:24 — a terminator standing tens of
+/// metres from the relief the cells it crosses are painted by. At the
+/// cells' own spacing the bake agrees with the march to a phase step
+/// almost everywhere, for a bake several times dearer that is still paid
+/// once per island, off any frame.
+const STEP_METRES: f32 = CELL_METRES;
 
 /// How far above a point's own surface the swept shadow height must stand
 /// before the point counts as shadowed. Without it, the interpolation the
