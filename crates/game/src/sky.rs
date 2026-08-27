@@ -489,11 +489,11 @@ fn light_at(phase: f32) -> Hour {
 /// of the pass as a caster, and what is left in it is the boat, the plants,
 /// the player and the beasts, whose shadows no baking could answer for
 /// because they are not a function of the hour alone. That is what makes
-/// [`crate::terrain::cascades`] a hundred metres and one cascade rather than
-/// a kilometre and four.
+/// [`crate::terrain::cascades`] two short cascades rather than a kilometre
+/// and four.
 fn hang_the_light(mut commands: Commands) {
-    // Shadow map resolution. One cascade now, so this is a single layer
-    // rather than four — and the reason it is not Bevy's 2048 is the mast.
+    // Shadow map resolution. Two cascades, so two layers rather than four —
+    // and the reason it is not Bevy's 2048 is the mast.
     // It is the thinnest caster in the world, and at 16 cm its shadow is a
     // stripe a few texels wide whose edges snap from texel to texel as the
     // boat moves, which reads as a flicker along the whole stripe. Halving

@@ -56,13 +56,16 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     shadows,
+    view_transformations,
 }
 
 struct Shading {
     // x: the phase of the day to hold the lit intervals against. y: half the
     // width of the terminator, in phase. z: the grain's full swing as a
     // fraction of the palette colour, zero for surfaces that go without.
-    // w: padding. The reasoning for all of them lives on `terrain::Shading`.
+    // w: how far out cast shadows are drawn hard, in metres of view depth,
+    // zero for surfaces that take none. The reasoning for all of them lives
+    // on `terrain::Shading`.
     hour: vec4<f32>,
     // The material window's place in the world — the lanes are read here and
     // owned, like the hour's, by `terrain::Shading`. All zeroes on surfaces
@@ -234,27 +237,30 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var sun = smoothstep(lit.x - edge, lit.x + edge, hour)
         * (1.0 - smoothstep(lit.y - edge, lit.y + edge, hour));
 
-    // The cast shadows — the boat, the palms, whatever the baking could not
-    // know — read from the shadow map and hardened, as the header says. The
-    // filtered value is re-thresholded about a half: [`CAST_EDGE`] of slope
-    // is kept for the screen's sake, the rest of the penumbra goes. Folded
-    // in by min, not product — a fragment is in shadow for either reason,
-    // not twice as dark for both.
-    let view_z = dot(vec4(
-        view.view_from_world[0].z,
-        view.view_from_world[1].z,
-        view.view_from_world[2].z,
-        view.view_from_world[3].z,
-    ), in.world_position);
-    for (var i = 0u; i < lights.n_directional_lights; i += 1u) {
-        if (lights.directional_lights[i].flags
-            & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) == 0u {
-            continue;
+    // The cast shadows, folded in by min, not product — a fragment is in
+    // shadow for either reason, not twice as dark for both. Skipped whole
+    // where the baked shadow has already settled it, and on surfaces whose
+    // reach is nothing — see the `w` lane above.
+    let reach = shading.hour.w;
+    if reach > 0.0 && sun > 0.0 {
+        let view_z = view_transformations::position_world_to_view(in.world_position.xyz).z;
+        // Light 0 is the sky's, sun or moon by turns, and the world hangs no
+        // other: point and spot lights would need their own reads. An empty
+        // slot's flags are zero, so no light at all fails the same test the
+        // console's `shadows off` does.
+        if (lights.directional_lights[0].flags
+            & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+            let raw = shadows::fetch_directional_shadow(
+                0u, in.world_position, in.world_normal, view_z, in.position.xy,
+            );
+            // Hard up close; eased back to the filter's own softness by
+            // `reach`, where a shadow is small on screen, a caster thinner
+            // than the far cascade's kernel would be thresholded away, and
+            // the cascades' cross-fade must not be cut into a step.
+            let hard = smoothstep(0.5 - CAST_EDGE, 0.5 + CAST_EDGE, raw);
+            let ease = smoothstep(0.75 * reach, reach, -view_z);
+            sun = min(sun, mix(hard, raw, ease));
         }
-        let raw = shadows::fetch_directional_shadow(
-            i, in.world_position, in.world_normal, view_z, in.position.xy,
-        );
-        sun = min(sun, smoothstep(0.5 - CAST_EDGE, 0.5 + CAST_EDGE, raw));
     }
 
     // The same fragment with the sun's share gone: the sky's own fill, which
