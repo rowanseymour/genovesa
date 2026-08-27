@@ -269,10 +269,15 @@ pub const SEA_WATER: Vec3 = Vec3::new(0.10, 0.42, 0.62);
 pub const LAKE_WATER: Vec3 = Vec3::new(0.12, 0.34, 0.38);
 
 impl Material {
+    /// How many materials there are. The palette and the enum are numbered
+    /// together, so this is also one past the largest number
+    /// [`Material::from_byte`] answers for.
+    pub const KINDS: usize = PALETTE.len();
+
     /// The material a stored number names, or `None` for one this build has
     /// never
     /// heard of.
-    fn from_byte(byte: u8) -> Option<Self> {
+    pub fn from_byte(byte: u8) -> Option<Self> {
         // The table and the enum are numbered together, so anything inside the
         // table is a material and the transmute-free way to say so is a match on
         // the count.
