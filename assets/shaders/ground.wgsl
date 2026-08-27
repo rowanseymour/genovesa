@@ -9,12 +9,12 @@
 // vertex carries, in the UV channel nothing else uses, the first and last
 // phase of the day at which the sun clears the terrain around it — see
 // `ChunkPayload::lit` in the protocol crate, which owns what the pair means.
-// The mesh gives a cell's four vertices one pair — the wire's corner values
-// read at the cell's centre, see `chunk_mesh` — so a cell stands in the sun
-// or does not, whole, and the shadow's edge lands on cell boundaries, the
-// grid the materials are painted on, with no shadow map drawn by anybody.
-// What eases is the hour, not the edge: a cell the terminator reaches fades
-// over a few seconds of the day rather than snapping.
+// All four of a drawn cell's vertices carry one pair, so a cell stands in the
+// sun or does not, whole, and the edge steps from cell to cell with no shadow
+// map drawn by anybody — `chunk_mesh` owns why, and is where that is decided.
+// What eases here is the hour, not the edge: the thresholds are held against
+// `hour` through a smoothstep of `SHADE_EDGE`, so a cell the terminator
+// reaches fades over a few seconds of the day rather than snapping.
 //
 // The shadow pass still exists for what baking cannot answer — the boat, the
 // palms, whatever moves — and the ground reads its map here itself rather
