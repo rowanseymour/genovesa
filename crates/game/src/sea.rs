@@ -1141,30 +1141,12 @@ pub(crate) fn refresh_depth(
     window.sweep = (window.sweep + SWEEP_ROWS) % DEPTH_TEXELS;
 }
 
-/// Shifts the window's texels so that texel `(x, y)` afterwards holds what
-/// texel `(x, y) + step` held before — the data moves opposite to the
-/// window, which is what keeps each surviving texel over the same piece of
-/// world. Texels that slide in from beyond the old window are set deep, and
-/// left for the sweep.
+/// Shifts the window's texels — [`crate::terrain::scroll_texels`], which the
+/// two windows share, and which says which way the data moves and why.
+/// Texels that slide in from beyond the old window are set deep, and left
+/// for the sweep.
 fn scroll(data: &mut [u8], step: IVec2) {
-    let n = DEPTH_TEXELS as i32;
-    let old = data.to_vec();
-    let texel = |x: i32, y: i32| (y * n + x) as usize * TEXEL_BYTES;
-    for y in 0..n {
-        for x in 0..n {
-            let from = IVec2::new(x, y) + step;
-            let into = texel(x, y);
-            // The index is only worked out once the texel is known to be on
-            // the old window: a coordinate that slid in from beyond it is
-            // negative, and negative has no place in an index.
-            let carried = ((0..n).contains(&from.x) && (0..n).contains(&from.y))
-                .then(|| texel(from.x, from.y));
-            data[into..into + TEXEL_BYTES].copy_from_slice(match carried {
-                Some(was) => &old[was..was + TEXEL_BYTES],
-                None => &UNREAD,
-            });
-        }
-    }
+    crate::terrain::scroll_texels(data, DEPTH_TEXELS, TEXEL_BYTES, &UNREAD, step);
 }
 
 /// The sea's mesh: a grid of [`SPACING`] cells out to [`REACH`], with one
