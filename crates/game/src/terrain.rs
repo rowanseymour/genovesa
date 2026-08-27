@@ -729,6 +729,13 @@ type ShadedMaterial = ExtendedMaterial<StandardMaterial, Daylight>;
 /// unreadable; narrow enough that a shadow's edge is still an edge.
 const SHADE_EDGE: f32 = 1.5 / 256.0;
 
+/// The ground's grain — the speckle `assets/shaders/ground.wgsl` hashes from
+/// world position, which is what stands in for a texture. The full swing one
+/// cell may pull the palette colour, as a fraction of it, and the width of a
+/// cell in metres.
+const GRAIN_SWING: f32 = 0.15;
+const GRAIN_CELL: f32 = 0.5;
+
 /// What the ground's shader needs beyond the standard material: the hour, to
 /// hold against the lit interval every vertex carries in its UV channel —
 /// see [`chunk_mesh`] for how it gets there, and
@@ -738,10 +745,20 @@ struct Daylight {
     /// `x` is the phase to ask the intervals about: the drawn hour by day
     /// and its mirror by night, when the moon rides the same arc half a day
     /// out of phase — the same swap the sky makes of the light itself.
-    /// Written every frame by [`shade_the_ground`]. `y` is [`SHADE_EDGE`],
-    /// `zw` padding.
+    /// Written every frame by [`shade_the_ground`]. `y` is [`SHADE_EDGE`];
+    /// `z` and `w` are [`GRAIN_SWING`] and [`GRAIN_CELL`] on the ground, and
+    /// zero on the waters, which a swing of nothing leaves smooth.
     #[uniform(100)]
     hour: Vec4,
+}
+
+impl Daylight {
+    /// The ground's copy: noon still, with the grain switched on.
+    fn grained() -> Self {
+        Self {
+            hour: DAYLIGHT_AT_NOON.with_z(GRAIN_SWING).with_w(GRAIN_CELL),
+        }
+    }
 }
 
 /// The hour every surface opens at, before the sky has spoken: noon, which
@@ -1039,7 +1056,7 @@ fn enter_world(
     // and the extension is what draws the baked shadows over the result.
     commands.insert_resource(GroundMaterial(shaded.add(ShadedMaterial {
         base: matte(Color::WHITE),
-        extension: Daylight::default(),
+        extension: Daylight::grained(),
     })));
 
     // Ocean floor. The sea is translucent, so without something opaque beneath
