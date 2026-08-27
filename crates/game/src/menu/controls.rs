@@ -87,8 +87,9 @@ pub(super) fn spawn_controls(
 
                     // Plain punctuation only: the default font has no dash of
                     // any kind and draws a missing glyph as an empty box.
-                    label(panel, ink, "the arrow keys always move, and escape always");
-                    label(panel, ink, "goes back; neither can be reassigned");
+                    label(panel, ink, "the arrow keys always move, escape always goes");
+                    label(panel, ink, "back, and f12 keeps a picture of the view;");
+                    label(panel, ink, "none of them can be reassigned");
 
                     panel
                         .spawn(Node {

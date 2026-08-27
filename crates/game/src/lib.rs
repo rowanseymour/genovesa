@@ -31,6 +31,7 @@ pub mod net;
 pub mod player;
 pub mod sea;
 pub mod settings;
+pub mod shots;
 pub mod sky;
 pub mod stopping;
 pub mod terrain;
