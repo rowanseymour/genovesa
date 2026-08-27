@@ -788,7 +788,12 @@ struct Shading {
     /// out of phase — the same swap the sky makes of the light itself.
     /// Written every frame by [`shade_the_ground`]. `y` is [`SHADE_EDGE`];
     /// `z` is [`GRAIN_SWING`] on the ground and zero on the waters, which a
-    /// swing of nothing leaves smooth; `w` padding.
+    /// swing of nothing leaves smooth; `w` is how far out, in metres of view
+    /// depth, the shader draws the shadow pass's cast shadows hard —
+    /// [`CASCADE_SPLIT`], easing back to the filter's own softness by there,
+    /// so the hardening never re-thresholds the cascades' cross-fade — and
+    /// zero on the bed, which takes no cast shadow at all: it lies under
+    /// metres of water, with nothing over it to have cast one.
     #[uniform(100)]
     hour: Vec4,
     /// The material window's place in the world: `xy` the world coordinates
@@ -818,7 +823,7 @@ impl Shading {
     /// opened around the focus.
     fn ground(materials: Handle<Image>, focus: Vec2) -> Self {
         Self {
-            hour: DAYLIGHT_AT_NOON.with_z(GRAIN_SWING),
+            hour: DAYLIGHT_AT_NOON.with_z(GRAIN_SWING).with_w(CASCADE_SPLIT),
             window: Self::window_uniform(MaterialWindow::origin_under(focus)),
             palette: drawn_palette(),
             materials,
@@ -828,7 +833,7 @@ impl Shading {
     /// A water's: noon, and no grain — a sheet of water is one tone.
     fn water(materials: Handle<Image>) -> Self {
         Self {
-            hour: DAYLIGHT_AT_NOON,
+            hour: DAYLIGHT_AT_NOON.with_w(CASCADE_SPLIT),
             window: Vec4::ZERO,
             palette: drawn_palette(),
             materials,
@@ -1653,10 +1658,12 @@ fn spawn_arrivals(
                     // intervals it arrived with, so putting it through the
                     // shadow pass as well would be the same shadow drawn
                     // twice by two methods that disagree at their edges — and
-                    // it is the whole of what made that pass expensive. It
-                    // still *receives*: what the pass is left for is the boat
-                    // and the palms, and their shadows have to land on this.
+                    // it is the whole of what made that pass expensive. Nor
+                    // does it receive through the standard path: the cast
+                    // shadows land through `ground.wgsl`'s own read of the
+                    // map, which owns the why.
                     NotShadowCaster,
+                    NotShadowReceiver,
                     // Visible from birth: plants parent themselves here as soon
                     // as the heights land, which can be before the mesh build
                     // finishes and Mesh3d's required components would have
@@ -1707,8 +1714,10 @@ fn receive_chunks(
                 // Water casts no shadow — Bevy shadows a transparent surface
                 // as though it were solid, so a lake would otherwise throw
                 // its own shadow down onto its own bed. The sea plane is kept
-                // out of the pass for exactly this reason.
+                // out of the pass for exactly this reason. And it receives
+                // the way the ground does, through `ground.wgsl`'s own read.
                 NotShadowCaster,
+                NotShadowReceiver,
                 Mesh3d(meshes.add(surface)),
                 MeshMaterial3d(lake.0.clone()),
             ));
@@ -2576,6 +2585,37 @@ mod tests {
         assert!(
             include_str!("terrain.rs").contains(&format!(".with_{lane}(GRAIN_SWING)")),
             "the packing puts the swing in `{lane}`"
+        );
+    }
+
+    #[test]
+    fn the_cast_shadows_ride_the_lane_and_keep_the_switch() {
+        // Two facts only the drawing machine could otherwise check: the
+        // shader takes the hardening reach from the lane the packing puts
+        // it in — `w`, the hazard the grain's test above explains — and it
+        // still asks the light whether shadows are on, which is the whole
+        // of how the console's `shadows off` reaches ground the standard
+        // path no longer shades. Needles assembled at runtime, as above.
+        let shader = std::fs::read_to_string(format!(
+            "{}/../../assets/shaders/ground.wgsl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("the ground's shader under assets/shaders/");
+        let lane = 'w';
+        assert!(
+            shader.contains(&format!("shading.hour.{lane}")),
+            "the shader takes the reach from `{lane}`"
+        );
+        assert!(
+            include_str!("terrain.rs").contains(&format!(".with_{lane}(CASCADE_SPLIT)")),
+            "the packing puts the reach in `{lane}`"
+        );
+        assert!(
+            shader.contains(&format!(
+                "{}_SHADOWS_ENABLED_BIT",
+                "DIRECTIONAL_LIGHT_FLAGS"
+            )),
+            "the shader honours the light's own shadow switch"
         );
     }
 

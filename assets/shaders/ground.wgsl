@@ -13,6 +13,16 @@
 // shadow's edge lands inside cells and sweeps over the ground as the hour
 // turns, with no shadow map drawn by anybody.
 //
+// The shadow pass still exists for what baking cannot answer — the boat, the
+// palms, whatever moves — and the ground reads its map here itself rather
+// than letting the standard path apply it: the mesh is `NotShadowReceiver`
+// (see the chunk spawn in `terrain.rs`), and the filtered value the map
+// gives back is cut down to an edge before it darkens anything. Filtering
+// first and hardening after is the point: the Gaussian's answer slides
+// smoothly as a caster moves, so the hardened edge sweeps instead of
+// crawling texel to texel — which is what reading the map raw does, and why
+// hard filtering on the camera was tried and thrown out.
+//
 // The hour itself arrives through the uniform below, packed by the Rust side
 // (`terrain.rs`), which is the single authority on it — including the swap
 // onto the moon's half of the day at night.
@@ -41,16 +51,21 @@
 #import bevy_pbr::{
     ambient,
     forward_io::{VertexOutput, FragmentOutput},
-    mesh_view_bindings::view,
+    mesh_view_bindings::{view, lights},
+    mesh_view_types,
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
+    shadows,
+    view_transformations,
 }
 
 struct Shading {
     // x: the phase of the day to hold the lit intervals against. y: half the
     // width of the terminator, in phase. z: the grain's full swing as a
     // fraction of the palette colour, zero for surfaces that go without.
-    // w: padding. The reasoning for all of them lives on `terrain::Shading`.
+    // w: how far out cast shadows are drawn hard, in metres of view depth,
+    // zero for surfaces that take none. The reasoning for all of them lives
+    // on `terrain::Shading`.
     hour: vec4<f32>,
     // The material window's place in the world — the lanes are read here and
     // owned, like the hour's, by `terrain::Shading`. All zeroes on surfaces
@@ -82,6 +97,13 @@ const CELL: f32 = 0.5;
 // water sheet. An eighth of a metre is exact in f32 and shares no multiple
 // with either grid.
 const OFF_LATTICE: f32 = 0.125;
+
+// How much of the shadow map's filtered gradient a cast shadow keeps, either
+// side of a half. The full gradient is the soft blur this file exists to keep
+// out of the picture; none at all is a stair-step the screen has no MSAA
+// against, since a shadow is shading rather than an edge. A tenth leaves
+// about a pixel of easing at the map's resolution.
+const CAST_EDGE: f32 = 0.1;
 
 // One grain cell's two independent values in [0, 1) — the speckle draws on
 // the first and the material pick on the second, so a texel's brightness
@@ -212,8 +234,34 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let lit = in.uv;
     let edge = shading.hour.y;
     let hour = shading.hour.x;
-    let sun = smoothstep(lit.x - edge, lit.x + edge, hour)
+    var sun = smoothstep(lit.x - edge, lit.x + edge, hour)
         * (1.0 - smoothstep(lit.y - edge, lit.y + edge, hour));
+
+    // The cast shadows, folded in by min, not product — a fragment is in
+    // shadow for either reason, not twice as dark for both. Skipped whole
+    // where the baked shadow has already settled it, and on surfaces whose
+    // reach is nothing — see the `w` lane above.
+    let reach = shading.hour.w;
+    if reach > 0.0 && sun > 0.0 {
+        let view_z = view_transformations::position_world_to_view(in.world_position.xyz).z;
+        // Light 0 is the sky's, sun or moon by turns, and the world hangs no
+        // other: point and spot lights would need their own reads. An empty
+        // slot's flags are zero, so no light at all fails the same test the
+        // console's `shadows off` does.
+        if (lights.directional_lights[0].flags
+            & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+            let raw = shadows::fetch_directional_shadow(
+                0u, in.world_position, in.world_normal, view_z, in.position.xy,
+            );
+            // Hard up close; eased back to the filter's own softness by
+            // `reach`, where a shadow is small on screen, a caster thinner
+            // than the far cascade's kernel would be thresholded away, and
+            // the cascades' cross-fade must not be cut into a step.
+            let hard = smoothstep(0.5 - CAST_EDGE, 0.5 + CAST_EDGE, raw);
+            let ease = smoothstep(0.75 * reach, reach, -view_z);
+            sun = min(sun, mix(hard, raw, ease));
+        }
+    }
 
     // The same fragment with the sun's share gone: the sky's own fill, which
     // is the ambient term the full path also used — bevy's own formula, so
