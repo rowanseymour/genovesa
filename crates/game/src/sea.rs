@@ -1052,6 +1052,15 @@ pub fn depth_image() -> Image {
     // Bilinear, so a facet between two texels gets water between their
     // depths rather than one or the other's — and a shadow's edge crossing
     // the window arrives as an edge rather than as a staircase of texels.
+    //
+    // Which is the opposite of what the ground does with the same bake: it
+    // holds each cell to one interval so the terminator steps on the mosaic
+    // it is painted on — see [`crate::terrain::chunk_mesh`]. Deliberate, and
+    // the sea is the one that should differ: it has no mosaic to agree with,
+    // its surface is one tone that a staircase would only make read as
+    // facets, and it is moving. A shadow reaching the water from a stepped
+    // shore therefore softens as it crosses the waterline, which is where
+    // the eye already expects the ground's grid to end.
     image.sampler = ImageSampler::linear();
     image
 }

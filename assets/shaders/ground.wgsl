@@ -9,9 +9,12 @@
 // vertex carries, in the UV channel nothing else uses, the first and last
 // phase of the day at which the sun clears the terrain around it — see
 // `ChunkPayload::lit` in the protocol crate, which owns what the pair means.
-// The thresholds interpolate across each cell like any attribute, so the
-// shadow's edge lands inside cells and sweeps over the ground as the hour
-// turns, with no shadow map drawn by anybody.
+// All four of a drawn cell's vertices carry one pair, so a cell stands in the
+// sun or does not, whole, and the edge steps from cell to cell with no shadow
+// map drawn by anybody — `chunk_mesh` owns why, and is where that is decided.
+// What eases here is the hour, not the edge: the thresholds are held against
+// `hour` through a smoothstep of `SHADE_EDGE`, so a cell the terminator
+// reaches fades over a few seconds of the day rather than snapping.
 //
 // The shadow pass still exists for what baking cannot answer — the boat, the
 // palms, whatever moves — and the ground reads its map here itself rather
@@ -164,7 +167,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // The standoff before the fade-in keeps all four reads on the
         // window from any fragment of the texel: half a cell of centre
         // wander, and a cell of reach either side of the centre.
-        let blend = sharp * smoothstep(0.5 + CELL, shading.window.w, inside);
+        // The width itself is the off switch for windowless surfaces (the
+        // bed's making): `smoothstep` up to a zero margin has indeterminate
+        // results by spec, so the fade must not be what keeps them out.
+        let blend = select(
+            0.0,
+            sharp * smoothstep(0.5 + CELL, shading.window.w, inside),
+            shading.window.z > 0.0,
+        );
         if blend > 0.0 {
             let column = vec2<i32>(cube.x, cube.z);
             let pick = grains(vec3(column.x, column.y, 0)).y;

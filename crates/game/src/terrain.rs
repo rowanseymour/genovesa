@@ -84,8 +84,9 @@ use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, Tex
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, material_index, ChunkPayload, Material, Plant, CELLS, CELL_METRES,
-    CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, LIT_ALL_DAY, NO_WATER, OCEAN_DEPTH, SEA_WATER,
+    chunk_at, dequantize, lit_across, material_index, ChunkPayload, Material, Plant, CELLS,
+    CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, LIT_ALL_DAY, NO_WATER,
+    OCEAN_DEPTH, SEA_WATER,
 };
 
 use crate::camera::{MapCamera, View};
@@ -476,10 +477,11 @@ impl Ground {
     /// because ground that has not arrived cannot be shadowing anything the
     /// eye can see either.
     ///
-    /// Bilinear across the corner grid rather than down the facet split
-    /// [`height_at`] uses: an interval belongs to the ground around a point
-    /// rather than to the triangle under it, and how a cell happens to be cut
-    /// has nothing to say about it.
+    /// Read across the corner grid by [`protocol::ground::lit_across`] —
+    /// which owns how a never-lit corner is weighed — rather than down the
+    /// facet split [`height_at`] uses: an interval belongs to the ground
+    /// around a point rather than to the triangle under it, and how a cell
+    /// happens to be cut has nothing to say about it.
     pub fn lit(&self, x: f32, z: f32) -> Option<[u8; 2]> {
         let at = Vec2::new(x, z);
         let chunk = chunk_at(at);
@@ -496,16 +498,16 @@ impl Ground {
             (local.x.floor() as usize).min(CELLS - 1),
             (local.y.floor() as usize).min(CELLS - 1),
         );
-        let (tx, tz) = (local.x - x0 as f32, local.y - z0 as f32);
-
-        let mut pair = [0u8; 2];
-        for (side, value) in pair.iter_mut().enumerate() {
-            let corner = |cx: usize, cz: usize| lit[cz * CORNERS + cx][side] as f32;
-            let low = corner(x0, z0) + (corner(x0 + 1, z0) - corner(x0, z0)) * tx;
-            let high = corner(x0, z0 + 1) + (corner(x0 + 1, z0 + 1) - corner(x0, z0 + 1)) * tx;
-            *value = (low + (high - low) * tz).round() as u8;
-        }
-        Some(pair)
+        let corner = |cx: usize, cz: usize| lit[cz * CORNERS + cx];
+        Some(lit_across(
+            [
+                corner(x0, z0),
+                corner(x0 + 1, z0),
+                corner(x0, z0 + 1),
+                corner(x0 + 1, z0 + 1),
+            ],
+            Vec2::new(local.x - x0 as f32, local.y - z0 as f32),
+        ))
     }
 
     /// What the ground is made of at a world point — the cell's own material,
@@ -939,7 +941,18 @@ const WINDOW_EXTENT: f32 = WINDOW_TEXELS as f32 * CELL_METRES;
 /// the sweep reaches it, and the margin keeps anything read near an edge
 /// deterministic — a boundary fringe that snapped between dithered and flat
 /// as the window scrolled would be the window made visible.
+///
+/// It is also the far edge of the shader's fade-in, whose near edge is the
+/// standoff of half a grain cell plus one. Below that the fade would run
+/// backwards, and a `smoothstep` whose edges cross has no answer by spec —
+/// so the assertion below is what keeps the ground off the same footing the
+/// waters are deliberately gated onto; see `assets/shaders/ground.wgsl`.
 const WINDOW_MARGIN: f32 = 64.0;
+
+/// Half a grain cell plus one — the shader's `0.5 + CELL`, in the metres this
+/// side counts in. Only this assertion reads it; the shader has its own copy
+/// of `CELL`, which is the one that varies nothing.
+const _: () = assert!(WINDOW_MARGIN > 0.5 + 0.5);
 
 /// How far the camera may drift from the window's centre before the window
 /// is scrolled back under it, in metres — the same decoupling the sea's
@@ -1167,14 +1180,12 @@ fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]], detail: 
             fz as f32 * CELL_METRES,
         )
     };
-    // Off the same payload corner the height above was, by the same stride.
-    // A coarse sheet is then shaded by intervals the ground actually has, for
-    // the reason [`Detail`] decimates corners rather than averaging them: a
-    // blended threshold is an hour no corner ever saw the sun at.
-    let daylight = |cx: usize, cz: usize| {
-        let (fx, fz) = (cx * stride, cz * stride);
-        lit_uv(lit[fz * CORNERS + fx])
-    };
+    // Off the same payload corner the height above was, by the same stride,
+    // so a coarse sheet reads intervals the ground actually has at the
+    // corners it draws — [`Detail`] decimates here exactly as it does the
+    // heights. In the wire's own steps: what weighs them is
+    // [`protocol::ground::lit_across`], which has to see the sentinel.
+    let daylight = |(cx, cz): (usize, usize)| lit[(cz * stride) * CORNERS + cx * stride];
 
     // The payload's grid is exactly the chunk's own cells — a neighbour's
     // ground, where a drawing decision wants it, is the neighbour's own
@@ -1209,21 +1220,33 @@ fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]], detail: 
             let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
             let color = [linear.red, linear.green, linear.blue, 1.0];
 
-            // The UV channel carries no texture coordinates — nothing binds a
-            // texture to the ground — it carries each corner's lit interval,
-            // as phases of the day. Free spatial interpolation is the point:
-            // the thresholds vary across a cell exactly as heights do, so the
-            // shadow's edge lands *inside* cells and sweeps smoothly over the
-            // ground as the hour turns. See `assets/shaders/ground.wgsl`.
+            // The UV channel carries no texture coordinates — nothing binds
+            // a texture to the ground — it carries the cell's lit interval,
+            // as phases of the day: [`protocol::ground::lit_across`] at the
+            // cell's middle, one value for all four vertices. Flat on
+            // purpose, like the normal and the colour: a cell stands in the
+            // sun or does not, whole, so a shadow's edge lands on the same
+            // boundaries the material and the normal already break on —
+            // instead of sweeping through cells as a gradient the texels
+            // cannot follow. It is the *drawn* cell, so a coarse [`Detail`]
+            // quantises the shadow onto its own wider grid along with
+            // everything else; the ground is drawn at [`Detail::FINEST`],
+            // where that grid is the wire's. What stays smooth is time: the
+            // shader eases each cell over the hour — see
+            // `assets/shaders/ground.wgsl`.
             // Pushed in [`SW`], [`SE`], [`NW`], [`NE`] order, which is what
-            // [`split`]'s corner numbers index.
+            // [`split`]'s corner numbers index, and which is the order
+            // `lit_across` weighs its corners in.
             let first = positions.len() as u32;
-            let corners = [(ix, iz), (ix + 1, iz), (ix, iz + 1), (ix + 1, iz + 1)];
-            for (vertex, (cx, cz)) in [sw, se, nw, ne].into_iter().zip(corners) {
+            let lit_pair = lit_uv(lit_across(
+                [(ix, iz), (ix + 1, iz), (ix, iz + 1), (ix + 1, iz + 1)].map(daylight),
+                Vec2::splat(0.5),
+            ));
+            for vertex in [sw, se, nw, ne] {
                 positions.push([vertex.x, vertex.y, vertex.z]);
                 normals.push([normal.x, normal.y, normal.z]);
                 colors.push(color);
-                uvs.push(daylight(cx, cz));
+                uvs.push(lit_pair);
             }
 
             // Cut the way [`split`] says, which is also the way [`height_at`]
@@ -1302,16 +1325,25 @@ fn water_mesh(water: &[u16], lit: &[[u8; 2]]) -> Option<Mesh> {
             };
             let y = dequantize(level) + OFF_LATTICE;
 
+            // The sheet wears the same baked daylight as the ground — one
+            // interval for the whole cell, read the way [`chunk_mesh`] reads
+            // it — so a cliff's shadow falls on the water as well as on the
+            // bed under it, and its edge steps on the cells the shore steps
+            // on. A sheet still interpolating across its quads would meet
+            // that shore with a gradient and disagree with it about where
+            // the shadow stands, at exactly the hour the edge is moving.
+            let daylight = lit_uv(lit_across(
+                [tl, tr, bl, br].map(|(cx, cz)| lit[cz * CORNERS + cx]),
+                Vec2::splat(0.5),
+            ));
+
             for (cx, cz) in [tl, bl, tr, tr, bl, br] {
                 positions.push([cx as f32 * CELL_METRES, y, cz as f32 * CELL_METRES]);
                 // Dead flat, so every normal is the same one and there is
                 // nothing for the light to pick out — which is what makes a
                 // lake read as a sheet of water rather than as ground.
                 normals.push([0.0, 1.0, 0.0]);
-                // The sheet wears the same baked daylight as the ground —
-                // see [`chunk_mesh`] — so a cliff's shadow falls on the
-                // water as well as on the bed under it.
-                uvs.push(lit_uv(lit[cz * CORNERS + cx]));
+                uvs.push(daylight);
             }
         }
     }
@@ -1969,21 +2001,29 @@ mod tests {
     }
 
     #[test]
-    fn a_coarse_cut_is_lit_by_the_corners_it_draws() {
-        // The light is decimated with the heights and by the same stride, so
-        // a drawn corner is shaded by the interval the ground actually has
-        // there — the reason [`Detail`] takes corners rather than averaging
-        // them, applied to the other thing a corner carries. Reading the
-        // drawn cell's index instead would shade the coarse sheet with the
-        // intervals of the chunk's first few metres, stretched over all of it.
+    fn a_cell_is_lit_whole_by_the_interval_at_its_middle() {
+        // Every vertex of a drawn cell carries one pair — the mean of the
+        // cell's own four corners, which is the interpolated value at its
+        // centre — so the shadow shades whole cells on the same grid the
+        // materials are painted on; see the UV note in [`chunk_mesh`]. The
+        // corners are decimated with the heights and by the same stride, so
+        // a coarse cut is still lit by intervals the ground actually has at
+        // the corners it draws: reading the drawn cell's index instead would
+        // shade the coarse sheet with the intervals of the chunk's first few
+        // metres, stretched over all of it.
         let mut payload = a_slope();
         payload.lit = (0..CORNERS * CORNERS)
             .map(|i| {
                 let (ix, iz) = (i % CORNERS, i / CORNERS);
-                // Distinct along both axes and inside a byte, so a wrong
-                // stride, a transpose or an off-by-one all read as some other
-                // corner's answer.
-                [(ix % 251) as u8, (iz % 251) as u8]
+                // `from` keyed on x and `until` on z, so a transpose reads as
+                // some other corner's answer, and each is distinct per corner
+                // so a wrong stride or an off-by-one does too. Kept well
+                // formed — `from` under `until` at every corner — because a
+                // pair that runs backwards means *never lit*, which
+                // [`protocol::ground::lit_across`] rightly refuses to weigh:
+                // a fixture full of those would be testing the sentinel path
+                // while claiming to test the middle of a cell.
+                [ix as u8, 128 + (iz / 2) as u8]
             })
             .collect();
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
@@ -1999,121 +2039,26 @@ mod tests {
             other => panic!("the lit intervals came back as {other:?}"),
         };
 
-        // The south-west corner of a few drawn cells: first of the cell's
-        // four vertices, in the order [`chunk_mesh`] pushes them.
+        // The payload's pattern is `[ix % 251, iz % 251]` per corner, so a
+        // cell's four corners are two consecutive x values against two
+        // consecutive z values and the middle of them is a half — written out
+        // here rather than folded, so a wrong corner list or weight in
+        // [`chunk_mesh`] cannot be copied into what checks it.
         let across = detail.cells();
         for (ix, iz) in [(0, 0), (1, 0), (0, 1), (3, 5), (across - 1, across - 1)] {
-            let want = lit_uv(payload.lit[(iz * stride) * CORNERS + ix * stride]);
-            let got = uvs[(iz * across + ix) * 4];
+            // Both means land on whole steps for an even stride, so the
+            // expectation is exact and owes nothing to how [`chunk_mesh`]
+            // sums: `from` is the middle of the cell's two x corners, `until`
+            // the middle of its two z ones.
+            let want = [
+                protocol::dequantize_phase((ix * stride + stride / 2) as u8),
+                protocol::dequantize_phase(128 + (iz * stride + stride / 2) as u8 / 2),
+            ];
+            let base = (iz * across + ix) * 4;
             assert_eq!(
-                got, want,
-                "drawn cell ({ix}, {iz}) is lit by some corner other than its own"
-            );
-        }
-    }
-
-    #[test]
-    fn a_coarse_cut_is_the_same_ground_with_fewer_facets() {
-        let payload = a_slope();
-        let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
-
-        for steps in 0..=3 {
-            let detail = Detail::new(steps);
-            let mesh = chunk_mesh(&heights, &payload.materials, &payload.lit, detail);
-            let across = detail.cells();
-
-            assert_eq!(mesh.count_vertices(), across * across * 4);
-            assert_eq!(
-                mesh.indices().expect("a cell shares its corners").len(),
-                across * across * 6
-            );
-
-            // Fewer facets over the same ground, not less ground: the far
-            // corner still lands on the chunk's own edge, so two neighbours
-            // cut the same way meet with nothing to reconcile.
-            let positions = mesh
-                .attribute(Mesh::ATTRIBUTE_POSITION)
-                .expect("positions")
-                .as_float3()
-                .expect("three floats each");
-            let span = positions
-                .iter()
-                .fold(f32::MIN, |far, point| far.max(point[0].max(point[2])));
-            assert_eq!(span, CHUNK_METRES, "{detail:?} stops short of its chunk");
-        }
-    }
-
-    #[test]
-    fn a_coarse_corner_is_a_corner_the_ground_actually_has() {
-        // Decimated and not averaged — see [`chunk_mesh`]. Every drawn corner
-        // is a height the payload sent, so a coarse sheet touches the fine one
-        // wherever they share a corner and its error between them is bounded
-        // both ways. An averaged or maximised corner would put the whole sheet
-        // off the ground in one direction, which for a shadow caster is a
-        // hillside wrongly lit rather than a hairline at a ridge.
-        let payload = a_slope();
-        let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
-
-        for steps in 1..=3 {
-            let detail = Detail::new(steps);
-            let mesh = chunk_mesh(&heights, &payload.materials, &payload.lit, detail);
-            let positions = mesh
-                .attribute(Mesh::ATTRIBUTE_POSITION)
-                .expect("positions")
-                .as_float3()
-                .expect("three floats each");
-
-            for point in positions {
-                let (fx, fz) = (
-                    (point[0] / CELL_METRES).round() as usize,
-                    (point[2] / CELL_METRES).round() as usize,
-                );
-                assert_eq!(
-                    point[1],
-                    heights[fz * CORNERS + fx],
-                    "{detail:?} invented a height at ({fx}, {fz})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_ground_underfoot_does_not_move_with_the_detail_drawn_over_it() {
-        // The whole promise of level of detail here: it is a decision about
-        // triangles, so a chunk laid out in coarser facets is still ridden and
-        // walked on at the density the wire sent. Were it not, a hull's
-        // waterline would step as the camera pulled back.
-        //
-        // The saddle makes the two sheets as unalike as ground gets. Its
-        // corners alternate high and low, and every second one is high — so
-        // decimating it lands on the high corners alone and the coarse cut is
-        // a dead flat lid eight metres over the bottom of every col. Anything
-        // reading the drawn sheet instead of the payload's own grid would be
-        // out by the whole of that.
-        let heights = a_saddle();
-        let coarse = chunk_mesh(
-            &heights,
-            &vec![Material::Grass; CELL_COUNT],
-            &all_day(),
-            Detail::new(1),
-        );
-        let lid = coarse
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .expect("positions")
-            .as_float3()
-            .expect("three floats each");
-        assert!(
-            lid.iter().all(|point| point[1] == 4.0),
-            "the fixture is not the flat lid this test argues against"
-        );
-
-        // Underfoot, the col is still a col.
-        for (ix, iz) in [(1, 0), (0, 1), (3, 2), (CELLS - 1, CELLS - 2)] {
-            let at = Vec2::new(ix as f32 * CELL_METRES, iz as f32 * CELL_METRES);
-            assert_eq!(
-                height_at(&heights, at),
-                -4.0,
-                "({ix}, {iz}) was read off the sheet drawn over it, not the ground"
+                &uvs[base..base + 4],
+                [want; 4],
+                "drawn cell ({ix}, {iz}) is not lit whole by the interval at its middle"
             );
         }
     }

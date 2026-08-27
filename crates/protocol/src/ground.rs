@@ -36,11 +36,12 @@
 //! may be a ridge many chunks away that a client has never been sent, so only
 //! whoever holds the whole island can say — the generator bakes the pair per
 //! corner and it crosses the wire as [`ChunkPayload::lit`]. It is what lets a
-//! client draw the terrain's own shadows without a shadow map: thresholds
-//! interpolate across a cell exactly as heights do, so a shadow's edge still
-//! moves smoothly over the ground as the day turns, and the same pair asked
-//! with `phase + 0.5` answers for the moon, which rides the same arc half a
-//! day out of phase.
+//! client draw the terrain's own shadows without a shadow map. The pairs read
+//! back anywhere on the grid — [`lit_across`], which owns what a never-lit
+//! corner does to its neighbours — and how finely a drawing end cuts its
+//! shadow out of them is its own business, like the grid itself. The same
+//! pair asked with `phase + 0.5` answers for the moon, which rides the same
+//! arc half a day out of phase.
 
 use glam::{IVec2, Vec2, Vec3};
 
@@ -585,6 +586,53 @@ pub const LIT_ALL_DAY: [u8; 2] = [64, 192];
 /// one a writer with nothing subtler to say writes.
 pub const NEVER_LIT: [u8; 2] = [u8::MAX, 0];
 
+/// Whether a lit pair names any daylight at all — false for [`NEVER_LIT`] and
+/// for every other pair that runs backwards, which say the same thing.
+pub fn ever_lit(pair: [u8; 2]) -> bool {
+    pair[0] <= pair[1]
+}
+
+/// The lit interval somewhere inside a cell, read across the four corners
+/// around it — `corners` in [`ChunkPayload::materials`]' own south-west,
+/// south-east, north-west, north-east order, `at` in cell widths from the
+/// south-west one. The middle of a cell is `Vec2::splat(0.5)`.
+///
+/// A corner the sun never reaches is left out of the weighing rather than
+/// averaged in. Its `from` stands past the end of the day, so a plain
+/// bilinear drags a neighbour's honest interval toward noon and prints a
+/// cliff foot's shade over the lit ground beside it — and two such corners
+/// give an interval running backwards, which reads as ground that never sees
+/// the sun at all. What is left is what the corners that *do* see it agree
+/// on, which errs toward light exactly as the bake does under a grazing sun.
+/// With no lit corner there is nothing to err with, and the answer is
+/// [`NEVER_LIT`].
+pub fn lit_across(corners: [[u8; 2]; 4], at: Vec2) -> [u8; 2] {
+    let weights = [
+        (1.0 - at.x) * (1.0 - at.y),
+        at.x * (1.0 - at.y),
+        (1.0 - at.x) * at.y,
+        at.x * at.y,
+    ];
+
+    let (mut sum, mut total) = ([0.0f32; 2], 0.0);
+    for (corner, weight) in corners.into_iter().zip(weights) {
+        if !ever_lit(corner) {
+            continue;
+        }
+        sum[0] += corner[0] as f32 * weight;
+        sum[1] += corner[1] as f32 * weight;
+        total += weight;
+    }
+
+    if total <= 0.0 {
+        return NEVER_LIT;
+    }
+    [
+        (sum[0] / total).round() as u8,
+        (sum[1] / total).round() as u8,
+    ]
+}
+
 /// Bytes a chunk's heights, materials and lit grid occupy on the wire: two
 /// per corner height, one per cell of the material grid, two per corner lit
 /// pair. Nothing is compressed — see the module docs on the grid being the
@@ -1019,6 +1067,47 @@ mod tests {
         assert!(!strayed.well_formed());
         strayed.plants[0].at = Vec2::new(1.0, -0.5);
         assert!(!strayed.well_formed());
+    }
+
+    #[test]
+    fn a_cell_is_lit_by_the_corners_that_see_the_sun() {
+        // The whole point of [`lit_across`] over a plain bilinear: the
+        // never-lit sentinel is not a phase, and weighing it as one is what
+        // printed a cliff foot's shade over the ground beside it.
+        let day = LIT_ALL_DAY;
+        let middle = Vec2::splat(0.5);
+
+        assert_eq!(lit_across([day; 4], middle), day, "nothing in the way");
+        assert_eq!(
+            lit_across([NEVER_LIT; 4], middle),
+            NEVER_LIT,
+            "no corner to err toward the light with"
+        );
+        assert_eq!(
+            lit_across([day, day, day, NEVER_LIT], middle),
+            day,
+            "three corners see the whole day; the fourth cannot shorten it"
+        );
+        assert_eq!(
+            lit_across([day, day, NEVER_LIT, NEVER_LIT], middle),
+            day,
+            "and two cannot turn the day around into ground that is never lit"
+        );
+
+        // A pair that runs backwards without being the sentinel says the same
+        // thing, and is left out on the same terms.
+        assert!(!ever_lit([200, 100]));
+        assert_eq!(lit_across([day, day, day, [200, 100]], middle), day);
+
+        // Corners that disagree honestly are still met in the middle, and the
+        // weights still favour the corner asked nearest.
+        let late = [128u8, 192];
+        assert_eq!(lit_across([day, late, day, late], middle), [96, 192]);
+        assert_eq!(
+            lit_across([day, late, day, late], Vec2::new(1.0, 0.5)),
+            late,
+            "asked at the eastern edge, the eastern corners answer alone"
+        );
     }
 
     #[test]
