@@ -1950,23 +1950,30 @@ impl TerrainGenerator {
     }
 }
 
-/// The corner heights one chunk of ground is built from: its
-/// [`CORNERS`]-square grid, row-major, sampled at [`CELL_METRES`] spacing
-/// from `base` — and what the payload carries.
+/// One chunk's [`CORNERS`]-square corner grid of anything: row-major,
+/// sampled at [`CELL_METRES`] spacing from `base`. The one place the
+/// sampling convention is written, so the payload's grids cannot fall out
+/// of register with each other — [`corner_water`] stays its own loop only
+/// for the fold it carries.
+fn corner_grid<T>(base: Vec2, sample: impl Fn(f32, f32) -> T) -> Vec<T> {
+    let mut grid = Vec::with_capacity(CORNERS * CORNERS);
+    for iz in 0..CORNERS {
+        let wz = base.y + iz as f32 * CELL_METRES;
+        for ix in 0..CORNERS {
+            grid.push(sample(base.x + ix as f32 * CELL_METRES, wz));
+        }
+    }
+    grid
+}
+
+/// The corner heights one chunk of ground is built from — and what the
+/// payload carries.
 ///
 /// The loop order is the format, so a caller may also *look* at the grid before
 /// deciding whether the chunk is worth sending at all — the open world skips
 /// chunks whose every corner sits on the ocean floor.
 pub(crate) fn corner_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec<f32> {
-    let mut heights = vec![0.0f32; CORNERS * CORNERS];
-    for iz in 0..CORNERS {
-        let wz = base.y + iz as f32 * CELL_METRES;
-        for ix in 0..CORNERS {
-            let wx = base.x + ix as f32 * CELL_METRES;
-            heights[iz * CORNERS + ix] = height(wx, wz);
-        }
-    }
-    heights
+    corner_grid(base, height)
 }
 
 /// The standing water one chunk carries, on the same grid and in the same
@@ -2011,14 +2018,7 @@ pub(crate) fn corner_water(
 /// the same order as [`corner_heights`] — read off the island's bake, which
 /// is where the answer lives; see [`crate::sunlight`].
 pub(crate) fn corner_lit(base: Vec2, lit: impl Fn(f32, f32) -> [u8; 2]) -> Vec<[u8; 2]> {
-    let mut pairs = Vec::with_capacity(CORNERS * CORNERS);
-    for iz in 0..CORNERS {
-        let wz = base.y + iz as f32 * CELL_METRES;
-        for ix in 0..CORNERS {
-            pairs.push(lit(base.x + ix as f32 * CELL_METRES, wz));
-        }
-    }
-    pairs
+    corner_grid(base, lit)
 }
 
 /// The material of every cell of one chunk's grid, row-major — the order a
@@ -3864,6 +3864,36 @@ mod tests {
             column(&right, 0),
             "chunks disagree along their seam"
         );
+    }
+
+    #[test]
+    fn a_cell_is_classified_at_its_own_centre() {
+        // A classifier that answers with where it was asked, so the grid's
+        // orientation — row-major, x along a row, the centre half a cell in
+        // from the lower corner — is pinned with no terrain in the way.
+        // Asked asymmetrically, because a transposed stride would pass a
+        // square ask; and pinned here at all because the only other thing
+        // holding it is the sent digest, whose remedy when red is to be
+        // re-recorded.
+        let base = Vec2::new(256.0, -384.0);
+        let flat = vec![0.0f32; CORNERS * CORNERS];
+        let materials = cell_materials(base, &flat, |wx, wz, _, _| {
+            if wx == base.x + 3.5 && wz == base.y + 0.5 {
+                Material::Sand
+            } else if wx == base.x + 0.5 && wz == base.y + 5.5 {
+                Material::Forest
+            } else {
+                Material::Grass
+            }
+        });
+
+        let at = |ix, iz| {
+            materials[protocol::ground::material_index(ix, iz).expect("a cell on the grid")]
+        };
+        assert_eq!(materials.len(), CELL_COUNT);
+        assert_eq!(at(3, 0), Material::Sand, "three cells along x");
+        assert_eq!(at(0, 5), Material::Forest, "five rows along z");
+        assert_eq!(at(3, 5), Material::Grass, "the diagonal is nobody's");
     }
 
     #[test]

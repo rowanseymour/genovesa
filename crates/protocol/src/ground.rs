@@ -319,9 +319,9 @@ impl Material {
 /// Everything a renderer needs and nothing else. The corners are a
 /// [`CORNERS`]-square grid sampled from the chunk's lower corner outwards
 /// at [`CELL_METRES`] spacing, row-major; the materials are one per cell on
-/// the grid those corners bound, also row-major, and reaching one cell past
-/// the chunk on every side. The two grids are offset half a cell from each
-/// other, which is simply what it means for corners to bound cells.
+/// the grid those corners bound, also row-major. The two grids are offset
+/// half a cell from each other, which is simply what it means for corners
+/// to bound cells.
 ///
 /// A chunk of open ocean has no payload at all — see
 /// [`crate::ToClient::Chunk`]. What arrives here is ground worth drawing.

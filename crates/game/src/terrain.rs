@@ -1171,11 +1171,9 @@ fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]], detail: 
         lit_uv(lit[fz * CORNERS + fx])
     };
 
-    // The chunk's own cells only. The payload's grid reaches a cell further
-    // out on every side — see [`ChunkPayload::materials`] — and that ring
-    // belongs to the neighbouring chunks, which draw it themselves. Drawing
-    // it here would lay a one-metre skirt of duplicate ground over every
-    // boundary in the world.
+    // The payload's grid is exactly the chunk's own cells — a neighbour's
+    // ground, where a drawing decision wants it, is the neighbour's own
+    // delivered grid, reached by world point; see [`ChunkPayload::materials`].
     for iz in 0..cells {
         for ix in 0..cells {
             // The material nearest the middle of what this cell covers. A
