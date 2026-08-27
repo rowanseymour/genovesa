@@ -1653,10 +1653,15 @@ fn spawn_arrivals(
                     // intervals it arrived with, so putting it through the
                     // shadow pass as well would be the same shadow drawn
                     // twice by two methods that disagree at their edges — and
-                    // it is the whole of what made that pass expensive. It
-                    // still *receives*: what the pass is left for is the boat
-                    // and the palms, and their shadows have to land on this.
+                    // it is the whole of what made that pass expensive. The
+                    // pass is left for the boat and the palms, and their
+                    // shadows still have to land on this — but not through
+                    // the standard path, whose filtering is the one soft
+                    // gradient in a picture of hard texels: the ground reads
+                    // the shadow map itself and hardens the edge, which is
+                    // why it receives nothing here. See `ground.wgsl`.
                     NotShadowCaster,
+                    NotShadowReceiver,
                     // Visible from birth: plants parent themselves here as soon
                     // as the heights land, which can be before the mesh build
                     // finishes and Mesh3d's required components would have
@@ -1707,8 +1712,11 @@ fn receive_chunks(
                 // Water casts no shadow — Bevy shadows a transparent surface
                 // as though it were solid, so a lake would otherwise throw
                 // its own shadow down onto its own bed. The sea plane is kept
-                // out of the pass for exactly this reason.
+                // out of the pass for exactly this reason. And it receives
+                // the way the ground does — a mangrove's shadow lands here —
+                // so it opts out of the standard path with it.
                 NotShadowCaster,
+                NotShadowReceiver,
                 Mesh3d(meshes.add(surface)),
                 MeshMaterial3d(lake.0.clone()),
             ));
