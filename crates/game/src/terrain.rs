@@ -80,7 +80,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
@@ -219,6 +219,7 @@ impl Plugin for TerrainPlugin {
                 receive_chunks,
                 stream_out,
                 follow_camera,
+                refresh_materials,
                 sea::refresh_depth,
                 // The wind heard, then worn: the sea this module draws is the
                 // sea `sea` keeps, so its two plugins are one.
@@ -267,7 +268,7 @@ pub struct Ground {
 struct Arrival {
     chunk: IVec2,
     heights: Arc<[f32]>,
-    materials: Vec<Material>,
+    materials: Arc<[Material]>,
     /// When each corner sees the sun, exactly as sent — turned into the mesh
     /// attribute the shader reads by [`chunk_mesh`].
     lit: Arc<[[u8; 2]]>,
@@ -330,6 +331,11 @@ enum Chunk {
         /// point — see [`crate::sea::refresh_depth`]. Two bytes a corner
         /// against the heights' four, on chunks that already cost a mesh.
         lit: Arc<[[u8; 2]]>,
+        /// What each cell is made of, kept as sent for the same reason `lit`
+        /// is: the material window re-reads it by world point long after the
+        /// mesh has baked its own copy into vertex colour — see
+        /// [`refresh_materials`].
+        materials: Arc<[Material]>,
         /// The entity drawing it, once [`spawn_arrivals`] has made one.
         mesh: Option<Entity>,
     },
@@ -360,18 +366,20 @@ impl Ground {
             Some(payload) => {
                 let heights: Arc<[f32]> = payload.heights.iter().copied().map(dequantize).collect();
                 let lit: Arc<[[u8; 2]]> = payload.lit.into();
+                let materials: Arc<[Material]> = payload.materials.into();
                 self.chunks.insert(
                     chunk,
                     Chunk::Land {
                         heights: heights.clone(),
                         lit: lit.clone(),
+                        materials: materials.clone(),
                         mesh: None,
                     },
                 );
                 self.arrived.push(Arrival {
                     chunk,
                     heights,
-                    materials: payload.materials,
+                    materials,
                     lit,
                     water: payload.water,
                     plants: payload.plants,
@@ -498,6 +506,27 @@ impl Ground {
             *value = (low + (high - low) * tz).round() as u8;
         }
         Some(pair)
+    }
+
+    /// What the ground is made of at a world point — the cell's own material,
+    /// no interpolation, since a material is a name rather than a quantity.
+    /// [`Material::Seabed`] over open water and `None` for a chunk that has
+    /// not arrived, the same split of answers [`Ground::lit`] makes and for
+    /// the same reason: the sea between islands *is* bed, while a chunk still
+    /// on its way is not yet anything.
+    pub fn material(&self, x: f32, z: f32) -> Option<Material> {
+        let at = Vec2::new(x, z);
+        let chunk = chunk_at(at);
+        let materials = match self.chunks.get(&chunk)? {
+            Chunk::Ocean => return Some(Material::Seabed),
+            Chunk::Land { materials, .. } => materials,
+        };
+        let local = ((at - chunk.as_vec2() * CHUNK_METRES) / CELL_METRES).floor();
+        // Inside the chunk by construction — `chunk_at` put it here — so the
+        // cell is on the grid the apron surrounds, never the apron itself.
+        let index = material_index(local.x as i32, local.y as i32)
+            .expect("a point of the chunk is on its own material grid");
+        Some(materials[index])
     }
 
     /// One chunk's corner heights as they were sent, or `None` for open water
@@ -719,8 +748,8 @@ struct LakeMaterial(Handle<ShadedMaterial>);
 
 /// What the ground and the lakes are drawn in: the standard matte underneath,
 /// with the terrain's own baked shadows applied on top by
-/// `assets/shaders/ground.wgsl` — see [`Daylight`].
-type ShadedMaterial = ExtendedMaterial<StandardMaterial, Daylight>;
+/// `assets/shaders/ground.wgsl` — see [`Shading`].
+type ShadedMaterial = ExtendedMaterial<StandardMaterial, Shading>;
 
 /// How wide the moment of gaining or losing the sun is drawn, in phase either
 /// side of a vertex's own threshold — a step and a half of the wire's 256, a
@@ -738,9 +767,14 @@ const GRAIN_SWING: f32 = 0.15;
 /// What the ground's shader needs beyond the standard material: the hour, to
 /// hold against the lit interval every vertex carries in its UV channel —
 /// see [`chunk_mesh`] for how it gets there, and
-/// [`protocol::ground::ChunkPayload::lit`] for what it means.
+/// [`protocol::ground::ChunkPayload::lit`] for what it means — and the
+/// material window it dithers boundaries out of, see [`MaterialWindow`].
+///
+/// The order of the uniform fields *is* the uniform's layout, and the
+/// shader's `Shading` has to name them in the same order — held to it by
+/// `the_shader_reads_the_uniform_in_the_order_it_is_written`.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
-struct Daylight {
+struct Shading {
     /// `x` is the phase to ask the intervals about: the drawn hour by day
     /// and its mirror by night, when the moon rides the same arc half a day
     /// out of phase — the same swap the sky makes of the light itself.
@@ -749,33 +783,54 @@ struct Daylight {
     /// swing of nothing leaves smooth; `w` padding.
     #[uniform(100)]
     hour: Vec4,
+    /// The material window's place in the world: `xy` the world coordinates
+    /// of its corner texel's corner, `z` its width in metres — a texel is a
+    /// metre, so the two are one number — and `w` [`WINDOW_MARGIN`].
+    /// Rewritten whenever the window scrolls; all zeroes on the waters,
+    /// which never look.
+    #[uniform(100)]
+    window: Vec4,
+    /// The window's texels — see [`MaterialWindow`], which owns the scroll
+    /// and the sweep that keep them current. Bound on the waters too, since
+    /// a binding cannot be optional, and read by neither.
+    #[texture(101)]
+    materials: Handle<Image>,
 }
 
 /// The two makings a shaded surface can have, and no third for `..default()`
 /// to reach: a surface is made of ground or made of water, and whoever adds
 /// one says which.
-impl Daylight {
-    /// The ground's copy: noon still, with the grain switched on.
-    fn ground() -> Self {
+impl Shading {
+    /// The ground's copy: noon still, with the grain switched on and the
+    /// window opened around the focus.
+    fn ground(materials: Handle<Image>, focus: Vec2) -> Self {
         Self {
             hour: DAYLIGHT_AT_NOON.with_z(GRAIN_SWING),
+            window: Self::window_uniform(MaterialWindow::origin_under(focus)),
+            materials,
         }
     }
 
     /// A water's copy: noon, and no grain — a sheet of water is one tone.
-    fn water() -> Self {
+    fn water(materials: Handle<Image>) -> Self {
         Self {
             hour: DAYLIGHT_AT_NOON,
+            window: Vec4::ZERO,
+            materials,
         }
+    }
+
+    fn window_uniform(origin: Vec2) -> Vec4 {
+        Vec4::new(origin.x, origin.y, WINDOW_EXTENT, WINDOW_MARGIN)
     }
 }
 
 /// The hour every surface opens at, before the sky has spoken: noon, which
-/// is the daylight the menus are lit by — the base both [`Daylight`]
+/// is the daylight the menus are lit by — the base both [`Shading`]
 /// constructors build on, and what the sea's own copy carries whole.
 pub(crate) const DAYLIGHT_AT_NOON: Vec4 = Vec4::new(0.5, SHADE_EDGE, 0.0, 0.0);
 
-impl MaterialExtension for Daylight {
+impl MaterialExtension for Shading {
     fn fragment_shader() -> bevy::shader::ShaderRef {
         "shaders/ground.wgsl".into()
     }
@@ -783,7 +838,7 @@ impl MaterialExtension for Daylight {
 
 /// Carries the drawn hour into every material that shades itself from the
 /// baked intervals, mirrored onto the moon's half of the day when the moon is
-/// the body up — see [`Daylight::hour`].
+/// the body up — see [`Shading::hour`].
 ///
 /// The sea is written here with the ground and the lakes, though it reads its
 /// intervals from a window rather than from its own vertices: what all three
@@ -811,6 +866,184 @@ fn shade_the_ground(
     }
     if let Some(mut sea) = window.and_then(|window| seas.get_mut(window.material())) {
         sea.extension.daylight.x = hour;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The material window
+// ---------------------------------------------------------------------------
+
+/// Texels along each side of the material window, at a texel per
+/// [`CELL_METRES`]. A kilometre square around the focus: the dither it feeds
+/// is a boundary effect the grain's own fade has finished with long before
+/// the far half of that, so the window ends well past the last place its
+/// absence could be seen.
+const WINDOW_TEXELS: usize = 1024;
+
+/// Width of the material window in metres.
+const WINDOW_EXTENT: f32 = WINDOW_TEXELS as f32 * CELL_METRES;
+
+/// How far inside the window's edge the dither has fully handed back to each
+/// cell's own colour, in metres. The strip a scroll exposes is stale until
+/// the sweep reaches it, and the margin keeps anything read near an edge
+/// deterministic — a boundary fringe that snapped between dithered and flat
+/// as the window scrolled would be the window made visible.
+const WINDOW_MARGIN: f32 = 64.0;
+
+/// How far the camera may drift from the window's centre before the window
+/// is scrolled back under it, in metres — the same decoupling the sea's
+/// depth window argues at its own [`sea::DepthWindow`]-side constant.
+const WINDOW_RECENTER: f32 = 128.0;
+
+/// Rows of the window refilled from the ground each frame, round and round —
+/// the whole window re-read in about a second, which is how arriving chunks,
+/// forgotten chunks and scroll-exposed strips all heal with nothing keeping
+/// track of what changed. The sweep never straddles the wrap; see
+/// `the_sweep_divides_the_window`.
+const WINDOW_SWEEP_ROWS: usize = 16;
+
+/// Bytes a texel of the window occupies: a palette colour in sRGB, and a
+/// flag in alpha for a cell the client actually knows — zero is a chunk not
+/// yet arrived, and the shader leaves such cells to the mesh's own colour.
+const WINDOW_TEXEL_BYTES: usize = 4;
+
+/// A texel for ground the client has not been told about.
+const UNKNOWN: [u8; WINDOW_TEXEL_BYTES] = [0, 0, 0, 0];
+
+/// The picture of what the ground is made of around the camera that the
+/// ground shader dithers material boundaries out of: a palette colour per
+/// cell, scrolled to follow the camera and perpetually re-read from
+/// [`Ground`] by [`refresh_materials`] — the sea's depth window pattern
+/// exactly, argued at [`sea::DepthWindow`], down to holding both handles
+/// because the image and the material's idea of where it sits must move in
+/// the same frame.
+#[derive(Resource)]
+struct MaterialWindow {
+    image: Handle<Image>,
+    material: Handle<ShadedMaterial>,
+    /// World coordinates of the corner of texel (0, 0), a whole number of
+    /// metres always, so texels stay pinned to the cells they were read from
+    /// across every scroll.
+    origin: Vec2,
+    /// The row the round-robin sweep refills next.
+    sweep: usize,
+}
+
+impl MaterialWindow {
+    /// The window origin that centres the window on a focus, on the cell
+    /// grid.
+    fn origin_under(focus: Vec2) -> Vec2 {
+        (focus / CELL_METRES).floor() * CELL_METRES - WINDOW_EXTENT / 2.0
+    }
+}
+
+/// A window with nothing in it yet — see [`UNKNOWN`]. sRGB, so a texel is
+/// the palette's own bytes and the hardware decodes them to the same linear
+/// colour the mesh's vertices carry.
+fn material_image() -> Image {
+    Image::new_fill(
+        Extent3d {
+            width: WINDOW_TEXELS as u32,
+            height: WINDOW_TEXELS as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &UNKNOWN,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    )
+}
+
+/// One texel's worth of what a cell is made of, as the palette's sRGB bytes.
+fn material_texel(material: Option<Material>) -> [u8; WINDOW_TEXEL_BYTES] {
+    match material {
+        None => UNKNOWN,
+        Some(material) => {
+            let srgb = material.color();
+            let byte = |c: f32| (c * 255.0).round() as u8;
+            [byte(srgb.x), byte(srgb.y), byte(srgb.z), u8::MAX]
+        }
+    }
+}
+
+/// Keeps the material window under the camera and its texels agreeing with
+/// the ground. The scroll and the sweep, exactly as [`sea::refresh_depth`]
+/// runs them and for the reasons argued there.
+fn refresh_materials(
+    ground: Res<Ground>,
+    cameras: Query<&MapCamera>,
+    mut window: ResMut<MaterialWindow>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<ShadedMaterial>>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let focus = Vec2::new(camera.focus.x, camera.focus.z);
+
+    // The scroll.
+    let drift = focus - (window.origin + WINDOW_EXTENT / 2.0);
+    if drift.x.abs() > WINDOW_RECENTER || drift.y.abs() > WINDOW_RECENTER {
+        let origin = MaterialWindow::origin_under(focus);
+        let step = ((origin - window.origin) / CELL_METRES).round().as_ivec2();
+        if let Some(mut image) = images.get_mut(&window.image) {
+            if let Some(data) = image.data.as_mut() {
+                scroll_window(data, step);
+            }
+        }
+        window.origin = origin;
+        if let Some(mut material) = materials.get_mut(&window.material) {
+            material.extension.window = Shading::window_uniform(origin);
+        }
+    }
+
+    // The sweep. Read into a scratch first and compare, so a frame that
+    // changed nothing marks nothing changed and re-uploads nothing.
+    let mut rows = [0u8; WINDOW_TEXELS * WINDOW_SWEEP_ROWS * WINDOW_TEXEL_BYTES];
+    for r in 0..WINDOW_SWEEP_ROWS {
+        let row = window.sweep + r;
+        for x in 0..WINDOW_TEXELS {
+            let at = window.origin + Vec2::new(x as f32 + 0.5, row as f32 + 0.5) * CELL_METRES;
+            let texel = material_texel(ground.material(at.x, at.y));
+            let into = (r * WINDOW_TEXELS + x) * WINDOW_TEXEL_BYTES;
+            rows[into..into + WINDOW_TEXEL_BYTES].copy_from_slice(&texel);
+        }
+    }
+    let start = window.sweep * WINDOW_TEXELS * WINDOW_TEXEL_BYTES;
+    let stale = |data: &[u8]| data[start..start + rows.len()] != rows[..];
+    if images
+        .get(&window.image)
+        .and_then(|image| image.data.as_deref())
+        .is_some_and(stale)
+    {
+        if let Some(mut image) = images.get_mut(&window.image) {
+            if let Some(data) = image.data.as_mut() {
+                data[start..start + rows.len()].copy_from_slice(&rows);
+            }
+        }
+    }
+    window.sweep = (window.sweep + WINDOW_SWEEP_ROWS) % WINDOW_TEXELS;
+}
+
+/// Shifts the window's texels so that texel `(x, y)` afterwards holds what
+/// texel `(x, y) + step` held before — [`sea::refresh_depth`]'s own scroll,
+/// which argues why the data moves opposite to the window. Texels that slide
+/// in from beyond the old window are unknown, and left for the sweep.
+fn scroll_window(data: &mut [u8], step: IVec2) {
+    let n = WINDOW_TEXELS as i32;
+    let old = data.to_vec();
+    let texel = |x: i32, y: i32| (y * n + x) as usize * WINDOW_TEXEL_BYTES;
+    for y in 0..n {
+        for x in 0..n {
+            let from = IVec2::new(x, y) + step;
+            let into = texel(x, y);
+            let carried = ((0..n).contains(&from.x) && (0..n).contains(&from.y))
+                .then(|| texel(from.x, from.y));
+            data[into..into + WINDOW_TEXEL_BYTES].copy_from_slice(match carried {
+                Some(was) => &old[was..was + WINDOW_TEXEL_BYTES],
+                None => &UNKNOWN,
+            });
+        }
     }
 }
 
@@ -936,7 +1169,7 @@ fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]], detail: 
 }
 
 /// A corner's lit interval as the mesh carries it: the two phase thresholds
-/// as fractions of the day, which is the domain [`Daylight::hour`] is in.
+/// as fractions of the day, which is the domain [`Shading::hour`] is in.
 fn lit_uv(pair: [u8; 2]) -> [f32; 2] {
     [
         protocol::dequantize_phase(pair[0]),
@@ -1053,12 +1286,22 @@ fn enter_world(
 
     // Terrain material. Base colour is white so the vertex colours come
     // through unmodified — StandardMaterial multiplies the two together —
-    // and the extension is what draws the baked shadows over the result.
+    // and the extension is what draws the baked shadows over the result. The
+    // material window opens where the player enters the world, knowing
+    // nothing; [`refresh_materials`] fills it in as the ground arrives.
+    let window = images.add(material_image());
+    let focus = Vec2::new(view.focus.x, view.focus.z);
     let ground = shaded.add(ShadedMaterial {
         base: matte(Color::WHITE),
-        extension: Daylight::ground(),
+        extension: Shading::ground(window.clone(), focus),
     });
     commands.insert_resource(GroundMaterial(ground.clone()));
+    commands.insert_resource(MaterialWindow {
+        image: window.clone(),
+        material: ground.clone(),
+        origin: MaterialWindow::origin_under(focus),
+        sweep: 0,
+    });
 
     // Ocean floor. The sea is translucent, so without something opaque beneath
     // it the water beyond the terrain meshes blends against the sky and reads
@@ -1129,7 +1372,7 @@ fn enter_world(
     };
     commands.insert_resource(LakeMaterial(shaded.add(ShadedMaterial {
         base: still(LAKE_WATER),
-        extension: Daylight::water(),
+        extension: Shading::water(window),
     })));
 
     // The sea alone wears the swell on top — a lake is sheltered water, and
@@ -1212,6 +1455,7 @@ fn leave_world(mut commands: Commands) {
     commands.remove_resource::<Ground>();
     commands.remove_resource::<GroundMaterial>();
     commands.remove_resource::<LakeMaterial>();
+    commands.remove_resource::<MaterialWindow>();
     commands.remove_resource::<sea::DepthWindow>();
 }
 
@@ -2131,7 +2375,7 @@ mod tests {
         let dry = Arrival {
             chunk: IVec2::ZERO,
             heights: a_slope().heights.iter().copied().map(dequantize).collect(),
-            materials: a_slope().materials,
+            materials: a_slope().materials.into(),
             lit: all_day().into(),
             water: None,
             plants: Vec::new(),
@@ -2238,13 +2482,69 @@ mod tests {
         .expect("the ground's shader under assets/shaders/");
         let lane = 'z';
         assert!(
-            shader.contains(&format!("daylight.hour.{lane}")),
+            shader.contains(&format!("shading.hour.{lane}")),
             "the shader takes the swing from `{lane}`"
         );
         assert!(
             include_str!("terrain.rs").contains(&format!(".with_{lane}(GRAIN_SWING)")),
             "the packing puts the swing in `{lane}`"
         );
+    }
+
+    #[test]
+    fn the_shader_reads_the_uniform_in_the_order_it_is_written() {
+        // The order of `Shading`'s uniform fields *is* the uniform's layout,
+        // and only one side of it is compiled here — the same hazard the
+        // sea's test of this name holds `sea.wgsl` against. Both orders are
+        // read out of the sources rather than written out a third time.
+        let shader = std::fs::read_to_string(format!(
+            "{}/../../assets/shaders/ground.wgsl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("the ground's shader under assets/shaders/");
+        let body = |source: &str, opens: &str| -> String {
+            source
+                .split_once(opens)
+                .expect("the struct the uniform is packed from")
+                .1
+                .split_once('}')
+                .expect("the end of it")
+                .0
+                .to_string()
+        };
+        let wgsl = body(&shader, "struct Shading {");
+        let rust = body(include_str!("terrain.rs"), "struct Shading {");
+        for fields in [&wgsl, &rust] {
+            let hour = fields.find("hour:").expect("the hour field");
+            let window = fields.find("window:").expect("the window field");
+            assert!(hour < window, "hour is written first, window second");
+        }
+    }
+
+    #[test]
+    fn the_sweep_divides_the_window() {
+        // What lets `refresh_materials` treat every sweep as one contiguous
+        // run of rows: a sweep that straddled the wrap would write one slice
+        // from two ends of the image.
+        assert_eq!(WINDOW_TEXELS % WINDOW_SWEEP_ROWS, 0);
+    }
+
+    #[test]
+    fn the_ground_answers_what_it_is_made_of() {
+        let mut ground = Ground::default();
+        ground.deliver(IVec2::new(1, 0), Some(a_slope()));
+        ground.deliver(IVec2::new(-1, -1), None);
+
+        // A land chunk answers with the cell's own material, anywhere in the
+        // cell — a_slope is Grass throughout.
+        assert_eq!(
+            ground.material(128.0 + 5.5, 3.25),
+            Some(Material::Grass),
+            "a delivered cell knows its material"
+        );
+        // Open water is bed, and an unasked chunk is nothing yet.
+        assert_eq!(ground.material(-5.0, -5.0), Some(Material::Seabed));
+        assert_eq!(ground.material(9999.0, 0.0), None);
     }
 
     #[test]
