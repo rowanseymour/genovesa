@@ -730,11 +730,10 @@ type ShadedMaterial = ExtendedMaterial<StandardMaterial, Daylight>;
 const SHADE_EDGE: f32 = 1.5 / 256.0;
 
 /// The ground's grain — the speckle `assets/shaders/ground.wgsl` hashes from
-/// world position, which is what stands in for a texture. The full swing one
-/// cell may pull the palette colour, as a fraction of it, and the width of a
-/// cell in metres.
+/// world position, which is what stands in for a texture: the full swing one
+/// cell may pull the palette colour, as a fraction of it. The cell's width
+/// lives shader-side as its `CELL`, nothing varying it per material.
 const GRAIN_SWING: f32 = 0.15;
-const GRAIN_CELL: f32 = 0.5;
 
 /// What the ground's shader needs beyond the standard material: the hour, to
 /// hold against the lit interval every vertex carries in its UV channel —
@@ -746,33 +745,35 @@ struct Daylight {
     /// and its mirror by night, when the moon rides the same arc half a day
     /// out of phase — the same swap the sky makes of the light itself.
     /// Written every frame by [`shade_the_ground`]. `y` is [`SHADE_EDGE`];
-    /// `z` and `w` are [`GRAIN_SWING`] and [`GRAIN_CELL`] on the ground, and
-    /// zero on the waters, which a swing of nothing leaves smooth.
+    /// `z` is [`GRAIN_SWING`] on the ground and zero on the waters, which a
+    /// swing of nothing leaves smooth; `w` padding.
     #[uniform(100)]
     hour: Vec4,
 }
 
+/// The two makings a shaded surface can have, and no third for `..default()`
+/// to reach: a surface is made of ground or made of water, and whoever adds
+/// one says which.
 impl Daylight {
     /// The ground's copy: noon still, with the grain switched on.
-    fn grained() -> Self {
+    fn ground() -> Self {
         Self {
-            hour: DAYLIGHT_AT_NOON.with_z(GRAIN_SWING).with_w(GRAIN_CELL),
+            hour: DAYLIGHT_AT_NOON.with_z(GRAIN_SWING),
         }
     }
-}
 
-/// The hour every surface opens at, before the sky has spoken: noon, which
-/// is the daylight the menus are lit by — packed as [`Daylight::hour`] and as
-/// the sea's own copy of it carry it.
-pub(crate) const DAYLIGHT_AT_NOON: Vec4 = Vec4::new(0.5, SHADE_EDGE, 0.0, 0.0);
-
-impl Default for Daylight {
-    fn default() -> Self {
+    /// A water's copy: noon, and no grain — a sheet of water is one tone.
+    fn water() -> Self {
         Self {
             hour: DAYLIGHT_AT_NOON,
         }
     }
 }
+
+/// The hour every surface opens at, before the sky has spoken: noon, which
+/// is the daylight the menus are lit by — the base both [`Daylight`]
+/// constructors build on, and what the sea's own copy carries whole.
+pub(crate) const DAYLIGHT_AT_NOON: Vec4 = Vec4::new(0.5, SHADE_EDGE, 0.0, 0.0);
 
 impl MaterialExtension for Daylight {
     fn fragment_shader() -> bevy::shader::ShaderRef {
@@ -1039,7 +1040,6 @@ fn chunk_meshes(arrival: &Arrival) -> ChunkMeshes {
 fn enter_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut paints: ResMut<Assets<StandardMaterial>>,
     mut shaded: ResMut<Assets<ShadedMaterial>>,
     mut seas: ResMut<Assets<SeaMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -1054,10 +1054,11 @@ fn enter_world(
     // Terrain material. Base colour is white so the vertex colours come
     // through unmodified — StandardMaterial multiplies the two together —
     // and the extension is what draws the baked shadows over the result.
-    commands.insert_resource(GroundMaterial(shaded.add(ShadedMaterial {
+    let ground = shaded.add(ShadedMaterial {
         base: matte(Color::WHITE),
-        extension: Daylight::grained(),
-    })));
+        extension: Daylight::ground(),
+    });
+    commands.insert_resource(GroundMaterial(ground.clone()));
 
     // Ocean floor. The sea is translucent, so without something opaque beneath
     // it the water beyond the terrain meshes blends against the sky and reads
@@ -1078,7 +1079,25 @@ fn enter_world(
     // buffer — which read as a faint darker banding drifting across the open
     // sea as the camera moved. A couple of metres of parallax at the seam is
     // invisible with the colours matched; a shimmer is not.
+    // "The same material" is taken literally: the ground's, which reads its
+    // colour and its lit interval off the vertices — so the plane carries
+    // both, seabed everywhere and lit the whole day, deep water having no
+    // terrain about it to shade it. It used to be a plain matte material of
+    // the same colour, which stopped matching the moment the ground took its
+    // grain: a flat bed beside a speckled one printed the chunk rectangle
+    // straight back onto the water.
     let seabed = Material::Seabed.color();
+    let linear = Color::srgb(seabed.x, seabed.y, seabed.z).to_linear();
+    let mut bed = Plane3d::default()
+        .mesh()
+        .size(SEA_EXTENT, SEA_EXTENT)
+        .build();
+    let corners = bed.count_vertices();
+    bed.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        vec![[linear.red, linear.green, linear.blue, 1.0]; corners],
+    );
+    bed.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![lit_uv(LIT_ALL_DAY); corners]);
     commands.spawn((
         Name::new("Ocean floor"),
         OceanFloor,
@@ -1089,8 +1108,8 @@ fn enter_world(
         // to have cast one.
         NotShadowCaster,
         NotShadowReceiver,
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(SEA_EXTENT, SEA_EXTENT))),
-        MeshMaterial3d(paints.add(matte(Color::srgb(seabed.x, seabed.y, seabed.z)))),
+        Mesh3d(meshes.add(bed)),
+        MeshMaterial3d(ground),
         Transform::from_xyz(0.0, -OCEAN_DEPTH - SEA_FLOOR_CLEARANCE, 0.0),
     ));
 
@@ -1110,7 +1129,7 @@ fn enter_world(
     };
     commands.insert_resource(LakeMaterial(shaded.add(ShadedMaterial {
         base: still(LAKE_WATER),
-        extension: Daylight::default(),
+        extension: Daylight::water(),
     })));
 
     // The sea alone wears the swell on top — a lake is sheltered water, and
@@ -2202,6 +2221,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_grain_swing_rides_the_lane_the_shader_reads() {
+        // One lane of a vec4, named on each side of the Rust/WGSL boundary
+        // and compiled by neither together: swap `z` on one side only and
+        // the ground draws smooth — or wrong — everywhere, blaming nothing.
+        // The sea pins its own uniform the same way, in `sea.rs`. The
+        // needles are assembled at runtime so this test's own source, which
+        // `include_str!` sweeps up too, cannot satisfy them.
+        let shader = std::fs::read_to_string(format!(
+            "{}/../../assets/shaders/ground.wgsl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("the ground's shader under assets/shaders/");
+        let lane = 'z';
+        assert!(
+            shader.contains(&format!("daylight.hour.{lane}")),
+            "the shader takes the swing from `{lane}`"
+        );
+        assert!(
+            include_str!("terrain.rs").contains(&format!(".with_{lane}(GRAIN_SWING)")),
+            "the packing puts the swing in `{lane}`"
+        );
     }
 
     #[test]

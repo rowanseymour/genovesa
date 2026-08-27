@@ -17,13 +17,15 @@
 // (`terrain.rs`), which is the single authority on it — including the swap
 // onto the moon's half of the day at night.
 //
-// The same uniform carries the grain: a speckle over the palette colour, as
-// though the ground were carved out of a block of noise. It is a function of
-// world position alone — hashed here, per fragment, from nothing but the
-// coordinates — so it cannot tile, cannot seam at a chunk border, and draws
-// identically at every level of mesh detail. The cells are cubes rather than
-// columns so that a cliff face is grained like the ground at its foot instead
-// of wearing the top's texels stretched down it.
+// The same uniform carries the grain's swing: a speckle over the palette
+// colour, as though the ground were carved out of a block of noise. It is a
+// function of world position alone — hashed here, per fragment, from nothing
+// but the coordinates — so it cannot tile, cannot seam at a chunk border, and
+// draws identically at every level of mesh detail. The cells are cubes rather
+// than columns so that a cliff face is grained like the ground at its foot
+// instead of wearing the top's texels stretched down it, and the speckle
+// bows out where a pixel outgrows a cell, because past that line it could
+// only seethe.
 
 #import bevy_pbr::{
     ambient,
@@ -37,16 +39,31 @@ struct Daylight {
     // x: the phase of the day to hold the lit intervals against. y: half the
     // width of the terminator, in phase. z: the grain's full swing as a
     // fraction of the palette colour, zero for surfaces that go without.
-    // w: metres to a grain cell's edge. The reasoning for all of them lives
-    // on `terrain::Daylight`.
+    // w: padding. The reasoning for all of them lives on `terrain::Daylight`.
     hour: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> daylight: Daylight;
 
+// Metres to a grain cell's edge. A constant here rather than a lane of the
+// uniform: nothing varies it per material, and a divisor that lives in a
+// buffer is a divisor that can arrive zero.
+const CELL: f32 = 0.5;
+
+// How far the grain lattice is slid off the world's own, on every axis. The
+// wire's heights are 0.02 m steps and the mesh's corners whole metres, so an
+// unslid lattice would lay cell faces exactly along flat ground and standing
+// edges — ground pinned dead on a face flickers between the cells either side
+// as interpolation rounds, the hazard `terrain::OFF_LATTICE` names for the
+// water sheet. An eighth of a metre is exact in f32 and shares no multiple
+// with either grid.
+const OFF_LATTICE: f32 = 0.125;
+
 // One grain cell's value in [0, 1). Integer mixing (PCG3D's) rather than the
 // usual fract(sin(...)) because the input is a world coordinate: sine hashes
-// decay into visible pattern as the numbers grow, and the world is wide.
+// decay into visible pattern as the numbers grow, and the world is wide. The
+// top 24 bits alone go to float, where they are exact — a whole u32 rounds,
+// and the largest round *up*, closing the interval.
 fn grain(cell: vec3<i32>) -> f32 {
     var v = bitcast<vec3<u32>>(cell) * 1664525u + 1013904223u;
     v.x += v.y * v.z;
@@ -54,7 +71,7 @@ fn grain(cell: vec3<i32>) -> f32 {
     v.z += v.x * v.y;
     v ^= v >> vec3<u32>(16u);
     v.x += v.y * v.z;
-    return f32(v.x) / 4294967296.0;
+    return f32(v.x >> 8u) / 16777216.0;
 }
 
 @fragment
@@ -62,13 +79,22 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
     // The grain goes on before lighting, so both the sunlit result and the
-    // shadowed one below are built from the speckled colour. The branch is on
-    // a uniform, so water skips the whole thing coherently.
-    let swing = daylight.hour.z;
+    // shadowed one below are built from the speckled colour.
+    //
+    // The footprint — how much ground this pixel spans — is taken outside the
+    // branch because derivatives want uniform control flow; the fade it buys
+    // takes the swing to nothing by the point a pixel swallows half a cell,
+    // which is where a speckle stops being drawable and starts being one
+    // arbitrary cell per pixel, re-rolled every time the camera moves. MSAA
+    // smooths edges, not shading, so nothing else stands in the way of that.
+    let at = in.world_position.xyz + vec3(OFF_LATTICE);
+    let footprint = fwidth(at);
+    let swing = daylight.hour.z
+        * (1.0 - smoothstep(0.25, 0.5, max(footprint.x, max(footprint.y, footprint.z)) / CELL));
     if swing > 0.0 {
-        let cell = vec3<i32>(floor(in.world_position.xyz / daylight.hour.w));
         pbr_input.material.base_color = vec4(
-            pbr_input.material.base_color.rgb * (1.0 + swing * (grain(cell) - 0.5)),
+            pbr_input.material.base_color.rgb
+                * (1.0 + swing * (grain(vec3<i32>(floor(at / CELL))) - 0.5)),
             pbr_input.material.base_color.a,
         );
     }
