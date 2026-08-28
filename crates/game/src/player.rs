@@ -412,14 +412,17 @@ impl Plugin for PlayerPlugin {
 ///
 /// The client asks and the server rules. It could not do otherwise — a claim
 /// is settled against the coast the *world* has watched this player sail, and
-/// this side's chart is a drawing of what it was told, not evidence. So what
-/// this does is ask on the two counts a player can see for themselves: they
-/// are on their own feet, and the sheet says they have closed the ring they
-/// are standing inside. A refusal is silent, and deserves to be: the two
-/// honest ways to earn one are a coast that looked closed here and did not
-/// close there, and an island somebody claimed while you were walking up to
-/// it — and the second answers itself, since the refusal carries the cairn
-/// that beat you to it.
+/// this side's chart is a drawing of what it was told, not evidence. Nothing
+/// is named in the ask, because the claimable unit is the island whole —
+/// however many coastlines the world says that is — and where one island
+/// ends is the world's to know. So what this does is ask on the two counts a
+/// player can see for themselves: they are on their own feet, and the sheet
+/// says they stand where a cairn could — see [`protocol::survey::Survey::ashore`].
+/// What comes back is the cairn, or word that there is more coast here than
+/// they have surveyed — see [`protocol::ToClient::Uncharted`] — or a silence
+/// that deserves to be one: an island somebody claimed while you were walking
+/// up to it answers itself, the refusal carrying the cairn that beat you to
+/// it.
 ///
 /// Asking from a boat is not offered at all. A cairn is built by somebody
 /// standing on the ground with stones in their hands, and the key that would
@@ -442,13 +445,14 @@ fn claim_the_island(
         return;
     };
     let standing = Vec2::new(place.translation.x, place.translation.z);
-    // Asked of the sheet's own survey, which is the same arithmetic the
-    // server will use on the same question — see `protocol::survey`. That is
-    // what makes this an ask worth making rather than a guess: where the two
-    // disagree it is because the world has seen more coast than this client
-    // has been told of yet, and a moment later it will have been.
-    if let Some(island) = chart.island_under(standing) {
-        online.connection.claim(island);
+    // Asked of the sheet's own survey, and the server asks the very same
+    // question of its own record before granting — one arithmetic, two ends,
+    // see [`protocol::survey::Survey::ashore`]. Not the whole of the
+    // server's judgement, which also wants every coastline of the island
+    // closed; it is the standing half, and it keeps the key from asking
+    // about open water and bare rocks.
+    if chart.ashore(standing) {
+        online.connection.claim();
     }
 }
 
@@ -2109,9 +2113,10 @@ mod tests {
         use protocol::ground::{CHUNK_METRES, CORNERS};
         use protocol::survey::survey;
 
-        // Comfortably past [`protocol::survey::LEAST_ISLAND`], so the ring is
-        // an island rather than a skerry, and comfortably inside one chunk, so
-        // the block of water round it closes the ring.
+        // Comfortably inside one chunk, so the block of water round it closes
+        // the ring. A skerry would do as well — the gate is about standing
+        // inside a closed ring, whatever its size — but sixty metres reads as
+        // an island.
         const REACH: f32 = 60.0;
 
         let heights = |chunk: IVec2| -> Vec<f32> {
@@ -2172,11 +2177,11 @@ mod tests {
             "the helm asked for a cairn"
         );
 
-        // Ashore, and the same key asks — for the island the sheet says is
-        // underfoot, which is the only thing this side has to offer. Put
-        // there by hand rather than by the gunwale key: a served world's
-        // crossings wait on tellings this fake server will never send, and
-        // none of that is what the claim key is about.
+        // Ashore, and the same key asks — naming nothing, the island being
+        // the world's to read from where the asker stands. Put there by hand
+        // rather than by the gunwale key: a served world's crossings wait on
+        // tellings this fake server will never send, and none of that is what
+        // the claim key is about.
         let player = app
             .world_mut()
             .query_filtered::<Entity, With<Player>>()
@@ -2189,13 +2194,12 @@ mod tests {
         app.update();
         assert_eq!(aboard(&mut app), None, "the player is still aboard");
         let standing = player_transform(&mut app).translation.xz();
-        let island = app
-            .world()
-            .resource::<Chart>()
-            .island_under(standing)
-            .expect("the walker was stood inside the test island's ring");
+        assert!(
+            app.world().resource::<Chart>().ashore(standing),
+            "the walker was stood inside the test island's ring"
+        );
         press_claim(&mut app);
-        assert_eq!(next_word(&server), ToServer::Claim { island });
+        assert_eq!(next_word(&server), ToServer::Claim);
     }
 
     /// The next thing the client actually *says*, past the traffic every

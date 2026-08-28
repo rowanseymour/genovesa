@@ -114,11 +114,11 @@ const SALT_STONE: u32 = 0xC0_2A11E5;
 
 /// The cairns this client has been told of, by the entity standing for each.
 ///
-/// Keyed by the island, which is a ring's identity and so the same pair of
-/// numbers on every machine — see [`protocol::survey::Island::id`]. Kept for
-/// the reason [`crate::beasts::Beasts`] keeps its own: entities spawn through
-/// `Commands`, so two words about one cairn in a single frame's drain would
-/// otherwise go looking for an entity that is still a queued command.
+/// Keyed by the island — the identity a cairn is told under, and so the same
+/// pair of numbers on every machine — see [`protocol::ToClient::Cairn`]. Kept
+/// for the reason [`crate::beasts::Beasts`] keeps its own: entities spawn
+/// through `Commands`, so two words about one cairn in a single frame's drain
+/// would otherwise go looking for an entity that is still a queued command.
 #[derive(Resource, Default)]
 pub struct Cairns {
     standing: HashMap<IVec2, Entity>,

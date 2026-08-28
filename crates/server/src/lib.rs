@@ -58,13 +58,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH};
-use protocol::survey::{in_sight_along, Soundings, Survey, SIGHT_RADIUS};
+use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH, CHUNK_METRES};
+use protocol::survey::{in_sight_along, Landmass, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
     SURVEY_BATCH_BYTES,
 };
-use world::archipelago::{Archipelago, WorldConfig};
+use world::archipelago::{Archipelago, IslandSpec, WorldConfig};
 
 pub use keeper::{data_dir, discard, keep_data_in, kept_worlds, KeptWorld};
 
@@ -449,15 +449,20 @@ pub(crate) struct Shared {
     /// nothing holding this ever reaches for the roster. That one-way rule is
     /// why the pair cannot deadlock.
     pub(crate) boats: Mutex<HashMap<BoatId, BoatState>>,
-    /// Every island anybody has claimed, by the identity of the ring that is
-    /// it — see [`protocol::survey::Island::id`]. What a cairn stands for, and
-    /// the whole of who may name what.
+    /// Every island anybody has claimed, by the identity a cairn is told
+    /// under: the lowest corner of the island's own ground on the chunk grid —
+    /// see [`settle_a_claim`]. What a cairn stands for, and the whole of who
+    /// may name what.
     ///
     /// Lock order: a leaf, like a player's survey, and held alone. Everything
     /// a grant needs from the roster is read and let go before this is taken,
     /// and everything anybody is told is posted after it has been let go
     /// again.
     claims: Mutex<HashMap<IVec2, Claim>>,
+    /// Every island whose coasts have been walked for a claim, remembered —
+    /// see [`Shared::island_coasts`]. A leaf lock, held only around a lookup
+    /// or an insert, never across the walk itself.
+    island_coasts: Mutex<HashMap<IVec2, Vec<Landmass>>>,
     /// The file this world survives in, if it is being kept: `None` is an
     /// ephemeral world — a test's, or a dedicated server nobody asked to
     /// remember — which lives exactly as long as its process.
@@ -567,12 +572,10 @@ impl Player {
 }
 
 /// One island claimed, as the session holds it: whose it is, where their cairn
-/// stands, and what they have christened it.
+/// stands, what the claim covers, and what they have christened it.
 ///
-/// An island is claimed by a player who has sailed the whole way round it and
-/// then stood on it — see [`settle_a_claim`], which is where that is judged
-/// against the world's own survey of them rather than against anything a
-/// client says.
+/// What earns one is [`ToServer::Claim`]'s rule, judged in
+/// [`settle_a_claim`] against the world's own survey of the claimant.
 #[derive(Clone)]
 struct Claim {
     /// The token it belongs to, and never the player id: a claim outlives the
@@ -583,6 +586,10 @@ struct Claim {
     /// Where the claimant stood when they claimed it, which is where the cairn
     /// stands for good.
     at: Vec2,
+    /// The claim's reach in world metres — [`ToClient::Cairn`]'s `covers`.
+    /// Derived from the world's own layout when the claim is made or loaded,
+    /// never from the file: the layout is the seed's to say.
+    covers: (Vec2, Vec2),
     /// Empty for an island nobody has christened yet.
     name: String,
 }
@@ -717,6 +724,34 @@ impl Server {
         let entry = world.spawn();
         let spawn = entry.map_or(Vec2::ZERO, |entry| entry.point);
 
+        // Each claim's reach comes from the layout rather than the file: the
+        // layout is the seed's to say. A record naming a chunk this seed
+        // hangs no island from — a file from some other world, or a world
+        // whose generator has since been deliberately changed — loses that
+        // claim rather than the world: its island no longer exists to stand
+        // a cairn on, and refusing the whole file here would sit outside the
+        // keeper's fallback, turning a re-recorded layout into every kept
+        // world with a claim in it never opening again. One line dropped is
+        // a fact lost; one file refused is a *world* lost.
+        let claims: HashMap<IVec2, Claim> = record
+            .claims
+            .into_iter()
+            .filter_map(|claim| {
+                let spec = world
+                    .island_at_chunk(claim.island)
+                    .filter(|spec| spec.origin == claim.island)?;
+                Some((
+                    claim.island,
+                    Claim {
+                        by: claim.by,
+                        at: claim.at,
+                        covers: claim_covers(&spec),
+                        name: claim.name,
+                    },
+                ))
+            })
+            .collect();
+
         Ok(Self {
             listener,
             loaded,
@@ -760,22 +795,8 @@ impl Server {
                         })
                         .collect(),
                 ),
-                claims: Mutex::new(
-                    record
-                        .claims
-                        .into_iter()
-                        .map(|claim| {
-                            (
-                                claim.island,
-                                Claim {
-                                    by: claim.by,
-                                    at: claim.at,
-                                    name: claim.name,
-                                },
-                            )
-                        })
-                        .collect(),
-                ),
+                claims: Mutex::new(claims),
+                island_coasts: Mutex::new(HashMap::new()),
                 keeper,
                 stopping: AtomicBool::new(false),
                 started: Instant::now(),
@@ -1270,8 +1291,8 @@ impl Shared {
                 // the beasts are held to — see `beasts::Flock::records`. A
                 // guarantee rather than a fix: nothing granted can fail this,
                 // but a claim the reader refuses would take the whole world
-                // with it. See [`island_in_the_world`].
-                .filter(|(island, claim)| island_in_the_world(**island) && reachable(claim.at))
+                // with it. See [`in_the_world`].
+                .filter(|(island, claim)| in_the_world(**island) && reachable(claim.at))
                 .map(|(island, claim)| keeper::ClaimRecord {
                     island: *island,
                     by: claim.by,
@@ -1303,6 +1324,24 @@ impl Shared {
                 (self.report)(&format!("the world could not be kept: {error}"));
             }
         }
+    }
+
+    /// The coastlines of one island, surveyed by the world itself — walked
+    /// once through [`survey_the_island`] and remembered: the answer is a
+    /// pure function of the seed and the island, so an entry can never go
+    /// stale, and the walk is the expensive half of a claim.
+    fn island_coasts(&self, spec: &IslandSpec) -> Vec<Landmass> {
+        if let Some(known) = self.island_coasts.held().get(&spec.origin) {
+            return known.clone();
+        }
+        // Walked with no lock held — two askers may race here and both walk,
+        // which costs a duplicate of something deterministic and harms
+        // nothing.
+        let walked = survey_the_island(&self.world, spec).landmasses();
+        self.island_coasts
+            .held()
+            .insert(spec.origin, walked.clone());
+        walked
     }
 
     /// Runs the clock on through a night everybody is waiting out, and says
@@ -1544,7 +1583,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
             {
                 lower_a_boat(&shared, id, position, heading)
             }
-            Ok(ToServer::Claim { island }) => {
+            Ok(ToServer::Claim) => {
                 // Paced by waiting out what is left of [`CAIRN_PACE`] rather
                 // than by dropping the ask: a client that asks too soon is
                 // answered late, never with silence, which would leave an
@@ -1558,7 +1597,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 // and charging it would mean a player who asked from the deck
                 // and then stepped ashore waited for no reason.
                 wait_out(asked_to_claim, CAIRN_PACE);
-                if settle_a_claim(&shared, id, island) {
+                if settle_a_claim(&shared, id) {
                     asked_to_claim = Some(Instant::now());
                 }
                 Went::Nowhere
@@ -2476,31 +2515,59 @@ fn lower_a_boat(shared: &Shared, id: PlayerId, position: Vec2, heading: f32) -> 
     }
 }
 
-/// Settles a claim: grants it if the world's own record says this player has
-/// earned the island, and tells whoever can see the answer either way.
+/// The rectangle a claim covers, in world metres: the island's chunks plus
+/// their skirt — see [`IslandSpec::covered`]. Every coastline of the island
+/// lies inside it and no neighbour's reaches in, the layout keeping islands
+/// further apart than two skirts, so a sheet may group its lettering by it
+/// exactly.
+fn claim_covers(spec: &IslandSpec) -> (Vec2, Vec2) {
+    let (lo, hi) = spec.covered();
+    (lo.as_vec2() * CHUNK_METRES, hi.as_vec2() * CHUNK_METRES)
+}
+
+/// Every coastline of one island, surveyed by the world itself: the island's
+/// covered chunks walked through [`survey_chunk`], so the coast is measured
+/// over exactly the soundings a client was sent — see the note there on why
+/// that and not the generator's own heights. What a claim's completeness is
+/// judged against, through [`Shared::island_coasts`], which remembers the
+/// answer — a walk of some hundreds of chunks for the biggest islands is
+/// real work, and it never changes.
+fn survey_the_island(world: &Archipelago, spec: &IslandSpec) -> Survey {
+    let mut whole = Survey::default();
+    let (lo, hi) = spec.covered();
+    for cz in lo.y..hi.y {
+        for cx in lo.x..hi.x {
+            let chunk = IVec2::new(cx, cz);
+            whole.record(chunk, survey_chunk(world, chunk));
+        }
+    }
+    // The layout owes this walk a closed answer: every coastline of the
+    // island lies inside `covered()`, a guarantee that actually rests on the
+    // skirt reaching the ocean floor, pinned far away in `world`'s own
+    // tests. If a recalibration ever left a rim shy, rings here would stop
+    // closing and the island would turn silently unclaimable — so the debt
+    // is asserted where it is spent.
+    debug_assert_eq!(
+        whole.coastlines(&mut |_, _| {}).1,
+        0,
+        "an island's own survey left a coastline hanging open"
+    );
+    whole
+}
+
+/// Settles a claim on [`ToServer::Claim`]'s rule — that doc is the rule, and
+/// this is where it is judged — and tells whoever can see the answer.
 ///
-/// The three things a grant wants are all facts the server holds. The claimant
-/// must be afoot, a cairn being built by somebody standing on the ground. The
-/// server's survey *for that player* must answer [`Survey::island_under`] with
-/// the island they named, which is both halves of the rule in one question —
-/// an unclosed coast rings nothing, and a point outside a ring is somewhere
-/// else. And nobody may hold it already, first asker taking it.
+/// Order matters twice here. The held claims are asked before anything else,
+/// so an island somebody already holds is settled without a walk; and the
+/// asker's *own* record is asked before the island's, because
+/// [`Survey::ashore`] costs microseconds where the island walk costs real
+/// work. Every refusal reaches the asker alone or not at all — broadcast, a
+/// client could pester the whole roster — and the first hold decides, the
+/// claims being re-checked under their lock at the grant.
 ///
-/// A refusal is posted to the asker alone and never broadcast: one every other
-/// player's outbox carried would be a client able to pester the whole roster.
-/// Where the refusal is that somebody got there first, what goes back is that
-/// cairn, if the asker is near enough to be looking at it — see
-/// [`tell_the_asker`]. Otherwise the answer is silence.
-///
-/// The claims are asked *before* the coastlines are walked, and that order is
-/// what stops a pestering client: an island somebody already holds is settled
-/// by the claims alone, and the walk is what the pace exists to ration. Asked
-/// twice, which is not a race — the second hold is the one that decides, so
-/// two players walking the same shore still leave one cairn.
-///
-/// Says whether the survey was walked, which is the expensive half and the
-/// only half worth pacing.
-fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
+/// Says whether an answer was earned, which is what the pace rations.
+fn settle_a_claim(shared: &Shared, id: PlayerId) -> bool {
     let Some((token, at, afoot, surveyed)) = ({
         let players = shared.players.held();
         players.get(&id).map(|player| {
@@ -2515,6 +2582,18 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
         return false;
     };
 
+    // No island underfoot means nothing to claim, and an island out past
+    // where the world resolves is one the world's own file could not carry
+    // back — refused rather than granted and lost, a claim the reader cannot
+    // read being a world that will not open.
+    let Some(spec) = shared.world.island_at(at.x, at.y) else {
+        return false;
+    };
+    let island = spec.origin;
+    if !in_the_world(island) {
+        return false;
+    }
+
     // Somebody's already — theirs or another's, and either way the cairn that
     // stands there is the answer and no coastline needs walking to find it.
     let held = shared.claims.held().get(&island).cloned();
@@ -2523,16 +2602,43 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
         tell_the_asker(&players, id, island, &claim);
         return false;
     }
-    // Nor for somebody who could not be building a cairn wherever they are:
-    // one is built by a player standing on the ground, not sailing past.
+    // A cairn is built by somebody afoot; a helm's ask is not a claim.
     if !afoot {
         return false;
     }
 
-    let stands_on = surveyed
+    // Standing where a cairn could stand, by the very question the claim key
+    // asked before sending — [`Survey::ashore`], of the server's record for
+    // this player, so the two ends of the gate cannot disagree. A record
+    // that rings nothing around the asker's own feet is a survey with coast
+    // still open right here, and says so; it is also the cheap half, asked
+    // before the island's own coasts are fetched.
+    if !surveyed.held().ashore(at) {
+        let players = shared.players.held();
+        if let Some(player) = players.get(&id) {
+            post(player, ToClient::Uncharted);
+        }
+        return true;
+    }
+
+    // The world's own survey of the whole island, and the player's judged
+    // against it: every coastline the island has, closed. Standing ashore
+    // already vouched for one landmass past the skerry line, so there is no
+    // bare-rock case left to refuse.
+    let wanted = shared.island_coasts(&spec);
+    let closed: HashSet<IVec2> = surveyed
         .held()
-        .island_under(at)
-        .is_some_and(|found| found.id == island);
+        .landmasses()
+        .iter()
+        .map(|landmass| landmass.id)
+        .collect();
+    if !wanted.iter().all(|landmass| closed.contains(&landmass.id)) {
+        let players = shared.players.held();
+        if let Some(player) = players.get(&id) {
+            post(player, ToClient::Uncharted);
+        }
+        return true;
+    }
 
     let (told, granted) = {
         let mut claims = shared.claims.held();
@@ -2541,22 +2647,16 @@ fn settle_a_claim(shared: &Shared, id: PlayerId, island: IVec2) -> bool {
             // way it gets here: the answer is that cairn, as it would have
             // been a moment earlier.
             Some(held) => (Some(held.clone()), false),
-            // Earned, and the identity is one the world's own file can carry
-            // back — see [`island_in_the_world`]. A ring closed out at the
-            // very brink of the world is refused rather than granted and lost,
-            // a claim the reader cannot read being a world that will not open.
-            None if stands_on && island_in_the_world(island) => {
+            None => {
                 let raised = Claim {
                     by: token,
                     at,
+                    covers: claim_covers(&spec),
                     name: String::new(),
                 };
                 claims.insert(island, raised.clone());
                 (Some(raised), true)
             }
-            // Nothing there, and nothing earned: an island this player has
-            // not been round, or is not standing on.
-            None => (None, false),
         }
     };
 
@@ -2786,15 +2886,15 @@ fn sight_the_cairns(shared: &Shared, id: PlayerId, from: Vec2, to: Vec2) {
 /// What one player's knowledge of the cairns goes into the world's file as.
 ///
 /// Nothing the file could not be read back saying, on the terms the claims
-/// themselves are held to — see [`Shared::record`], and [`island_in_the_world`]
-/// for what it costs to get this wrong. Nothing that gets in here can fail it,
+/// themselves are held to — see [`Shared::record`], and [`in_the_world`] for
+/// what it costs to get this wrong. Nothing that gets in here can fail it,
 /// every entry being about a claim that passed the same test to exist at all;
 /// it is the guarantee rather than the fix, and one line the reader refuses is
 /// not a fact lost but a *world* lost.
 fn filed(known: &HashMap<IVec2, Knowing>) -> HashMap<IVec2, Knowing> {
     known
         .iter()
-        .filter(|(island, _)| island_in_the_world(**island))
+        .filter(|(island, _)| in_the_world(**island))
         .map(|(island, knowing)| (*island, *knowing))
         .collect()
 }
@@ -2902,6 +3002,7 @@ fn cairn_told_to(player: &Player, island: IVec2, claim: &Claim) -> ToClient {
     ToClient::Cairn {
         island,
         at: claim.at,
+        covers: claim.covers,
         name: match knows(&player.known, player.token, island, claim) {
             Some(Knowing::Visited) => claim.name.clone(),
             _ => String::new(),
@@ -3242,18 +3343,6 @@ pub(crate) fn in_the_world(chunk: IVec2) -> bool {
     reachable(chunk.as_vec2() * protocol::ground::CHUNK_METRES)
 }
 
-/// Whether an island's identity is one the world can keep: the [`in_the_world`]
-/// test, asked of the chunk the identity's lattice point falls in — see
-/// [`protocol::survey::chunk_of`].
-///
-/// Both ends of the world file ask exactly this, which is the point of it
-/// being one function. A claim the reader refuses is not a claim lost but a
-/// *world* lost: the file will not parse, the opening falls back to the copy
-/// beside it, and the next save takes that too.
-pub(crate) fn island_in_the_world(island: IVec2) -> bool {
-    in_the_world(protocol::survey::chunk_of(island))
-}
-
 /// Puts a message in a player's outbox, or hangs up on them.
 ///
 /// Never waits. Most of the sends here happen with the roster's lock held, and
@@ -3478,6 +3567,90 @@ mod tests {
         assert!(
             again.distance(reached) < SURVEY_SWEEP / 4.0,
             "a second jump ran on to {again} from {reached}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod claims {
+    use super::*;
+    use glam::IVec2;
+
+    /// The crux of a claim, pinned without a socket: an island is every one
+    /// of its coastlines, skerries included, and both ends of the comparison
+    /// come out of the same soundings.
+    ///
+    /// Seed 1 hangs a 2x2-chunk island from chunk 24,-65 holding two
+    /// landmasses — a shore about 170 m across and a skerry about 26 m —
+    /// found by sweeping seeds for exactly this shape. If a generator change
+    /// moves it, re-find one with the same sweep rather than loosening the
+    /// assertions.
+    #[test]
+    fn a_claim_wants_every_coastline_of_the_island() {
+        let world = Archipelago::new(&WorldConfig { seed: 1 });
+        let spec = world
+            .island_at_chunk(IVec2::new(24, -65))
+            .expect("seed 1 hangs an island from chunk 24,-65");
+        assert_eq!(
+            spec.origin,
+            IVec2::new(24, -65),
+            "a different island answered"
+        );
+
+        let wanted = survey_the_island(&world, &spec).landmasses();
+        assert!(
+            wanted.len() >= 2,
+            "one landmass makes this test a tautology"
+        );
+        let skerry = wanted
+            .iter()
+            .find(|landmass| landmass.is_skerry())
+            .copied()
+            .expect("no skerry to hold the rule to");
+
+        // A survey that has seen every covered chunk closes the same
+        // coastlines under the same identities — the two ends of the
+        // completeness comparison are one arithmetic.
+        let (lo, hi) = spec.covered();
+        let mut whole = Survey::default();
+        for cz in lo.y..hi.y {
+            for cx in lo.x..hi.x {
+                let chunk = IVec2::new(cx, cz);
+                whole.record(chunk, survey_chunk(&world, chunk));
+            }
+        }
+        let closed: HashSet<IVec2> = whole
+            .landmasses()
+            .iter()
+            .map(|landmass| landmass.id)
+            .collect();
+        assert!(
+            wanted.iter().all(|landmass| closed.contains(&landmass.id)),
+            "a whole survey left a coastline unclosed"
+        );
+
+        // And one missing the ground about the skerry is short a coastline:
+        // a main shore closed is not an island surveyed, which is the whole
+        // of what the claim rule holds a claimant to.
+        let mut short = Survey::default();
+        for cz in lo.y..hi.y {
+            for cx in lo.x..hi.x {
+                let chunk = IVec2::new(cx, cz);
+                let middle = (chunk.as_vec2() + 0.5) * CHUNK_METRES;
+                if middle.distance(skerry.centre) <= CHUNK_METRES {
+                    continue;
+                }
+                short.record(chunk, survey_chunk(&world, chunk));
+            }
+        }
+        let closed: HashSet<IVec2> = short
+            .landmasses()
+            .iter()
+            .map(|landmass| landmass.id)
+            .collect();
+        assert!(
+            !wanted.iter().all(|landmass| closed.contains(&landmass.id)),
+            "a survey missing the skerry's ground still closed every coastline"
         );
     }
 }

@@ -20,11 +20,13 @@
 //!
 //! Three things can be true of an island here, earned three different ways: a
 //! cairn seen from offshore, unlettered; a cairn landed at and read, its name
-//! beside it; and a coastline sailed the whole way round, closed and lettered.
-//! Only the third is this sheet's own seeing and only the third earns the
-//! right to claim — a chart that let hearsay close a ring would be one an
-//! island could be claimed off having been *told* about it. The first two
-//! arrive as [`Claimed`] and put no stroke of coastline on the paper.
+//! beside it; and coastlines sailed the whole way round, closed and lettered.
+//! Only the third is this sheet's own seeing, and only closing the whole of
+//! an island's coast — every landmass's ring, and the world is the judge of
+//! how many that is — earns the right to claim: a chart that let hearsay
+//! close a ring would be one an island could be claimed off having been
+//! *told* about it. The first two arrive as [`Claimed`] and put no stroke of
+//! coastline on the paper.
 //!
 //! The character is in the line rather than in the paper. An old chart's
 //! stains and mottle are the one way it cannot be got here, this world having
@@ -64,15 +66,15 @@ use crate::{AppState, Helm};
 #[derive(Resource, Default)]
 pub struct Chart {
     survey: Survey,
-    /// The claims this player has been told of, keyed by [`Island::id`] — see
-    /// [`Claimed`]. Not the player's own notes: an island's name belongs to
-    /// the claim it was written on, so everything here arrived over the wire
-    /// and none of it outlives the visit.
+    /// The claims this player has been told of, keyed by the identity their
+    /// cairns are told under — see [`Claimed`]. Not the player's own notes: an
+    /// island's name belongs to the claim it was written on, so everything
+    /// here arrived over the wire and none of it outlives the visit.
     claims: HashMap<IVec2, Claimed>,
 }
 
-/// A claimed island, as this sheet knows it: where the cairn stands, what it
-/// is called, and whether it is the player's own.
+/// A claimed island, as this sheet knows it: where the cairn stands, what the
+/// claim covers, what it is called, and whether it is the player's own.
 ///
 /// A cairn is the only reason a name is on the sheet at all. An island nobody
 /// has claimed is drawn and unlettered, however many times its own discoverer
@@ -84,6 +86,10 @@ pub struct Claimed {
     /// spot rather than the island's middle. A cairn is on a headland
     /// somebody chose, and where they chose is worth drawing.
     pub at: Vec2,
+    /// What the claim covers, in world metres — [`protocol::ToClient::Cairn`]'s
+    /// `covers`, whole. How the sheet knows which coastlines the claim's one
+    /// name is true of; never a line on the paper.
+    pub covers: Rect,
     /// What it has been christened, as far as this player has any business
     /// knowing. Empty for a claim nobody has named — the cairn goes up when the
     /// island is taken and the name is written after — and empty just the same
@@ -95,22 +101,25 @@ pub struct Claimed {
     pub yours: bool,
 }
 
-/// An island the survey has closed, carried onto the sheet to be lettered.
+/// A landmass the survey has closed, carried onto the sheet to be lettered.
 ///
-/// Two things separate it from the [`protocol::survey::Island`] it is built
-/// from, and both are the client's own. Its centre is where the name goes on
-/// the *paper* rather than where the island stands in the world — see
-/// [`on_the_sheet`] — and its name is what the player has written on it.
+/// Things separate it from the [`protocol::survey::Landmass`] it is built
+/// from, and all of them are the client's own. Its centre is where the name
+/// goes on the *paper* rather than where the land stands in the world — see
+/// [`on_the_sheet`] — and it knows which claim's reach holds it, since a name
+/// is a claim's and a claim may cover more coastlines than this one.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Island {
-    /// What names the island for as long as the chart lives — see
-    /// [`protocol::survey::Island::id`].
+pub struct Landmass {
+    /// What names the landmass for as long as the chart lives — see
+    /// [`protocol::survey::Landmass::id`].
     pub id: IVec2,
     /// The middle of its bounding box, on the sheet (see [`on_the_sheet`]).
     pub centre: Vec2,
     /// How far it reaches: the longer side of that box, in metres.
     pub extent: f32,
-    /// What the player has christened it, if they have.
+    /// The claim whose reach holds it, if this sheet has been told of one.
+    pub claim: Option<IVec2>,
+    /// What that claim is christened, if anything.
     pub name: Option<String>,
 }
 
@@ -133,41 +142,66 @@ impl Chart {
         self.survey.tally()
     }
 
-    /// The islands the chart has closed, each measured for its lettering.
+    /// The landmasses the chart has closed and would letter, each measured —
+    /// the skerries left out, a rock awash being coast to draw and never a
+    /// place to write on.
     ///
     /// Asked afresh every time and deliberately not kept. The walk behind it is
     /// bounded by the whole voyage rather than by the window on the paper,
     /// which looks like exactly what a chart of a long sail should not do per
     /// frame — and it was measured: tens of microseconds for a well-sailed
-    /// world, see [`protocol::survey::Survey::islands`], against a redraw that
-    /// rebuilds every stroke on the sheet. A cached list would be a rule about
-    /// when to throw it away, and that rule could be wrong.
-    pub fn islands(&self) -> Vec<Island> {
+    /// world, see [`protocol::survey::Survey::landmasses`], against a redraw
+    /// that rebuilds every stroke on the sheet. A cached list would be a rule
+    /// about when to throw it away, and that rule could be wrong.
+    pub fn landmasses(&self) -> Vec<Landmass> {
         self.survey
-            .islands()
+            .landmasses()
             .into_iter()
-            .map(|island| Island {
-                id: island.id,
-                // The survey measures in the world and the lettering goes on
-                // the paper, so the centre makes the same crossing every other
-                // point on the sheet does.
-                centre: on_the_sheet(island.centre),
-                // The reach needs no crossing: the longer side of a box is the
-                // longer side of it whichever way up the box is drawn.
-                extent: island.extent,
-                name: self.name(island.id).map(str::to_string),
+            .filter(|landmass| !landmass.is_skerry())
+            .map(|landmass| {
+                let claim = self.claim_covering(landmass.centre);
+                Landmass {
+                    id: landmass.id,
+                    // The survey measures in the world and the lettering goes
+                    // on the paper, so the centre makes the same crossing
+                    // every other point on the sheet does.
+                    centre: on_the_sheet(landmass.centre),
+                    // The reach needs no crossing: the longer side of a box is
+                    // the longer side of it whichever way up the box is drawn.
+                    extent: landmass.extent,
+                    claim,
+                    name: claim.and_then(|claim| self.name(claim).map(str::to_string)),
+                }
             })
             .collect()
+    }
+
+    /// The claim whose reach holds a world point, if this sheet has been told
+    /// of one. At most one can: claims cover islands, and the layout keeps
+    /// islands further apart than their covers reach.
+    fn claim_covering(&self, at: Vec2) -> Option<IVec2> {
+        self.claims
+            .iter()
+            .find(|(_, claimed)| claimed.covers.contains(at))
+            .map(|(island, _)| *island)
     }
 
     /// Takes down what the world says about a claimed island — see
     /// [`letter_the_sheet`], which is the only caller. A cairn is told again
     /// whenever its word changes, so this overwrites wholesale.
-    pub(crate) fn claimed(&mut self, island: IVec2, at: Vec2, name: &str, yours: bool) {
+    pub(crate) fn claimed(
+        &mut self,
+        island: IVec2,
+        at: Vec2,
+        covers: Rect,
+        name: &str,
+        yours: bool,
+    ) {
         self.claims.insert(
             island,
             Claimed {
                 at,
+                covers,
                 name: name.trim().to_string(),
                 yours,
             },
@@ -189,15 +223,15 @@ impl Chart {
         self.claims.iter().map(|(island, claim)| (*island, claim))
     }
 
-    /// The island a world point stands on, if this sheet has closed one round
-    /// it — the survey's own question, asked in world metres rather than on
-    /// the paper. What the claim key asks before it asks the world; see
-    /// [`crate::player::claim_the_island`].
-    pub fn island_under(&self, at: Vec2) -> Option<IVec2> {
-        self.survey.island_under(at).map(|island| island.id)
+    /// Whether a world point stands where a cairn could — the survey's own
+    /// question ([`protocol::survey::Survey::ashore`]), asked in world metres
+    /// rather than on the paper. What the claim key asks before it asks the
+    /// world; see [`crate::player::claim_the_island`].
+    pub fn ashore(&self, at: Vec2) -> bool {
+        self.survey.ashore(at)
     }
 
-    /// What an island is called, if it is claimed and named.
+    /// What a claimed island is called, if it has been named.
     pub fn name(&self, island: IVec2) -> Option<&str> {
         self.claims
             .get(&island)
@@ -611,7 +645,13 @@ pub(crate) fn letter_the_sheet(
     mut seen: MessageReader<crate::net::CairnSeen>,
 ) {
     for cairn in seen.read() {
-        chart.claimed(cairn.island, cairn.at, &cairn.name, cairn.yours);
+        chart.claimed(
+            cairn.island,
+            cairn.at,
+            cairn.covers,
+            &cairn.name,
+            cairn.yours,
+        );
     }
 }
 
@@ -1058,35 +1098,51 @@ fn engrave(
 /// coordinates.
 ///
 /// Two kinds of lettering, and which one a name gets is the whole of what this
-/// decides. An island **this survey has closed** is lettered across its own
-/// middle, the way a chart letters an island. An island that is only a cairn is
+/// decides. A landmass **this survey has closed** is lettered across its own
+/// middle, the way a chart letters an island. A claim that is only a cairn is
 /// lettered against the mark instead, that being the only thing on the paper
 /// the name is true of — writing it across a middle the sheet has not drawn
 /// would be lettering a shape nobody has seen.
 ///
-/// A closed island is skipped in the second pass, or its name would be on the
-/// sheet twice. The island under the pen shows the draft with its caret, the
-/// lettering *being* the text field.
+/// A name is a claim's, and a claim may cover more coastlines than one — an
+/// island and its islets. It letters the biggest of them once, and the rest go
+/// unlettered rather than each repeating the word: the twins are one holding,
+/// and a sheet that wrote the name on both would be saying there are two. A
+/// claim lettered on a landmass is skipped in the cairn pass, or its name
+/// would be on the sheet twice. The claim under the pen shows the draft with
+/// its caret, the lettering *being* the text field.
 ///
 /// The walk is over the whole chart rather than a window of it — a chain can
 /// cross any number of chunks — and the caller drops whatever falls off the
 /// paper.
 fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> Vec<(String, Vec2)> {
-    let islands = chart.islands();
-    let mut written: Vec<(String, Vec2)> = islands
-        .iter()
-        .map(|island| {
-            let text = match naming {
-                Some(naming) if naming.island == island.id => format!("{}|", naming.draft),
-                _ => island
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| "Unnamed island".to_string()),
-            };
-            (text, island.centre)
-        })
-        .collect();
-    let closed: HashSet<IVec2> = islands.iter().map(|island| island.id).collect();
+    // Biggest first, so the landmass a claim's name lands on is its main
+    // shore and not an islet that happened to sort earlier.
+    let mut landmasses = chart.landmasses();
+    landmasses.sort_by(|a, b| b.extent.total_cmp(&a.extent));
+
+    let mut lettered: HashSet<IVec2> = HashSet::new();
+    let mut written: Vec<(String, Vec2)> = Vec::new();
+    for landmass in &landmasses {
+        if let Some(claim) = landmass.claim {
+            if !lettered.insert(claim) {
+                continue;
+            }
+        }
+        let text = match (naming, landmass.claim) {
+            (Some(naming), Some(claim)) if naming.claim == claim => {
+                format!("{}|", naming.draft)
+            }
+            // One fallback for claimed-but-unnamed and never-claimed alike:
+            // from the paper those are the same sight, and the words must be
+            // the same words.
+            _ => landmass
+                .name
+                .clone()
+                .unwrap_or_else(|| "Unnamed island".to_string()),
+        };
+        written.push((text, landmass.centre));
+    }
 
     // Half a line on top of the gap, `Text2d` hanging its lettering off the
     // middle of the line where the gap is measured to the foot of it. Without
@@ -1096,7 +1152,7 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
     written.extend(
         chart
             .cairns()
-            .filter(|(island, claimed)| !claimed.name.is_empty() && !closed.contains(island))
+            .filter(|(island, claimed)| !claimed.name.is_empty() && !lettered.contains(island))
             .map(|(_, claimed)| {
                 (
                     claimed.name.clone(),
@@ -1266,16 +1322,16 @@ fn readers_mark() -> Mesh {
 // Naming
 // ---------------------------------------------------------------------------
 
-/// A name being written on the sheet: the island under the pen, and the
+/// A name being written on the sheet: the claim under the pen, and the
 /// letters so far.
 ///
 /// While this exists the keyboard is the pen's — the chart key and the driving
 /// keys spell letters, and Escape puts the pen down — so [`chart_key`] and
-/// [`pan`] stand down while it does. There is no dialog: the island's own
+/// [`pan`] stand down while it does. There is no dialog: the claim's own
 /// lettering shows the draft, with a caret on the end.
 #[derive(Resource)]
 pub struct Naming {
-    island: IVec2,
+    claim: IVec2,
     draft: String,
 }
 
@@ -1332,7 +1388,7 @@ fn write_the_name(
         }
         match press.key_code {
             KeyCode::Enter | KeyCode::NumpadEnter => {
-                write_through(&online, naming.island, &naming.draft);
+                write_through(&online, naming.claim, &naming.draft);
                 commands.remove_resource::<Naming>();
                 return;
             }
@@ -1400,10 +1456,11 @@ impl Pointer<'_, '_> {
     }
 }
 
-/// Picks the pen up and puts it down: a click on an island starts writing its
-/// name, and a click anywhere with a name in hand writes that name as it
-/// stands — clicking away is finishing, not abandoning, because a half-typed
-/// name lost to a stray click would be the sheet eating somebody's work.
+/// Picks the pen up and puts it down: a click on a landmass starts writing its
+/// claim's name, and a click anywhere with a name in hand writes that name as
+/// it stands — clicking away is finishing, not abandoning, because a
+/// half-typed name lost to a stray click would be the sheet eating somebody's
+/// work.
 fn click_to_name(
     mut commands: Commands,
     chart: Res<Chart>,
@@ -1416,30 +1473,33 @@ fn click_to_name(
         return;
     };
 
-    let hit = hit_island(&chart.islands(), at, view.metres_per_pixel);
+    let hit = hit_landmass(&chart.landmasses(), at, view.metres_per_pixel);
     if let Some(naming) = naming {
-        write_through(&online, naming.island, &naming.draft);
+        write_through(&online, naming.claim, &naming.draft);
         commands.remove_resource::<Naming>();
-        // Clicking the island being written is only ever finishing it.
-        if hit.as_ref().map(|island| island.id) == Some(naming.island) {
+        // Clicking any coast of the claim being written is only ever
+        // finishing it.
+        if hit.as_ref().and_then(|landmass| landmass.claim) == Some(naming.claim) {
             return;
         }
     }
-    // The pen only opens on an island this player holds: naming is what a
-    // claim earns, so there is nothing to write on an island nobody has
-    // claimed and nothing this player may write on somebody else's. The sheet
-    // says so by not taking the pen up.
-    if let Some(island) = hit.filter(|island| ours(&chart, island.id)) {
-        commands.insert_resource(Naming {
-            island: island.id,
-            draft: island.name.unwrap_or_default(),
-        });
+    // The pen only opens on a claim this player holds: naming is what a claim
+    // earns, so there is nothing to write on an island nobody has claimed and
+    // nothing this player may write on somebody else's. The sheet says so by
+    // not taking the pen up.
+    if let Some(landmass) = hit {
+        if let Some(claim) = landmass.claim.filter(|claim| ours(&chart, *claim)) {
+            commands.insert_resource(Naming {
+                claim,
+                draft: landmass.name.unwrap_or_default(),
+            });
+        }
     }
 }
 
-/// Whether this island is one the player holds — see [`click_to_name`].
-fn ours(chart: &Chart, island: IVec2) -> bool {
-    chart.claim(island).is_some_and(|claimed| claimed.yours)
+/// Whether this claim is one the player holds — see [`click_to_name`].
+fn ours(chart: &Chart, claim: IVec2) -> bool {
+    chart.claim(claim).is_some_and(|claimed| claimed.yours)
 }
 
 /// Sends a christening to the world, which is the only place a name lives.
@@ -1447,21 +1507,21 @@ fn ours(chart: &Chart, island: IVec2) -> bool {
 /// Nothing is written on the sheet here. The name goes up, the server judges
 /// it, and the cairn is told back with whatever it now says — so the lettering
 /// a player sees is always the lettering everybody else sees.
-fn write_through(online: &Option<Res<crate::net::Online>>, island: IVec2, draft: &str) {
+fn write_through(online: &Option<Res<crate::net::Online>>, claim: IVec2, draft: &str) {
     if let Some(online) = online {
-        online.connection.christen(island, draft);
+        online.connection.christen(claim, draft);
     }
 }
 
-/// The island a click on the sheet lands on, if any: within the island's own
-/// bounds, or within the stretch of paper its lettering sits on — and where
-/// those crowd, whichever island's middle lies nearest.
-fn hit_island(islands: &[Island], at: Vec2, metres_per_pixel: f32) -> Option<Island> {
-    islands
+/// The landmass a click on the sheet lands on, if any: within its own bounds,
+/// or within the stretch of paper its lettering sits on — and where those
+/// crowd, whichever landmass's middle lies nearest.
+fn hit_landmass(landmasses: &[Landmass], at: Vec2, metres_per_pixel: f32) -> Option<Landmass> {
+    landmasses
         .iter()
-        .filter(|island| {
-            let half = Vec2::splat(island.extent / 2.0).max(NAME_REACH * metres_per_pixel);
-            let off = (at - island.centre).abs();
+        .filter(|landmass| {
+            let half = Vec2::splat(landmass.extent / 2.0).max(NAME_REACH * metres_per_pixel);
+            let off = (at - landmass.centre).abs();
             off.x <= half.x && off.y <= half.y
         })
         .min_by(|a, b| {
@@ -2510,18 +2570,18 @@ mod tests {
             survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
         );
 
-        let islands = chart.islands();
-        assert_eq!(islands.len(), 1);
+        let landmasses = chart.landmasses();
+        assert_eq!(landmasses.len(), 1);
         assert!(
-            (islands[0].centre - on_the_sheet(middle)).length() < TOLERANCE + MARK_STEP,
+            (landmasses[0].centre - on_the_sheet(middle)).length() < TOLERANCE + MARK_STEP,
             "the name sits at {:?}, off the island at {:?}",
-            islands[0].centre,
+            landmasses[0].centre,
             on_the_sheet(middle)
         );
         assert!(
-            (islands[0].extent - 120.0).abs() < 2.0 * (TOLERANCE + MARK_STEP),
+            (landmasses[0].extent - 120.0).abs() < 2.0 * (TOLERANCE + MARK_STEP),
             "a 120 m island measured {} m",
-            islands[0].extent
+            landmasses[0].extent
         );
     }
 
@@ -2534,7 +2594,7 @@ mod tests {
         let mut chart = Chart::default();
         chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
 
-        assert!(chart.islands().is_empty());
+        assert!(chart.landmasses().is_empty());
     }
 
     #[test]
@@ -2637,11 +2697,18 @@ mod tests {
         }
     }
 
+    /// A claim's reach comfortably holding the two-chunk cone these tests
+    /// close — what the wire's `covers` would say of it.
+    fn covering(middle: Vec2) -> Rect {
+        Rect::from_corners(middle - Vec2::splat(200.0), middle + Vec2::splat(200.0))
+    }
+
     #[test]
-    fn a_claim_letters_the_island_it_was_written_on() {
+    fn a_claim_letters_the_landmass_its_reach_covers() {
         // A name reaches the sheet by riding a cairn — see [`Chart::claimed`],
-        // which is what the world's word lands in. Written against the ring's
-        // id, read back off the island the walk finds.
+        // which is what the world's word lands in. Written against the claim's
+        // own identity, read back off whichever closed coastline its reach
+        // holds: the sheet never derives the claim, only matches its covers.
         let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
         let mut chart = Chart::default();
         chart.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
@@ -2650,21 +2717,22 @@ mod tests {
             survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
         );
 
-        let id = chart.islands()[0].id;
         // Unclaimed, it is drawn and unlettered however well it is known.
-        assert_eq!(chart.islands()[0].name, None);
+        assert_eq!(chart.landmasses()[0].name, None);
 
-        chart.claimed(id, middle, "  Isla Genovesa  ", true);
-        assert_eq!(chart.islands()[0].name.as_deref(), Some("Isla Genovesa"));
-        assert_eq!(chart.name(id), Some("Isla Genovesa"));
-        assert!(chart.claim(id).is_some_and(|claimed| claimed.yours));
+        let claim = IVec2::new(5, -2);
+        chart.claimed(claim, middle, covering(middle), "  Isla Genovesa  ", true);
+        assert_eq!(chart.landmasses()[0].name.as_deref(), Some("Isla Genovesa"));
+        assert_eq!(chart.landmasses()[0].claim, Some(claim));
+        assert_eq!(chart.name(claim), Some("Isla Genovesa"));
+        assert!(chart.claim(claim).is_some_and(|claimed| claimed.yours));
 
         // A claim with nothing written on it yet is a cairn without a name:
         // the island is spoken for, and the paper says so by the mark rather
         // than by lettering.
-        chart.claimed(id, middle, "   ", true);
-        assert_eq!(chart.islands()[0].name, None);
-        assert!(chart.claim(id).is_some(), "the cairn went with the name");
+        chart.claimed(claim, middle, covering(middle), "   ", true);
+        assert_eq!(chart.landmasses()[0].name, None);
+        assert!(chart.claim(claim).is_some(), "the cairn went with the name");
     }
 
     #[test]
@@ -2675,7 +2743,13 @@ mod tests {
         // write that across, so it goes beside the mark it was read off.
         let mut chart = Chart::default();
         let stones = Vec2::new(4_000.0, -2_500.0);
-        chart.claimed(IVec2::new(9, -3), stones, "Ilha Verde", false);
+        chart.claimed(
+            IVec2::new(9, -3),
+            stones,
+            covering(stones),
+            "Ilha Verde",
+            false,
+        );
 
         let written = lettering(&chart, None, 1.0);
         assert_eq!(written.len(), 1, "one cairn, one name");
@@ -2690,7 +2764,7 @@ mod tests {
         // And a cairn with nothing legible on it letters nothing at all —
         // which is an island nobody has christened, or one this player has not
         // been up to. From here those are the same sight.
-        chart.claimed(IVec2::new(9, -3), stones, "", false);
+        chart.claimed(IVec2::new(9, -3), stones, covering(stones), "", false);
         assert!(lettering(&chart, None, 1.0).is_empty());
     }
 
@@ -2708,8 +2782,14 @@ mod tests {
             IVec2::new(1, 0),
             survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
         );
-        let id = chart.islands()[0].id;
-        chart.claimed(id, middle + Vec2::new(40.0, 0.0), "Ilha Verde", false);
+        let claim = IVec2::new(5, -2);
+        chart.claimed(
+            claim,
+            middle + Vec2::new(40.0, 0.0),
+            covering(middle),
+            "Ilha Verde",
+            false,
+        );
 
         let written = lettering(&chart, None, 1.0);
         assert_eq!(
@@ -2720,7 +2800,7 @@ mod tests {
         assert_eq!(written[0].0, "Ilha Verde");
         assert_eq!(
             written[0].1,
-            chart.islands()[0].centre,
+            chart.landmasses()[0].centre,
             "the name was not written across the island"
         );
     }
@@ -2772,7 +2852,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pen_only_opens_on_an_island_this_player_holds() {
+    fn the_pen_only_opens_on_a_claim_this_player_holds() {
         // The filter a hit goes through in [`click_to_name`], asked of the
         // three things an island can be. Naming is what a claim earns: there
         // is nothing to write on an island nobody has taken, and nothing this
@@ -2785,38 +2865,50 @@ mod tests {
             IVec2::new(1, 0),
             survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
         );
-        let id = chart.islands()[0].id;
+        let claim = IVec2::new(5, -2);
 
+        assert_eq!(
+            chart.landmasses()[0].claim,
+            None,
+            "an island nobody has claimed answered to a claim"
+        );
         assert!(
-            !ours(&chart, id),
+            !ours(&chart, claim),
             "the pen opened on an island nobody has claimed"
         );
 
-        chart.claimed(id, middle, "Isla Ajena", false);
-        assert!(!ours(&chart, id), "the pen opened on a stranger's island");
+        chart.claimed(claim, middle, covering(middle), "Isla Ajena", false);
+        assert!(
+            !ours(&chart, claim),
+            "the pen opened on a stranger's island"
+        );
 
-        chart.claimed(id, middle, "Isla Genovesa", true);
-        assert!(ours(&chart, id), "the pen would not open on our own island");
+        chart.claimed(claim, middle, covering(middle), "Isla Genovesa", true);
+        assert!(
+            ours(&chart, claim),
+            "the pen would not open on our own island"
+        );
     }
 
     #[test]
-    fn a_click_lands_on_the_island_or_its_lettering() {
-        let island = Island {
+    fn a_click_lands_on_the_landmass_or_its_lettering() {
+        let landmass = Landmass {
             id: IVec2::ZERO,
             centre: Vec2::ZERO,
             extent: 200.0,
+            claim: None,
             name: None,
         };
-        let islands = vec![island];
+        let landmasses = vec![landmass];
 
-        // On the island itself, and just off it.
-        assert!(hit_island(&islands, Vec2::new(80.0, 40.0), 1.0).is_some());
-        assert!(hit_island(&islands, Vec2::new(300.0, 0.0), 1.0).is_none());
+        // On the land itself, and just off it.
+        assert!(hit_landmass(&landmasses, Vec2::new(80.0, 40.0), 1.0).is_some());
+        assert!(hit_landmass(&landmasses, Vec2::new(300.0, 0.0), 1.0).is_none());
 
-        // Zoomed far out the island is a speck — extent under a pixel of
+        // Zoomed far out the land is a speck — extent under a pixel of
         // reach — but the stretch of lettering still takes the click.
-        assert!(hit_island(&islands, Vec2::new(1500.0, 0.0), 32.0).is_some());
-        assert!(hit_island(&islands, Vec2::new(0.0, 1500.0), 32.0).is_none());
+        assert!(hit_landmass(&landmasses, Vec2::new(1500.0, 0.0), 32.0).is_some());
+        assert!(hit_landmass(&landmasses, Vec2::new(0.0, 1500.0), 32.0).is_none());
     }
 
     #[test]
@@ -2831,9 +2923,9 @@ mod tests {
         press(&mut app, KeyCode::KeyM);
         assert_eq!(helm(&app), Helm::Chart);
 
-        let island = IVec2::new(40, -17);
+        let claim = IVec2::new(40, -17);
         app.insert_resource(Naming {
-            island,
+            claim,
             draft: String::new(),
         });
         type_word(&mut app, "Skull Rock");
@@ -2849,7 +2941,7 @@ mod tests {
             "the pen is still down"
         );
         assert_eq!(
-            app.world().resource::<Chart>().name(island),
+            app.world().resource::<Chart>().name(claim),
             None,
             "the sheet lettered a name the world had not confirmed"
         );
@@ -2860,9 +2952,9 @@ mod tests {
         let mut app = keyed_app();
         press(&mut app, KeyCode::KeyM);
 
-        let island = IVec2::ZERO;
+        let claim = IVec2::ZERO;
         app.insert_resource(Naming {
-            island,
+            claim,
             draft: String::new(),
         });
         // Far past the cap, so the surplus has something to be dropped from.
@@ -2881,9 +2973,9 @@ mod tests {
         let mut app = keyed_app();
         press(&mut app, KeyCode::KeyM);
 
-        let island = IVec2::ZERO;
+        let claim = IVec2::ZERO;
         app.insert_resource(Naming {
-            island,
+            claim,
             draft: "Half a nam".to_string(),
         });
         press(&mut app, KeyCode::Escape);
@@ -2893,7 +2985,7 @@ mod tests {
         assert_eq!(helm(&app), Helm::Chart);
         let world = app.world();
         assert!(world.get_resource::<Naming>().is_none());
-        assert_eq!(world.resource::<Chart>().name(island), None);
+        assert_eq!(world.resource::<Chart>().name(claim), None);
     }
 
     #[test]
@@ -2912,7 +3004,7 @@ mod tests {
         press(&mut app, KeyCode::KeyM);
 
         app.insert_resource(Naming {
-            island: IVec2::ZERO,
+            claim: IVec2::ZERO,
             draft: String::new(),
         });
         press(&mut app, KeyCode::KeyM);
@@ -3251,7 +3343,7 @@ mod tests {
             survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
         );
 
-        assert_eq!(chart.islands().len(), 1);
+        assert_eq!(chart.landmasses().len(), 1);
         assert_eq!(chart.tally().complete, 1);
         assert!(
             chart

@@ -135,12 +135,14 @@ pub(crate) struct BoatRecord {
 /// One island claimed, as the file keeps it: which island, whose it is, where
 /// their cairn stands, and what they have christened it.
 ///
-/// The island is named by the identity of its ring — see
-/// [`protocol::survey::Island::id`] — which is a point on the mark lattice and
-/// so a pair of whole numbers that mean the same thing in every session of
-/// this world. `by` is a [`Token`], the same one the player's own line is
-/// filed under: a claim belongs to whoever holds those papers, and outlives
-/// every visit.
+/// The island is named by the identity its cairn was told under — the lowest
+/// corner of its ground on the chunk grid, see [`crate::settle_a_claim`] — a
+/// pair of whole numbers that mean the same thing in every session of this
+/// world. What the claim *covers* is deliberately not here: the reach is the
+/// layout's to say, and is worked out from the seed again at every opening —
+/// see `Server::from_record`. `by` is a [`Token`], the same one the player's
+/// own line is filed under: a claim belongs to whoever holds those papers,
+/// and outlives every visit.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ClaimRecord {
     pub island: IVec2,
@@ -852,7 +854,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     // to be the same one: these name the same islands, so a
                     // knowing this refuses would be a world that will not open
                     // over a fact about somebody's chart.
-                    if !crate::island_in_the_world(island) {
+                    if !crate::in_the_world(island) {
                         return Err(format!("nobody ever saw a cairn on {island}"));
                     }
                     if known.insert(island, depth).is_some() {
@@ -894,14 +896,13 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     fields.next().ok_or("a cairn with half a position")?,
                 );
                 let island = IVec2::new(whole(x)?, whole(z)?);
-                // The reach everything else here is held to, asked of the chunk
-                // the identity stands in — see [`crate::island_in_the_world`],
-                // which is the same test the granting end applies. Not of the
-                // metres the identity works out to: the lattice is a rounded
-                // 255 steps to the chunk, so that arithmetic refuses the outer
-                // chunks a survey may honestly reach, and a claim refused here
-                // is a whole world that will not open.
-                if !crate::island_in_the_world(island) {
+                // The reach everything else here is held to — the identity is
+                // a chunk coordinate, and [`crate::in_the_world`] is the same
+                // test the granting end applies. Whether this seed actually
+                // hangs an island from that chunk is judged where the world
+                // exists to ask: the opening, which quietly drops a claim the
+                // layout disowns — see `Server::from_record`.
+                if !crate::in_the_world(island) {
                     return Err(format!("nobody ever sailed round {island}"));
                 }
                 let at = spot(ax, az, "no cairn ever stood")?;
@@ -1251,12 +1252,6 @@ mod tests {
     fn a_record_at_the_edge() -> WorldRecord {
         let brink = the_last_chunk();
         let far = Vec2::splat(crate::MAX_RANGE);
-        let steps = u8::MAX as i32;
-        // The outermost identity the lattice carries inside the world: the last
-        // mark of the last chunk. One step further is the boundary, and a
-        // boundary belongs to the chunk beyond it — see
-        // [`protocol::survey::chunk_of`].
-        let last_ring = IVec2::splat(brink * steps + steps - 1);
         // A name at exactly the length the wire allows, with spaces in it and
         // letters that cost more than a byte: what a claim's line has to carry
         // through going last on it.
@@ -1285,14 +1280,14 @@ mod tests {
                             IVec2::splat(brink),
                             IVec2::new(brink, brink - 1),
                         ],
-                        // Both outermost identities the lattice carries, one
-                        // at each depth of knowing — the same two the claims
+                        // Both outermost identities a claim can carry, one at
+                        // each depth of knowing — the same two the claims
                         // below stand on, because a knowing names an island the
                         // very same way a claim does and so has the very same
                         // edge to fall off.
                         known: HashMap::from([
-                            (last_ring, crate::Knowing::Visited),
-                            (IVec2::splat(-brink * steps), crate::Knowing::Sighted),
+                            (IVec2::splat(brink), crate::Knowing::Visited),
+                            (IVec2::splat(-brink), crate::Knowing::Sighted),
                         ]),
                     },
                 ),
@@ -1314,13 +1309,13 @@ mod tests {
             }],
             claims: vec![
                 ClaimRecord {
-                    island: last_ring,
+                    island: IVec2::splat(brink),
                     by: Token(u64::MAX),
                     at: far,
                     name: long,
                 },
                 ClaimRecord {
-                    island: IVec2::splat(-brink * steps),
+                    island: IVec2::splat(-brink),
                     by: Token(0),
                     at: -far,
                     name: String::new(),

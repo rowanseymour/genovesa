@@ -32,6 +32,7 @@ use game::logbook::{self, LogbookPlugin};
 use game::menu::MenuPlugin;
 use game::models::ModelsPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
+use game::notice::NoticePlugin;
 use game::player::PlayerPlugin;
 use game::settings::{self, DisplaySettings, SettingsPlugin};
 use game::shots::ShotsPlugin;
@@ -228,6 +229,8 @@ impl PluginGroup for GamePlugins {
             .add(SettingsPlugin)
             // Harmless offline, its systems conditioning on a joined world.
             .add(NetPlugin)
+            // The line of word the world sometimes answers with.
+            .add(NoticePlugin)
             // F12, a picture of whatever the window is showing.
             .add(ShotsPlugin)
             // The machine's own way of asking this to quit, which matters most

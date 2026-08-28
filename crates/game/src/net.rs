@@ -257,11 +257,12 @@ impl Connection {
         self.say(ToServer::Lower { position, heading });
     }
 
-    /// Claims the island the player is standing on, which the server grants
-    /// against its own survey or refuses — see [`crate::player`], which owns
-    /// the key. What comes back is a cairn, or nothing at all.
-    pub fn claim(&self, island: IVec2) {
-        self.say(ToServer::Claim { island });
+    /// Claims the island the player is standing on, which the server reads
+    /// from where they stand and grants against its own survey or refuses —
+    /// see [`crate::player`], which owns the key. What comes back is a cairn,
+    /// word that the survey is unfinished, or nothing at all.
+    pub fn claim(&self) {
+        self.say(ToServer::Claim);
     }
 
     /// Writes a name on an island this player holds. The name is the world's
@@ -615,6 +616,7 @@ impl Plugin for NetPlugin {
             .add_message::<HullGone>()
             .add_message::<PutDown>()
             .add_message::<CairnSeen>()
+            .add_message::<Uncharted>()
             .add_message::<ServerReplied>()
             .add_message::<VocabularyTaught>()
             .configure_sets(
@@ -811,9 +813,19 @@ pub struct PutDown {
 pub struct CairnSeen {
     pub island: IVec2,
     pub at: Vec2,
+    /// What the claim covers, in world metres — see
+    /// [`protocol::ToClient::Cairn`]'s `covers`. The sheet's, the standing
+    /// stone having no use for it.
+    pub covers: Rect,
     pub name: String,
     pub yours: bool,
 }
+
+/// The answer to a claim from ground whose island the asker has not finished
+/// surveying — see [`protocol::ToClient::Uncharted`]. Read by
+/// [`crate::notice`], which is the one line it becomes.
+#[derive(Message)]
+pub struct Uncharted;
 
 /// What the server said to a console line. Read by [`crate::console`], which
 /// prints it, and by [`crate::control`], where a driver may be waiting on it.
@@ -1009,17 +1021,22 @@ fn receive(
             ToClient::Cairn {
                 island,
                 at,
+                covers,
                 name,
                 yours,
             } => {
-                if at.is_finite() {
+                if at.is_finite() && covers.0.is_finite() && covers.1.is_finite() {
                     said.cairn.write(CairnSeen {
                         island,
                         at,
+                        covers: Rect::from_corners(covers.0, covers.1),
                         name,
                         yours,
                     });
                 }
+            }
+            ToClient::Uncharted => {
+                said.uncharted.write(Uncharted);
             }
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
@@ -1047,6 +1064,7 @@ struct Words<'w> {
     hull_gone: MessageWriter<'w, HullGone>,
     put_down: MessageWriter<'w, PutDown>,
     cairn: MessageWriter<'w, CairnSeen>,
+    uncharted: MessageWriter<'w, Uncharted>,
     reply: MessageWriter<'w, ServerReplied>,
     vocabulary: MessageWriter<'w, VocabularyTaught>,
 }
@@ -2171,6 +2189,7 @@ mod tests {
         (ToClient::Cairn {
             island,
             at,
+            covers: (Vec2::new(-128.0, -256.0), Vec2::new(512.0, 128.0)),
             name: "Isla Genovesa".to_string(),
             yours: true,
         })

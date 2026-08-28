@@ -496,26 +496,23 @@ pub enum ToServer {
     /// thwarts: the grant seats the asker at the ship's helm and the tender
     /// is hoisted back in — see [`ToClient::BoatGone`].
     Lower { position: Vec2, heading: f32 },
-    /// Claims the island of this identity — see [`survey::Island::id`], which
-    /// is what a client names it by.
+    /// Claims the island the player is standing on. The ask names nothing:
+    /// the claimable unit is the world's own grouping of landmasses — a main
+    /// shore and its skerries — and where one island ends is the layout's
+    /// business, so the server reads the island from where the asker stands.
     ///
-    /// Granted to a player who is standing on that island having sailed the
-    /// whole way round it, and to nobody else: the server asks
-    /// [`survey::Survey::island_under`] of *its own* survey for this player,
-    /// which answers both halves at once, and grants only if the island it
-    /// finds is the one named and nobody has claimed it already. The claim is
-    /// settled against the world's record of where this player has been, never
-    /// against the client's assertion of it.
-    ///
-    /// A grant raises a cairn where the claimant stands, and everybody near
-    /// enough to see it is told — see [`ToClient::Cairn`], which is the whole
-    /// of the answer: what the asker hears is either the cairn they have just
-    /// raised or the one that was already there. A claim refused for any other
-    /// reason is answered by silence, the world being exactly as the asker
-    /// last heard it.
-    Claim { island: IVec2 },
-    /// Christens a claimed island. Granted only to the holder of the claim,
-    /// and the name then rides with the cairn for everyone who passes it.
+    /// Granted to a player afoot where [`survey::Survey::ashore`] says a
+    /// cairn could stand, whose survey has closed every one of the island's
+    /// coastlines, skerries included — both judged over the server's survey
+    /// *for that player*, never over the client's assertion. A grant raises
+    /// a cairn and tells whoever can see it ([`ToClient::Cairn`]); a survey
+    /// still short of that is answered [`ToClient::Uncharted`]; every other
+    /// refusal is silence, or the cairn already standing there.
+    Claim,
+    /// Christens a claimed island, named by the identity its cairn was told
+    /// under — see [`ToClient::Cairn`]. Granted only to the holder of the
+    /// claim, and the name then rides with the cairn for everyone who passes
+    /// it.
     ///
     /// There is no such thing as a private name any more: a name is something
     /// the world carries, so it is earned the way the island was. A name that
@@ -848,9 +845,20 @@ pub enum ToClient {
     /// refused because the island was already somebody's, which is how an
     /// asker's picture corrects itself.
     ///
+    /// `island` names the claim for as long as the world lives: a chunk
+    /// coordinate, the lowest corner of the island's own ground on the chunk
+    /// grid. A client treats it as nothing but a key.
+    ///
     /// `at` is where the claimant stood, in metres, and the cairn stands there
     /// for good: an island is claimed by a person in a place, not by a
     /// calculation about its middle.
+    ///
+    /// `covers` is the claim's reach, as the two corners of a rectangle in
+    /// world metres: every coastline of the island lies inside it, and no
+    /// other island's coast does. It is what lets a sheet letter everything
+    /// the one name is true of — it is not a boundary to be drawn, and a
+    /// chart that ruled it onto the paper would be drawing the machinery
+    /// rather than the place.
     ///
     /// `name` is what the island is called, and empty for one nobody has
     /// christened yet — see [`ToServer::Name`]. It is **also** empty for one
@@ -869,9 +877,19 @@ pub enum ToClient {
     Cairn {
         island: IVec2,
         at: Vec2,
+        covers: (Vec2, Vec2),
         name: String,
         yours: bool,
     },
+    /// The answer to a [`ToServer::Claim`] the asker's survey has not yet
+    /// earned: there is more coastline in these waters than they have closed
+    /// — a coastline of the island still hanging open, or no closed ring
+    /// about where they themselves stand. Existence and never location —
+    /// which coast is missing is exactly what going and looking is for, and
+    /// the cairn will not take until the whole of it has been seen.
+    ///
+    /// Posted to the asker alone, as the one refusal with something to say.
+    Uncharted,
 }
 
 impl ToServer {
@@ -921,10 +939,7 @@ impl ToServer {
                 payload.push(8);
                 put_vec2(&mut payload, *position);
             }
-            Self::Claim { island } => {
-                payload.push(9);
-                put_ivec2(&mut payload, *island);
-            }
+            Self::Claim => payload.push(9),
             Self::Name { island, name } => {
                 payload.push(10);
                 put_ivec2(&mut payload, *island);
@@ -974,9 +989,7 @@ impl ToServer {
             8 => Self::Disembark {
                 position: payload.vec2()?,
             },
-            9 => Self::Claim {
-                island: payload.ivec2()?,
-            },
+            9 => Self::Claim,
             10 => Self::Name {
                 island: payload.ivec2()?,
                 // Read as whatever text it is, and judged where it is acted
@@ -1118,18 +1131,22 @@ impl ToClient {
             Self::Cairn {
                 island,
                 at,
+                covers,
                 name,
                 yours,
             } => {
                 payload.push(15);
                 put_ivec2(&mut payload, *island);
                 put_vec2(&mut payload, *at);
+                put_vec2(&mut payload, covers.0);
+                put_vec2(&mut payload, covers.1);
                 payload.push(u8::from(*yours));
                 // Last, being the one field whose length is not the same for
                 // every cairn — so everything a reader needs in order to read
                 // it stands in front of it.
                 put_str(&mut payload, name);
             }
+            Self::Uncharted => payload.push(18),
             Self::Surveyed { found } => {
                 payload.push(14);
                 put_u16(&mut payload, found.len() as u16);
@@ -1262,6 +1279,7 @@ impl ToClient {
             15 => Self::Cairn {
                 island: payload.ivec2()?,
                 at: payload.vec2()?,
+                covers: (payload.vec2()?, payload.vec2()?),
                 yours: payload.u8()? != 0,
                 name: payload.str()?,
             },
@@ -1276,6 +1294,7 @@ impl ToClient {
                     flag => return Err(corrupt(format!("a put down flagged {flag}"))),
                 },
             },
+            18 => Self::Uncharted,
             tag => return Err(corrupt(format!("unknown server message tag {tag}"))),
         };
         payload.finish()?;
@@ -1609,9 +1628,7 @@ mod tests {
                 position: at,
                 heading: -2.5,
             },
-            ToServer::Claim {
-                island: IVec2::new(-1_234, 5_678),
-            },
+            ToServer::Claim,
             ToServer::Name {
                 island: IVec2::new(-1_234, 5_678),
                 name: "Windward Reach".to_string(),
@@ -1744,6 +1761,7 @@ mod tests {
             ToClient::Cairn {
                 island: IVec2::new(-1_234, 5_678),
                 at,
+                covers: (Vec2::new(-256.0, -128.0), Vec2::new(512.0, 384.0)),
                 name: "Windward Reach".to_string(),
                 yours: true,
             },
@@ -1751,9 +1769,11 @@ mod tests {
             ToClient::Cairn {
                 island: IVec2::new(7, -7),
                 at,
+                covers: (Vec2::ZERO, Vec2::new(128.0, 128.0)),
                 name: String::new(),
                 yours: false,
             },
+            ToClient::Uncharted,
         ] {
             let bytes = bytes_of_server(&message);
             assert_eq!(ToClient::read(&mut bytes.as_slice()).unwrap(), message);
@@ -1870,15 +1890,9 @@ mod tests {
             ],
         );
         assert_eq!(
-            bytes_of_client(&ToServer::Claim {
-                island: IVec2::new(5, -3),
-            }),
-            [
-                9, 0, 0, 0, // length
-                9, // tag
-                5, 0, 0, 0, // x = 5
-                0xFD, 0xFF, 0xFF, 0xFF, // z = -3, two's complement LE
-            ],
+            bytes_of_client(&ToServer::Claim),
+            [1, 0, 0, 0, 9],
+            "claim: length 1, tag 9, and the asker's own position says the rest"
         );
         assert_eq!(
             bytes_of_client(&ToServer::Name {
@@ -2196,42 +2210,55 @@ mod tests {
             bytes_of_server(&ToClient::Cairn {
                 island: IVec2::new(5, -3),
                 at: Vec2::new(1.5, -2.0),
+                covers: (Vec2::new(-256.0, -128.0), Vec2::new(512.0, 384.0)),
                 name: "hi".to_string(),
                 yours: true,
             }),
             [
-                22, 0, 0, 0,  // length
+                38, 0, 0, 0,  // length
                 15, // tag
                 5, 0, 0, 0, // the island's x = 5
                 0xFD, 0xFF, 0xFF, 0xFF, // and z = -3
                 0, 0, 0xC0, 0x3F, // where it stands: x = 1.5
                 0, 0, 0, 0xC0, // z = -2.0
+                0, 0, 0x80, 0xC3, // covers, from: x = -256.0
+                0, 0, 0, 0xC3, // z = -128.0
+                0, 0, 0, 0x44, // covers, to: x = 512.0
+                0, 0, 0xC0, 0x43, // z = 384.0
                 1,    // the hearer's own doing
                 2, 0, 0x68, 0x69, // "hi", counted then spelled
             ],
         );
         // Somebody else's, and unchristened: the flag and an empty count, and
         // nothing else moves.
+        let covers = (Vec2::new(-256.0, -128.0), Vec2::new(512.0, 384.0));
         let mine = bytes_of_server(&ToClient::Cairn {
             island: IVec2::new(5, -3),
             at: Vec2::new(1.5, -2.0),
+            covers,
             name: "hi".to_string(),
             yours: true,
         });
         let theirs = bytes_of_server(&ToClient::Cairn {
             island: IVec2::new(5, -3),
             at: Vec2::new(1.5, -2.0),
+            covers,
             name: String::new(),
             yours: false,
         });
         assert_eq!(
             theirs[..4],
-            [20, 0, 0, 0],
+            [36, 0, 0, 0],
             "a nameless cairn is shorter by a name"
         );
-        assert_eq!(theirs[4..21], mine[4..21], "whose it is moved the fields");
-        assert_eq!(theirs[21], 0, "somebody else's cairn is not flagged 0");
-        assert_eq!(theirs[22..], [0, 0], "an unchristened cairn says nothing");
+        assert_eq!(theirs[4..37], mine[4..37], "whose it is moved the fields");
+        assert_eq!(theirs[37], 0, "somebody else's cairn is not flagged 0");
+        assert_eq!(theirs[38..], [0, 0], "an unchristened cairn says nothing");
+        assert_eq!(
+            bytes_of_server(&ToClient::Uncharted),
+            [1, 0, 0, 0, 18],
+            "uncharted: length 1, tag 18, and existence is the whole message"
+        );
 
         // A survey: two chunks, one with a single open run on its waterline
         // and one surveyed and blank. Written out whole, since between them

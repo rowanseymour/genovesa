@@ -360,6 +360,7 @@ impl Client {
                 | ToClient::Boat { .. }
                 | ToClient::Surveyed { .. }
                 | ToClient::Cairn { .. }
+                | ToClient::Uncharted
                 | ToClient::Vocabulary { .. } => continue,
                 message => return message,
             }
@@ -403,15 +404,48 @@ impl Client {
     /// The same, on a caller's deadline and in a caller's words — see
     /// [`Client::hear_a_boat_kinded_by`].
     fn hear_a_cairn_by(&self, deadline: Instant, awaited: &str) -> (IVec2, Vec2, String, bool) {
+        let (island, at, _covers, name, yours) = self.hear_a_cairn_whole_by(deadline, awaited);
+        (island, at, name, yours)
+    }
+
+    /// The same, with the claim's reach — for the tests that are about what a
+    /// cairn says it covers.
+    fn hear_a_cairn_whole(&self) -> (IVec2, Vec2, (Vec2, Vec2), String, bool) {
+        self.hear_a_cairn_whole_by(Instant::now() + PATIENCE, "word of any cairn")
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn hear_a_cairn_whole_by(
+        &self,
+        deadline: Instant,
+        awaited: &str,
+    ) -> (IVec2, Vec2, (Vec2, Vec2), String, bool) {
         loop {
             if let ToClient::Cairn {
                 island,
                 at,
+                covers,
                 name,
                 yours,
             } = self.hear_by(deadline, awaited)
             {
-                return (island, at, name, yours);
+                return (island, at, covers, name, yours);
+            }
+        }
+    }
+
+    /// The next answer that there is more coast here than the asker has
+    /// surveyed — the one refusal with something to say. A cairn arriving
+    /// instead is a grant that should not have happened, and fails loudly.
+    fn hear_uncharted(&self) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match self.hear_by(deadline, "word that the survey was unfinished") {
+                ToClient::Uncharted => return,
+                ToClient::Cairn { .. } => {
+                    panic!("a cairn was raised on an unfinished survey")
+                }
+                _ => {}
             }
         }
     }
@@ -3050,10 +3084,18 @@ fn sail_round_the_island(
     let world = behind_the_curtain(CLAIMABLE);
     let (centre, across, ashore) = an_island_to_sail_round(&world, spawn);
     let charted = sail_around(&client, spawn, centre, across / 2.0 + OFFING, LEGS);
-    let island = chart_of(&charted)
-        .island_under(ashore)
-        .expect("a coast sailed right round closes an island");
-    (client, token, island.id, ashore)
+    assert!(
+        chart_of(&charted).ashore(ashore),
+        "a coast sailed right round closes a coastline round the summit"
+    );
+    // The identity a cairn will be told under is the island's own, and a
+    // client never derives it — a test reads it off the layout the way the
+    // server will.
+    let island = world
+        .island_at(ashore.x, ashore.y)
+        .expect("the summit stands on an island")
+        .origin;
+    (client, token, island, ashore)
 }
 
 #[test]
@@ -3064,15 +3106,15 @@ fn an_island_sailed_round_and_stood_upon_is_claimed() {
     let addr = host(CLAIMABLE);
     let (client, _token, island, ashore) = sail_round_the_island(addr, None);
 
-    client.say(ToServer::Claim { island });
+    client.say(ToServer::Claim);
     assert!(
         client.nothing_was_said_about_a_cairn(),
         "a cairn was raised by somebody who never left the helm"
     );
 
     client.say(ToServer::Disembark { position: ashore });
-    client.say(ToServer::Claim { island });
-    let (told, at, name, yours) = client.hear_a_cairn();
+    client.say(ToServer::Claim);
+    let (told, at, covers, name, yours) = client.hear_a_cairn_whole();
     assert_eq!(told, island, "a cairn for some other island");
     assert_eq!(
         at, ashore,
@@ -3080,13 +3122,21 @@ fn an_island_sailed_round_and_stood_upon_is_claimed() {
     );
     assert!(yours, "the claimant was not told the cairn was theirs");
     assert_eq!(name, "", "an island nobody has christened came named");
+    // The claim's reach holds the ground it was granted on — the whole of
+    // what a sheet needs in order to letter this island's coastlines under
+    // the one name.
+    assert!(
+        covers.0.cmple(ashore).all() && ashore.cmple(covers.1).all(),
+        "the cairn stands outside what its own claim covers"
+    );
 }
 
 #[test]
-fn part_of_a_coast_earns_nothing_even_from_the_beach() {
+fn part_of_a_coast_earns_uncharted_rather_than_a_cairn() {
     // The claim is settled against the coast the world has watched somebody
-    // go round, not against where they are standing: half a survey rings
-    // nothing, and there is nothing to be standing inside of.
+    // go round, not against where they are standing: half a survey leaves
+    // coastlines unclosed, and the cairn will not take until the whole of
+    // the island's coast has been seen.
     let addr = host(CLAIMABLE);
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
 
@@ -3106,21 +3156,22 @@ fn part_of_a_coast_earns_nothing_even_from_the_beach() {
     let offshore = centre + Vec2::from_angle(std::f32::consts::TAU / 4.0) * reach;
     let landfall = a_shore_to_step_out_onto(&world, offshore, centre);
     assert!(
-        chart_of(&charted).island_under(landfall).is_none(),
-        "a quarter of a coast closed an island"
+        !chart_of(&charted).ashore(landfall),
+        "a quarter of a coast closed a coastline"
     );
 
     bob.say(ToServer::Disembark { position: landfall });
-    bob.say(ToServer::Claim { island });
-    assert!(
-        bob.nothing_was_said_about_a_cairn(),
-        "a coast nobody had been round was claimed from the beach"
-    );
+    bob.say(ToServer::Claim);
+    // The refusal with something to say: Bob is standing on real ground of a
+    // claimable island, so what stands between him and the cairn is exactly
+    // that there is more coast here than he has surveyed — and he is told
+    // that, and no more than that.
+    bob.hear_uncharted();
 
     // And the island was there to be had all along, which is what says the
     // refusal was about Bob's voyage rather than about this island.
     alice.say(ToServer::Disembark { position: ashore });
-    alice.say(ToServer::Claim { island });
+    alice.say(ToServer::Claim);
     let (told, _at, _name, yours) = alice.hear_a_cairn();
     assert_eq!((told, yours), (island, true));
 }
@@ -3133,7 +3184,7 @@ fn a_second_claim_is_refused_and_told_the_cairn_that_is_there() {
     let addr = host(CLAIMABLE);
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
     alice.say(ToServer::Disembark { position: ashore });
-    alice.say(ToServer::Claim { island });
+    alice.say(ToServer::Claim);
     let (_told, alices_cairn, _name, _yours) = alice.hear_a_cairn();
 
     // Bob goes round it too and steps ashore somewhere else on it — his own
@@ -3148,7 +3199,7 @@ fn a_second_claim_is_refused_and_told_the_cairn_that_is_there() {
     bob.say(ToServer::Disembark {
         position: bobs_spot,
     });
-    bob.say(ToServer::Claim { island });
+    bob.say(ToServer::Claim);
     let (told, at, _name, yours) = bob.hear_a_cairn();
     assert_eq!(told, island);
     assert_eq!(at, alices_cairn, "the cairn moved to the second asker");
@@ -3163,7 +3214,7 @@ fn only_the_claimant_may_name_the_island() {
     let addr = host(CLAIMABLE);
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
     alice.say(ToServer::Disembark { position: ashore });
-    alice.say(ToServer::Claim { island });
+    alice.say(ToServer::Claim);
     let _ = alice.hear_a_cairn();
 
     // The claimant's christening is granted, and rides with the cairn.
@@ -3200,7 +3251,7 @@ fn a_passing_hull_reads_the_stones_and_a_landing_reads_the_word() {
     let addr = host(CLAIMABLE);
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
     alice.say(ToServer::Disembark { position: ashore });
-    alice.say(ToServer::Claim { island });
+    alice.say(ToServer::Claim);
     let _ = alice.hear_a_cairn();
     alice.say(ToServer::Name {
         island,
@@ -3250,7 +3301,7 @@ fn a_claimant_walking_round_their_own_cairn_is_not_told_about_it_again() {
     let addr = host(CLAIMABLE);
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
     alice.say(ToServer::Disembark { position: ashore });
-    alice.say(ToServer::Claim { island });
+    alice.say(ToServer::Claim);
     let (told, _at, _name, yours) = alice.hear_a_cairn();
     assert_eq!((told, yours), (island, true));
 
@@ -3284,7 +3335,7 @@ fn what_a_landing_taught_is_still_known_when_the_world_opens_again() {
 
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
     alice.say(ToServer::Disembark { position: ashore });
-    alice.say(ToServer::Claim { island });
+    alice.say(ToServer::Claim);
     let _ = alice.hear_a_cairn();
     alice.say(ToServer::Name {
         island,
@@ -3350,7 +3401,7 @@ fn a_word_carved_after_a_visit_does_not_chase_the_chart_that_left() {
     let addr = host(CLAIMABLE);
     let (alice, _token, island, ashore) = sail_round_the_island(addr, None);
     alice.say(ToServer::Disembark { position: ashore });
-    alice.say(ToServer::Claim { island });
+    alice.say(ToServer::Claim);
     let _ = alice.hear_a_cairn();
     alice.say(ToServer::Name {
         island,
@@ -3407,8 +3458,8 @@ fn an_ask_inside_the_pace_is_answered_late_rather_than_dropped() {
     // The first is the grant, and pays the pace. The rest arrive well inside
     // it — a claim on an island now held, and two names in a row — and the
     // count is what is being asserted: four asks, four cairns back.
-    client.say(ToServer::Claim { island });
-    client.say(ToServer::Claim { island });
+    client.say(ToServer::Claim);
+    client.say(ToServer::Claim);
     for name in ["Ilha Verde", "Ilha Vermelha"] {
         client.say(ToServer::Name {
             island,
@@ -3430,7 +3481,7 @@ fn a_name_the_wire_will_not_carry_leaves_the_cairn_as_it_was() {
     let addr = host(CLAIMABLE);
     let (client, _token, island, ashore) = sail_round_the_island(addr, None);
     client.say(ToServer::Disembark { position: ashore });
-    client.say(ToServer::Claim { island });
+    client.say(ToServer::Claim);
     let _ = client.hear_a_cairn();
     client.say(ToServer::Name {
         island,
@@ -3470,7 +3521,7 @@ fn a_returning_player_is_told_their_own_claims_however_far_off_they_are() {
     let addr = host(CLAIMABLE);
     let (client, token, island, ashore) = sail_round_the_island(addr, None);
     client.say(ToServer::Disembark { position: ashore });
-    client.say(ToServer::Claim { island });
+    client.say(ToServer::Claim);
     let _ = client.hear_a_cairn();
     client.say(ToServer::Name {
         island,
@@ -3518,7 +3569,7 @@ fn a_claim_and_its_name_survive_the_world_being_closed() {
 
     let (client, token, island, ashore) = sail_round_the_island(addr, None);
     client.say(ToServer::Disembark { position: ashore });
-    client.say(ToServer::Claim { island });
+    client.say(ToServer::Claim);
     let _ = client.hear_a_cairn();
     client.say(ToServer::Name {
         island,
