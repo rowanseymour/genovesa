@@ -514,27 +514,64 @@ const GRAIN_SCALE: f32 = 4.7;
 /// rather than ground; the middle band does that work now.
 const GRAIN_RELIEF: f32 = 0.5;
 
-/// Wavelength of the extra jag bare rock carries, in metres — incommensurate
-/// with the metre grid for the reason [`GRAIN_SCALE`] spells out.
-///
-/// The rugged dial says what kind of *country* this is; this band answers a
-/// different question — whether anything grows here. Soil smooths ground and
-/// bare rock breaks it, so the two places the palette strips the ground bare
-/// (the spray zone and the mountain band) carry a short ridged band the
-/// detail stack's power law would otherwise forbid, and grassy hills keep
-/// rolling right beside broken grey ones. Without it the spray zone was the
-/// smooth landform painted grey — the detail apron fades the whole stack out
-/// exactly where the spray band paints — and it read as lawns in fancy dress.
-const JAG_SCALE: f32 = 7.3;
-/// How far the jag lifts or drops bare rock, in metres, where the ground is
-/// wholly bare. Deliberately louder than the spectral share a band this short
-/// would earn: the break *is* the message.
-const JAG_RELIEF: f32 = 1.6;
-/// Height above which the jag is fully faded in, in metres. The fade starts
-/// at [`SHORE_TOP`], so the waterline and the drawn shore stay the
-/// landform's — the lesson [`APRON_DRY`] already paid for — and no downward
-/// jag can reach the water from inside the fade.
-const JAG_FULL: f32 = 4.0;
+// --- Crags: what bare rock does instead of rolling -------------------------
+//
+// The rugged dial says what kind of *country* this is; the crag pass answers
+// a different question — whether anything grows here. Soil smooths ground and
+// bare rock breaks it, so wherever the palette strips the ground bare (the
+// spray zone and the mountain band) the finished ground is reworked into rock
+// forms, and grassy hills keep rolling right beside them. A first attempt
+// added a quiet ridged band instead, and it read as a bump map on the same
+// smooth hills: relief far below the landform's own can only ever decorate
+// it. What says *rock formation* is structure — ridges warped until they
+// gnarl, crests sharpened into stacks and pinnacles, clefts cut between them,
+// and the whole part-terraced into strata — at amplitudes that compete with
+// the hills they stand on.
+//
+// See [`TerrainGenerator::crags`] for how the parts compose, and the
+// waterline guarantees ([`SHORE_TOP`] fade, bounded clefts, terraces that
+// cannot cross zero) that keep the coast the landform's — the lesson
+// [`APRON_DRY`] already paid for.
+
+/// Wavelength of the crag backbone, in metres — the ridged field the spires
+/// and clefts are both read off. Incommensurate with the metre grid for the
+/// reason [`GRAIN_SCALE`] spells out.
+const CRAG_SCALE: f32 = 23.3;
+/// Wavelength and reach of the warp the backbone is read through, in metres.
+/// Unwarped ridged noise is even-tempered — every crest the same width, every
+/// gully the same depth — and reads as corrugation; pushed through a warp the
+/// crests pinch, fork and wander, which is most of what makes rock look
+/// grown rather than stamped.
+const CRAG_WARP_SCALE: f32 = 41.0;
+/// See [`CRAG_WARP_SCALE`].
+const CRAG_WARP: f32 = 11.0;
+/// The exponent the backbone is sharpened by. Raised to a power, most of the
+/// field lies low and the crests stab — isolated stacks and pinnacles rather
+/// than an even swell of bumps.
+const CRAG_SHARP: f32 = 2.6;
+/// How far a spire may stand above the ground it grew from, in metres, where
+/// the ground is wholly bare. Sized against [`DETAIL_RELIEF`] rather than the
+/// fine bands: a form shorter than the hills cannot contrast with them.
+const CRAG_SPIRE: f32 = 11.0;
+/// How deep the clefts between spires cut, in metres — bounded at each point
+/// by the headroom above the shore band, so no cleft ever reaches the water.
+const CRAG_CLEFT: f32 = 7.0;
+/// The strata: bare rock is pulled part of the way onto terraces this many
+/// metres apart. Horizontal bedding is the one regularity real rock wears,
+/// and with flat-shaded facets a level tread against a sheer riser is the
+/// strongest "rock, not hill" signal the mesh can draw. Not a whole number,
+/// so treads and the metre mesh stay out of phase.
+const CRAG_STEP: f32 = 2.7;
+/// How far toward those terraces the ground is pulled, 0 none to 1 fully.
+const CRAG_STRATA: f32 = 0.65;
+/// Height above which the crag pass is fully faded in, in metres. The fade
+/// starts at [`SHORE_TOP`], so the waterline and the drawn shore stay the
+/// landform's. Long on purpose: at 4.0 the first metres behind a rocky
+/// waterline carried enough crag to read as cliff, and the coast-agreement
+/// test rightly objected — a rocky shore is the middle ground, and its
+/// foreshore has to stay walkable. The forms this pass exists for stand on
+/// clifftops and summits, well above the fade.
+const CRAG_FULL: f32 = 7.0;
 
 /// The waterline apron: the altitude band, in landform metres, across which
 /// the whole detail stack fades in from nothing. Below [`APRON_DRY`] the
@@ -1758,19 +1795,18 @@ impl TerrainGenerator {
         h += (shape_coast(h, distance, shore, self.coast_scale) - h) * coastal_weight(distance);
         h = self.skerries(wx, wz, h, shore);
 
-        // The jag rides on the *finished* ground — see [`JAG_SCALE`] — because
-        // the bare coast it exists for is mostly shaped by the coastal pass
-        // above. Where it stands is where the palette bares rock: the spray
-        // zone, read from the same character and distance the paint reads, and
-        // the mountain band. Faded in above the shore, and calmed by lakes the
-        // way the rest of the detail is.
+        // The crag pass reworks the *finished* ground — see the constants'
+        // header — because the bare coast it exists for is mostly shaped by
+        // the coastal pass above. Where it stands is where the palette bares
+        // rock: the spray zone, read from the same character and distance the
+        // paint reads, and the mountain band. Faded in above the shore, and
+        // calmed by lakes the way the rest of the detail is.
         let bare = smoothstep(ROCKY_SHORE, CLIFF_SHORE, shore);
         let sprayed = bare * bare * (1.0 - smoothstep(0.0, SPRAY_REACH, distance));
         let barren = sprayed.max(smoothstep(MOOR_HEIGHT, MOUNTAIN_HEIGHT, h));
-        let jagging = barren * smoothstep(SHORE_TOP, JAG_FULL, h) * lake_calm;
-        if jagging > 0.0 {
-            let jag = self.ridges.ridged(wx / JAG_SCALE, wz / JAG_SCALE, 2) * 2.0 - 1.0;
-            h += jag * JAG_RELIEF * jagging;
+        let cragging = barren * smoothstep(SHORE_TOP, CRAG_FULL, h) * lake_calm;
+        if cragging > 0.0 {
+            h = self.crags(wx, wz, h, cragging);
         }
 
         h.max(-MAX_DEPTH)
@@ -1832,6 +1868,36 @@ impl TerrainGenerator {
     /// Which of the three kinds of coast the character field lands on here.
     fn shore(&self, wx: f32, wz: f32) -> Shore {
         Shore::of(self.shore_character(wx, wz))
+    }
+
+    /// Bare ground reworked into rock forms — see the [`CRAG_SCALE`] header
+    /// for why and the shape of the parts. `weight` is how bare this point is,
+    /// 0 to 1, and everything below scales with it.
+    ///
+    /// Order matters: spires and clefts first, strata last, so the terraces
+    /// cut *across* the forms — ledges running through a stack's flank — as
+    /// bedding does, rather than each spire carrying its own private steps.
+    ///
+    /// The waterline holds by construction and not by the fade alone: a cleft
+    /// is bounded by most of the headroom above the shore band, and a terrace
+    /// tread is a floor toward zero, which for ground above the water is never
+    /// below it.
+    fn crags(&self, wx: f32, wz: f32, h: f32, weight: f32) -> f32 {
+        let qx = self
+            .detail
+            .fbm(wx / CRAG_WARP_SCALE + 71.0, wz / CRAG_WARP_SCALE - 17.0, 2);
+        let qz = self
+            .detail
+            .fbm(wx / CRAG_WARP_SCALE - 43.0, wz / CRAG_WARP_SCALE + 59.0, 2);
+        let (cx, cz) = (wx + qx * CRAG_WARP, wz + qz * CRAG_WARP);
+
+        let ridge = self.ridges.ridged(cx / CRAG_SCALE, cz / CRAG_SCALE, 3);
+        let spire = pow(ridge, CRAG_SHARP) * CRAG_SPIRE;
+        let cleft = (CRAG_CLEFT * (1.0 - ridge)).min((h - SHORE_TOP).max(0.0) * 0.8);
+        let jagged = h + (spire - cleft) * weight;
+
+        let tread = (jagged / CRAG_STEP).floor() * CRAG_STEP;
+        jagged + (tread - jagged) * CRAG_STRATA * weight
     }
 
     /// Rock heads standing offshore of a rocky coast, and only there.
@@ -3532,8 +3598,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x8F5A_168A_551A_FEB2u64),
-            (99, UVec2::new(3, 2), 0x39C9_F36F_3387_274Du64),
+            (20_040_112u32, UVec2::new(4, 4), 0x1E9C_7602_7EDA_AFB7u64),
+            (99, UVec2::new(3, 2), 0x497F_BEBA_FE22_CCCEu64),
         ];
 
         for (seed, chunks, expected) in cases {

@@ -1401,9 +1401,9 @@ mod tests {
             "layout digests to {layout:#018X}, ground to {ground:#018X}, sent to {sent:#018X}"
         );
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
-        assert_eq!(ground, 0x90E0_094A_7983_0772, "the ground changed");
+        assert_eq!(ground, 0x5759_A689_9DB8_88EB, "the ground changed");
         assert_eq!(
-            sent, 0xC753_8048_8F7F_8FDF,
+            sent, 0xAC2E_E2D1_A9FE_DBC0,
             "what a client would be sent changed"
         );
     }
