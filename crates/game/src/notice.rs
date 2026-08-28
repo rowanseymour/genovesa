@@ -59,7 +59,14 @@ impl Plugin for NoticePlugin {
             .add_systems(Update, hear.in_set(crate::net::Wire::Read))
             .add_systems(
                 Update,
-                speak.run_if(in_state(AppState::InWorld).and_then(resource_exists::<Notice>)),
+                // After `hear`, so a word and a fading line meeting on one
+                // frame resolve in that order: unordered, `speak`'s teardown
+                // commands could apply after `hear`'s insert and delete a
+                // notice that was never drawn — and ordered, a fresh word
+                // shows the same frame it is heard.
+                speak
+                    .after(hear)
+                    .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Notice>)),
             )
             .add_systems(OnExit(AppState::InWorld), hush);
     }

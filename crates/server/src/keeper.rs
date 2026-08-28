@@ -900,8 +900,8 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                 // a chunk coordinate, and [`crate::in_the_world`] is the same
                 // test the granting end applies. Whether this seed actually
                 // hangs an island from that chunk is judged where the world
-                // exists to ask: the opening, which refuses the file there —
-                // see `Server::from_record`.
+                // exists to ask: the opening, which quietly drops a claim the
+                // layout disowns — see `Server::from_record`.
                 if !crate::in_the_world(island) {
                     return Err(format!("nobody ever sailed round {island}"));
                 }

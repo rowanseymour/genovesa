@@ -651,9 +651,9 @@ impl Survey {
     }
 
     /// The landmasses the survey has closed, each measured — skerries
-    /// included, because a claim wants an island's every coastline and the
-    /// server compares exactly this list, taken over its own survey of the
-    /// island, against the claimant's.
+    /// included, because a claim wants an island's every coastline closed
+    /// (see [`crate::ToServer::Claim`]) and this list is what both ends of
+    /// that comparison are made of.
     ///
     /// Sorted by identity, so that two machines walking the same survey hand
     /// back the same list in the same order however their hash maps felt about
@@ -682,16 +682,17 @@ impl Survey {
         landmasses
     }
 
-    /// Whether a point stands on ground this survey has closed a coastline
-    /// around — inside any landmass's ring. A point in a lagoon counts as
-    /// ashore: the water in the middle of a place is part of the place, and
-    /// somebody who has run the whole outer shore has earned it either way.
+    /// Whether a point stands where a cairn could: inside a closed coastline
+    /// of a landmass past the skerry line. A point in a lagoon counts —
+    /// the water in the middle of a place is part of the place, and somebody
+    /// who has run the whole outer shore has earned it either way — and a
+    /// skerry does not: a rock awash is coast to close, never ground to
+    /// build on.
     ///
-    /// The client's half of the claim gate: what the claim key checks before
-    /// asking, so an ask stands on a coast this player believes they have
-    /// closed rather than on a guess. The server's own judgement is wider —
-    /// every coastline of the island, not just the one underfoot — see
-    /// [`crate::ToServer::Claim`].
+    /// The standing half of the claim, and deliberately *one* question: the
+    /// claim key asks it before sending and the server asks it of its own
+    /// record before granting — see [`crate::ToServer::Claim`] — so the two
+    /// ends cannot disagree about where the key is live.
     pub fn ashore(&self, at: Vec2) -> bool {
         let mut inside = false;
         self.coastlines(&mut |id, ring| {
@@ -699,7 +700,9 @@ impl Survey {
                 return;
             }
             let points: Vec<Vec2> = ring.collect();
-            inside = landmass_of(id, &mut points.iter().copied()).is_some() && rings(&points, at);
+            inside = landmass_of(id, &mut points.iter().copied())
+                .is_some_and(|landmass| !landmass.is_skerry())
+                && rings(&points, at);
         });
         inside
     }
@@ -1719,17 +1722,18 @@ mod tests {
     }
 
     #[test]
-    fn a_rock_awash_is_ground_underfoot_but_never_lettered() {
-        // Closed, and a landmass in its own right: standing on it passes the
-        // client's gate, and whether it earns anything is the server's to say
-        // — a skerry closes coast a claim requires without ever being worth a
-        // name of its own.
+    fn a_rock_awash_is_coast_to_close_but_no_ground_to_claim_from() {
+        // Closed, and a landmass in its own right — a claim will want this
+        // ring closed — but the claim key is dead standing on it: a skerry
+        // is never ground a cairn is built on, whether it stands alone or
+        // off a shore somebody could claim from instead.
         let middle = Vec2::splat(CHUNK_METRES / 2.0);
         let mut kept = Survey::default();
         kept.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 30.0)));
 
         assert_eq!(counted(&kept), (1, 0, 0), "a skerry was worth lettering");
-        assert!(kept.ashore(middle), "a rock awash is not ground underfoot");
+        assert_eq!(kept.landmasses().len(), 1, "a skerry is still a landmass");
+        assert!(!kept.ashore(middle), "a rock awash took the claim key live");
     }
 
     /// A ring of land with water inside it — an atoll, and the shape that has

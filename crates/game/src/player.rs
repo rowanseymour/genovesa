@@ -417,11 +417,12 @@ impl Plugin for PlayerPlugin {
 /// however many coastlines the world says that is — and where one island
 /// ends is the world's to know. So what this does is ask on the two counts a
 /// player can see for themselves: they are on their own feet, and the sheet
-/// says they have closed a ring around where they stand. What comes back is
-/// the cairn, or word that there is more coast here than they have surveyed —
-/// see [`protocol::ToClient::Uncharted`] — or a silence that deserves to be
-/// one: an island somebody claimed while you were walking up to it answers
-/// itself, the refusal carrying the cairn that beat you to it.
+/// says they stand where a cairn could — see [`protocol::survey::Survey::ashore`].
+/// What comes back is the cairn, or word that there is more coast here than
+/// they have surveyed — see [`protocol::ToClient::Uncharted`] — or a silence
+/// that deserves to be one: an island somebody claimed while you were walking
+/// up to it answers itself, the refusal carrying the cairn that beat you to
+/// it.
 ///
 /// Asking from a boat is not offered at all. A cairn is built by somebody
 /// standing on the ground with stones in their hands, and the key that would
@@ -444,11 +445,12 @@ fn claim_the_island(
         return;
     };
     let standing = Vec2::new(place.translation.x, place.translation.z);
-    // Asked of the sheet's own survey, which is the same arithmetic the
-    // server will use over the same soundings — see `protocol::survey`. Not
-    // the whole of the server's question, which takes in every coastline of
-    // the island rather than the one underfoot; it is the half a client can
-    // see, and it keeps the key from asking about open water.
+    // Asked of the sheet's own survey, and the server asks the very same
+    // question of its own record before granting — one arithmetic, two ends,
+    // see [`protocol::survey::Survey::ashore`]. Not the whole of the
+    // server's judgement, which also wants every coastline of the island
+    // closed; it is the standing half, and it keeps the key from asking
+    // about open water and bare rocks.
     if chart.ashore(standing) {
         online.connection.claim();
     }

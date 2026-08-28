@@ -223,8 +223,8 @@ impl Chart {
         self.claims.iter().map(|(island, claim)| (*island, claim))
     }
 
-    /// Whether a world point stands on ground this sheet has closed a
-    /// coastline around — the survey's own question, asked in world metres
+    /// Whether a world point stands where a cairn could — the survey's own
+    /// question ([`protocol::survey::Survey::ashore`]), asked in world metres
     /// rather than on the paper. What the claim key asks before it asks the
     /// world; see [`crate::player::claim_the_island`].
     pub fn ashore(&self, at: Vec2) -> bool {
@@ -1128,17 +1128,20 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
             if !lettered.insert(claim) {
                 continue;
             }
-            let text = match naming {
-                Some(naming) if naming.claim == claim => format!("{}|", naming.draft),
-                _ => landmass
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| "Unnamed island".to_string()),
-            };
-            written.push((text, landmass.centre));
-        } else {
-            written.push(("Unnamed island".to_string(), landmass.centre));
         }
+        let text = match (naming, landmass.claim) {
+            (Some(naming), Some(claim)) if naming.claim == claim => {
+                format!("{}|", naming.draft)
+            }
+            // One fallback for claimed-but-unnamed and never-claimed alike:
+            // from the paper those are the same sight, and the words must be
+            // the same words.
+            _ => landmass
+                .name
+                .clone()
+                .unwrap_or_else(|| "Unnamed island".to_string()),
+        };
+        written.push((text, landmass.centre));
     }
 
     // Half a line on top of the gap, `Text2d` hanging its lettering off the

@@ -37,13 +37,17 @@ fn main() {
 
     let world = Archipelago::new(&WorldConfig { seed });
 
-    // Enough world to hold a spread of sizes, biggest first, then an even
-    // stride down the sorted list so the sample spans big to skerry.
+    // Enough world to hold a spread of sizes, biggest first, then indices
+    // spread over the whole of the sorted list — first and last included —
+    // so the sample truly spans big to skerry: a plain stride never reaches
+    // the tail once truncated to `count`.
     let reach = Vec2::splat(12_000.0);
     let mut specs = world.islands_within(-reach, reach);
     specs.sort_by_key(|s| std::cmp::Reverse(s.chunks.x * s.chunks.y));
-    let step = (specs.len() / count.min(specs.len()).max(1)).max(1);
-    let picked: Vec<IslandSpec> = specs.into_iter().step_by(step).take(count).collect();
+    let wanted = count.min(specs.len());
+    let picked: Vec<IslandSpec> = (0..wanted)
+        .map(|i| specs[i * (specs.len() - 1) / (wanted - 1).max(1)])
+        .collect();
 
     println!("world seed {seed}, {} islands:", picked.len());
     for spec in picked {

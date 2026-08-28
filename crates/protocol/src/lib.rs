@@ -496,29 +496,18 @@ pub enum ToServer {
     /// thwarts: the grant seats the asker at the ship's helm and the tender
     /// is hoisted back in — see [`ToClient::BoatGone`].
     Lower { position: Vec2, heading: f32 },
-    /// Claims the island the player is standing on. No island is named in the
-    /// ask, because the asker cannot know one to name: the claimable unit is
-    /// the world's own grouping of landmasses — a main shore and its
-    /// skerries, or twins parted by a channel — and where one island ends is
-    /// the layout's business, not anything a survey alone could say. The
-    /// server reads the island from where the asker stands.
+    /// Claims the island the player is standing on. The ask names nothing:
+    /// the claimable unit is the world's own grouping of landmasses — a main
+    /// shore and its skerries — and where one island ends is the layout's
+    /// business, so the server reads the island from where the asker stands.
     ///
-    /// Granted to a player who is standing on that island's ground having
-    /// surveyed the whole of its coast — every one of its landmasses'
-    /// coastlines closed, skerries included — and to nobody else: the server
-    /// surveys the island's own chunks and compares what it finds against
-    /// *its* survey for this player, so a claim is settled against the
-    /// world's record of where this player has been, never against the
-    /// client's assertion of it.
-    ///
-    /// A grant raises a cairn where the claimant stands, and everybody near
-    /// enough to see it is told — see [`ToClient::Cairn`], which also says
-    /// what the claim covers. An ask from ground whose island the asker has
-    /// not finished surveying is answered with [`ToClient::Uncharted`] — that
-    /// there is more coast, never where. A claim refused for any other reason
-    /// is answered by silence, the world being exactly as the asker last
-    /// heard it — or by the cairn already standing there, where that is the
-    /// answer.
+    /// Granted to a player afoot where [`survey::Survey::ashore`] says a
+    /// cairn could stand, whose survey has closed every one of the island's
+    /// coastlines, skerries included — both judged over the server's survey
+    /// *for that player*, never over the client's assertion. A grant raises
+    /// a cairn and tells whoever can see it ([`ToClient::Cairn`]); a survey
+    /// still short of that is answered [`ToClient::Uncharted`]; every other
+    /// refusal is silence, or the cairn already standing there.
     Claim,
     /// Christens a claimed island, named by the identity its cairn was told
     /// under — see [`ToClient::Cairn`]. Granted only to the holder of the
@@ -892,15 +881,14 @@ pub enum ToClient {
         name: String,
         yours: bool,
     },
-    /// The answer to a [`ToServer::Claim`] from ground whose island the asker
-    /// has not finished surveying: there is more coastline in these waters
-    /// than their survey has closed. Existence and never location — which
-    /// coast is missing is exactly what going and looking is for, and the
-    /// cairn will not take until the whole of it has been seen.
+    /// The answer to a [`ToServer::Claim`] the asker's survey has not yet
+    /// earned: there is more coastline in these waters than they have closed
+    /// — a coastline of the island still hanging open, or no closed ring
+    /// about where they themselves stand. Existence and never location —
+    /// which coast is missing is exactly what going and looking is for, and
+    /// the cairn will not take until the whole of it has been seen.
     ///
-    /// Posted to the asker alone, and only for an island that would have been
-    /// worth the cairn: an ask this cannot be said of is met with silence, as
-    /// every other refusal is.
+    /// Posted to the asker alone, as the one refusal with something to say.
     Uncharted,
 }
 
