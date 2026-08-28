@@ -253,11 +253,12 @@ impl Connection {
         self.say(ToServer::Lower { position, heading });
     }
 
-    /// Claims the island the player is standing on, which the server grants
-    /// against its own survey or refuses — see [`crate::player`], which owns
-    /// the key. What comes back is a cairn, or nothing at all.
-    pub fn claim(&self, island: IVec2) {
-        self.say(ToServer::Claim { island });
+    /// Claims the island the player is standing on, which the server reads
+    /// from where they stand and grants against its own survey or refuses —
+    /// see [`crate::player`], which owns the key. What comes back is a cairn,
+    /// word that the survey is unfinished, or nothing at all.
+    pub fn claim(&self) {
+        self.say(ToServer::Claim);
     }
 
     /// Writes a name on an island this player holds. The name is the world's
@@ -889,6 +890,7 @@ fn receive(
             ToClient::Cairn {
                 island,
                 at,
+                covers,
                 name,
                 yours,
             } => {
@@ -896,16 +898,31 @@ fn receive(
                 // stood on the ground at this point every frame until the
                 // ground arrives, and one telling of a place that is not a
                 // place would be a pillar at NaN for the rest of the session.
-                if at.is_finite() {
+                if at.is_finite() && covers.0.is_finite() && covers.1.is_finite() {
                     told.cairns.told(&mut commands, island, at);
                     // The sheet and the world hear the same word. What the
                     // island is called is the world's to say now — a name
                     // rides with the claim it was written on — so this is the
                     // only way lettering reaches the chart.
                     if let Some(chart) = told.chart.as_mut() {
-                        chart.claimed(island, at, &name, yours);
+                        chart.claimed(
+                            island,
+                            at,
+                            Rect::from_corners(covers.0, covers.1),
+                            &name,
+                            yours,
+                        );
                     }
                 }
+            }
+            // The one refusal with something to say: the claim key was
+            // pressed on ground whose island's coast this player has not
+            // finished surveying. The word goes to the player, there being
+            // no state anywhere for it to change.
+            ToClient::Uncharted => {
+                commands.insert_resource(crate::notice::Notice::new(
+                    "There is more coast here than you have charted",
+                ));
             }
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
@@ -2009,6 +2026,7 @@ mod tests {
         (ToClient::Cairn {
             island,
             at,
+            covers: (Vec2::new(-128.0, -256.0), Vec2::new(512.0, 128.0)),
             name: "Isla Genovesa".to_string(),
             yours: true,
         })

@@ -2,7 +2,8 @@
 //!
 //! This is the arithmetic that turns a chunk's corner heights into lines: the
 //! waterline, the edge of the shallows outside it, and — where a waterline has
-//! been followed all the way round — an *island*, with an identity and a size.
+//! been followed all the way round — a *landmass*, with an identity and a
+//! size.
 //!
 //! # Why it lives on the wire's own crate
 //!
@@ -40,7 +41,7 @@
 //! and the server has no camera to agree with. Nor is there any test for what
 //! a headland hides.
 //!
-//! # Closing a coastline, and what an island is
+//! # Closing a coastline, and what a landmass is
 //!
 //! Because coast is surveyed by going there, "has the whole of this shore been
 //! run" is a question with an answer. Strokes meet *exactly* at chunk
@@ -48,17 +49,19 @@
 //! runs that links back to its own start, found by integer bookkeeping rather
 //! than by comparing points that are nearly equal.
 //!
-//! A closed coastline that rings **land** and reaches at least
-//! [`LEAST_ISLAND`] across is an island: the claimable, nameable unit. The
-//! land-on-the-left convention the contour is built with makes a ring around
-//! land and a ring around a lagoon run opposite ways, so the signed area tells
-//! the two apart for free.
+//! A closed coastline that rings **land** is a *landmass*: one piece of ground
+//! the sea outlines. The land-on-the-left convention the contour is built with
+//! makes a ring around land and a ring around a lagoon run opposite ways, so
+//! the signed area tells the two apart for free.
 //!
-//! An island is defined here, on the coastline, rather than by asking the
-//! generator what it planned — what it grows may meet the sea in more pieces
-//! than one, as a main shore and a scatter of skerries, or as two hills with a
-//! drowned middle. Each piece big enough is its own island, and none of it asks
-//! the plan.
+//! A landmass is not the claimable unit — an **island** is, and an island may
+//! meet the sea in more pieces than one: a main shore and its skerries, or two
+//! hills with a drowned middle. Which landmasses stand together as one island
+//! is the world's layout speaking, so it is the server's to say, and a claim
+//! is granted only to a player whose survey has closed every one of that
+//! island's coastlines — see [`crate::ToServer::Claim`]. What this module
+//! gives both ends is the same arithmetic for what a coast is and when it has
+//! been closed.
 
 use std::collections::{HashMap, HashSet};
 
@@ -129,19 +132,19 @@ pub const SHOAL_DEPTH: f32 = -3.0;
 /// the rest of it is the neighbour's.
 pub const LEAST_ISLET: f32 = 6.0;
 
-/// The smallest closed coastline that counts as an *island*, as the longer side
-/// of what it rings, in metres.
+/// The reach below which a landmass is a skerry, as the longer side of its
+/// bounding box, in metres.
 ///
-/// The claimable, nameable unit — see the module docs. Below this a ring is a
-/// rock or a skerry: surveyed, drawn, honestly part of the coast, but not a
-/// place anybody would put a name to. A hundred metres is a little under the
+/// A skerry is surveyed, drawn, and part of the coast a claim requires closed
+/// — but not a place anybody would letter a name over, and not enough on its
+/// own to make its island worth a cairn: an island holding nothing bigger is
+/// refused as though it were bare sea. A hundred metres is a little under the
 /// smallest island the generator sets out to make, so everything *meant* as an
-/// island qualifies and the accidents of a coast mostly do not.
+/// island clears it and the accidents of a coast mostly do not.
 ///
 /// Not to be confused with [`LEAST_ISLET`], which is about ink — what is too
-/// small to draw at all — where this is about standing: what is too small to
-/// claim. The gap between the two is exactly the skerries.
-pub const LEAST_ISLAND: f32 = 100.0;
+/// small to draw at all. The gap between the two is exactly the skerries.
+pub const SKERRY_REACH: f32 = 100.0;
 
 // ---------------------------------------------------------------------------
 // The pieces of a survey
@@ -445,15 +448,18 @@ pub struct Survey {
     soundings: HashMap<IVec2, Soundings>,
 }
 
-/// An island a survey has closed: the claimable, nameable unit.
+/// A landmass a survey has closed: one piece of ground the sea outlines,
+/// measured. Not the claimable unit — that is the island, the world's own
+/// grouping of landmasses, which is the server's to say (see
+/// [`crate::ToServer::Claim`]).
 ///
 /// What names it is the ring's least point on the step lattice, which is the
 /// same points however the walk went round — see [`Survey::coastlines`]. No
-/// name is carried here: what an island is called is something a player knows
-/// about it, not something the coast says.
+/// name is carried here: names ride claims, and a claim is an island's, never
+/// one landmass's.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Island {
-    /// What names the island for as long as the world lives.
+pub struct Landmass {
+    /// What names the landmass for as long as the world lives.
     pub id: IVec2,
     /// The middle of its bounding box, in world metres.
     pub centre: Vec2,
@@ -461,12 +467,19 @@ pub struct Island {
     pub extent: f32,
 }
 
+impl Landmass {
+    /// Whether this landmass is a skerry — see [`SKERRY_REACH`].
+    pub fn is_skerry(&self) -> bool {
+        self.extent < SKERRY_REACH
+    }
+}
+
 /// What a survey holds, counted — the whole of it in one walk of the coasts.
 ///
 /// The first two are the record of where somebody has been. The last three are
 /// what going and looking earns: how many coastlines have been followed all the
 /// way round, how many are still being worked on, and how many of the closed
-/// ones are islands anybody could claim.
+/// ones ring land anybody would letter.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SurveyTally {
     /// Chunks surveyed at all.
@@ -479,10 +492,10 @@ pub struct SurveyTally {
     /// Chains that do not close yet — coasts with their ends still hanging,
     /// waiting for somebody to go and look.
     pub open: usize,
-    /// The closed coastlines that are *islands*: rings with the land inside and
-    /// at least [`LEAST_ISLAND`] across. The claimable count — the gap between
-    /// it and [`SurveyTally::complete`] is the skerries and the lagoons.
-    pub islands: usize,
+    /// The closed coastlines that ring land at least [`SKERRY_REACH`] across —
+    /// the landmasses worth lettering. The gap between it and
+    /// [`SurveyTally::complete`] is the skerries and the lagoons.
+    pub landmasses: usize,
 }
 
 impl Survey {
@@ -637,11 +650,14 @@ impl Survey {
         (complete, open)
     }
 
-    /// The islands the survey has closed, each measured.
+    /// The landmasses the survey has closed, each measured — skerries
+    /// included, because a claim wants an island's every coastline and the
+    /// server compares exactly this list, taken over its own survey of the
+    /// island, against the claimant's.
     ///
     /// Sorted by identity, so that two machines walking the same survey hand
     /// back the same list in the same order however their hash maps felt about
-    /// it. Nothing here depends on that order — an island's identity is its
+    /// it. Nothing here depends on that order — a landmass's identity is its
     /// least point, not its place in a list — but a claim is settled by
     /// comparing these, and a stable order makes that comparison something a
     /// test can pin.
@@ -659,88 +675,66 @@ impl Survey {
     /// answer should have a measurement in hand first: an invalidation rule is
     /// a thing that can be wrong, and this is tens of microseconds against a
     /// redraw that rebuilds every stroke on the sheet.
-    pub fn islands(&self) -> Vec<Island> {
-        let mut islands = Vec::new();
-        self.coastlines(&mut |id, ring| islands.extend(island_of(id, ring)));
-        islands.sort_by_key(|island| (island.id.x, island.id.y));
-        islands
+    pub fn landmasses(&self) -> Vec<Landmass> {
+        let mut landmasses = Vec::new();
+        self.coastlines(&mut |id, ring| landmasses.extend(landmass_of(id, ring)));
+        landmasses.sort_by_key(|landmass| (landmass.id.x, landmass.id.y));
+        landmasses
     }
 
-    /// The island a point stands on, if this survey has closed one around it.
+    /// Whether a point stands on ground this survey has closed a coastline
+    /// around — inside any landmass's ring. A point in a lagoon counts as
+    /// ashore: the water in the middle of a place is part of the place, and
+    /// somebody who has run the whole outer shore has earned it either way.
     ///
-    /// The whole of the claim test, in one question. Standing inside a ring
-    /// this survey has closed means both of the things a claim asks — that the
-    /// claimant has been all the way round this shore, and that they are on the
-    /// land it encloses — and neither can be had without the other, because an
-    /// unclosed coast rings nothing and a point outside it is somewhere else.
-    /// The server asks it of its own survey, which is what makes a claim
-    /// something granted rather than something announced.
-    ///
-    /// Where rings nest — an islet in a lagoon in an island — the answer is the
-    /// smallest that holds the point, which is the one somebody is actually
-    /// standing on.
-    ///
-    /// A point in a lagoon counts as on the island: the water in the middle of
-    /// a place is part of the place, and somebody who has run the whole outer
-    /// shore has earned it either way.
-    ///
-    /// Two rings of the same reach are settled by identity, for the reason
-    /// [`Survey::islands`] sorts by it: the rings arrive in a hash map's order,
-    /// and the answer to this is what a claim is granted on. It must not be one
-    /// island on one run and its neighbour on the next.
-    pub fn island_under(&self, at: Vec2) -> Option<Island> {
-        let mut under: Option<Island> = None;
+    /// The client's half of the claim gate: what the claim key checks before
+    /// asking, so an ask stands on a coast this player believes they have
+    /// closed rather than on a guess. The server's own judgement is wider —
+    /// every coastline of the island, not just the one underfoot — see
+    /// [`crate::ToServer::Claim`].
+    pub fn ashore(&self, at: Vec2) -> bool {
+        let mut inside = false;
         self.coastlines(&mut |id, ring| {
-            let points: Vec<Vec2> = ring.collect();
-            let measured = island_of(id, &mut points.iter().copied());
-            let Some(island) = measured.filter(|_| rings(&points, at)) else {
+            if inside {
                 return;
-            };
-            let smaller = under.is_none_or(|held| {
-                island
-                    .extent
-                    .total_cmp(&held.extent)
-                    .then_with(|| (island.id.x, island.id.y).cmp(&(held.id.x, held.id.y)))
-                    .is_lt()
-            });
-            if smaller {
-                under = Some(island);
             }
+            let points: Vec<Vec2> = ring.collect();
+            inside = landmass_of(id, &mut points.iter().copied()).is_some() && rings(&points, at);
         });
-        under
+        inside
     }
 
     /// Everything the survey holds, counted in a single walk of the coasts.
     ///
     /// One walk rather than a count and a list, because measuring a ring is
-    /// what decides whether it is an island, and the walk is already handing
+    /// what decides whether it is a landmass, and the walk is already handing
     /// every ring over to be measured.
     pub fn tally(&self) -> SurveyTally {
-        let mut islands = 0;
+        let mut landmasses = 0;
         let (complete, open) = self.coastlines(&mut |id, ring| {
-            islands += usize::from(island_of(id, ring).is_some());
+            landmasses +=
+                usize::from(landmass_of(id, ring).is_some_and(|landmass| !landmass.is_skerry()));
         });
         SurveyTally {
             surveyed: self.chunks(),
             coastal: self.coastal(),
             complete,
             open,
-            islands,
+            landmasses,
         }
     }
 }
 
-/// One walked ring as an island, if it is one — the measuring and the test
+/// One walked ring as a landmass, if it is one — the measuring and the test
 /// that decides, in the one place, for every caller who walks the coasts.
 ///
-/// [`Survey::islands`], [`Survey::island_under`] and [`Survey::tally`] each
-/// ask the same question of every ring [`Survey::coastlines`] hands over, and
-/// what an island *is* must be one answer: a ring that counted towards the
-/// tally and then failed to appear in the list would be two rules wearing one
-/// name.
-fn island_of(id: IVec2, ring: &mut dyn Iterator<Item = Vec2>) -> Option<Island> {
+/// [`Survey::landmasses`], [`Survey::ashore`] and [`Survey::tally`] each ask
+/// the same question of every ring [`Survey::coastlines`] hands over, and what
+/// a landmass *is* must be one answer: a ring that counted towards the tally
+/// and then failed to appear in the list would be two rules wearing one name.
+fn landmass_of(id: IVec2, ring: &mut dyn Iterator<Item = Vec2>) -> Option<Landmass> {
     let measured = measure(ring);
-    measured.is_island().then_some(Island {
+    measured.is_land().then_some(Landmass {
         id,
         centre: measured.centre,
         extent: measured.extent,
@@ -765,24 +759,6 @@ fn run_steps(chunk: IVec2, mark: Mark) -> IVec2 {
         .saturating_add(IVec2::new(mark.x as i32, mark.z as i32))
 }
 
-/// Which chunk a point on the step lattice stands in — [`run_steps`] read
-/// backwards.
-///
-/// What wants this is whoever holds an island's identity and no survey to look
-/// it up in. An identity is a lattice point (see [`Survey::coastlines`]), and
-/// the one question anybody asks of a bare one is whether it names ground
-/// somebody could have been to — which is a question about chunks, and has to
-/// be asked in chunks. Working the point back to metres and asking there
-/// instead puts the answer a tenth of a metre out at the far edge of the
-/// world, because [`MARK_STEP`] is a rounded 128/255, and refuses the very
-/// chunks a survey may honestly reach.
-///
-/// A mark sitting exactly on a chunk's far boundary answers with the
-/// neighbour, the two being one point of ground under two names.
-pub fn chunk_of(point: IVec2) -> IVec2 {
-    point.div_euclid(IVec2::splat(u8::MAX as i32))
-}
-
 /// The least of a ring's points on the step lattice, west before south — the
 /// ring's identity, whatever order its points arrive in.
 fn ring_id(marks: impl Iterator<Item = IVec2>) -> IVec2 {
@@ -797,7 +773,7 @@ fn ring_id(marks: impl Iterator<Item = IVec2>) -> IVec2 {
 /// inside. Which way the ring was walked does not matter, so no assumption is
 /// made here about the land-on-the-left convention every other question leans
 /// on — a lagoon's ring encloses its water exactly as an island's encloses its
-/// land, and telling those two apart is [`Ring::is_island`]'s job, not this
+/// land, and telling those two apart is [`Ring::is_land`]'s job, not this
 /// one's.
 ///
 /// The joins are harmless: a run's end and the next run's identical start make
@@ -835,10 +811,11 @@ struct Ring {
 }
 
 impl Ring {
-    /// Whether this coastline is an island: land inside, and enough of it. A
-    /// lagoon fails the sign however big it is, a skerry the reach.
-    fn is_island(&self) -> bool {
-        self.area > 0.0 && self.extent >= LEAST_ISLAND
+    /// Whether this coastline rings land: a lagoon fails the sign however big
+    /// it is. Size is no part of it — a skerry is a landmass too, just one
+    /// nobody would letter (see [`SKERRY_REACH`]).
+    fn is_land(&self) -> bool {
+        self.area > 0.0
     }
 }
 
@@ -1244,11 +1221,16 @@ mod tests {
     }
 
     /// What a survey has closed, counted: coastlines followed all the way
-    /// round, chains still hanging open, and the closed ones big enough to be
-    /// islands. The three numbers most of these tests are about.
+    /// round, chains still hanging open, and the closed ones ringing land big
+    /// enough to letter. The three numbers most of these tests are about.
     fn counted(survey: &Survey) -> (usize, usize, usize) {
         let (complete, open) = survey.coastlines(&mut |_, _| {});
-        (complete, open, survey.islands().len())
+        let lettered = survey
+            .landmasses()
+            .iter()
+            .filter(|landmass| !landmass.is_skerry())
+            .count();
+        (complete, open, lettered)
     }
 
     #[test]
@@ -1621,11 +1603,12 @@ mod tests {
     }
 
     #[test]
-    fn a_skerry_closes_as_a_coastline_without_being_an_island() {
+    fn a_skerry_closes_as_a_coastline_without_being_lettered() {
         // Many an island is a little archipelago — a main shore with skerries
-        // off it. Each ring closes on its own, and the threshold is what says
-        // which of them are islands to claim: the main shore is one, and the
-        // rock off it is surveyed without being anybody's island.
+        // off it. Each ring closes on its own and each is a landmass a claim
+        // will want closed, but the threshold says which are worth lettering:
+        // the main shore is, and the rock off it is surveyed without ever
+        // carrying a name.
         let mut kept = Survey::default();
         kept.record(
             IVec2::ZERO,
@@ -1640,13 +1623,18 @@ mod tests {
             )),
         );
 
-        let (complete, open, islands) = counted(&kept);
+        let (complete, open, lettered) = counted(&kept);
         assert_eq!((complete, open), (2, 0));
-        assert_eq!(islands, 1, "the skerry counts as an island");
+        assert_eq!(lettered, 1, "the skerry was worth lettering");
+        assert_eq!(
+            kept.landmasses().len(),
+            2,
+            "the skerry is still a landmass a claim would want closed"
+        );
     }
 
     #[test]
-    fn a_lagoon_rings_water_and_is_never_an_island() {
+    fn a_lagoon_rings_water_and_is_never_a_landmass() {
         // The mirror image of an islet: land everywhere except a basin of
         // water in the middle, whose waterline is a closed ring the same size
         // an island's would be. The land-on-the-left convention runs the two
@@ -1662,9 +1650,10 @@ mod tests {
         let mut kept = Survey::default();
         kept.record(IVec2::ZERO, survey(&heights));
 
-        let (complete, open, islands) = counted(&kept);
+        let (complete, open, lettered) = counted(&kept);
         assert_eq!((complete, open), (1, 0));
-        assert_eq!(islands, 0, "a lagoon was claimed as an island");
+        assert_eq!(lettered, 0, "a lagoon read as a landmass");
+        assert_eq!(kept.landmasses(), &[], "a lagoon rings no land");
     }
 
     #[test]
@@ -1681,11 +1670,11 @@ mod tests {
     }
 
     #[test]
-    fn an_islands_identity_survives_more_of_the_world_arriving() {
+    fn a_landmasses_identity_survives_more_of_the_world_arriving() {
         // The id has to keep naming the same ring while the survey around it
         // grows, or whatever was written against it — a name, a claim — would
-        // fall off its island when the player sailed on. More survey arriving
-        // elsewhere must not move it.
+        // fall off its landmass when the player sailed on. More survey
+        // arriving elsewhere must not move it.
         let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
         let mut kept = Survey::default();
         kept.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
@@ -1693,41 +1682,27 @@ mod tests {
             IVec2::new(1, 0),
             survey(&a_cone(IVec2::new(1, 0), middle, 60.0)),
         );
-        let id = kept.islands()[0].id;
+        let id = kept.landmasses()[0].id;
 
         kept.record(IVec2::new(4, 4), survey(&a_north_shore(50.0)));
         kept.record(IVec2::new(-3, 2), survey(&all(-8.0)));
-        assert_eq!(kept.islands()[0].id, id);
+        assert_eq!(kept.landmasses()[0].id, id);
     }
 
-    /// One island, closed: a cone across two chunks, big enough to be worth a
-    /// name. Hands back the survey and the island in it.
-    fn a_closed_island() -> (Survey, Island) {
+    #[test]
+    fn standing_on_a_landmass_is_standing_inside_its_ring() {
+        // The client's half of the claim gate: the middle of the cone is
+        // ashore, and the open water well off its shore is not.
         let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
         let mut kept = Survey::default();
         for chunk in [IVec2::ZERO, IVec2::new(1, 0)] {
             kept.record(chunk, survey(&a_cone(chunk, middle, 60.0)));
         }
-        let island = kept.islands()[0];
-        (kept, island)
-    }
 
-    #[test]
-    fn standing_on_an_island_is_standing_inside_its_ring() {
-        // The whole of the claim test: the middle of the cone is on it, and
-        // the open water well off its shore is not.
-        let (kept, island) = a_closed_island();
-        let middle = Vec2::new(CHUNK_METRES, CHUNK_METRES / 2.0);
-
-        assert_eq!(
-            kept.island_under(middle).map(|found| found.id),
-            Some(island.id),
-            "the middle of an island is not on it"
-        );
-        assert_eq!(
-            kept.island_under(middle + Vec2::new(400.0, 0.0)),
-            None,
-            "open water four hundred metres out is somebody's island"
+        assert!(kept.ashore(middle), "the middle of a landmass is not on it");
+        assert!(
+            !kept.ashore(middle + Vec2::new(400.0, 0.0)),
+            "open water four hundred metres out is somebody's ground"
         );
     }
 
@@ -1739,19 +1714,22 @@ mod tests {
         let mut half = Survey::default();
         half.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
 
-        assert_eq!(half.islands(), &[], "half a coast closed an island");
-        assert_eq!(half.island_under(middle), None);
+        assert_eq!(half.landmasses(), &[], "half a coast closed a landmass");
+        assert!(!half.ashore(middle));
     }
 
     #[test]
-    fn a_rock_awash_is_nobodys_island_to_stand_on() {
-        // Closed, and too small to be a place: standing on it earns nothing.
+    fn a_rock_awash_is_ground_underfoot_but_never_lettered() {
+        // Closed, and a landmass in its own right: standing on it passes the
+        // client's gate, and whether it earns anything is the server's to say
+        // — a skerry closes coast a claim requires without ever being worth a
+        // name of its own.
         let middle = Vec2::splat(CHUNK_METRES / 2.0);
         let mut kept = Survey::default();
         kept.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 30.0)));
 
-        assert_eq!(counted(&kept), (1, 0, 0), "a skerry counted as an island");
-        assert_eq!(kept.island_under(middle), None);
+        assert_eq!(counted(&kept), (1, 0, 0), "a skerry was worth lettering");
+        assert!(kept.ashore(middle), "a rock awash is not ground underfoot");
     }
 
     /// A ring of land with water inside it — an atoll, and the shape that has
@@ -1787,24 +1765,19 @@ mod tests {
             kept.record(chunk, survey(&an_atoll(chunk, middle, 40.0, 90.0)));
         }
 
-        // Two coastlines closed, and exactly one of them an island: the lagoon
-        // rings water, so it is coast to draw and nobody's ground to stand on.
-        let (complete, open, islands) = counted(&kept);
+        // Two coastlines closed, and exactly one of them a landmass: the
+        // lagoon rings water, so it is coast to draw and nobody's ground to
+        // stand on.
+        let (complete, open, lettered) = counted(&kept);
         assert_eq!((complete, open), (2, 0), "an atoll is two closed shores");
-        assert_eq!(islands, 1, "the lagoon counted as an island of its own");
+        assert_eq!(lettered, 1, "the lagoon counted as a landmass of its own");
 
-        let atoll = kept.islands()[0];
-        assert_eq!(
-            kept.island_under(middle).map(|found| found.id),
-            Some(atoll.id),
-            "the lagoon is a hole in its own island"
+        assert!(
+            kept.ashore(middle),
+            "the lagoon is a hole in its own landmass"
         );
-        // And the land itself, out between the lagoon and the sea, is the same
-        // island — not some second one found by the inner ring.
-        assert_eq!(
-            kept.island_under(middle + Vec2::new(65.0, 0.0))
-                .map(|found| found.id),
-            Some(atoll.id)
-        );
+        // And the land itself, out between the lagoon and the sea, is ashore
+        // just the same.
+        assert!(kept.ashore(middle + Vec2::new(65.0, 0.0)));
     }
 }

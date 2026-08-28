@@ -27,6 +27,7 @@ pub mod logbook;
 pub mod menu;
 pub mod models;
 pub mod net;
+pub mod notice;
 pub mod player;
 pub mod sea;
 pub mod settings;

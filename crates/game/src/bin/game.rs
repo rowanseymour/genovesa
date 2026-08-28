@@ -32,6 +32,7 @@ use game::logbook::{self, LogbookPlugin};
 use game::menu::MenuPlugin;
 use game::models::ModelsPlugin;
 use game::net::{Hosting, NetPlugin, Online, Reach, Session};
+use game::notice::NoticePlugin;
 use game::player::PlayerPlugin;
 use game::settings::{self, DisplaySettings, SettingsPlugin};
 use game::sky::SkyPlugin;
@@ -201,12 +202,12 @@ fn run(args: Args, session: Option<Session>, control: Option<control::Control>) 
             // holds fifteen.
             (LogbookPlugin, BackdropPlugin, MenuPlugin, SettingsPlugin),
             // The session — harmless offline, its systems conditioning on a
-            // joined one — and the machine's own way of asking this to quit,
-            // which matters most in a run that is hosting: the world is
-            // written down in the drop an ordinary exit reaches and a killed
-            // process does not. Paired only because a plugin tuple holds
-            // fifteen.
-            (NetPlugin, StoppingPlugin),
+            // joined one — the line of word the world sometimes answers with,
+            // and the machine's own way of asking this to quit, which matters
+            // most in a run that is hosting: the world is written down in the
+            // drop an ordinary exit reaches and a killed process does not.
+            // Grouped only because a plugin tuple holds fifteen.
+            (NetPlugin, NoticePlugin, StoppingPlugin),
         ));
 
     // Last, and only when asked for: the socket is a mouth on everything above
