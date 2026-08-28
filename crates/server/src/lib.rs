@@ -8,6 +8,32 @@
 //! worth asking for. See the `protocol` crate for why the ground travels
 //! rather than the seed.
 //!
+//! # Nothing here is re-exported from `world`
+//!
+//! A world is asked for by seed and reached through this crate's own types,
+//! so a caller that opens one never learns the generator's name. That is not
+//! cosmetic: `game` may not depend on `world`, and a re-export is exactly how
+//! that rule gets broken without anybody choosing to — the client goes on
+//! naming this crate, the dependency graph goes on looking right, and the
+//! generator's vocabulary is in the client's hands all the same. It began
+//! with a seed's ceiling and a struct wrapping a `u32`, which cost nothing;
+//! what it would have ended with is a menu drawing a preview by sampling the
+//! generator, which is the arrangement the whole split exists to undo.
+//!
+//! No re-export appearing below is the checkable half — the README greps for
+//! one, anchored to the start of a line so that this paragraph is not itself
+//! a hit — and it is worth more than the `cargo tree` line that guard used to
+//! be: that one only ever read the *direct* dependencies, so it could not
+//! have failed however much came through here.
+//!
+//! The other half is not checkable and is written here rather than in the
+//! README because here is where it would be broken. A public signature that
+//! *names* a `world` type hands the generator over exactly as a re-export
+//! does — a caller need never name the crate to call a method on something it
+//! was given — and no grep and no dependency graph will say so. So: nothing
+//! public below takes or returns one, and the way to keep that true is to
+//! notice when a new `pub fn` wants to.
+//!
 //! Concurrency is plain std threading. Per connection: a thread blocking on
 //! its reads, and a writer thread draining a channel onto the socket. Shared
 //! between them: one lock around the roster, and a small pool of workers that
@@ -29,7 +55,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH, CHUNK_METRES};
@@ -38,10 +64,45 @@ use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
     SURVEY_BATCH_BYTES,
 };
-use world::archipelago::{Archipelago, IslandSpec};
+use world::archipelago::{Archipelago, IslandSpec, WorldConfig};
 
 pub use keeper::{data_dir, discard, keep_data_in, kept_worlds, KeptWorld};
-pub use world::archipelago::{random_seed, WorldConfig, MAX_SEED};
+
+/// The largest seed this side hands out or takes typed in. Nine digits rather
+/// than the whole of a `u32`, because such a seed is read off a screen,
+/// written down and typed back in, and a tenth digit buys nothing worth that.
+/// A seed named outright — `--seed` — may still be any `u32`: every one of
+/// them is a world, and refusing the wide ones would only be rude.
+pub const MAX_SEED: u32 = 999_999_999;
+
+/// A seed for whoever did not choose one, off the clock. Nothing here wants
+/// randomness that would stand up to being bet on — only that two runs a
+/// moment apart land in different worlds.
+///
+/// The count is what makes that true of two draws in the same *run*, whatever
+/// the clock underneath is worth: not every platform's has nanoseconds in it,
+/// and a coarse one would otherwise hand the same world to a menu button
+/// pressed twice, or to a test that asked for two. Counting into the seed
+/// rather than mixing into it keeps successive draws different even after the
+/// reduction below, which mixing cannot promise.
+///
+/// Here rather than in `world`, where it used to live, and the move is the
+/// point. That crate may not read a clock — a seed has to mean the same
+/// islands on every machine that hosts it, and the rule that keeps it so is
+/// worth more as something checkable by eye than as something argued case by
+/// case. This was the one exception, and it was never generation: picking
+/// which world to open is a question for whoever is opening one, which is
+/// this side.
+pub fn random_seed() -> u32 {
+    static DRAWN: AtomicU32 = AtomicU32::new(0);
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.subsec_nanos() ^ since.as_secs() as u32)
+        .unwrap_or(0);
+    let drawn = DRAWN.fetch_add(1, Ordering::Relaxed);
+    nanos.wrapping_add(drawn) % (MAX_SEED + 1)
+}
 
 /// How long a fresh connection has to say hello. Generous for a slow link,
 /// and the point is only that a connection which arrives and then says
@@ -629,8 +690,14 @@ impl Server {
     /// started: a bound server is a world with a door, and [`Server::spawn`]
     /// is what opens it. The world is ephemeral until [`Server::keeping_in`]
     /// or [`Server::keeping_at`] says otherwise.
-    pub fn bind(addr: impl ToSocketAddrs, config: WorldConfig) -> io::Result<Self> {
-        Self::from_record(addr, keeper::WorldRecord::fresh(config.seed), None, false)
+    ///
+    /// A bare seed rather than the generator's own parameters, and that is
+    /// the whole of what a caller needs to say: a seed *is* a world. What the
+    /// generator makes of one is `world`'s business, and a client asking this
+    /// crate to open a world has no reason to learn that crate's name — see
+    /// this module's header on why nothing here is re-exported from it.
+    pub fn bind(addr: impl ToSocketAddrs, seed: u32) -> io::Result<Self> {
+        Self::from_record(addr, keeper::WorldRecord::fresh(seed), None, false)
     }
 
     /// Reopens the kept world at `path` and binds a listener for it: the
@@ -1350,40 +1417,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         return;
     };
 
-    // The first word must be a hello in the version this build speaks, and it
-    // must come soon — see HANDSHAKE_TIMEOUT, which the welcome below lifts
-    // again. A refusal answers with the version this build wanted, so
-    // the client can say something more useful than "hung up".
-    let _ = reader.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-    match ToServer::read(&mut reader) {
-        Ok(ToServer::Hello { version }) if version == PROTOCOL_VERSION => {}
-        Ok(ToServer::Hello { .. }) => {
-            let _ = (ToClient::Refused {
-                version: PROTOCOL_VERSION,
-            })
-            .write(&mut &stream);
-            return;
-        }
-        _ => return,
-    }
-
-    // Which world this is, so the client can look out what it holds of it —
-    // and then the papers themselves, under the same deadline the hello was:
-    // a connection that says hello and then nothing is the same stalled
-    // stranger either way.
-    if (ToClient::World {
-        id: shared.world_id,
-    })
-    .write(&mut &stream)
-    .is_err()
-    {
+    // The four words of a handshake, and the papers they end with.
+    let Some(presented) = shake_hands(&stream, &mut reader, shared.world_id) else {
         return;
-    }
-    let presented = match ToServer::read(&mut reader) {
-        Ok(ToServer::Papers { token }) => token,
-        _ => return,
     };
-    let _ = reader.set_read_timeout(None);
     let id = PlayerId(shared.next_id.fetch_add(1, Ordering::Relaxed));
 
     // The papers, resolved against what the world remembers: a recognised
@@ -1418,7 +1455,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         }
     });
 
-    let mut player = Player {
+    let player = Player {
         position: returning_to
             .as_ref()
             .map_or_else(|| shared.spawn_for(id), |record| record.position),
@@ -1451,278 +1488,14 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         outbox,
         line: stream,
     };
-    let mut returning = returning_to;
-
-    // Onto the roster and then welcomed, under one hold of the lock.
-    //
-    // In that order, because a client's join is over the moment it reads its
-    // welcome: a player welcomed before they were listed would, for that
-    // instant, believe they are in a world the session cannot see them in to
-    // hang up on them — and the end of a session is exactly when that instant
-    // is unaffordable. Listing first costs the welcome nothing, everything
-    // else that writes to a player taking this lock too.
-    //
-    // One hold, so that the newcomer hears exactly who is already here,
-    // everyone else hears the newcomer, and no move slips between the two: a
-    // `Moved` about a player a client has not met would be about nobody.
-    //
-    // The sky is asked for out here because the hour has a lock of its own —
-    // see [`Shared::skipped`] — and asking with the roster held would be the
-    // one path in the process that nested the two. A sky a few microseconds
-    // old is the same sky.
-    let wind = shared.wind();
-    let phase = shared.phase();
-    {
-        let mut players = shared.players.held();
-
-        // A world that has already ended has nobody to introduce and no way to
-        // hear of anyone arriving now. Its drop set this before reaching for
-        // the lock, so a connection that gets here afterwards finds it — and
-        // returning drops the socket, which is the same hang-up the drop would
-        // have delivered had this player made it onto the roster in time.
-        if shared.stopping.load(Ordering::Relaxed) {
-            return;
-        }
-
-        // A token already on the roster is one client's files opened twice.
-        // The second arrival enters as a stranger rather than being refused:
-        // a refusal would lock a player out of a world over a copied file,
-        // where a fresh start merely puzzles them.
-        if players.values().any(|other| other.token == player.token) {
-            player.token = Token(keeper::mint());
-            player.position = shared.spawn_for(id);
-            // Including where the papers had been: the survey belongs to
-            // whoever is still holding them rather than to both. Replaced
-            // rather than emptied, so that nothing locks a survey with the
-            // roster in hand — see [`Surveyed`].
-            player.surveyed = Arc::new(Mutex::new(Survey::default()));
-            player.known.clear();
-            returning = None;
-        }
-
-        // Where this player enters, and at whose helm — the boats being world
-        // entities with keepers rather than owners. A newcomer's story starts
-        // aboard, on a sloop the world mints them. A returner who left at a
-        // helm is seated back into that boat only if it still lies where they
-        // left it and is nobody else's; otherwise somebody here has taken it
-        // up in the meantime, and stepping ashore again is not letting go of
-        // it. A fresh hull where they stood is the interim answer until there
-        // is any other way to be on open water. A returner who left ashore
-        // enters on their own feet — and is dealt a hull all the same if
-        // nothing free lies within reach of where they stood.
-        //
-        // Inside the roster's hold, with the boats' lock nested under it —
-        // the one nesting [`Shared::boats`]'s order allows — so the seat is
-        // taken before anyone can be told about the boat it claims.
-        // The way the hull a returner is seated at lies — what their view
-        // is opened along, there being no entry island to face them at.
-        let mut bow = None;
-        {
-            // The papers this arrival actually enters on, the duplicate above
-            // having possibly dealt them fresh ones.
-            let token = player.token;
-            // Who is here — the one claim on a hull nobody is aboard.
-            // Gathered once, rather than asked again of every hull the
-            // search below walks past.
-            let here: HashSet<Token> = players.values().map(|other| other.token).collect();
-            let mut boats = shared.boats.held();
-            let fresh_hull = |boats: &mut HashMap<BoatId, BoatState>, at: Vec2| {
-                // A free hull nobody is keeping, lying where this arrival is
-                // being put down, is theirs before any new one is minted —
-                // see [`BoatState::keeper`] and [`SPARE_BERTH`]. It reads as
-                // the world having a boat ready rather than conjuring one,
-                // and it is the whole of what bounds the fleet: a client that
-                // joins, steps ashore and hangs up in a loop is handed the
-                // same hull every time round rather than leaving one behind
-                // every time round, for the world to file and to post to
-                // every future joiner.
-                //
-                // Nobody's counts the hull somebody left the world aboard,
-                // which sounds like a claim and is not one: a returner is put
-                // down where the world last saw them and seated at a helm
-                // either way — their own if it is still lying there, see
-                // [`KEPT_BERTH`], and one where they stand if it is not.
-                // Holding hulls for the away would leave the plainer loop —
-                // join, hang up, touch nothing — unbounded again.
-                //
-                // A sloop, and now that there are dinghies in the water that
-                // has to be said: an arrival's story starts at a ship's helm,
-                // never in a boat somebody rowed ashore and left on a beach.
-                let handed_down = boats.iter_mut().find(|(_, boat)| {
-                    boat.kind == BoatKind::Sloop
-                        && boat.occupant.is_none()
-                        && boat.position.distance(at) <= SPARE_BERTH
-                        && boat.keeper.is_none_or(|keeper| !here.contains(&keeper))
-                });
-                if let Some((&boat, state)) = handed_down {
-                    state.occupant = Some(id);
-                    state.keeper = Some(token);
-                    return (boat, state.position);
-                }
-                let boat = BoatId(keeper::mint());
-                boats.insert(
-                    boat,
-                    BoatState {
-                        kind: BoatKind::Sloop,
-                        position: at,
-                        heading: aimed(at, shared.facing),
-                        occupant: Some(id),
-                        keeper: Some(token),
-                    },
-                );
-                (boat, at)
-            };
-            player.aboard = match &returning {
-                None => {
-                    let (boat, at) = fresh_hull(&mut boats, player.position);
-                    player.position = at;
-                    Some(boat)
-                }
-                Some(record) => match record.aboard {
-                    // Left afoot, with something free lying where they stood:
-                    // they walk to it, and the world adds nothing.
-                    None if boats.values().any(|boat| {
-                        boat.occupant.is_none()
-                            && boat.position.distance(record.position) <= KEPT_BERTH
-                    }) =>
-                    {
-                        None
-                    }
-                    // Left afoot with nothing there: a player on an island
-                    // with no way off it but a swim, which is a way out of a
-                    // bay and not a way across open water — the crossings
-                    // between islands are an hour of it and there is nothing
-                    // to make for at the far end but more of the same. And
-                    // it is reachable without anybody cheating: boats have
-                    // keepers and not owners, so the dinghy somebody beached
-                    // and logged off beside is one another player may
-                    // honestly row away while they are gone. So they are
-                    // dealt a hull, the same way an arrival is. What keeps
-                    // that from repeating on one beach is the arm above
-                    // rather than anything here: a player dealt one leaves at
-                    // a helm, and a helm is resumed rather than re-dealt.
-                    //
-                    // Where they stood, which for somebody who rowed ashore is
-                    // the waterline, and inland for somebody who walked. A
-                    // hull the ground turns up underneath is a case the client
-                    // already sails out of — every way down to the sea is
-                    // downhill, see `boat::grounding` — so an unlucky mint is
-                    // an ungainly launch and not a second strand.
-                    //
-                    // What this does not do is bound the minting a handshake
-                    // can already ask for, and it does not widen it either. A
-                    // stranger presenting no papers is dealt a hull too, and
-                    // one who sails it a boat's length before hanging up
-                    // leaves a permanent one behind every time. This is that
-                    // rate, not a new one.
-                    None => {
-                        let (boat, at) = fresh_hull(&mut boats, record.position);
-                        player.position = at;
-                        bow = boats.get(&boat).map(|state| state.heading);
-                        Some(boat)
-                    }
-                    Some(kept) => match boats.get_mut(&kept) {
-                        Some(boat)
-                            if boat.occupant.is_none()
-                                && boat.position.distance(record.position) <= KEPT_BERTH
-                                && boat.keeper.is_none_or(|keeper| !here.contains(&keeper)) =>
-                        {
-                            boat.occupant = Some(id);
-                            // Which is also what re-claims a dinghy somebody
-                            // resumes in: taking a hull up is taking it up,
-                            // whichever door it happens through. See
-                            // [`BoatState::keeper`].
-                            boat.keeper = Some(token);
-                            player.position = boat.position;
-                            bow = Some(boat.heading);
-                            Some(kept)
-                        }
-                        _ => {
-                            let (boat, at) = fresh_hull(&mut boats, record.position);
-                            player.position = at;
-                            bow = boats.get(&boat).map(|state| state.heading);
-                            Some(boat)
-                        }
-                    },
-                },
-            };
-        }
-
-        let welcome = ToClient::Welcome {
-            id,
-            spawn: player.position,
-            // A returning player is not put down beside the entry island,
-            // so its centre is nothing to turn their view towards. Seated
-            // at a helm, they open looking the way the hull lies — the view
-            // behind their own bow. Afoot, their own position names no
-            // direction, which leaves the bearing to the client, exactly as
-            // a world with no island to look at does.
-            facing: match (returning.is_some(), bow) {
-                (false, _) => shared.facing,
-                (true, Some(heading)) => {
-                    player.position + Vec2::new(-heading.sin(), -heading.cos()) * 64.0
-                }
-                (true, None) => player.position,
-            },
-            token: player.token,
-            aboard: player.aboard,
-        };
-        let arrival = ToClient::Joined {
-            id,
-            position: player.position,
-        };
-        let seated = player.aboard;
-        players.insert(id, player);
-
-        let newcomer = &players[&id];
-        post(newcomer, welcome);
-        // The sky, straight after the session itself: a client draws the sea
-        // from the moment it has ground, and until this arrives it can only
-        // assume a day nobody promised. Inside the same hold of the lock as
-        // the welcome, so the watcher's broadcasts cannot slip in front of it
-        // and arrive before the client knows who it is.
-        post(newcomer, ToClient::Weather { wind });
-        // And what hour it is, for the same reason: a client with no word on
-        // the time can only draw an assumed one, and an arrival that snapped
-        // from midday to a night already half gone would be a worse opening
-        // than a moment's wait.
-        post(newcomer, ToClient::Daylight { phase });
-        // And the words this console answers to, so a client's console can
-        // offer them as the player types. Hints only: lines cross verbatim
-        // and are answered whether or not they start with any of these.
-        post(
-            newcomer,
-            ToClient::Vocabulary {
-                phrases: console::PHRASES
-                    .iter()
-                    .map(|phrase| phrase.to_string())
-                    .collect(),
-            },
-        );
-        for (other, existing) in players.iter() {
-            if *other != id {
-                post(
-                    newcomer,
-                    ToClient::Joined {
-                        id: *other,
-                        position: existing.position,
-                    },
-                );
-            }
-        }
-        // Every boat there is, the hulls being as much of the scene as the
-        // players — and everyone else hears about the one this arrival
-        // minted or took up, under the same hold as the arrival itself.
-        {
-            let boats = shared.boats.held();
-            for (boat, state) in boats.iter() {
-                post(newcomer, state.told(*boat));
-            }
-            if let Some(boat) = seated {
-                broadcast(&players, id, boats[&boat].told(boat));
-            }
-        }
-        broadcast(&players, id, arrival);
+    // Onto the roster and welcomed — see [`welcome_aboard`], which is one
+    // hold of the lock and everything that has to happen inside it. A world
+    // that ended while this connection was in the handshake has nobody to
+    // introduce and no way to hear of anyone arriving now, and says so by
+    // answering false; returning drops the socket, which is the same hang-up
+    // its ending would have delivered had this player been listed in time.
+    if !welcome_aboard(&shared, id, player, returning_to) {
+        return;
     }
     (shared.report)(&format!("{id} joined"));
 
@@ -1766,328 +1539,32 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     // can be trusted, a second hello is a client that has lost its place, and
     // a position or a chunk no player could be at is one to hang up over
     // rather than to answer.
+    //
+    // Each word is served by a function of its own, and every one of them
+    // answers the same question: where the asker ended up. That is the only
+    // thing this loop has to know about any of them, and it is what lets the
+    // survey be followed in one place instead of five — a walk, a helm
+    // report, a boarding, a step ashore and a lowering all move somebody, and
+    // each used to end with a boolean of its own and its own call. The one
+    // word that moves a player without earning them anything is the console's
+    // `goto`, which is why it is still spelled out here: it *reopens* the wake
+    // where they now stand rather than following a way to it.
     loop {
-        match ToServer::read(&mut reader) {
-            Ok(ToServer::Move { position }) if reachable(position) => {
-                let walked = {
-                    let mut players = shared.players.held();
-                    // Quietly ignored from a player at a helm, on Helm's own
-                    // terms: a `Move` can honestly cross a boarding grant on
-                    // the wire, and believing it would walk the player away
-                    // from a boat everyone else sees them steering.
-                    let afoot = players
-                        .get_mut(&id)
-                        .filter(|player| player.aboard.is_none());
-                    let walked = afoot.is_some();
-                    if let Some(player) = afoot {
-                        player.position = position;
-                        broadcast(&players, id, ToClient::Moved { id, position });
-                    }
-                    walked
-                };
-                // Outside the hold, the survey meaning ground to work out —
-                // and only for a move that was believed, or a report the
-                // session ignored would still put ink on somebody's chart.
-                if walked {
-                    follow_the_way(&shared, id, &mut wake, position);
-                }
-            }
+        let went = match ToServer::read(&mut reader) {
+            Ok(ToServer::Move { position }) if reachable(position) => walk(&shared, id, position),
             Ok(ToServer::Helm { position, heading })
                 if reachable(position) && heading.is_finite() =>
             {
-                let sailed = {
-                    let mut players = shared.players.held();
-                    // The rider goes with the vehicle: one report moves both.
-                    // Quietly ignored from a player occupying nothing — see the
-                    // wire's own doc for how that happens honestly.
-                    let steering = players
-                        .get_mut(&id)
-                        .and_then(|player| player.aboard.inspect(|_| player.position = position));
-                    if let Some(boat) = steering {
-                        let told = {
-                            let mut boats = shared.boats.held();
-                            let state = boats.get_mut(&boat).expect("a boat once boarded exists");
-                            state.position = position;
-                            state.heading = heading;
-                            state.told(boat)
-                        };
-                        broadcast(&players, id, told);
-                    }
-                    steering.is_some()
-                };
-                // The coast a voyage runs past, on the terms a walk's is —
-                // and this is the report the way between two of them exists
-                // for, a hull under sail covering ground a walker cannot.
-                if sailed {
-                    follow_the_way(&shared, id, &mut wake, position);
-                }
+                take_the_helm(&shared, id, position, heading)
             }
-            Ok(ToServer::Board { boat }) => {
-                let mut players = shared.players.held();
-                let Some(player) = players.get_mut(&id) else {
-                    break;
-                };
-                let (answer, granted, hoisted) = {
-                    let mut boats = shared.boats.held();
-                    // A name no boat answers to is answered with silence, and
-                    // not — as it once was — with a hang-up. Ids are retired
-                    // now: a tender hoisted in is gone the instant its crew
-                    // steps aboard the ship, and any client that heard of it
-                    // may honestly ask after it in the same breath, its
-                    // [`ToClient::BoatGone`] still on the wire. There is no
-                    // state to answer with either way, and a refusal that
-                    // says nothing is what every other ungranted boarding
-                    // sounds like.
-                    let Some(state) = boats.get(&boat) else {
-                        continue;
-                    };
-                    // What the asker would be stepping aboard from: their own
-                    // feet, or — for a ship's helm only — the thwarts of a
-                    // rowing boat laid alongside, which the grant then hoists
-                    // back in. Any other helm refuses the ask: ships do not
-                    // board ships.
-                    let stepping_from = match player.aboard {
-                        None => Some(None),
-                        Some(tender) => (tender != boat
-                            && state.kind == BoatKind::Sloop
-                            && boats
-                                .get(&tender)
-                                .is_some_and(|held| held.kind == BoatKind::Rowboat))
-                        .then_some(Some(tender)),
-                    };
-                    // Granted only beside an empty helm; anything else leaves
-                    // the boat as it was, and the state is the whole of the
-                    // answer either way.
-                    let granted = stepping_from.is_some()
-                        && state.occupant.is_none()
-                        && state.position.distance(player.position) <= BOARD_GRANT;
-                    let mut hoisted = None;
-                    if granted {
-                        let state = boats.get_mut(&boat).expect("looked up a breath ago");
-                        state.occupant = Some(id);
-                        // Theirs from here on, and still theirs when they step
-                        // off — see [`BoatState::keeper`]. A dinghy taken up
-                        // is the taker's tender from that moment, whoever put
-                        // it in the water: the claim travels with the hull,
-                        // so the last hands on it are the ones the hoists
-                        // answer to.
-                        state.keeper = Some(player.token);
-                        player.aboard = Some(boat);
-                        player.position = state.position;
-                        // The rowing boat goes back aboard as the ship's own:
-                        // out of the world, its name retired with it — and
-                        // with it whatever claim it carried.
-                        if let Some(Some(tender)) = stepping_from {
-                            boats.remove(&tender);
-                            hoisted = Some(tender);
-                        }
-                    }
-                    (
-                        boats.get(&boat).expect("never removed").told(boat),
-                        granted,
-                        hoisted,
-                    )
-                };
-                // Where a granted boarding has put them, kept for the survey
-                // below while the roster is still in hand.
-                let stepped = granted.then_some(player.position);
-                // A grant is news for everyone, the asker included — the
-                // telling is what seats them. A refusal changed nothing and
-                // is news only to the one who asked: answered to them alone,
-                // or a client could make the whole roster's outboxes carry
-                // its pestering of a distant helm.
-                if granted {
-                    broadcast_all(&players, answer);
-                } else if let Some(player) = players.get(&id) {
-                    post(player, answer);
-                }
-                // The tender's going is told after the boarding that took its
-                // crew, so nobody — the asker least of all — hears of a hull
-                // vanishing under a player still seated in it.
-                if let Some(tender) = hoisted {
-                    broadcast_all(&players, ToClient::BoatGone { id: tender });
-                }
-                drop(players);
-                // A grant moves the player onto the hull — a stride, never
-                // more than [`BOARD_GRANT`] — and a stride can still bring
-                // ground into sight.
-                if let Some(aboard) = stepped {
-                    follow_the_way(&shared, id, &mut wake, aboard);
-                }
-            }
+            Ok(ToServer::Board { boat }) => board(&shared, id, boat),
             Ok(ToServer::Disembark { position }) if reachable(position) => {
-                let mut stepped = false;
-                let mut players = shared.players.held();
-                if let Some(player) = players.get_mut(&id) {
-                    // Ignored when not aboard, on Helm's terms.
-                    if let Some(boat) = player.aboard.take() {
-                        stepped = true;
-                        player.position = position;
-                        let told = {
-                            let mut boats = shared.boats.held();
-                            let state = boats.get_mut(&boat).expect("a boat once boarded exists");
-                            // The occupant goes and the keeper stays: a hull
-                            // parked ashore is still theirs while they are
-                            // here, and is only handed on once they have left
-                            // the world — see [`BoatState::keeper`].
-                            state.occupant = None;
-                            state.told(boat)
-                        };
-                        broadcast_all(&players, told);
-                        broadcast(&players, id, ToClient::Moved { id, position });
-                    }
-                }
-                drop(players);
-                // A step ashore is a step, and the shore is exactly the place
-                // a step of it can be worth surveying.
-                if stepped {
-                    follow_the_way(&shared, id, &mut wake, position);
-                }
+                step_ashore(&shared, id, position)
             }
             Ok(ToServer::Lower { position, heading })
                 if reachable(position) && heading.is_finite() =>
             {
-                // The ship's water is sounded with no lock held, because
-                // [`Archipelago::height`] may have an island to generate —
-                // the same order `survey_the_way` and the console keep. So
-                // the ship is looked up twice, here for where it lies and
-                // below under the grant's own hold; it may drift a position
-                // report between the two, which is inside the slack
-                // [`BOARD_GRANT`] already carries.
-                let ship_at = {
-                    let players = shared.players.held();
-                    let boats = shared.boats.held();
-                    players
-                        .get(&id)
-                        .and_then(|player| player.aboard)
-                        .and_then(|aboard| boats.get(&aboard))
-                        .map(|state| state.position)
-                };
-                let holds =
-                    ship_at.is_some_and(|at| shared.world.height(at.x, at.y) >= -ANCHOR_DEPTH);
-
-                let mut players = shared.players.held();
-                let Some(player) = players.get_mut(&id) else {
-                    break;
-                };
-                let granted = {
-                    let mut boats = shared.boats.held();
-                    // Granted to a player at the helm of a boat that carries
-                    // one, and only alongside it — a tender is lowered over
-                    // the side, not sent across the bay — and only where the
-                    // ship's anchor holds: see [`ANCHOR_DEPTH`]. Anything
-                    // else is answered with the usual silence.
-                    let ship = player.aboard.filter(|aboard| {
-                        boats.get(aboard).is_some_and(|state| {
-                            state.kind == BoatKind::Sloop
-                                && state.position.distance(position) <= BOARD_GRANT
-                                && holds
-                        })
-                    });
-                    match ship {
-                        Some(ship) => {
-                            // The ship is left at anchor for anyone, exactly
-                            // as a disembark leaves it.
-                            let ship_told = {
-                                let state = boats.get_mut(&ship).expect("looked up a breath ago");
-                                state.occupant = None;
-                                // Still theirs, lying at anchor with nobody
-                                // aboard — see [`BoatState::keeper`], which
-                                // the helm they are stepping off does not
-                                // give up.
-                                state.keeper = Some(token);
-                                state.told(ship)
-                            };
-                            // A rowing boat already lying free where this one
-                            // is going *is* the boat being lowered: stepped
-                            // down into rather than minted alongside. Which
-                            // is one of the two things bounding the fleet on
-                            // this path — a client looping lower, step out,
-                            // board, lower is handed the same hull every
-                            // time, exactly as the join loop is handed the
-                            // same free sloop, see [`BoatState::keeper`].
-                            // A dinghy somebody else left floating there is
-                            // fair game for the same reason a free helm is:
-                            // boats have keepers, not owners.
-                            let alongside = boats
-                                .iter()
-                                .find(|(_, boat)| {
-                                    boat.kind == BoatKind::Rowboat
-                                        && boat.occupant.is_none()
-                                        && boat.position.distance(position) <= BOARD_GRANT
-                                })
-                                .map(|(&found, _)| found);
-                            let tender = alongside.unwrap_or_else(|| BoatId(keeper::mint()));
-                            // Written whole rather than settled field by
-                            // field, so the minted hull and the re-used one
-                            // leave here in the same shape by construction:
-                            // there is no reading of this that has to argue
-                            // which fields a re-use carries over. The keeper
-                            // above all — a tender is somebody's doing from
-                            // the moment it touches the water, and this is
-                            // the word both hoists go looking for.
-                            let state = BoatState {
-                                kind: BoatKind::Rowboat,
-                                position,
-                                heading,
-                                occupant: Some(id),
-                                keeper: Some(token),
-                            };
-                            let tender_told = state.told(tender);
-                            boats.insert(tender, state);
-                            // And the other thing bounding it: one boat in
-                            // the water each. Whatever else in the world is
-                            // this player's tender is hoisted out of it as
-                            // this one goes in — otherwise a client that
-                            // lowers, steps out, boards and sails on leaves a
-                            // hull behind every time, and every one of them
-                            // is written to the world file and posted to
-                            // every future joiner. Asked of the hulls rather
-                            // than of a name the player remembers, so that a
-                            // dinghy somebody else has taken up since is no
-                            // longer theirs to hoist — see
-                            // [`BoatState::keeper`]. Only while it still lies
-                            // free, too: a hull somebody is sitting in is
-                            // theirs until they step out of it.
-                            let hoisted = boats
-                                .iter()
-                                .find(|(&held, state)| {
-                                    held != tender
-                                        && state.kind == BoatKind::Rowboat
-                                        && state.keeper == Some(token)
-                                        && state.occupant.is_none()
-                                })
-                                .map(|(&held, _)| held);
-                            if let Some(last) = hoisted {
-                                boats.remove(&last);
-                            }
-                            player.aboard = Some(tender);
-                            player.position = position;
-                            Some((tender_told, ship_told, hoisted))
-                        }
-                        None => None,
-                    }
-                };
-                if let Some((tender_told, ship_told, hoisted)) = &granted {
-                    // The rowing boat first — that telling is what seats the
-                    // asker — and only then the ship it stepped down from,
-                    // so no client ever holds a helm the world has already
-                    // given away. The hull the world took back last of all,
-                    // on the same rule the hoist of a tender goes by: nobody
-                    // hears of a boat vanishing before they have heard where
-                    // its crew went.
-                    broadcast_all(&players, tender_told.clone());
-                    broadcast_all(&players, ship_told.clone());
-                    if let Some(last) = hoisted {
-                        broadcast_all(&players, ToClient::BoatGone { id: *last });
-                    }
-                }
-                drop(players);
-                // Stepping down moves the player at most a boat-length, and
-                // a boat-length can still bring ground into sight.
-                if granted.is_some() {
-                    follow_the_way(&shared, id, &mut wake, position);
-                }
+                lower_a_boat(&shared, id, position, heading)
             }
             Ok(ToServer::Claim) => {
                 // Paced by waiting out what is left of [`CAIRN_PACE`] rather
@@ -2106,6 +1583,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 if settle_a_claim(&shared, id) {
                     asked_to_claim = Some(Instant::now());
                 }
+                Went::Nowhere
             }
             Ok(ToServer::Name { island, name }) => {
                 // Paced on the claim's terms — see [`CAIRN_PACE`]. What pays is
@@ -2116,6 +1594,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 if christen(&shared, id, island, &name) {
                     asked_to_name = Some(Instant::now());
                 }
+                Went::Nowhere
             }
             Ok(ToServer::WantDawn) => {
                 // Noted rather than acted on: whether the night actually
@@ -2126,6 +1605,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 if let Some(player) = players.get_mut(&id) {
                     player.waiting_since = Some(Instant::now());
                 }
+                Went::Nowhere
             }
             Ok(ToServer::Command { line }) => {
                 // Interpreted holding nothing: a command takes the day's or
@@ -2166,6 +1646,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                     wake = Wake::opening(put);
                     follow_the_way(&shared, id, &mut wake, put);
                 }
+                Went::Nowhere
             }
             Ok(ToServer::WantChunk { chunk }) if in_the_world(chunk) => {
                 // Queued rather than answered, because answering means
@@ -2175,20 +1656,394 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
                 // faster than the world can make it — and a send that fails
                 // outright means the workers have gone, so there is no more
                 // ground to be had and the session is over.
-                if wanted
-                    .send(ChunkRequest {
-                        for_player: id,
-                        chunk,
-                    })
-                    .is_err()
-                {
-                    break;
+                match wanted.send(ChunkRequest {
+                    for_player: id,
+                    chunk,
+                }) {
+                    Ok(()) => Went::Nowhere,
+                    Err(_) => Went::Over,
                 }
             }
-            _ => break,
+            _ => Went::Over,
+        };
+        match went {
+            Went::Nowhere => {}
+            // With every lock let go, which is the whole reason the words
+            // above answer rather than doing this themselves: following a way
+            // may mean generating an island, and no roster may be held across
+            // that. A function that has returned is holding nothing.
+            Went::To(at) => follow_the_way(&shared, id, &mut wake, at),
+            Went::Over => break,
         }
     }
 
+    depart(&shared, id);
+}
+
+/// Puts an arriving player on the roster and tells them, and everyone else,
+/// what that means.
+///
+/// Answers false for a world that has already ended, which has nobody to
+/// introduce and no way to hear of anyone arriving now — see [`Host::drop`],
+/// which sets that flag before reaching for this lock.
+///
+/// Lifted out of [`serve`] whole rather than in pieces, because the whole of
+/// it is one hold of one lock and the reasons below are reasons about that
+/// hold. What it does not do is any of the work that must happen with the
+/// lock let go: the survey, the cairns and the wake are the caller's, and are
+/// the next thing it does.
+fn welcome_aboard(
+    shared: &Shared,
+    id: PlayerId,
+    mut player: Player,
+    mut returning: Option<keeper::PlayerRecord>,
+) -> bool {
+    // Onto the roster and then welcomed, under one hold of the lock.
+    //
+    // In that order, because a client's join is over the moment it reads its
+    // welcome: a player welcomed before they were listed would, for that
+    // instant, believe they are in a world the session cannot see them in to
+    // hang up on them — and the end of a session is exactly when that instant
+    // is unaffordable. Listing first costs the welcome nothing, everything
+    // else that writes to a player taking this lock too.
+    //
+    // One hold, so that the newcomer hears exactly who is already here,
+    // everyone else hears the newcomer, and no move slips between the two: a
+    // `Moved` about a player a client has not met would be about nobody.
+    //
+    // The sky is asked for out here because the hour has a lock of its own —
+    // see [`Shared::skipped`] — and asking with the roster held would be the
+    // one path in the process that nested the two. A sky a few microseconds
+    // old is the same sky.
+    let wind = shared.wind();
+    let phase = shared.phase();
+    let mut players = shared.players.held();
+
+    // A world that has already ended has nobody to introduce and no way to
+    // hear of anyone arriving now. Its drop set this before reaching for
+    // the lock, so a connection that gets here afterwards finds it — and
+    // returning drops the socket, which is the same hang-up the drop would
+    // have delivered had this player made it onto the roster in time.
+    if shared.stopping.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    // A token already on the roster is one client's files opened twice.
+    // The second arrival enters as a stranger rather than being refused:
+    // a refusal would lock a player out of a world over a copied file,
+    // where a fresh start merely puzzles them.
+    if players.values().any(|other| other.token == player.token) {
+        player.token = Token(keeper::mint());
+        player.position = shared.spawn_for(id);
+        // Including where the papers had been: the survey belongs to
+        // whoever is still holding them rather than to both. Replaced
+        // rather than emptied, so that nothing locks a survey with the
+        // roster in hand — see [`Surveyed`].
+        player.surveyed = Arc::new(Mutex::new(Survey::default()));
+        player.known.clear();
+        returning = None;
+    }
+
+    // Where this player enters, and at whose helm — see
+    // [`seat_the_arrival`], which is the whole of that policy and knows
+    // nothing about sockets or the roster. Called inside the roster's
+    // hold with the boats' lock nested under it, the one nesting
+    // [`Shared::boats`]'s order allows, so the seat is taken before
+    // anyone can be told about the boat it claims.
+    let bow = {
+        // Who is here — the one claim on a hull nobody is aboard.
+        // Gathered once, rather than asked again of every hull the search
+        // below walks past.
+        let here: HashSet<Token> = players.values().map(|other| other.token).collect();
+        let mut boats = shared.boats.held();
+        seat_the_arrival(shared, id, &mut player, &returning, &here, &mut boats)
+    };
+
+    let welcome = ToClient::Welcome {
+        id,
+        spawn: player.position,
+        // A returning player is not put down beside the entry island,
+        // so its centre is nothing to turn their view towards. Seated
+        // at a helm, they open looking the way the hull lies — the view
+        // behind their own bow. Afoot, their own position names no
+        // direction, which leaves the bearing to the client, exactly as
+        // a world with no island to look at does.
+        facing: match (returning.is_some(), bow) {
+            (false, _) => shared.facing,
+            (true, Some(heading)) => {
+                player.position + Vec2::new(-heading.sin(), -heading.cos()) * 64.0
+            }
+            (true, None) => player.position,
+        },
+        token: player.token,
+        aboard: player.aboard,
+    };
+    let arrival = ToClient::Joined {
+        id,
+        position: player.position,
+    };
+    let seated = player.aboard;
+    players.insert(id, player);
+
+    let newcomer = &players[&id];
+    post(newcomer, welcome);
+    // The sky, straight after the session itself: a client draws the sea
+    // from the moment it has ground, and until this arrives it can only
+    // assume a day nobody promised. Inside the same hold of the lock as
+    // the welcome, so the watcher's broadcasts cannot slip in front of it
+    // and arrive before the client knows who it is.
+    post(newcomer, ToClient::Weather { wind });
+    // And what hour it is, for the same reason: a client with no word on
+    // the time can only draw an assumed one, and an arrival that snapped
+    // from midday to a night already half gone would be a worse opening
+    // than a moment's wait.
+    post(newcomer, ToClient::Daylight { phase });
+    // And the words this console answers to, so a client's console can
+    // offer them as the player types. Hints only: lines cross verbatim
+    // and are answered whether or not they start with any of these.
+    post(
+        newcomer,
+        ToClient::Vocabulary {
+            phrases: console::phrases(),
+        },
+    );
+    for (other, existing) in players.iter() {
+        if *other != id {
+            post(
+                newcomer,
+                ToClient::Joined {
+                    id: *other,
+                    position: existing.position,
+                },
+            );
+        }
+    }
+    // Every boat there is, the hulls being as much of the scene as the
+    // players — and everyone else hears about the one this arrival
+    // minted or took up, under the same hold as the arrival itself.
+    {
+        let boats = shared.boats.held();
+        for (boat, state) in boats.iter() {
+            post(newcomer, state.told(*boat));
+        }
+        if let Some(boat) = seated {
+            broadcast(&players, id, boats[&boat].told(boat));
+        }
+    }
+    broadcast(&players, id, arrival);
+    true
+}
+
+/// Where an arriving player enters, and at whose helm — the boats being world
+/// entities with keepers rather than owners.
+///
+/// A newcomer's story starts aboard, on a sloop the world mints them. A
+/// returner who left at a helm is seated back into that boat only if it still
+/// lies where they left it and is nobody else's; otherwise somebody here has
+/// taken it up in the meantime, and stepping ashore again is not letting go
+/// of it. A fresh hull where they stood is the interim answer until there is
+/// any other way to be on open water. A returner who left ashore enters on
+/// their own feet — and is dealt a hull all the same if nothing free lies
+/// within reach of where they stood.
+///
+/// Takes the boats themselves rather than reaching for their lock, and the
+/// papers of everyone already here rather than the roster, so that the whole
+/// of this policy is a question about a map of hulls: what it does can be
+/// asked of it directly, where the locking and the telling stay with the one
+/// caller that has to get their order right — see [`serve`].
+///
+/// Writes `player.aboard` and, where the world put them somewhere of its
+/// choosing, `player.position`. Answers with the way the hull a returner is
+/// seated at lies, which is what their view is opened along, there being no
+/// entry island to face them at.
+fn seat_the_arrival(
+    shared: &Shared,
+    id: PlayerId,
+    player: &mut Player,
+    returning: &Option<keeper::PlayerRecord>,
+    here: &HashSet<Token>,
+    boats: &mut HashMap<BoatId, BoatState>,
+) -> Option<f32> {
+    // The papers this arrival actually enters on, which for a token already
+    // in the world are fresh ones dealt a moment ago — see [`serve`].
+    let token = player.token;
+    let mut bow = None;
+    let fresh_hull = |boats: &mut HashMap<BoatId, BoatState>, at: Vec2| {
+        // A free hull nobody is keeping, lying where this arrival is
+        // being put down, is theirs before any new one is minted —
+        // see [`BoatState::keeper`] and [`SPARE_BERTH`]. It reads as
+        // the world having a boat ready rather than conjuring one,
+        // and it is the whole of what bounds the fleet: a client that
+        // joins, steps ashore and hangs up in a loop is handed the
+        // same hull every time round rather than leaving one behind
+        // every time round, for the world to file and to post to
+        // every future joiner.
+        //
+        // Nobody's counts the hull somebody left the world aboard,
+        // which sounds like a claim and is not one: a returner is put
+        // down where the world last saw them and seated at a helm
+        // either way — their own if it is still lying there, see
+        // [`KEPT_BERTH`], and one where they stand if it is not.
+        // Holding hulls for the away would leave the plainer loop —
+        // join, hang up, touch nothing — unbounded again.
+        //
+        // A sloop, and now that there are dinghies in the water that
+        // has to be said: an arrival's story starts at a ship's helm,
+        // never in a boat somebody rowed ashore and left on a beach.
+        let handed_down = boats.iter_mut().find(|(_, boat)| {
+            boat.kind == BoatKind::Sloop
+                && boat.occupant.is_none()
+                && boat.position.distance(at) <= SPARE_BERTH
+                && boat.keeper.is_none_or(|keeper| !here.contains(&keeper))
+        });
+        if let Some((&boat, state)) = handed_down {
+            state.occupant = Some(id);
+            state.keeper = Some(token);
+            return (boat, state.position);
+        }
+        let boat = BoatId(keeper::mint());
+        boats.insert(
+            boat,
+            BoatState {
+                kind: BoatKind::Sloop,
+                position: at,
+                heading: aimed(at, shared.facing),
+                occupant: Some(id),
+                keeper: Some(token),
+            },
+        );
+        (boat, at)
+    };
+    player.aboard = match returning {
+        None => {
+            let (boat, at) = fresh_hull(boats, player.position);
+            player.position = at;
+            Some(boat)
+        }
+        Some(record) => match record.aboard {
+            // Left afoot, with something free lying where they stood:
+            // they walk to it, and the world adds nothing.
+            None if boats.values().any(|boat| {
+                boat.occupant.is_none() && boat.position.distance(record.position) <= KEPT_BERTH
+            }) =>
+            {
+                None
+            }
+            // Left afoot with nothing there: a player on an island
+            // with no way off it but a swim, which is a way out of a
+            // bay and not a way across open water — the crossings
+            // between islands are an hour of it and there is nothing
+            // to make for at the far end but more of the same. And
+            // it is reachable without anybody cheating: boats have
+            // keepers and not owners, so the dinghy somebody beached
+            // and logged off beside is one another player may
+            // honestly row away while they are gone. So they are
+            // dealt a hull, the same way an arrival is. What keeps
+            // that from repeating on one beach is the arm above
+            // rather than anything here: a player dealt one leaves at
+            // a helm, and a helm is resumed rather than re-dealt.
+            //
+            // Where they stood, which for somebody who rowed ashore is
+            // the waterline, and inland for somebody who walked. A
+            // hull the ground turns up underneath is a case the client
+            // already sails out of — every way down to the sea is
+            // downhill, see `boat::grounding` — so an unlucky mint is
+            // an ungainly launch and not a second strand.
+            //
+            // What this does not do is bound the minting a handshake
+            // can already ask for, and it does not widen it either. A
+            // stranger presenting no papers is dealt a hull too, and
+            // one who sails it a boat's length before hanging up
+            // leaves a permanent one behind every time. This is that
+            // rate, not a new one.
+            None => {
+                let (boat, at) = fresh_hull(boats, record.position);
+                player.position = at;
+                bow = boats.get(&boat).map(|state| state.heading);
+                Some(boat)
+            }
+            Some(kept) => match boats.get_mut(&kept) {
+                Some(boat)
+                    if boat.occupant.is_none()
+                        && boat.position.distance(record.position) <= KEPT_BERTH
+                        && boat.keeper.is_none_or(|keeper| !here.contains(&keeper)) =>
+                {
+                    boat.occupant = Some(id);
+                    // Which is also what re-claims a dinghy somebody
+                    // resumes in: taking a hull up is taking it up,
+                    // whichever door it happens through. See
+                    // [`BoatState::keeper`].
+                    boat.keeper = Some(token);
+                    player.position = boat.position;
+                    bow = Some(boat.heading);
+                    Some(kept)
+                }
+                _ => {
+                    let (boat, at) = fresh_hull(boats, record.position);
+                    player.position = at;
+                    bow = boats.get(&boat).map(|state| state.heading);
+                    Some(boat)
+                }
+            },
+        },
+    };
+    bow
+}
+
+/// The whole of the handshake: hello, which world this is, papers.
+///
+/// Four words long, two in each direction, and this is the half of it a
+/// connection has to get through before it is anybody — the welcome that ends
+/// it needs the roster and so belongs to [`serve`]. `None` is a connection to
+/// drop, whether it said the wrong version, said nothing, or hung up; every
+/// one of those is answered by returning, which closes the socket.
+///
+/// The deadline is on both reads and lifted at the end. The point of it is
+/// only that a connection which arrives and then says nothing — a port scan,
+/// a client that died mid-dial — cannot hold a thread for the life of the
+/// process. The session that follows has no deadline: going quiet is what a
+/// player standing still sounds like.
+fn shake_hands(
+    stream: &TcpStream,
+    reader: &mut TcpStream,
+    world: WorldId,
+) -> Option<Option<Token>> {
+    // A refusal answers with the version this build wanted, so the client can
+    // say something more useful than "hung up".
+    let _ = reader.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+    match ToServer::read(reader) {
+        Ok(ToServer::Hello { version }) if version == PROTOCOL_VERSION => {}
+        Ok(ToServer::Hello { .. }) => {
+            let _ = (ToClient::Refused {
+                version: PROTOCOL_VERSION,
+            })
+            .write(&mut &*stream);
+            return None;
+        }
+        _ => return None,
+    }
+
+    // Which world this is, so the client can look out what it holds of it —
+    // and then the papers themselves, under the same deadline the hello was:
+    // a connection that says hello and then nothing is the same stalled
+    // stranger either way.
+    (ToClient::World { id: world }).write(&mut &*stream).ok()?;
+    let presented = match ToServer::read(reader) {
+        Ok(ToServer::Papers { token }) => token,
+        _ => return None,
+    };
+    let _ = reader.set_read_timeout(None);
+    Some(presented)
+}
+
+/// The end of a visit: what the world remembers of this player, and what it
+/// tells everyone still in it.
+///
+/// Split from [`serve`] because it is the one part of a session that runs
+/// after the reading has stopped, and because the order of it is the whole
+/// content — the memory written before the roster is left, the freed helm
+/// told before the hull that goes with it.
+fn depart(shared: &Shared, id: PlayerId) {
     // Where the world last saw them, filed under their token *before* they
     // leave the roster — a save can land between the two steps, and a player
     // momentarily in both places is written once, where they are, while one
@@ -2296,6 +2151,351 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
         }
     }
     (shared.report)(&format!("{id} left"));
+}
+
+/// Where serving one word left the player who said it.
+///
+/// The whole of what [`serve`]'s loop learns from any of the words below, so
+/// that following a way — the expensive half, and the half that must never
+/// happen with a lock held — is written once rather than at every word that
+/// moves somebody.
+enum Went {
+    /// Nowhere the survey has any business with: the word changed nothing, or
+    /// changed nothing about where its asker is standing.
+    Nowhere,
+    /// Here. The way from wherever the survey last got to earns them the
+    /// ground within sight of it — see [`follow_the_way`].
+    To(Vec2),
+    /// Nothing left to serve. The session is over and the loop ends.
+    ///
+    /// Which is also what every word below answers for an asker the roster
+    /// has no entry for: reading on would serve nobody, each later word
+    /// finding the same emptiness. It cannot happen while the loop runs — a
+    /// player is seated before it and struck off only in [`depart`] after —
+    /// and is said anyway, so that one condition has one answer.
+    Over,
+}
+
+/// A player on their own feet, reporting where they have walked to.
+///
+/// Every word below returns with the roster let go, which is what
+/// [`Went::To`] is worth: the caller follows the way with nothing held, and
+/// that cannot be got wrong by forgetting a `drop`.
+fn walk(shared: &Shared, id: PlayerId, position: Vec2) -> Went {
+    let mut players = shared.players.held();
+    let Some(player) = players.get_mut(&id) else {
+        return Went::Over;
+    };
+    // Quietly ignored from a player at a helm, on Helm's own terms: a `Move`
+    // can honestly cross a boarding grant on the wire, and believing it would
+    // walk the player away from a boat everyone else sees them steering.
+    if player.aboard.is_some() {
+        return Went::Nowhere;
+    }
+    player.position = position;
+    broadcast(&players, id, ToClient::Moved { id, position });
+    Went::To(position)
+}
+
+/// A player at a helm, reporting where they have sailed the hull to.
+///
+/// This is the report the way between two of them exists for, a hull under
+/// sail covering ground a walker cannot.
+fn take_the_helm(shared: &Shared, id: PlayerId, position: Vec2, heading: f32) -> Went {
+    let mut players = shared.players.held();
+    let Some(player) = players.get_mut(&id) else {
+        return Went::Over;
+    };
+    // The rider goes with the vehicle: one report moves both. Quietly ignored
+    // from a player occupying nothing — see the wire's own doc for how that
+    // happens honestly.
+    let Some(boat) = player.aboard else {
+        return Went::Nowhere;
+    };
+    player.position = position;
+    let told = {
+        let mut boats = shared.boats.held();
+        let state = boats.get_mut(&boat).expect("a boat once boarded exists");
+        state.position = position;
+        state.heading = heading;
+        state.told(boat)
+    };
+    broadcast(&players, id, told);
+    Went::To(position)
+}
+
+/// A boat's helm, asked for.
+///
+/// Granted beside an empty one, and answered either way by the boat's own
+/// state — there is no separate refusal. A grant moves the asker onto the
+/// hull, a stride at most, and a stride can still bring ground into sight.
+fn board(shared: &Shared, id: PlayerId, boat: BoatId) -> Went {
+    let mut players = shared.players.held();
+    let Some(player) = players.get_mut(&id) else {
+        return Went::Over;
+    };
+    let answer = {
+        let mut boats = shared.boats.held();
+        // A name no boat answers to is answered with silence, and not — as it
+        // once was — with a hang-up. Ids are retired now: a tender hoisted in
+        // is gone the instant its crew steps aboard the ship, and any client
+        // that heard of it may honestly ask after it in the same breath, its
+        // [`ToClient::BoatGone`] still on the wire. There is no state to
+        // answer with either way, and a refusal that says nothing is what
+        // every other ungranted boarding sounds like.
+        let Some(state) = boats.get(&boat) else {
+            return Went::Nowhere;
+        };
+        // What the asker would be stepping aboard from: their own feet, or —
+        // for a ship's helm only — the thwarts of a rowing boat laid
+        // alongside, which the grant then hoists back in. Any other helm
+        // refuses the ask: ships do not board ships.
+        let stepping_from = match player.aboard {
+            None => Some(None),
+            Some(tender) => (tender != boat
+                && state.kind == BoatKind::Sloop
+                && boats
+                    .get(&tender)
+                    .is_some_and(|held| held.kind == BoatKind::Rowboat))
+            .then_some(Some(tender)),
+        };
+        // Granted only beside an empty helm; anything else leaves the boat as
+        // it was, and the state is the whole of the answer either way.
+        let granted = stepping_from.is_some()
+            && state.occupant.is_none()
+            && state.position.distance(player.position) <= BOARD_GRANT;
+        let mut hoisted = None;
+        if granted {
+            let state = boats.get_mut(&boat).expect("looked up a breath ago");
+            state.occupant = Some(id);
+            // Theirs from here on, and still theirs when they step off — see
+            // [`BoatState::keeper`]. A dinghy taken up is the taker's tender
+            // from that moment, whoever put it in the water: the claim
+            // travels with the hull, so the last hands on it are the ones the
+            // hoists answer to.
+            state.keeper = Some(player.token);
+            player.aboard = Some(boat);
+            player.position = state.position;
+            // The rowing boat goes back aboard as the ship's own: out of the
+            // world, its name retired with it — and with it whatever claim it
+            // carried.
+            if let Some(Some(tender)) = stepping_from {
+                boats.remove(&tender);
+                hoisted = Some(tender);
+            }
+        }
+        Boarded {
+            told: boats.get(&boat).expect("never removed").told(boat),
+            granted,
+            hoisted,
+        }
+    };
+    // Where a granted boarding has put them, read while the roster is still
+    // in hand.
+    let stepped = answer.granted.then_some(player.position);
+    // A grant is news for everyone, the asker included — the telling is what
+    // seats them. A refusal changed nothing and is news only to the one who
+    // asked: answered to them alone, or a client could make the whole
+    // roster's outboxes carry its pestering of a distant helm.
+    if answer.granted {
+        broadcast_all(&players, answer.told);
+    } else if let Some(player) = players.get(&id) {
+        post(player, answer.told);
+    }
+    // The tender's going is told after the boarding that took its crew, so
+    // nobody — the asker least of all — hears of a hull vanishing under a
+    // player still seated in it.
+    if let Some(tender) = answer.hoisted {
+        broadcast_all(&players, ToClient::BoatGone { id: tender });
+    }
+    drop(players);
+    match stepped {
+        Some(aboard) => Went::To(aboard),
+        None => Went::Nowhere,
+    }
+}
+
+/// What a boarding came to, gathered under the boats' lock and acted on once
+/// it has been let go — named rather than a tuple because the three parts go
+/// out in an order that has a reason, spelled out at each of them.
+struct Boarded {
+    /// The boat's state as everyone will hear it, which is the whole of the
+    /// answer whether or not the ask was granted.
+    told: ToClient,
+    granted: bool,
+    /// The rowing boat this grant took out of the world, if it took one.
+    hoisted: Option<BoatId>,
+}
+
+/// A deck stepped off, onto the footing the client judged.
+fn step_ashore(shared: &Shared, id: PlayerId, position: Vec2) -> Went {
+    let mut players = shared.players.held();
+    let Some(player) = players.get_mut(&id) else {
+        return Went::Over;
+    };
+    // Ignored when not aboard, on Helm's terms.
+    let Some(boat) = player.aboard.take() else {
+        return Went::Nowhere;
+    };
+    player.position = position;
+    let told = {
+        let mut boats = shared.boats.held();
+        let state = boats.get_mut(&boat).expect("a boat once boarded exists");
+        // The occupant goes and the keeper stays: a hull parked ashore is
+        // still theirs while they are here, and is only handed on once they
+        // have left the world — see [`BoatState::keeper`].
+        state.occupant = None;
+        state.told(boat)
+    };
+    broadcast_all(&players, told);
+    broadcast(&players, id, ToClient::Moved { id, position });
+    drop(players);
+    // A step ashore is a step, and the shore is exactly the place a step of
+    // it can be worth surveying.
+    Went::To(position)
+}
+
+/// A ship's boat put in the water, with the asker stepping down into it.
+fn lower_a_boat(shared: &Shared, id: PlayerId, position: Vec2, heading: f32) -> Went {
+    // The ship's water is sounded with no lock held, because
+    // [`Archipelago::height`] may have an island to generate — the same order
+    // `survey_the_way` and the console keep. So the ship is looked up twice,
+    // here for where it lies and below under the grant's own hold; it may
+    // drift a position report between the two, which is inside the slack
+    // [`BOARD_GRANT`] already carries.
+    let ship_at = {
+        let players = shared.players.held();
+        let boats = shared.boats.held();
+        players
+            .get(&id)
+            .and_then(|player| player.aboard)
+            .and_then(|aboard| boats.get(&aboard))
+            .map(|state| state.position)
+    };
+    let holds = ship_at.is_some_and(|at| shared.world.height(at.x, at.y) >= -ANCHOR_DEPTH);
+
+    let mut players = shared.players.held();
+    let Some(player) = players.get_mut(&id) else {
+        return Went::Over;
+    };
+    // The papers this player actually holds, read off the roster rather than
+    // remembered from the handshake. They are not always the same: a token
+    // already in the world is one client's files opened twice, and the second
+    // arrival is dealt fresh papers on the spot — see [`serve`]. Stamping a
+    // hull with the handshake's copy would mark it as belonging to whoever
+    // still holds those, and the hoist below would then go looking through
+    // *their* boats and take one out of the water under them.
+    let token = player.token;
+    let granted = {
+        let mut boats = shared.boats.held();
+        // Granted to a player at the helm of a boat that carries one, and
+        // only alongside it — a tender is lowered over the side, not sent
+        // across the bay — and only where the ship's anchor holds: see
+        // [`ANCHOR_DEPTH`]. Anything else is answered with the usual silence.
+        let ship = player.aboard.filter(|aboard| {
+            boats.get(aboard).is_some_and(|state| {
+                state.kind == BoatKind::Sloop
+                    && state.position.distance(position) <= BOARD_GRANT
+                    && holds
+            })
+        });
+        match ship {
+            Some(ship) => {
+                // The ship is left at anchor for anyone, exactly as a
+                // disembark leaves it.
+                let ship_told = {
+                    let state = boats.get_mut(&ship).expect("looked up a breath ago");
+                    state.occupant = None;
+                    // Still theirs, lying at anchor with nobody aboard — see
+                    // [`BoatState::keeper`], which the helm they are stepping
+                    // off does not give up.
+                    state.keeper = Some(token);
+                    state.told(ship)
+                };
+                // A rowing boat already lying free where this one is going
+                // *is* the boat being lowered: stepped down into rather than
+                // minted alongside. Which is one of the two things bounding
+                // the fleet on this path — a client looping lower, step out,
+                // board, lower is handed the same hull every time, exactly as
+                // the join loop is handed the same free sloop, see
+                // [`BoatState::keeper`]. A dinghy somebody else left floating
+                // there is fair game for the same reason a free helm is:
+                // boats have keepers, not owners.
+                let alongside = boats
+                    .iter()
+                    .find(|(_, boat)| {
+                        boat.kind == BoatKind::Rowboat
+                            && boat.occupant.is_none()
+                            && boat.position.distance(position) <= BOARD_GRANT
+                    })
+                    .map(|(&found, _)| found);
+                let tender = alongside.unwrap_or_else(|| BoatId(keeper::mint()));
+                // Written whole rather than settled field by field, so the
+                // minted hull and the re-used one leave here in the same
+                // shape by construction: there is no reading of this that has
+                // to argue which fields a re-use carries over. The keeper
+                // above all — a tender is somebody's doing from the moment it
+                // touches the water, and this is the word both hoists go
+                // looking for.
+                let state = BoatState {
+                    kind: BoatKind::Rowboat,
+                    position,
+                    heading,
+                    occupant: Some(id),
+                    keeper: Some(token),
+                };
+                let tender_told = state.told(tender);
+                boats.insert(tender, state);
+                // And the other thing bounding it: one boat in the water
+                // each. Whatever else in the world is this player's tender is
+                // hoisted out of it as this one goes in — otherwise a client
+                // that lowers, steps out, boards and sails on leaves a hull
+                // behind every time, and every one of them is written to the
+                // world file and posted to every future joiner. Asked of the
+                // hulls rather than of a name the player remembers, so that a
+                // dinghy somebody else has taken up since is no longer theirs
+                // to hoist — see [`BoatState::keeper`]. Only while it still
+                // lies free, too: a hull somebody is sitting in is theirs
+                // until they step out of it.
+                let hoisted = boats
+                    .iter()
+                    .find(|(&held, state)| {
+                        held != tender
+                            && state.kind == BoatKind::Rowboat
+                            && state.keeper == Some(token)
+                            && state.occupant.is_none()
+                    })
+                    .map(|(&held, _)| held);
+                if let Some(last) = hoisted {
+                    boats.remove(&last);
+                }
+                player.aboard = Some(tender);
+                player.position = position;
+                Some((tender_told, ship_told, hoisted))
+            }
+            None => None,
+        }
+    };
+    if let Some((tender_told, ship_told, hoisted)) = &granted {
+        // The rowing boat first — that telling is what seats the asker — and
+        // only then the ship it stepped down from, so no client ever holds a
+        // helm the world has already given away. The hull the world took back
+        // last of all, on the same rule the hoist of a tender goes by: nobody
+        // hears of a boat vanishing before they have heard where its crew
+        // went.
+        broadcast_all(&players, tender_told.clone());
+        broadcast_all(&players, ship_told.clone());
+        if let Some(last) = hoisted {
+            broadcast_all(&players, ToClient::BoatGone { id: *last });
+        }
+    }
+    drop(players);
+    // Stepping down moves the player at most a boat-length, and a
+    // boat-length can still bring ground into sight.
+    match granted {
+        Some(_) => Went::To(position),
+        None => Went::Nowhere,
+    }
 }
 
 /// The rectangle a claim covers, in world metres: the island's chunks plus
@@ -3163,6 +3363,18 @@ fn broadcast(players: &HashMap<PlayerId, Player>, from: PlayerId, message: ToCli
 mod tests {
     use super::*;
     use protocol::survey::{Coast, Mark};
+
+    #[test]
+    fn an_unchosen_seed_is_a_different_world_every_time() {
+        let drawn: Vec<u32> = (0..8).map(|_| random_seed()).collect();
+        for (i, seed) in drawn.iter().enumerate() {
+            assert!(*seed <= MAX_SEED, "{seed} is wider than a seed is written");
+            assert!(
+                !drawn[i + 1..].contains(seed),
+                "two draws landed in the same world"
+            );
+        }
+    }
 
     /// One chunk's ink of a chosen size: a coast of `marks` points, which is
     /// what a torn shore actually costs on the wire.

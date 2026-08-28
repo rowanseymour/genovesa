@@ -203,8 +203,8 @@ fn find_footing(mut commands: Commands, ground: Option<Res<Ground>>, mut walkers
 }
 
 /// The player and whatever they are aboard, as a query. The one shape every
-/// system that has to answer "what is carrying the player" reads it in —
-/// [`crate::net::receive`] included, which passes it on to the fleet.
+/// system that has to answer "what is carrying the player" reads it in — the
+/// readers of the wire's own words included, which pass it on to the fleet.
 pub type Players<'w, 's> = Query<'w, 's, (Entity, Option<&'static ChildOf>), With<Player>>;
 
 /// The entity carrying the player through the world: the vehicle they are
@@ -348,6 +348,26 @@ pub fn put_down(
     }
 }
 
+/// Moves whatever carries this player wherever the world says they now are.
+///
+/// After [`crate::boat::take_the_hulls`], and that ordering is the whole of
+/// what makes a `goto` from a helm work: a player seated at one in the same
+/// breath is carried by that hull, so the seating has to have been heard
+/// before this moves anything. The wire says as much — see
+/// [`crate::net::PutDown`] — and reading the two words in two systems is what
+/// keeps the order a thing somebody can point at rather than a line's
+/// position in a match.
+pub(crate) fn take_the_put_down(
+    mut commands: Commands,
+    fleet: Res<Fleet>,
+    players: Players,
+    mut moved: MessageReader<crate::net::PutDown>,
+) {
+    for put in moved.read() {
+        put_down(&mut commands, &fleet, &players, put.position, put.heading);
+    }
+}
+
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
@@ -361,6 +381,7 @@ impl Plugin for PlayerPlugin {
         // them in `main`: it is nothing but how this entity is drawn, and a
         // player spawned without one would be invisible.
         app.add_plugins(FigurePlugin)
+            .add_message::<crate::net::PutDown>()
             .init_resource::<Fleet>()
             // A swimmer rides the sea, so [`walk`] reads the weather — and a
             // plugin asks for what its own systems read rather than trusting
@@ -375,7 +396,15 @@ impl Plugin for PlayerPlugin {
             )
             // Outside the pause and the helm's own set: a walker waiting
             // for their ground should find it even while the menu is up.
-            .add_systems(Update, find_footing.run_if(in_state(AppState::InWorld)));
+            .add_systems(Update, find_footing.run_if(in_state(AppState::InWorld)))
+            // Being taken somewhere is not the player's hands either, so it
+            // does not pause. See the note on its ordering.
+            .add_systems(
+                Update,
+                take_the_put_down
+                    .in_set(crate::net::Wire::Read)
+                    .after(crate::boat::take_the_hulls),
+            );
     }
 }
 

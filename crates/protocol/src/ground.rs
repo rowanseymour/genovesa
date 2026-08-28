@@ -36,11 +36,12 @@
 //! may be a ridge many chunks away that a client has never been sent, so only
 //! whoever holds the whole island can say — the generator bakes the pair per
 //! corner and it crosses the wire as [`ChunkPayload::lit`]. It is what lets a
-//! client draw the terrain's own shadows without a shadow map: thresholds
-//! interpolate across a cell exactly as heights do, so a shadow's edge still
-//! moves smoothly over the ground as the day turns, and the same pair asked
-//! with `phase + 0.5` answers for the moon, which rides the same arc half a
-//! day out of phase.
+//! client draw the terrain's own shadows without a shadow map. The pairs read
+//! back anywhere on the grid — [`lit_across`], which owns what a never-lit
+//! corner does to its neighbours — and how finely a drawing end cuts its
+//! shadow out of them is its own business, like the grid itself. The same
+//! pair asked with `phase + 0.5` answers for the moon, which rides the same
+//! arc half a day out of phase.
 
 use glam::{IVec2, Vec2, Vec3};
 
@@ -115,16 +116,6 @@ pub const CORNERS: usize = CELLS + 1;
 /// client flat-shade the ground and another paint it while both draw the same
 /// world.
 pub const CELL_COUNT: usize = CELLS * CELLS;
-
-/// Cells of overhang the material grid carries on every side — see
-/// [`ChunkPayload::materials`] and [`MATERIAL_CELLS`].
-pub const APRON: usize = 1;
-
-/// Cells along one edge of the material grid, apron included.
-pub const MATERIAL_CELLS: usize = CELLS + 2 * APRON;
-
-/// Materials in one chunk's grid, apron and all.
-pub const MATERIAL_COUNT: usize = MATERIAL_CELLS * MATERIAL_CELLS;
 
 // --- Heights ----------------------------------------------------------------
 
@@ -269,10 +260,15 @@ pub const SEA_WATER: Vec3 = Vec3::new(0.10, 0.42, 0.62);
 pub const LAKE_WATER: Vec3 = Vec3::new(0.12, 0.34, 0.38);
 
 impl Material {
+    /// How many materials there are. The palette and the enum are numbered
+    /// together, so this is also one past the largest number
+    /// [`Material::from_byte`] answers for.
+    pub const KINDS: usize = PALETTE.len();
+
     /// The material a stored number names, or `None` for one this build has
     /// never
     /// heard of.
-    fn from_byte(byte: u8) -> Option<Self> {
+    pub fn from_byte(byte: u8) -> Option<Self> {
         // The table and the enum are numbered together, so anything inside the
         // table is a material and the transmute-free way to say so is a match on
         // the count.
@@ -324,9 +320,9 @@ impl Material {
 /// Everything a renderer needs and nothing else. The corners are a
 /// [`CORNERS`]-square grid sampled from the chunk's lower corner outwards
 /// at [`CELL_METRES`] spacing, row-major; the materials are one per cell on
-/// the grid those corners bound, also row-major, and reaching one cell past
-/// the chunk on every side. The two grids are offset half a cell from each
-/// other, which is simply what it means for corners to bound cells.
+/// the grid those corners bound, also row-major. The two grids are offset
+/// half a cell from each other, which is simply what it means for corners
+/// to bound cells.
 ///
 /// A chunk of open ocean has no payload at all — see
 /// [`crate::ToClient::Chunk`]. What arrives here is ground worth drawing.
@@ -335,31 +331,16 @@ pub struct ChunkPayload {
     /// `CORNERS * CORNERS` corner heights, quantised — see
     /// [`quantize`].
     pub heights: Vec<u16>,
-    /// [`MATERIAL_COUNT`] materials, row-major, covering the chunk's own
-    /// [`CELLS`]-square grid *plus [`APRON`] cells of its neighbours on every
-    /// side* — so cell `(-1, -1)` is first and cell `(CELLS, CELLS)` is last.
-    /// [`ChunkPayload::material`] does the indexing.
+    /// [`CELL_COUNT`] materials, one per cell of the chunk's own grid,
+    /// row-major — [`ChunkPayload::material`] does the indexing.
     ///
-    /// The overhang is what keeps a chunk drawable on its own. A renderer
-    /// that decides how to paint a cell by looking at what is *next* to it —
-    /// anything blending or tiling across a material boundary, which is most
-    /// ways of drawing ground that are not flat colour — needs its
-    /// neighbours' materials, and a chunk at the edge of what has arrived has
-    /// no neighbours yet. Without the apron such a client either leaves a
-    /// wrong-looking seam around every chunk until the next one lands, or
-    /// keeps chunk state and rebuilds meshes when it does; with it, a chunk
-    /// answers for its own edges the moment it arrives, which is the property
-    /// every other part of this payload already has.
-    ///
-    /// One cell is exactly what that needs and no more: a cell's four corners
-    /// are each shared with three neighbouring cells, so the widest reach is
-    /// from corner `(0, 0)` to cell `(-1, -1)`. It costs 516 bytes on a
-    /// payload of some fifty thousand.
-    ///
-    /// The apron is genuinely the neighbour's own answer, not an
-    /// extrapolation — a generator samples the same field a cell further out,
-    /// so two chunks agree about the cells they both describe. That is what
-    /// `the_apron_is_the_neighbours_own_ground` holds them to.
+    /// The chunk's own cells and no ring of its neighbours': a renderer that
+    /// paints a cell by looking at what is next to it reads the neighbouring
+    /// *chunks*, which is what the one client here does — it keeps every
+    /// delivered grid and blends by world point, so a seam is between two
+    /// answers it already holds. (An overhang was carried for a while,
+    /// against a renderer that wanted each chunk drawable alone the moment
+    /// it arrived; nothing ever read it.)
     pub materials: Vec<Material>,
     /// When each corner sees the sun: the first and last phase of the day —
     /// [`crate::quantize_phase`] steps — at which the sun stands clear of the
@@ -605,12 +586,59 @@ pub const LIT_ALL_DAY: [u8; 2] = [64, 192];
 /// one a writer with nothing subtler to say writes.
 pub const NEVER_LIT: [u8; 2] = [u8::MAX, 0];
 
+/// Whether a lit pair names any daylight at all — false for [`NEVER_LIT`] and
+/// for every other pair that runs backwards, which say the same thing.
+pub fn ever_lit(pair: [u8; 2]) -> bool {
+    pair[0] <= pair[1]
+}
+
+/// The lit interval somewhere inside a cell, read across the four corners
+/// around it — `corners` in [`ChunkPayload::materials`]' own south-west,
+/// south-east, north-west, north-east order, `at` in cell widths from the
+/// south-west one. The middle of a cell is `Vec2::splat(0.5)`.
+///
+/// A corner the sun never reaches is left out of the weighing rather than
+/// averaged in. Its `from` stands past the end of the day, so a plain
+/// bilinear drags a neighbour's honest interval toward noon and prints a
+/// cliff foot's shade over the lit ground beside it — and two such corners
+/// give an interval running backwards, which reads as ground that never sees
+/// the sun at all. What is left is what the corners that *do* see it agree
+/// on, which errs toward light exactly as the bake does under a grazing sun.
+/// With no lit corner there is nothing to err with, and the answer is
+/// [`NEVER_LIT`].
+pub fn lit_across(corners: [[u8; 2]; 4], at: Vec2) -> [u8; 2] {
+    let weights = [
+        (1.0 - at.x) * (1.0 - at.y),
+        at.x * (1.0 - at.y),
+        (1.0 - at.x) * at.y,
+        at.x * at.y,
+    ];
+
+    let (mut sum, mut total) = ([0.0f32; 2], 0.0);
+    for (corner, weight) in corners.into_iter().zip(weights) {
+        if !ever_lit(corner) {
+            continue;
+        }
+        sum[0] += corner[0] as f32 * weight;
+        sum[1] += corner[1] as f32 * weight;
+        total += weight;
+    }
+
+    if total <= 0.0 {
+        return NEVER_LIT;
+    }
+    [
+        (sum[0] / total).round() as u8,
+        (sum[1] / total).round() as u8,
+    ]
+}
+
 /// Bytes a chunk's heights, materials and lit grid occupy on the wire: two
 /// per corner height, one per cell of the material grid, two per corner lit
 /// pair. Nothing is compressed — see the module docs on the grid being the
 /// format, and note that delta-coding the heights and run-coding the
 /// materials would take most of this back if the wire ever needs it to.
-pub const PAYLOAD_BYTES: usize = CORNERS * CORNERS * 2 + MATERIAL_COUNT + LIT_BYTES;
+pub const PAYLOAD_BYTES: usize = CORNERS * CORNERS * 2 + CELL_COUNT + LIT_BYTES;
 
 /// Bytes a chunk's lit grid occupies — a pair per corner, unconditionally:
 /// unlike a lake, there is no chunk of ground whose light is not worth
@@ -631,24 +659,23 @@ pub const fn payload_bytes(water: bool, plants: usize) -> usize {
 }
 
 /// Where cell `(ix, iz)` sits in a payload's material grid, or `None` for a
-/// cell the grid does not reach — anything outside `-APRON ..= CELLS - 1 +
-/// APRON` on either axis.
+/// cell the grid does not reach — anything outside `0 .. CELLS` on either
+/// axis.
 ///
-/// Coordinates are the chunk's own, so `(0, 0)` is its lower corner cell and
-/// the apron is at `-1` and [`CELLS`]. Written once here because both ends
-/// index the same grid and neither should be restating the arithmetic.
+/// Coordinates are the chunk's own, so `(0, 0)` is its lower corner cell.
+/// Written once here because both ends index the same grid and neither
+/// should be restating the arithmetic.
 pub const fn material_index(ix: i32, iz: i32) -> Option<usize> {
-    let reach = APRON as i32;
-    let last = CELLS as i32 - 1 + reach;
-    if ix < -reach || ix > last || iz < -reach || iz > last {
+    let last = CELLS as i32 - 1;
+    if ix < 0 || ix > last || iz < 0 || iz > last {
         return None;
     }
-    Some((iz + reach) as usize * MATERIAL_CELLS + (ix + reach) as usize)
+    Some(iz as usize * CELLS + ix as usize)
 }
 
 impl ChunkPayload {
     /// What cell `(ix, iz)` of this chunk is made of, in the chunk's own cell
-    /// coordinates — `None` past the apron. See [`material_index`].
+    /// coordinates — `None` off the grid. See [`material_index`].
     pub fn material(&self, ix: i32, iz: i32) -> Option<Material> {
         material_index(ix, iz).map(|at| self.materials[at])
     }
@@ -687,7 +714,7 @@ impl ChunkPayload {
     pub fn well_formed(&self) -> bool {
         let corners = CORNERS * CORNERS;
         self.heights.len() == corners
-            && self.materials.len() == MATERIAL_COUNT
+            && self.materials.len() == CELL_COUNT
             && self.lit.len() == corners
             && self
                 .water
@@ -745,7 +772,7 @@ impl ChunkPayload {
                 .collect::<Vec<u16>>()
         };
         let (heights, rest) = bytes.split_at(CORNERS * CORNERS * 2);
-        let (materials, rest) = rest.split_at(MATERIAL_COUNT);
+        let (materials, rest) = rest.split_at(CELL_COUNT);
         let (lit, rest) = rest.split_at(LIT_BYTES);
         let (water, plants) = rest.split_at(rest.len() - plants * PLANT_BYTES);
         Some(Self {
@@ -773,9 +800,7 @@ mod tests {
         assert_eq!(CELLS as f32 * CELL_METRES, CHUNK_METRES);
         assert_eq!(CORNERS, 129);
         assert_eq!(CELL_COUNT, 16_384);
-        assert_eq!(MATERIAL_CELLS, 130);
-        assert_eq!(MATERIAL_COUNT, 16_900);
-        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_900 + 129 * 129 * 2);
+        assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_384 + 129 * 129 * 2);
         assert_eq!(WATER_BYTES, 129 * 129 * 2);
         assert_eq!(LIT_BYTES, 129 * 129 * 2);
         assert_eq!(payload_bytes(false, 0), PAYLOAD_BYTES);
@@ -787,28 +812,13 @@ mod tests {
     }
 
     #[test]
-    fn the_apron_reaches_one_cell_and_costs_what_it_says() {
-        // What the overhang is *for* is that a corner of the chunk has four
-        // cells around it and one of them lies outside — so one cell of reach
-        // is the whole requirement, and a second would be carried for nothing.
-        assert_eq!(APRON, 1);
-        assert_eq!(MATERIAL_CELLS, CELLS + 2);
-
-        // And what it costs, said out loud so that widening it is a decision
-        // somebody makes rather than one that happens.
-        assert_eq!(MATERIAL_COUNT - CELL_COUNT, 516);
-    }
-
-    #[test]
     fn a_cell_indexes_to_its_own_place_on_the_material_grid() {
         // Corners first: the lowest cell the grid reaches and the highest.
-        assert_eq!(material_index(-1, -1), Some(0));
+        assert_eq!(material_index(0, 0), Some(0));
         assert_eq!(
-            material_index(CELLS as i32, CELLS as i32),
-            Some(MATERIAL_COUNT - 1)
+            material_index(CELLS as i32 - 1, CELLS as i32 - 1),
+            Some(CELL_COUNT - 1)
         );
-        // The chunk's own first cell sits one row and one column in.
-        assert_eq!(material_index(0, 0), Some(MATERIAL_CELLS + 1));
 
         // Row-major, so a step along x moves one and a step along z moves a
         // whole row. Written as two separate checks because the failure that
@@ -816,26 +826,26 @@ mod tests {
         assert_eq!(material_index(1, 0), material_index(0, 0).map(|at| at + 1));
         assert_eq!(
             material_index(0, 1),
-            material_index(0, 0).map(|at| at + MATERIAL_CELLS)
+            material_index(0, 0).map(|at| at + CELLS)
         );
 
-        // And nothing past the apron, on either axis or either side.
-        assert_eq!(material_index(-2, 0), None);
-        assert_eq!(material_index(0, -2), None);
-        assert_eq!(material_index(CELLS as i32 + 1, 0), None);
-        assert_eq!(material_index(0, CELLS as i32 + 1), None);
+        // And nothing off the grid, on either axis or either side.
+        assert_eq!(material_index(-1, 0), None);
+        assert_eq!(material_index(0, -1), None);
+        assert_eq!(material_index(CELLS as i32, 0), None);
+        assert_eq!(material_index(0, CELLS as i32), None);
 
         // Every place on the grid is some cell's, and no two share one.
         let mut seen = std::collections::BTreeSet::new();
-        for iz in -(APRON as i32)..=(CELLS as i32) {
-            for ix in -(APRON as i32)..=(CELLS as i32) {
+        for iz in 0..CELLS as i32 {
+            for ix in 0..CELLS as i32 {
                 assert!(
                     seen.insert(material_index(ix, iz).expect("a cell on the grid")),
                     "({ix}, {iz}) landed on a place already taken"
                 );
             }
         }
-        assert_eq!(seen.len(), MATERIAL_COUNT);
+        assert_eq!(seen.len(), CELL_COUNT);
     }
 
     #[test]
@@ -941,7 +951,7 @@ mod tests {
             heights: (0..CORNERS * CORNERS)
                 .map(|i| (i * 7 % 65_535) as u16)
                 .collect(),
-            materials: (0..MATERIAL_COUNT)
+            materials: (0..CELL_COUNT)
                 .map(|i| Material::from_byte((i % PALETTE.len()) as u8).expect("a material"))
                 .collect(),
             lit: (0..CORNERS * CORNERS)
@@ -1013,7 +1023,7 @@ mod tests {
         // asked asymmetrically, because a transpose would pass a square ask.
         assert_eq!(wet.water_level(3, 2), Some(quantize(31.0)));
 
-        // Nothing past the grid: corners have no apron.
+        // Nothing past the grid.
         assert_eq!(wet.water_level(-1, 0), None);
         assert_eq!(wet.water_level(0, CORNERS as i32), None);
     }
@@ -1057,6 +1067,47 @@ mod tests {
         assert!(!strayed.well_formed());
         strayed.plants[0].at = Vec2::new(1.0, -0.5);
         assert!(!strayed.well_formed());
+    }
+
+    #[test]
+    fn a_cell_is_lit_by_the_corners_that_see_the_sun() {
+        // The whole point of [`lit_across`] over a plain bilinear: the
+        // never-lit sentinel is not a phase, and weighing it as one is what
+        // printed a cliff foot's shade over the ground beside it.
+        let day = LIT_ALL_DAY;
+        let middle = Vec2::splat(0.5);
+
+        assert_eq!(lit_across([day; 4], middle), day, "nothing in the way");
+        assert_eq!(
+            lit_across([NEVER_LIT; 4], middle),
+            NEVER_LIT,
+            "no corner to err toward the light with"
+        );
+        assert_eq!(
+            lit_across([day, day, day, NEVER_LIT], middle),
+            day,
+            "three corners see the whole day; the fourth cannot shorten it"
+        );
+        assert_eq!(
+            lit_across([day, day, NEVER_LIT, NEVER_LIT], middle),
+            day,
+            "and two cannot turn the day around into ground that is never lit"
+        );
+
+        // A pair that runs backwards without being the sentinel says the same
+        // thing, and is left out on the same terms.
+        assert!(!ever_lit([200, 100]));
+        assert_eq!(lit_across([day, day, day, [200, 100]], middle), day);
+
+        // Corners that disagree honestly are still met in the middle, and the
+        // weights still favour the corner asked nearest.
+        let late = [128u8, 192];
+        assert_eq!(lit_across([day, late, day, late], middle), [96, 192]);
+        assert_eq!(
+            lit_across([day, late, day, late], Vec2::new(1.0, 0.5)),
+            late,
+            "asked at the eastern edge, the eastern corners answer alone"
+        );
     }
 
     #[test]
@@ -1105,7 +1156,7 @@ mod tests {
         for water in [false, true] {
             let mut bytes = Vec::new();
             a_payload(water, 2).put(&mut bytes);
-            bytes[CORNERS * CORNERS * 2 + MATERIAL_COUNT - 1] = 0xFF;
+            bytes[CORNERS * CORNERS * 2 + CELL_COUNT - 1] = 0xFF;
             assert_eq!(ChunkPayload::take(&bytes, water, 2), None);
         }
     }

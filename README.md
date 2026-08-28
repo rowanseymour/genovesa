@@ -81,15 +81,17 @@ cargo run --release --bin mapgen -- grid
 ## Debugging
 
 `--debug <port>` keeps a run up on a socket taking the console's own lines,
-plus the ones a keyboard never needed — `shot`, `press`, `click`, `goto`,
-`quit`. `help` lists the lot, both sides of the wire.
+plus the ones a keyboard never needed — `shot`, `press`, `click`, `quit`.
+`help` lists the lot, both sides of the wire. The console answers as well as
+commands: `world seed`, `client position` and `client zoom` say what a run is
+doing, which is how a driver reads what the debug overlay only draws.
 
 ```bash
 cargo run -- --seed 7 --debug 7777 --headless
 ```
 
 ```bash
-printf 'goto 98 -317\nzoom 120\nshot near.png\nquit\n' | nc 127.0.0.1 7777
+printf 'goto 98 -317\nclient zoom 120\nshot near.png\nquit\n' | nc 127.0.0.1 7777
 ```
 
 **Every line is answered when its work is done, and not before.** A line that
@@ -136,17 +138,27 @@ cargo test
 ```
 
 Two things the tests cannot see are worth checking after moving anything
-between crates: Bevy must appear nowhere below the game, and the game must not
-depend on `world` at all.
+between crates. Bevy must appear nowhere below the game:
 
 ```bash
 cargo tree --workspace --invert bevy
 ```
 
+And the game must not reach the generator. It does not depend on `world`,
+which the dependency graph shows — but the graph is the easy half, since
+`world` sits behind `server` and a re-export would put its vocabulary in the
+client's hands with nothing in the tree to say so. Both, then:
+
 ```bash
 cargo tree -p game --depth 1
 ```
 
-## Licence
+```bash
+grep -rn '^pub use world' crates/server/src/
+```
 
-GPL-3.0 — see [LICENSE](LICENSE).
+Neither is the whole rule. A public signature in `server` that *names* a
+`world` type hands the generator over just as a re-export does, and no grep
+and no dependency graph will say so — that half is a thing to notice while
+writing a `pub fn`, and is written down where it would be broken, at the head
+of [`crates/server/src/lib.rs`](crates/server/src/lib.rs).

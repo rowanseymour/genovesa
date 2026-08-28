@@ -39,6 +39,7 @@ use crate::models::above;
 use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
+use crate::told::{eased_onto, Told};
 use crate::{eased, matte, model_mesh, AppState, Helm};
 
 /// The ship, as a file. Built from `assets-src/models/boat/boat.blend` by
@@ -900,15 +901,28 @@ pub struct Vessel;
 type Hulls<'w, 's, F> =
     Query<'w, 's, (Option<&'static Boat>, &'static Transform), (With<Vessel>, F)>;
 
-/// Where the server last put a hull nobody here is steering, and how it was
-/// pointed — eased towards, like a marker; [`moor`] is what does the easing
-/// and keeps the hull riding the swell meanwhile. Present on every hull but
-/// the one this player has the helm of, whose transform belongs to the
-/// sailing systems.
-#[derive(Component, Clone, Copy)]
-struct ToldHull {
-    position: Vec2,
-    heading: f32,
+/// How quickly a hull nobody here is steering closes on where the server last
+/// put it, in e-foldings per second — see [`crate::told`]. Tellings come as
+/// often as its helmsman's client reports, which is ten a second for a hull
+/// under way, and the easing is what turns those steps back into sailing.
+///
+/// One number for the place and the bearing alike, unlike a beast's: a hull
+/// under way is pointed where it is going, so a swing that lagged the slide
+/// would draw every other player crabbing.
+const MOORED: f32 = 8.0;
+
+/// Where the server last put a hull nobody here is steering, as the one
+/// component every told thing on screen carries — see [`crate::told::Told`],
+/// and [`moor`], which does the easing and keeps the hull riding the swell
+/// meanwhile. Present on every hull but the one this player has the helm of,
+/// whose transform belongs to the sailing systems.
+fn moored_at(position: Vec2, heading: f32) -> Told {
+    Told {
+        at: position,
+        facing: Some(heading),
+        closing: MOORED,
+        swinging: MOORED,
+    }
 }
 
 /// The boats of the world, as this client was told them: the wire's ids to
@@ -962,17 +976,16 @@ impl Fleet {
         hull.remove::<Boat>();
         if let Some(pose) = pose {
             let forward = pose.forward();
-            hull.insert(ToldHull {
-                position: pose.translation.xz(),
-                heading: f32::atan2(-forward.x, -forward.z),
-            });
+            hull.insert(moored_at(
+                pose.translation.xz(),
+                f32::atan2(-forward.x, -forward.z),
+            ));
         }
     }
 
     /// A word about a boat: the first spawns its hull, every later one
-    /// re-moors it or changes whose hands are on the helm. Called by the
-    /// session's [`crate::net::receive`], which is where everything a server
-    /// says lands.
+    /// re-moors it or changes whose hands are on the helm. Called by
+    /// [`take_the_hulls`], which is where a [`crate::net::HullTold`] lands.
     ///
     /// The one word that changes this client's own life is `occupant`
     /// becoming — or no longer being — *us*: boarding is asked of the server
@@ -1069,7 +1082,7 @@ impl Fleet {
                 self.helmed = Some(id);
                 let boat = Boat::of(kind);
                 let helm = Transform::from_translation(boat.helm());
-                commands.entity(hull).remove::<ToldHull>().insert((
+                commands.entity(hull).remove::<Told>().insert((
                     boat,
                     Transform::from_xyz(position.x, 0.0, position.y)
                         .with_rotation(Quat::from_rotation_y(heading)),
@@ -1098,7 +1111,7 @@ impl Fleet {
 
         // Somebody else's, or nobody's: moored to wherever the server said,
         // which [`moor`] eases it towards.
-        commands.entity(hull).insert(ToldHull { position, heading });
+        commands.entity(hull).insert(moored_at(position, heading));
     }
 
     /// The entity of the hull we hold the helm of, if any — see
@@ -1218,9 +1231,9 @@ fn stand_off(commands: &mut Commands, players: &crate::player::Players, lying: &
     ));
 }
 
-/// What spawning a hull needs in hand — bundled because the telling arrives
-/// inside [`crate::net::receive`], which is already juggling the markers'
-/// own assets.
+/// What spawning a hull needs in hand — bundled because a hull is spawned
+/// from a telling, and [`take_the_hulls`] cannot hold two asset stores as
+/// separate parameters.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct HullKit<'w, 's> {
     pub(crate) meshes: ResMut<'w, Assets<Mesh>>,
@@ -1251,7 +1264,12 @@ impl Plugin for BoatPlugin {
         // The conditions the hull floats on, here as well as in the terrain
         // plugin: resources are global and initialising one twice is free,
         // and the boat's own tests run without any terrain at all.
-        app.init_resource::<sea::SeaConditions>()
+        // The words this plugin listens for, declared here as its resources
+        // are and for the same reason: registering one twice is free, and a
+        // module's own tests run it without the session that writes them.
+        app.add_message::<crate::net::HullTold>()
+            .add_message::<crate::net::HullGone>()
+            .init_resource::<sea::SeaConditions>()
             .init_resource::<Fleet>()
             // Cleared with the world it described: the next world's hulls
             // are new tellings, and a fleet carried over would pin their
@@ -1263,6 +1281,16 @@ impl Plugin for BoatPlugin {
             .add_systems(
                 OnEnter(AppState::InWorld),
                 launch.run_if(not(resource_exists::<crate::net::Online>)),
+            )
+            // What the world says about its boats, before anything that
+            // draws one: a hull told this frame is rigged, moored and ridden
+            // in the same one.
+            .add_systems(
+                Update,
+                (take_the_hulls, lose_the_hulls)
+                    .chain()
+                    .in_set(crate::net::Wire::Read)
+                    .run_if(resource_exists::<crate::net::Online>),
             )
             .add_systems(
                 Update,
@@ -1302,6 +1330,7 @@ impl Plugin for BoatPlugin {
                     cut_the_water,
                 )
                     .chain()
+                    .after(lose_the_hulls)
                     .run_if(in_state(AppState::InWorld)),
             );
     }
@@ -1351,7 +1380,7 @@ fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
 
 /// One hull, meshes and all, at a pose — everything a boat is *before*
 /// anyone is aboard: no [`Boat`], because the sailing systems belong to
-/// whoever holds the helm, and no [`ToldHull`], because who moves it is the
+/// whoever holds the helm, and no [`Told`], because who moves it is the
 /// caller's decision. `named` is its wire id, for the hulls a server told
 /// us about.
 ///
@@ -1580,30 +1609,77 @@ fn cut_the_water(
 /// anchor or under somebody else's hand having no business doing either
 /// this side of the wire. The easing pace is the markers' own, tellings
 /// arriving on the same reporting beat.
+/// The hulls this frame moors: every told one, and no other told thing.
+///
+/// `Vessel` and not merely `Without<Boat>`, which is what this was while a
+/// hull's telling was a component of its own: a [`Told`] is what everything
+/// on screen the wire moves now carries, so the marker another player stands
+/// as and the beasts in the water would both answer a query without it.
+type Moorings<'w, 's> =
+    Query<'w, 's, (&'static Told, &'static mut Transform), (With<Vessel>, Without<Boat>)>;
+
 fn moor(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
     sea: Res<sea::SeaConditions>,
-    mut hulls: Query<(&ToldHull, &mut Transform), Without<Boat>>,
+    mut hulls: Moorings,
 ) {
-    let elapsed = time.elapsed_secs_wrapped();
-    let t = eased(8.0, time.delta_secs());
+    let (dt, elapsed) = (time.delta_secs(), time.elapsed_secs_wrapped());
 
     for (told, mut transform) in &mut hulls {
-        let at = transform.translation.xz();
-        let eased_to = at.lerp(told.position, t);
-        transform.translation.x = eased_to.x;
-        transform.translation.z = eased_to.y;
-        if let Some(height) = ground
-            .as_ref()
-            .and_then(|g| g.height(eased_to.x, eased_to.y))
-        {
-            let water = sea.water_over(ground.as_deref(), eased_to, elapsed);
-            transform.translation.y = height.max(water);
+        let at = eased_onto(&mut transform, told, dt);
+        if let Some(surface) = sea.surface_over(ground.as_deref(), at, elapsed) {
+            transform.translation.y = surface;
         }
-        transform.rotation = transform
-            .rotation
-            .slerp(Quat::from_rotation_y(told.heading), t);
+    }
+}
+
+/// Takes what the server says about the boats of the world.
+///
+/// One word is both the introduction and every change after — see
+/// [`Fleet::told`], which is where a first telling spawns a hull and a later
+/// one re-moors it or changes whose hands are on the helm.
+pub(crate) fn take_the_hulls(
+    mut commands: Commands,
+    mut kit: HullKit,
+    mut fleet: ResMut<Fleet>,
+    online: Res<crate::net::Online>,
+    players: crate::player::Players,
+    poses: Query<&Transform, With<Vessel>>,
+    mut told: MessageReader<crate::net::HullTold>,
+) {
+    for hull in told.read() {
+        fleet.told(
+            &mut commands,
+            &mut kit,
+            &players,
+            &poses,
+            online.connection.id,
+            hull.id,
+            hull.kind,
+            hull.position,
+            hull.heading,
+            hull.occupant,
+        );
+    }
+}
+
+/// Takes the hulls the world has taken back — see [`Fleet::gone`].
+///
+/// After every telling of this frame rather than interleaved with them, which
+/// is the wire's own order and not a convenience: a boat's going is always
+/// said *after* the seatings that go with it, so that no client hears a hull
+/// vanish while it still believes somebody is aboard. Ids are retired with
+/// their hulls, so there is no telling about a boat this could run ahead of.
+pub(crate) fn lose_the_hulls(
+    mut commands: Commands,
+    mut fleet: ResMut<Fleet>,
+    players: crate::player::Players,
+    poses: Query<&Transform, With<Vessel>>,
+    mut gone: MessageReader<crate::net::HullGone>,
+) {
+    for hull in gone.read() {
+        fleet.gone(&mut commands, &players, &poses, hull.id);
     }
 }
 
@@ -2224,7 +2300,7 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
 ///
 /// Heel is wholly a thing the eye gets: the keel lies along the forward axis
 /// the hull rolls about, so it moves nothing [`grounding`] probes along.
-fn steer(
+pub(crate) fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     time: Res<Time>,

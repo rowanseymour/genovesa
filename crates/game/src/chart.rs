@@ -187,8 +187,8 @@ impl Chart {
     }
 
     /// Takes down what the world says about a claimed island — see
-    /// [`crate::net::receive`], which is the only caller. A cairn is told
-    /// again whenever its word changes, so this overwrites wholesale.
+    /// [`letter_the_sheet`], which is the only caller. A cairn is told again
+    /// whenever its word changes, so this overwrites wholesale.
     pub(crate) fn claimed(
         &mut self,
         island: IVec2,
@@ -250,9 +250,8 @@ impl Chart {
         self.survey.within(window.min, window.max)
     }
 
-    /// Records what the world says one chunk holds — see
-    /// [`crate::net::receive`], which is the only caller and the only way ink
-    /// reaches this sheet.
+    /// Records what the world says one chunk holds — see [`ink_the_coast`],
+    /// which is the only caller and the only way ink reaches this sheet.
     pub(crate) fn record(&mut self, chunk: IVec2, found: Soundings) {
         self.survey.record(chunk, found);
     }
@@ -572,7 +571,9 @@ impl Plugin for ChartPlugin {
     fn build(&self, app: &mut App) {
         // The bindings are shared with the settings screen and the camera,
         // whichever is built first winning — see `MapCameraPlugin`.
-        app.init_resource::<ChartView>()
+        app.add_message::<crate::net::CoastSurveyed>()
+            .add_message::<crate::net::CairnSeen>()
+            .init_resource::<ChartView>()
             .init_resource::<KeyBindings>()
             // Normally `UiPlugin`'s, initialised the same way for the tests.
             .init_resource::<UiScale>()
@@ -580,6 +581,15 @@ impl Plugin for ChartPlugin {
             .add_systems(OnExit(AppState::InWorld), stow_the_chart)
             .add_systems(OnExit(Helm::Chart), roll_up)
             .add_systems(Update, chart_key.run_if(in_state(AppState::InWorld)))
+            // What the world says is taken down whether or not the sheet is
+            // out: a chart is a record of a voyage, and a voyage does not
+            // stop being sailed because nobody is looking at the paper.
+            .add_systems(
+                Update,
+                (ink_the_coast, letter_the_sheet)
+                    .in_set(crate::net::Wire::Read)
+                    .run_if(resource_exists::<Chart>),
+            )
             .add_systems(
                 Update,
                 (
@@ -600,6 +610,48 @@ impl Plugin for ChartPlugin {
                     .chain()
                     .run_if(in_state(Helm::Chart).and_then(resource_exists::<Chart>)),
             );
+    }
+}
+
+/// Takes the coast the world says this player has surveyed.
+///
+/// Nothing is checked: a mark is two bytes and cannot be non-finite, and what
+/// a coast *means* is the wire's own arithmetic — see [`protocol::survey`] —
+/// rather than something a client re-derives and could disagree about.
+///
+/// Drained rather than read, for the reason [`crate::terrain`]'s answers are:
+/// a voyage's worth of ink arrives at once and the sheet wants to own it.
+/// This is the sole reader of the word.
+pub(crate) fn ink_the_coast(
+    mut chart: ResMut<Chart>,
+    mut surveyed: ResMut<Messages<crate::net::CoastSurveyed>>,
+) {
+    for batch in surveyed.drain() {
+        for (chunk, soundings) in batch.found {
+            chart.record(chunk, soundings);
+        }
+    }
+}
+
+/// Letters the sheet from what the world says about a cairn.
+///
+/// The other half of the same word is [`crate::cairn`], which stands the
+/// stone in the world — two modules that owe each other nothing hearing one
+/// sentence, which is why it is a message and not a call. What an island is
+/// *called* is the world's to say: a name rides with the claim it was written
+/// on, so this is the only way lettering reaches the chart.
+pub(crate) fn letter_the_sheet(
+    mut chart: ResMut<Chart>,
+    mut seen: MessageReader<crate::net::CairnSeen>,
+) {
+    for cairn in seen.read() {
+        chart.claimed(
+            cairn.island,
+            cairn.at,
+            cairn.covers,
+            &cairn.name,
+            cairn.yours,
+        );
     }
 }
 

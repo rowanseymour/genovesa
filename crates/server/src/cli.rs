@@ -4,12 +4,14 @@ use std::path::PathBuf;
 
 use protocol::DEFAULT_PORT;
 
-use crate::{random_seed, WorldConfig};
+use crate::random_seed;
 
 /// What the command line asked for.
 pub struct Args {
     pub port: u16,
-    pub config: WorldConfig,
+    /// The world to host. A seed is a world — what a generator makes of one
+    /// is not this binary's business.
+    pub seed: u32,
     /// Whether `--seed` was actually said, as opposed to the random one
     /// every run fills in — what lets the binary refuse a seed aimed at a
     /// world that already has one.
@@ -38,8 +40,10 @@ Options:
                  process]
 
 The world is generated here and handed out a chunk at a time. Clients need
-know nothing about it — not the seed, not the layout — which is why the seed
-is named on this side of the wire and nowhere else.
+know nothing about it — not the seed, not the layout — so nothing they are
+sent carries either, and the ground arrives already made. A client that wants
+the number can ask for it: the console's `world seed` answers, that being a
+debugging question rather than something a client draws with.
 
 A day turns in {day:.0} seconds, and the hour is the server's: every client in
 the world is under the same sun, however long the world has been up. Which
@@ -64,9 +68,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
     // as it starts is what makes that world askable for again.
     let mut args = Args {
         port: DEFAULT_PORT,
-        config: WorldConfig {
-            seed: random_seed(),
-        },
+        seed: random_seed(),
         seed_chosen: false,
         world: None,
     };
@@ -83,7 +85,7 @@ pub fn parse(argv: Vec<String>) -> Result<Args, String> {
                     .map_err(|_| format!("`{value}` is not a port"))?;
             }
             "--seed" => {
-                args.config.seed = value
+                args.seed = value
                     .parse()
                     .map_err(|_| format!("`{value}` is not a seed"))?;
                 args.seed_chosen = true;
@@ -111,14 +113,14 @@ mod tests {
         // Told nothing, two runs host different worlds rather than the same
         // one forever.
         let again = parse_args("").expect("should parse");
-        assert_ne!(args.config.seed, again.config.seed);
+        assert_ne!(args.seed, again.seed);
     }
 
     #[test]
     fn takes_a_port_and_a_seed() {
         let args = parse_args("--port 4000 --seed 7").expect("should parse");
         assert_eq!(args.port, 4000);
-        assert_eq!(args.config.seed, 7);
+        assert_eq!(args.seed, 7);
         assert!(args.seed_chosen, "a seed said out loud went unnoticed");
         assert!(
             !parse_args("").expect("should parse").seed_chosen,

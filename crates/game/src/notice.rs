@@ -12,11 +12,10 @@ use bevy::text::{FontSize, FontSource, FontStyle};
 
 use crate::AppState;
 
-/// What the world just said. Inserting it — see [`crate::net::receive`], the
-/// only writer — is the whole of asking for it to be shown; a new one takes
-/// the line over from whatever was fading there. Showing, holding and fading
-/// are this module's business, and it removes the resource when the line has
-/// gone.
+/// What the world just said. Inserting it — see [`hear`], the only writer —
+/// is the whole of asking for it to be shown; a new one takes the line over
+/// from whatever was fading there. Showing, holding and fading are this
+/// module's business, and it removes the resource when the line has gone.
 #[derive(Resource)]
 pub struct Notice {
     text: String,
@@ -56,11 +55,24 @@ pub struct NoticePlugin;
 
 impl Plugin for NoticePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            speak.run_if(in_state(AppState::InWorld).and_then(resource_exists::<Notice>)),
-        )
-        .add_systems(OnExit(AppState::InWorld), hush);
+        app.add_message::<crate::net::Uncharted>()
+            .add_systems(Update, hear.in_set(crate::net::Wire::Read))
+            .add_systems(
+                Update,
+                speak.run_if(in_state(AppState::InWorld).and_then(resource_exists::<Notice>)),
+            )
+            .add_systems(OnExit(AppState::InWorld), hush);
+    }
+}
+
+/// Turns the world's word into the line it means. Today the vocabulary is one
+/// word long; a second speaker would earn `Notice::new` a second caller, not
+/// a queue — the newest word takes the line over, as [`Notice`] says.
+fn hear(mut commands: Commands, mut heard: MessageReader<crate::net::Uncharted>) {
+    if heard.read().next().is_some() {
+        commands.insert_resource(Notice::new(
+            "There is more coast here than you have charted",
+        ));
     }
 }
 

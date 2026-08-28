@@ -43,6 +43,7 @@ use protocol::{BeastId, BeastKind};
 use crate::models::above;
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
+use crate::told::{eased_onto, Told};
 use crate::{between, eased, matte, signed, unit, AppState, Size};
 
 /// The shark, rigged and with its one clip in it. The other kinds are rigid
@@ -192,9 +193,8 @@ pub struct Beasts {
 
 impl Beasts {
     /// A word about a beast: the first one spawns it, every later one only
-    /// moves the goalposts it eases towards. Called by the session's
-    /// [`crate::net::receive`], which is where everything a server says
-    /// lands.
+    /// moves the goalposts it eases towards. Called by [`take_the_beasts`],
+    /// which is where a [`crate::net::BeastSeen`] lands.
     pub fn seen(
         &mut self,
         commands: &mut Commands,
@@ -205,15 +205,21 @@ impl Beasts {
         surfaced: bool,
     ) {
         let told = Told {
-            target: position,
-            velocity,
-            surfaced,
+            at: position,
+            // A beast is pointed where it is going: its bearing is never sent
+            // and would be a second thing to keep in step with the velocity
+            // if it were. A standstill names no direction and leaves the body
+            // pointed where it was.
+            facing: crate::told::heading_of(velocity),
+            closing: SMOOTHING,
+            swinging: TURNING,
         };
+        let swimming = Swimming { velocity, surfaced };
         if let Some(&beast) = self.seen.get(&id) {
             // Overwriting is the whole of the update, exactly as it is for a
             // marker — where the server last put a beast is all this side
             // knows about it.
-            commands.entity(beast).insert(told);
+            commands.entity(beast).insert((told, swimming));
             return;
         }
         let beast = commands
@@ -221,6 +227,7 @@ impl Beasts {
                 Name::new(id.to_string()),
                 Beast { kind, seed: id.0 },
                 told,
+                swimming,
                 // At the depth the first telling implies rather than eased
                 // into it: a beast heard of for the first time is simply
                 // where it is, and the easing below is for a beast that
@@ -247,8 +254,10 @@ impl Beasts {
 }
 
 /// One beast as this client draws it: the facts that never change between
-/// tellings. Where it is heading lives in [`Told`], overwritten wholesale by
-/// every word from the server.
+/// tellings. Where it is and which way it is pointed live in the [`Told`]
+/// every told thing on screen carries, and what it is *doing* in the
+/// [`Swimming`] beside it — both overwritten wholesale by every word from the
+/// server.
 #[derive(Component)]
 struct Beast {
     kind: BeastKind,
@@ -259,11 +268,14 @@ struct Beast {
     seed: u32,
 }
 
-/// Where the server last put a beast, where it said it was going, and whether
-/// it said the animal is showing itself.
+/// What the server said a beast is doing, as against where it is: the pace
+/// and set of the water going by, and whether the animal is showing itself.
+///
+/// The velocity is here as well as being read into [`Told::facing`] because
+/// two things want the *speed* rather than the bearing — the pitch of a leap,
+/// and how fast a tail works — and neither can get it back out of a yaw.
 #[derive(Component, Clone, Copy)]
-struct Told {
-    target: Vec2,
+struct Swimming {
     velocity: Vec2,
     surfaced: bool,
 }
@@ -325,21 +337,64 @@ pub struct BeastsPlugin;
 
 impl Plugin for BeastsPlugin {
     fn build(&self, app: &mut App) {
-        // Also initialised by NetPlugin, whose `receive` writes into it;
-        // initialising a resource twice is free, and each plugin's tests run
-        // it alone.
-        app.init_resource::<Beasts>()
+        app.add_message::<crate::net::BeastSeen>()
+            .add_message::<crate::net::BeastGone>()
+            .init_resource::<Beasts>()
             .init_resource::<SeaConditions>()
             .add_systems(Startup, school)
+            .add_systems(
+                Update,
+                // Heard before anything draws one, so a beast told this frame
+                // is in the water this frame. The two are chained on the
+                // wire's own order: a going is always said after the last
+                // telling about the animal that is going.
+                (take_the_beasts, lose_the_beasts)
+                    .chain()
+                    .in_set(crate::net::Wire::Read),
+            )
             .add_systems(
                 Update,
                 // Nothing outside a match has beasts in it. Inside one, none
                 // of this is the player's hands, so none of it pauses: the
                 // sharks are the server's, and the server does not stop
                 // swimming them because somebody opened a menu.
-                (dress, conduct, glide, porpoise, swish).run_if(in_state(AppState::InWorld)),
+                (dress, conduct, glide, porpoise, swish)
+                    .after(lose_the_beasts)
+                    .run_if(in_state(AppState::InWorld)),
             )
             .add_systems(OnExit(AppState::InWorld), forget);
+    }
+}
+
+/// Takes the beasts the server says are in these waters — see
+/// [`Beasts::seen`], where one word is both the introduction and every
+/// movement after it.
+fn take_the_beasts(
+    mut commands: Commands,
+    mut beasts: ResMut<Beasts>,
+    mut told: MessageReader<crate::net::BeastSeen>,
+) {
+    for beast in told.read() {
+        beasts.seen(
+            &mut commands,
+            beast.id,
+            beast.kind,
+            beast.position,
+            beast.velocity,
+            beast.surfaced,
+        );
+    }
+}
+
+/// Takes away the ones it has stopped minding — see [`Beasts::gone`]. Not a
+/// death; the sea is simply emptier by one.
+fn lose_the_beasts(
+    mut commands: Commands,
+    mut beasts: ResMut<Beasts>,
+    mut gone: MessageReader<crate::net::BeastGone>,
+) {
+    for beast in gone.read() {
+        beasts.gone(&mut commands, beast.id);
     }
 }
 
@@ -530,15 +585,14 @@ fn glide(
     time: Res<Time>,
     ground: Option<Res<Ground>>,
     sea: Res<SeaConditions>,
-    mut beasts: Query<(&Beast, &Told, &mut Sounding, &mut Transform)>,
+    mut beasts: Query<(&Beast, &Told, &Swimming, &mut Sounding, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs_wrapped();
 
-    for (beast, told, mut sounding, mut transform) in &mut beasts {
-        let at = Vec2::new(transform.translation.x, transform.translation.z);
-        let at = at.lerp(told.target, eased(SMOOTHING, dt));
-        sounding.0 += (f32::from(!told.surfaced) - sounding.0) * eased(DIVING, dt);
+    for (beast, told, swimming, mut sounding, mut transform) in &mut beasts {
+        let at = eased_onto(&mut transform, told, dt);
+        sounding.0 += (f32::from(!swimming.surfaced) - sounding.0) * eased(DIVING, dt);
 
         let ride = match beast.kind {
             // The water surface here, swell and all: the ride is measured
@@ -562,12 +616,7 @@ fn glide(
             BeastKind::Dolphins | BeastKind::Whale => 0.0,
         };
 
-        transform.translation = Vec3::new(at.x, ride, at.y);
-        if let Ok(heading) = Dir3::new(Vec3::new(told.velocity.x, 0.0, told.velocity.y)) {
-            let onto = Transform::default().looking_to(heading, Vec3::Y).rotation;
-            let swing = transform.rotation.slerp(onto, eased(TURNING, dt));
-            transform.rotation = swing;
-        }
+        transform.translation.y = ride;
     }
 }
 
@@ -589,12 +638,12 @@ fn porpoise(
     time: Res<Time>,
     ground: Option<Res<Ground>>,
     sea: Res<SeaConditions>,
-    beasts: Query<(&Told, &Sounding, &Transform), With<Beast>>,
+    beasts: Query<(&Swimming, &Sounding, &Transform), With<Beast>>,
     mut members: Query<(&Porpoising, &ChildOf, &mut Transform), Without<Beast>>,
 ) {
     let elapsed = time.elapsed_secs_wrapped();
     for (swimming, of, mut transform) in &mut members {
-        let Ok((told, sounding, carrier)) = beasts.get(of.parent()) else {
+        let Ok((beast, sounding, carrier)) = beasts.get(of.parent()) else {
             continue;
         };
         let (at, water) = sea.under_station(ground.as_deref(), carrier, &transform, elapsed);
@@ -603,7 +652,7 @@ fn porpoise(
         let leap = swimming.leap * (1.0 - sounding.0);
         let riding = water - swimming.cruise + leap * rise;
         transform.translation.y = sunk(ground.as_deref(), at.xz(), riding, sounding.0);
-        let pitch = (leap * TAU / swimming.period * run).atan2(told.velocity.length());
+        let pitch = (leap * TAU / swimming.period * run).atan2(beast.velocity.length());
         transform.rotation = Quat::from_rotation_x(pitch);
     }
 }
@@ -637,15 +686,15 @@ fn sunk(ground: Option<&Ground>, at: Vec2, riding: f32, sounding: f32) -> f32 {
 /// see the module's opening for why that is enough for a tail.
 fn swish(
     swim: Res<Swim>,
-    tellings: Query<&Told>,
+    tellings: Query<&Swimming>,
     mut swimming: Query<(&Swishing, &mut AnimationPlayer)>,
 ) {
     for (Swishing(beast), mut player) in &mut swimming {
-        let Ok(told) = tellings.get(*beast) else {
+        let Ok(swimming) = tellings.get(*beast) else {
             continue;
         };
         if let Some(playing) = player.animation_mut(swim.node) {
-            playing.set_speed(told.velocity.length() / SWISH_PACE);
+            playing.set_speed(swimming.velocity.length() / SWISH_PACE);
         }
     }
 }
@@ -893,9 +942,9 @@ mod tests {
 
     fn beasts_afoot(app: &mut App) -> Vec<(Vec2, Vec2)> {
         app.world_mut()
-            .query::<&Told>()
+            .query::<(&Told, &Swimming)>()
             .iter(app.world())
-            .map(|told| (told.target, told.velocity))
+            .map(|(told, swimming)| (told.at, swimming.velocity))
             .collect()
     }
 

@@ -30,9 +30,7 @@
 //! continuous play, so "infinite-ish" is a measurement rather than a hope.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, UVec2, Vec2, Vec3};
 use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH};
@@ -40,8 +38,8 @@ use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH};
 use crate::noise::smoothstep;
 use crate::sunlight::Sunlight;
 use crate::terrain::{
-    cell_materials, corner_heights, corner_lit, corner_water, normal_at, working_heights,
-    MapConfig, TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
+    cell_materials, corner_heights, corner_lit, corner_water, normal_at, MapConfig,
+    TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
 };
 
 pub use protocol::ground::{chunk_at, CHUNK_METRES};
@@ -279,34 +277,6 @@ impl Default for WorldConfig {
     fn default() -> Self {
         Self { seed: 20_040_112 }
     }
-}
-
-/// The largest seed anything here hands out or takes typed in. Nine digits
-/// rather than the whole of a `u32`, because such a seed is read off a screen,
-/// written down and typed back in, and a tenth digit buys nothing worth that.
-/// A seed named outright — `--seed` — may still be any `u32`: every one of
-/// them is a world, and refusing the wide ones would only be rude.
-pub const MAX_SEED: u32 = 999_999_999;
-
-/// A seed for whoever did not choose one, off the clock. Nothing here wants
-/// randomness that would stand up to being bet on — only that two runs a
-/// moment apart land in different worlds.
-///
-/// The count is what makes that true of two draws in the same *run*, whatever
-/// the clock underneath is worth: not every platform's has nanoseconds in it,
-/// and a coarse one would otherwise hand the same world to a menu button
-/// pressed twice, or to a test that asked for two. Counting into the seed
-/// rather than mixing into it keeps successive draws different even after the
-/// reduction below, which mixing cannot promise.
-pub fn random_seed() -> u32 {
-    static DRAWN: AtomicU32 = AtomicU32::new(0);
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.subsec_nanos() ^ since.as_secs() as u32)
-        .unwrap_or(0);
-    let drawn = DRAWN.fetch_add(1, Ordering::Relaxed);
-    nanos.wrapping_add(drawn) % (MAX_SEED + 1)
 }
 
 /// One island's place in the world, before any terrain exists: where it
@@ -873,14 +843,13 @@ impl Archipelago {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
 
-        let working = working_heights(base, |wx, wz| island.height(wx, wz));
-        let heights = corner_heights(&working);
+        let heights = corner_heights(base, |wx, wz| island.height(wx, wz));
         if heights.iter().all(|h| *h == -OCEAN_DEPTH) {
             return None;
         }
 
         Some(ChunkPayload {
-            materials: cell_materials(base, &working, |wx, wz, height, normal| {
+            materials: cell_materials(base, &heights, |wx, wz, height, normal| {
                 island.material(wx, wz, height, normal)
             }),
             heights: heights.iter().copied().map(quantize).collect(),
@@ -908,7 +877,7 @@ impl Archipelago {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
 
-        let heights = corner_heights(&working_heights(base, |wx, wz| island.height(wx, wz)));
+        let heights = corner_heights(base, |wx, wz| island.height(wx, wz));
         if heights.iter().all(|h| *h == -OCEAN_DEPTH) {
             return None;
         }
@@ -996,18 +965,6 @@ mod tests {
         let (a, b, c) = (world(99), world(99), world(100));
         assert_eq!(specs(&a), specs(&b));
         assert_ne!(specs(&a), specs(&c), "two seeds drew the same ocean");
-    }
-
-    #[test]
-    fn an_unchosen_seed_is_a_different_world_every_time() {
-        let drawn: Vec<u32> = (0..8).map(|_| random_seed()).collect();
-        for (i, seed) in drawn.iter().enumerate() {
-            assert!(*seed <= MAX_SEED, "{seed} is wider than a seed is written");
-            assert!(
-                !drawn[i + 1..].contains(seed),
-                "two draws landed in the same world"
-            );
-        }
     }
 
     #[test]
@@ -1446,7 +1403,7 @@ mod tests {
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0x811F_02CF_E62B_C2B9, "the ground changed");
         assert_eq!(
-            sent, 0x98A5_D80B_583F_5735,
+            sent, 0xEEE2_CD94_9C82_1664,
             "what a client would be sent changed"
         );
     }

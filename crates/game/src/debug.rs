@@ -37,6 +37,7 @@ use crate::camera::{MapCamera, View};
 use crate::chart::Chart;
 use crate::net::Hosting;
 use crate::terrain::{Ground, Tally};
+use crate::AppState;
 use protocol::survey::SurveyTally;
 
 pub(crate) const TEXT: Color = Color::srgb(0.88, 0.87, 0.80);
@@ -189,47 +190,231 @@ pub const SWITCHES: [Switch; 4] = [
     },
 ];
 
-/// The one variable that is not a switch — rows of pixels rather than on and
-/// off. It stays out of [`SWITCHES`] because that table carries `confessed`
-/// for [`Toggles::line`], which walks booleans and would have to unwrap a
-/// kind to do it; what it joins instead is [`Toggles::variable`], which is
-/// what the grammar asks.
+/// The variables that are not switches. They stay out of [`SWITCHES`]
+/// because that table carries `confessed` for [`Toggles::line`], which walks
+/// booleans and would have to unwrap a kind to do it; what they join instead
+/// is [`Picture::variable`], which is what the grammar asks.
 const RESOLUTION: &str = "resolution";
+const ZOOM: &str = "zoom";
+const YAW: &str = "yaw";
+const POSITION: &str = "position";
 
-/// What a variable holds, for [`Toggles::variable`] to answer with.
+/// What a `client` line reaches: the switches this machine draws by, and the
+/// view it draws through.
 ///
-/// Two kinds because there are two. The *wording* of each is
-/// [`crate::console`]'s, which owns the grammar — this only says which kind
-/// the name found, so the console can read and write every variable by asking
-/// once instead of testing for the one that is not a switch everywhere it
-/// walks them.
+/// The view is here rather than in [`Toggles`] because it is not this
+/// module's to hold — the camera is [`crate::camera`]'s, and a `zoom` typed
+/// at the console is the same zoom the mouse wheel does. What makes it a
+/// `client` variable all the same is the rule the word stands for: it is this
+/// machine's picture and nobody else's, which is exactly what separates these
+/// lines from the ones that cross the wire.
+pub struct Picture<'a> {
+    pub toggles: &'a mut Toggles,
+    /// `None` where there is no world being looked at — every screen but the
+    /// helm, which is a refusal to read rather than a variable nobody has.
+    /// See [`Machine::afloat`], which is what decides it: the camera outlives
+    /// every world, so a reading off it on a menu would be a number about
+    /// nowhere.
+    pub looking: Option<Looking<'a>>,
+}
+
+/// Where this machine is looking from, as a `client` line reaches it.
+///
+/// Two things, because a view is written in one place and true in another.
+/// The camera is what is actually drawn — eased, grounded on the surface the
+/// player rides, and what the readout prints — so it is what a reading has to
+/// come off. [`View`] is what a camera is spawned and recentred from, so a
+/// line that moved the view has to move it too, or entering a world would put
+/// back a view somebody had typed their way out of.
+pub struct Looking<'a> {
+    pub view: &'a mut View,
+    pub camera: &'a mut MapCamera,
+}
+
+impl Looking<'_> {
+    /// The view as it stands, which is the camera's own.
+    pub fn now(&self) -> View {
+        View {
+            focus: self.camera.focus,
+            distance: self.camera.distance,
+            yaw: self.camera.yaw,
+        }
+    }
+
+    /// Puts the view where a line asked for it. Only ever the *view* — where
+    /// the player is is the server's to say, and the camera follows whatever
+    /// carries them of its own accord.
+    pub fn look(&mut self, wanted: View) {
+        *self.view = wanted;
+        self.camera.snap_to(wanted);
+    }
+}
+
+/// What a variable holds, for [`Picture::variable`] to answer with.
+///
+/// The *wording* of each is [`crate::console`]'s, which owns the grammar —
+/// this only says which kind the name found, so the console can read and
+/// write every variable by asking once instead of testing for each kind
+/// everywhere it walks them.
 pub enum Value<'a> {
     Switch(&'a mut bool),
     /// `None` in a run with a window, which has no off-screen picture to
     /// size — see [`Toggles::resolution`].
     Rows(&'a mut Option<u32>),
+    /// One of the view's own, and the view to read or move — `None` on a
+    /// screen with no world under it. One variant for the three of them so
+    /// that *there is no view here* is worded once rather than three times.
+    Looking(Look, Option<Looking<'a>>),
 }
 
-impl Toggles {
-    /// The variable a name asks for, whatever kind it holds, or `None` for a
-    /// name that is not one.
-    pub fn variable(&mut self, name: &str) -> Option<Value<'_>> {
-        match name {
-            RESOLUTION => Some(Value::Rows(&mut self.resolution)),
-            _ => self.switch(name).map(Value::Switch),
+/// Which of the view's variables a name found.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Look {
+    Zoom,
+    Yaw,
+    /// Reads and does not turn. Where somebody is is not a dial: they get
+    /// there by sailing, by walking, or by being taken — see the server's
+    /// `goto`, which is one of those ways and not the definition.
+    Position,
+}
+
+/// Which kind a variable is, told without a [`Picture`] to hand.
+///
+/// [`Value`] answers the same question by handing over the thing itself,
+/// which is what reading and writing want and what completing a line cannot
+/// use: tab is offered while a player types, against no particular state, and
+/// what it needs to know is that `on` and `off` stand after a switch and the
+/// ladder's rungs after `resolution`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    Switch,
+    Rows,
+    /// A number of the player's own, or nothing at all: the view's variables
+    /// take metres and degrees, and `position` takes nothing.
+    Looking,
+}
+
+/// This machine, as a system reaches it: everything a `client` line can read
+/// or move. One parameter rather than three because [`Picture`] wants all
+/// three together, and both mouths that speak the grammar — the keyboard and
+/// the socket — would otherwise carry the same three and build the same
+/// thing.
+#[derive(SystemParam)]
+pub struct Machine<'w, 's> {
+    pub toggles: ResMut<'w, Toggles>,
+    view: ResMut<'w, View>,
+    cameras: Query<'w, 's, &'static mut MapCamera>,
+    /// Whether there is a world being looked at.
+    ///
+    /// The camera is spawned at startup and never despawned, so its existing
+    /// says nothing about whether it is showing anybody anything: on a menu
+    /// screen it is still pointed wherever it was last left. Without this a
+    /// `client position` typed at the title screen would answer `0 0` — a
+    /// place, in the words a place is given, for a player who is nowhere.
+    ///
+    /// `None` in a run with no states at all, which is a test harness rather
+    /// than a screen, and is read as no world for the same reason.
+    afloat: Option<Res<'w, State<AppState>>>,
+}
+
+impl Machine<'_, '_> {
+    /// This machine's picture, as a `client` line reaches it.
+    pub fn picture(&mut self) -> Picture<'_> {
+        let camera = self
+            .afloat()
+            .then(|| self.cameras.single_mut().ok())
+            .flatten();
+        Picture {
+            toggles: &mut self.toggles,
+            looking: camera.map(|camera| Looking {
+                view: &mut self.view,
+                camera: camera.into_inner(),
+            }),
         }
     }
 
-    /// Every variable there is, in the order a bare `client` lists them — here
-    /// rather than in the console because this is where they live, and a list
-    /// kept beside the grammar would be a second place to add one.
-    pub fn names() -> impl Iterator<Item = &'static str> {
-        SWITCHES
-            .iter()
-            .map(|switch| switch.name)
-            .chain([RESOLUTION])
+    /// The view as it stands, or `None` where there is no world being looked
+    /// at — what a line that may have moved the picture is measured against.
+    /// The camera's own rather than the [`View`], for the reason [`Looking`]
+    /// gives.
+    pub fn seen(&self) -> Option<View> {
+        if !self.afloat() {
+            return None;
+        }
+        self.cameras.single().ok().map(|camera| View {
+            focus: camera.focus,
+            distance: camera.distance,
+            yaw: camera.yaw,
+        })
     }
 
+    /// Whether there is a world under the camera — see [`Machine::afloat`].
+    fn afloat(&self) -> bool {
+        self.afloat
+            .as_ref()
+            .is_some_and(|state| *state.get() == AppState::InWorld)
+    }
+}
+
+impl<'a> Picture<'a> {
+    /// The switches alone, for a caller with no camera to offer — the tests,
+    /// and any screen the console can be reached from that has no view.
+    pub fn of(toggles: &'a mut Toggles) -> Self {
+        Self {
+            toggles,
+            looking: None,
+        }
+    }
+
+    /// The variable a name asks for, whatever kind it holds, or `None` for a
+    /// name that is not one.
+    pub fn variable(&mut self, name: &str) -> Option<Value<'_>> {
+        let look = match name {
+            ZOOM => Look::Zoom,
+            YAW => Look::Yaw,
+            POSITION => Look::Position,
+            RESOLUTION => return Some(Value::Rows(&mut self.toggles.resolution)),
+            _ => return self.toggles.switch(name).map(Value::Switch),
+        };
+        // Reborrowed rather than handed over, so the answer borrows this
+        // picture for as long as it is used and no longer.
+        let looking = self.looking.as_mut().map(|it| Looking {
+            view: &mut *it.view,
+            camera: &mut *it.camera,
+        });
+        Some(Value::Looking(look, looking))
+    }
+
+    /// Every variable there is, in the order a bare `client` lists them, each
+    /// with the kind it holds — here rather than in the console because this
+    /// is where they live, and a list kept beside the grammar would be a
+    /// second place to add one.
+    pub fn every() -> impl Iterator<Item = (&'static str, Kind)> {
+        SWITCHES
+            .iter()
+            .map(|switch| (switch.name, Kind::Switch))
+            .chain([
+                (RESOLUTION, Kind::Rows),
+                (ZOOM, Kind::Looking),
+                (YAW, Kind::Looking),
+                (POSITION, Kind::Looking),
+            ])
+    }
+
+    /// Every variable's name, for the listing and the refusal that offer them.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        Self::every().map(|(name, _)| name)
+    }
+
+    /// What a name holds, or `None` for a name that is not a variable at all.
+    pub fn kind(name: &str) -> Option<Kind> {
+        Self::every()
+            .find(|(it, _)| *it == name)
+            .map(|(_, kind)| kind)
+    }
+}
+
+impl Toggles {
     /// The boolean switch a name asks for, or `None` where the name is not
     /// one of them.
     fn switch(&mut self, name: &str) -> Option<&mut bool> {
@@ -575,11 +760,13 @@ fn overlay_text(
 }
 
 /// The world and the view in the terms that take them back in: `--seed` on
-/// the command line, the console's `goto`, and then the socket's own `yaw`
-/// and `zoom` — metres, degrees and metres. Written as they are typed, spaces
-/// and all, because the whole point is that a picture of this line is enough
-/// to stand here again. The yaw runs unbounded on the camera — easing
-/// never wants to wrap — so it is folded to a bearing here.
+/// the command line, the console's `goto`, and then its `client yaw` and
+/// `client zoom` — metres, degrees and metres. Written as the *arguments* are
+/// typed, so that a picture of this line is enough to stand here again; the
+/// console will also say all four back on request, which is the same numbers
+/// through a channel something other than an eye can read. The yaw runs
+/// unbounded on the camera — easing never wants to wrap — so it is folded to
+/// a bearing here.
 ///
 /// The seed leads because it is the part that cannot be guessed from the
 /// picture, and it is absent in somebody else's world: a guest can say where
@@ -621,10 +808,10 @@ mod tests {
     /// A chunk of flat ground, which is all this needs of one: the readout
     /// counts chunks, it does not look at them.
     fn a_chunk() -> protocol::ChunkPayload {
-        use protocol::ground::{quantize, Material, CORNERS, LIT_ALL_DAY, MATERIAL_COUNT};
+        use protocol::ground::{quantize, Material, CELL_COUNT, CORNERS, LIT_ALL_DAY};
         protocol::ChunkPayload {
             heights: vec![quantize(1.0); CORNERS * CORNERS],
-            materials: vec![Material::Grass; MATERIAL_COUNT],
+            materials: vec![Material::Grass; CELL_COUNT],
             lit: vec![LIT_ALL_DAY; CORNERS * CORNERS],
             water: None,
             plants: Vec::new(),
@@ -794,7 +981,7 @@ mod tests {
         // And a world of this machine's own behind it, which is what the seed
         // is read off. Bound and never accepted from: the readout asks the
         // handle which world it is, and nothing here has to join it.
-        let host = server::Server::bind(("127.0.0.1", 0), server::WorldConfig { seed: 4242 })
+        let host = server::Server::bind(("127.0.0.1", 0), 4242)
             .expect("a server should bind")
             .spawn()
             .expect("a server should serve");

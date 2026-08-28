@@ -148,19 +148,22 @@ pub fn reserved_key(name: &str) -> Option<KeyCode> {
         .map(|(_, key)| *key)
 }
 
-/// Keys the player may not take, because taking them would leave no way back.
-/// The arrows are a permanent second set of movement keys, so however
+/// Keys the player may not take. Most because taking them would leave no way
+/// back: the arrows are a permanent second set of movement keys, so however
 /// thoroughly the rest is rebound the player can always get about; Escape is
 /// the one step back from wherever the player is — into the pause menu, out of
 /// it again, and out of setting a key; and the backquote is the way into and
-/// out of the debug console — see `crate::console`.
-pub const RESERVED: [KeyCode; 6] = [
+/// out of the debug console — see `crate::console`. F12 for a plainer reason:
+/// it photographs the screen — see `crate::shots` — and a control bound over
+/// it would fire alongside every picture.
+pub const RESERVED: [KeyCode; 7] = [
     KeyCode::Escape,
     KeyCode::ArrowUp,
     KeyCode::ArrowDown,
     KeyCode::ArrowLeft,
     KeyCode::ArrowRight,
     KeyCode::Backquote,
+    KeyCode::F12,
 ];
 
 /// Whether a key is the player's to give away.

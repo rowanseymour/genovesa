@@ -20,9 +20,7 @@
 //! module decides which name; the protocol says what each one looks like.
 
 use glam::{UVec2, Vec2, Vec3};
-use protocol::ground::{
-    Material, APRON, CELL_METRES, CHUNK_METRES, CORNERS, MATERIAL_CELLS, MATERIAL_COUNT,
-};
+use protocol::ground::{Material, CELLS, CELL_COUNT, CELL_METRES, CHUNK_METRES, CORNERS};
 
 use crate::noise::{smoothstep, Noise};
 
@@ -1952,50 +1950,30 @@ impl TerrainGenerator {
     }
 }
 
-/// Corners along one edge of the grid a chunk is worked out on: its own, plus
-/// the ring needed to bound the outer cells of the material apron.
-pub(crate) const WORKING_CORNERS: usize = CORNERS + 2 * APRON;
-
-/// The corner heights one chunk of ground is worked out from: a
-/// [`WORKING_CORNERS`]-square grid, row-major, sampled at [`CELL_METRES`]
-/// spacing from [`APRON`] cells *before* `base`.
-///
-/// Wider than the chunk because the material grid is — a cell of the apron
-/// has to be bounded by corners like any other, and the outermost of those
-/// lie a cell outside the chunk. Sampled once and read twice rather than
-/// twice over: [`corner_heights`] cuts the chunk's own grid out of this, so
-/// the apron costs a 3% wider sample rather than a second pass.
-pub(crate) fn working_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec<f32> {
-    let start = base - Vec2::splat(APRON as f32 * CELL_METRES);
-    let mut heights = vec![0.0f32; WORKING_CORNERS * WORKING_CORNERS];
-    for iz in 0..WORKING_CORNERS {
-        let wz = start.y + iz as f32 * CELL_METRES;
-        for ix in 0..WORKING_CORNERS {
-            let wx = start.x + ix as f32 * CELL_METRES;
-            heights[iz * WORKING_CORNERS + ix] = height(wx, wz);
+/// One chunk's [`CORNERS`]-square corner grid of anything: row-major,
+/// sampled at [`CELL_METRES`] spacing from `base`. The one place the
+/// sampling convention is written, so the payload's grids cannot fall out
+/// of register with each other — [`corner_water`] stays its own loop only
+/// for the fold it carries.
+fn corner_grid<T>(base: Vec2, sample: impl Fn(f32, f32) -> T) -> Vec<T> {
+    let mut grid = Vec::with_capacity(CORNERS * CORNERS);
+    for iz in 0..CORNERS {
+        let wz = base.y + iz as f32 * CELL_METRES;
+        for ix in 0..CORNERS {
+            grid.push(sample(base.x + ix as f32 * CELL_METRES, wz));
         }
     }
-    heights
+    grid
 }
 
-/// The chunk's own [`CORNERS`]-square grid, cut out of the middle of what
-/// [`working_heights`] returned — row-major, and what the payload carries.
+/// The corner heights one chunk of ground is built from — and what the
+/// payload carries.
 ///
 /// The loop order is the format, so a caller may also *look* at the grid before
 /// deciding whether the chunk is worth sending at all — the open world skips
 /// chunks whose every corner sits on the ocean floor.
-pub(crate) fn corner_heights(working: &[f32]) -> Vec<f32> {
-    debug_assert_eq!(
-        working.len(),
-        WORKING_CORNERS * WORKING_CORNERS,
-        "not a chunk's working grid"
-    );
-    let mut heights = Vec::with_capacity(CORNERS * CORNERS);
-    for iz in 0..CORNERS {
-        let row = (iz + APRON) * WORKING_CORNERS + APRON;
-        heights.extend_from_slice(&working[row..row + CORNERS]);
-    }
-    heights
+pub(crate) fn corner_heights(base: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec<f32> {
+    corner_grid(base, height)
 }
 
 /// The standing water one chunk carries, on the same grid and in the same
@@ -2040,23 +2018,15 @@ pub(crate) fn corner_water(
 /// the same order as [`corner_heights`] — read off the island's bake, which
 /// is where the answer lives; see [`crate::sunlight`].
 pub(crate) fn corner_lit(base: Vec2, lit: impl Fn(f32, f32) -> [u8; 2]) -> Vec<[u8; 2]> {
-    let mut pairs = Vec::with_capacity(CORNERS * CORNERS);
-    for iz in 0..CORNERS {
-        let wz = base.y + iz as f32 * CELL_METRES;
-        for ix in 0..CORNERS {
-            pairs.push(lit(base.x + ix as f32 * CELL_METRES, wz));
-        }
-    }
-    pairs
+    corner_grid(base, lit)
 }
 
-/// The material of every cell of one chunk's material grid, apron included,
-/// row-major — the order a payload carries them in.
+/// The material of every cell of one chunk's grid, row-major — the order a
+/// payload carries them in.
 ///
-/// `working` is what [`working_heights`] returned for the same `base`. A cell
+/// `heights` is what [`corner_heights`] returned for the same `base`. A cell
 /// sits between the corners either side of it, so its centre is half a cell
-/// in from its lower corner, and the apron's outermost cells reach the
-/// corners the working grid was widened for.
+/// in from its lower corner.
 ///
 /// The normal a cell is classified by is the one its four corners describe,
 /// not the generator's own gradient and not a triangle's. That is what keeps
@@ -2067,19 +2037,19 @@ pub(crate) fn corner_lit(base: Vec2, lit: impl Fn(f32, f32) -> [u8; 2]) -> Vec<[
 /// made the palette depend on a triangulation the wire no longer carries.
 pub(crate) fn cell_materials(
     base: Vec2,
-    working: &[f32],
+    heights: &[f32],
     material: impl Fn(f32, f32, f32, Vec3) -> Material,
 ) -> Vec<Material> {
     debug_assert_eq!(
-        working.len(),
-        WORKING_CORNERS * WORKING_CORNERS,
-        "not a chunk's working grid"
+        heights.len(),
+        CORNERS * CORNERS,
+        "not a chunk's corner grid"
     );
-    let corner = |ix: usize, iz: usize| working[iz * WORKING_CORNERS + ix];
+    let corner = |ix: usize, iz: usize| heights[iz * CORNERS + ix];
 
-    let mut materials = Vec::with_capacity(MATERIAL_COUNT);
-    for iz in 0..MATERIAL_CELLS {
-        for ix in 0..MATERIAL_CELLS {
+    let mut materials = Vec::with_capacity(CELL_COUNT);
+    for iz in 0..CELLS {
+        for ix in 0..CELLS {
             let (sw, se) = (corner(ix, iz), corner(ix + 1, iz));
             let (nw, ne) = (corner(ix, iz + 1), corner(ix + 1, iz + 1));
 
@@ -2092,10 +2062,7 @@ pub(crate) fn cell_materials(
             let across = (nw + ne - sw - se) / (2.0 * CELL_METRES);
             let normal = Vec3::new(-along, 1.0, -across).normalize();
 
-            // Cell coordinates run from -APRON, and the centre is half a cell
-            // on from the cell's own lower corner.
-            let cell = Vec2::new(ix as f32, iz as f32) - Vec2::splat(APRON as f32);
-            let mid = base + (cell + Vec2::splat(0.5)) * CELL_METRES;
+            let mid = base + (Vec2::new(ix as f32, iz as f32) + Vec2::splat(0.5)) * CELL_METRES;
             let height = (sw + se + nw + ne) / 4.0;
             materials.push(material(mid.x, mid.y, height, normal));
         }
@@ -3858,7 +3825,7 @@ mod tests {
         // order a client rebuilds the ground from.
         let (_, gen) = generator(2, 2, 1);
         let base = Vec2::new(-64.0, 32.0);
-        let heights = corner_heights(&working_heights(base, |wx, wz| gen.height(wx, wz)));
+        let heights = corner_heights(base, |wx, wz| gen.height(wx, wz));
 
         assert_eq!(heights.len(), CORNERS * CORNERS);
         assert_eq!(heights[0], gen.height(base.x, base.y), "the near corner");
@@ -3886,10 +3853,8 @@ mod tests {
         // other — so the ground has no seam to show wherever a client puts the
         // two meshes next to each other.
         let (_, gen) = generator(2, 1, 5);
-        let left = corner_heights(&working_heights(Vec2::ZERO, |wx, wz| gen.height(wx, wz)));
-        let right = corner_heights(&working_heights(Vec2::new(CHUNK_METRES, 0.0), |wx, wz| {
-            gen.height(wx, wz)
-        }));
+        let left = corner_heights(Vec2::ZERO, |wx, wz| gen.height(wx, wz));
+        let right = corner_heights(Vec2::new(CHUNK_METRES, 0.0), |wx, wz| gen.height(wx, wz));
 
         let column = |grid: &[f32], ix: usize| -> Vec<f32> {
             (0..CORNERS).map(|iz| grid[iz * CORNERS + ix]).collect()
@@ -3902,78 +3867,33 @@ mod tests {
     }
 
     #[test]
-    fn the_apron_is_the_neighbours_own_ground() {
-        use protocol::ground::CELLS;
+    fn a_cell_is_classified_at_its_own_centre() {
+        // A classifier that answers with where it was asked, so the grid's
+        // orientation — row-major, x along a row, the centre half a cell in
+        // from the lower corner — is pinned with no terrain in the way.
+        // Asked asymmetrically, because a transposed stride would pass a
+        // square ask; and pinned here at all because the only other thing
+        // holding it is the sent digest, whose remedy when red is to be
+        // re-recorded.
+        let base = Vec2::new(256.0, -384.0);
+        let flat = vec![0.0f32; CORNERS * CORNERS];
+        let materials = cell_materials(base, &flat, |wx, wz, _, _| {
+            if wx == base.x + 3.5 && wz == base.y + 0.5 {
+                Material::Sand
+            } else if wx == base.x + 0.5 && wz == base.y + 5.5 {
+                Material::Forest
+            } else {
+                Material::Grass
+            }
+        });
 
-        // The whole worth of the apron is that it is the neighbour's real
-        // answer and not a guess at one — a client blending across a chunk
-        // boundary has to reach the same picture as the client that owns the
-        // chunk over there. Nothing in this repo reads the apron yet, so
-        // without this the grid could be transposed, mis-signed or filled
-        // with the chunk's own edge cells repeated and everything would still
-        // pass.
-        let (_, gen) = generator(4, 4, 5);
-        let materials = |base: Vec2| {
-            cell_materials(
-                base,
-                &working_heights(base, |wx, wz| gen.height(wx, wz)),
-                |wx, wz, h, n| gen.material(wx, wz, h, n),
-            )
+        let at = |ix, iz| {
+            materials[protocol::ground::material_index(ix, iz).expect("a cell on the grid")]
         };
-
-        let here = materials(Vec2::ZERO);
-        let east = materials(Vec2::new(CHUNK_METRES, 0.0));
-        let north = materials(Vec2::new(0.0, CHUNK_METRES));
-
-        let at = |grid: &Vec<Material>, ix: i32, iz: i32| {
-            grid[protocol::ground::material_index(ix, iz).expect("a cell on the grid")]
-        };
-
-        let reach = APRON as i32;
-        let last = CELLS as i32 - 1;
-        for i in 0..CELLS as i32 {
-            // This chunk's eastern apron is the eastern neighbour's own first
-            // column, and its own last column is that neighbour's apron.
-            assert_eq!(
-                at(&here, last + reach, i),
-                at(&east, reach - 1, i),
-                "the eastern apron is not the eastern chunk's ground at row {i}"
-            );
-            assert_eq!(
-                at(&here, last, i),
-                at(&east, -reach, i),
-                "the eastern chunk's apron is not this chunk's ground at row {i}"
-            );
-            // And the same one turn round, which is what catches a transpose.
-            assert_eq!(
-                at(&here, i, last + reach),
-                at(&north, i, reach - 1),
-                "the northern apron is not the northern chunk's ground at column {i}"
-            );
-        }
-
-        // The corner cell too — the diagonal neighbour's, reached by two
-        // steps rather than one, which is the case a row-and-column check
-        // alone would miss.
-        let corner = materials(Vec2::splat(CHUNK_METRES));
-        assert_eq!(
-            at(&here, last + reach, last + reach),
-            at(&corner, -reach, -reach),
-            "the corner of the apron belongs to no chunk"
-        );
-
-        // And it is not merely the chunk's own edge repeated — on a map with
-        // this much going on, some of what the apron reports differs from the
-        // cell beside it, or the test above would pass on a grid that had
-        // never left home.
-        let differing = (0..CELLS as i32)
-            .filter(|i| at(&here, last + reach, *i) != at(&here, last, *i))
-            .count();
-        assert!(
-            differing > 0,
-            "every apron cell matches the edge cell inside it, which no real \
-             coastline does — the apron is probably the edge repeated"
-        );
+        assert_eq!(materials.len(), CELL_COUNT);
+        assert_eq!(at(3, 0), Material::Sand, "three cells along x");
+        assert_eq!(at(0, 5), Material::Forest, "five rows along z");
+        assert_eq!(at(3, 5), Material::Grass, "the diagonal is nobody's");
     }
 
     #[test]

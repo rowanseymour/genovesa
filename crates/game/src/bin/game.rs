@@ -11,7 +11,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use bevy::app::ScheduleRunnerPlugin;
+use bevy::app::{PluginGroupBuilder, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowResolution};
 
@@ -35,6 +35,7 @@ use game::net::{Hosting, NetPlugin, Online, Reach, Session};
 use game::notice::NoticePlugin;
 use game::player::PlayerPlugin;
 use game::settings::{self, DisplaySettings, SettingsPlugin};
+use game::shots::ShotsPlugin;
 use game::sky::SkyPlugin;
 use game::stopping::StoppingPlugin;
 use game::terrain::TerrainPlugin;
@@ -57,7 +58,7 @@ fn main() -> ExitCode {
     // back into, could never be asked for a second time. A joined run is in
     // somebody else's world and has no seed of its own to name.
     if !args.seed_given && args.join.is_none() {
-        println!("world {}", args.config.seed);
+        println!("world {}", args.seed);
     }
 
     // A run that starts in a world gets one before the app exists, because
@@ -72,7 +73,7 @@ fn main() -> ExitCode {
         // or returned to: sharing and keeping are the menu's business, and a
         // dedicated `server` is the other binary.
         (None, AppState::InWorld) => Some(Session::open(
-            args.config,
+            args.seed,
             Reach::Alone,
             server::OPENING,
             false,
@@ -173,42 +174,7 @@ fn run(args: Args, session: Option<Session>, control: Option<control::Control>) 
         // into, never opened on — so the default is the whole of it.
         .add_sub_state::<Helm>()
         .insert_resource(args.starting_view())
-        .add_plugins((
-            // Before anything that draws a model: it owns the world's tones,
-            // which the modules dressing rigged models register into.
-            ModelsPlugin,
-            TerrainPlugin,
-            // Before the terrain and the rest only by convention; what it
-            // owns — the clear colour, the ambient light and the one light in
-            // the sky — is the world's whole lighting.
-            SkyPlugin,
-            TreesPlugin,
-            WildlifePlugin,
-            BeastsPlugin,
-            // The boats, and the cairns a claim leaves standing. Paired only
-            // because a plugin tuple holds fifteen.
-            (BoatPlugin, CairnPlugin),
-            // The white water the boat leaves, painted by the sea itself.
-            WakePlugin,
-            PlayerPlugin,
-            MapCameraPlugin,
-            // The card in the corner, and the two readings that stand beside
-            // it. Paired only because a plugin tuple holds fifteen.
-            (CompassPlugin, InstrumentsPlugin),
-            ChartPlugin,
-            // The logbook — harmless in a world nobody remembers, its systems
-            // conditioning on a book being open — then the sheet the menus
-            // stand on, and the menus. Nested only because a plugin tuple
-            // holds fifteen.
-            (LogbookPlugin, BackdropPlugin, MenuPlugin, SettingsPlugin),
-            // The session — harmless offline, its systems conditioning on a
-            // joined one — the line of word the world sometimes answers with,
-            // and the machine's own way of asking this to quit, which matters
-            // most in a run that is hosting: the world is written down in the
-            // drop an ordinary exit reaches and a killed process does not.
-            // Grouped only because a plugin tuple holds fifteen.
-            (NetPlugin, NoticePlugin, StoppingPlugin),
-        ));
+        .add_plugins(GamePlugins);
 
     // Last, and only when asked for: the socket is a mouth on everything above
     // rather than a part of any of it, and a run without one should be the run
@@ -219,6 +185,59 @@ fn run(args: Args, session: Option<Session>, control: Option<control::Control>) 
     }
 
     app.run();
+}
+
+/// The game proper, in the order it is built.
+///
+/// A group rather than a tuple because a tuple holds fifteen and this is
+/// longer: staying under that meant pairing plugins with nothing to do with
+/// each other, and saying so in the place an order should have been.
+struct GamePlugins;
+
+impl PluginGroup for GamePlugins {
+    fn build(self) -> PluginGroupBuilder {
+        PluginGroupBuilder::start::<Self>()
+            // Before anything that draws a model: it owns the world's tones,
+            // which the modules dressing rigged models register into.
+            .add(ModelsPlugin)
+            .add(TerrainPlugin)
+            // Before the terrain and the rest only by convention; what it
+            // owns — the clear colour, the ambient light and the one light in
+            // the sky — is the world's whole lighting.
+            .add(SkyPlugin)
+            .add(TreesPlugin)
+            .add(WildlifePlugin)
+            .add(BeastsPlugin)
+            .add(BoatPlugin)
+            // The cairns a claim leaves standing.
+            .add(CairnPlugin)
+            // The white water the boat leaves, painted by the sea itself.
+            .add(WakePlugin)
+            .add(PlayerPlugin)
+            .add(MapCameraPlugin)
+            // The card in the corner, and the two readings that stand beside
+            // it.
+            .add(CompassPlugin)
+            .add(InstrumentsPlugin)
+            .add(ChartPlugin)
+            // Harmless in a world nobody remembers, its systems conditioning
+            // on a book being open.
+            .add(LogbookPlugin)
+            // The sheet the menus stand on, and the menus.
+            .add(BackdropPlugin)
+            .add(MenuPlugin)
+            .add(SettingsPlugin)
+            // Harmless offline, its systems conditioning on a joined world.
+            .add(NetPlugin)
+            // The line of word the world sometimes answers with.
+            .add(NoticePlugin)
+            // F12, a picture of whatever the window is showing.
+            .add(ShotsPlugin)
+            // The machine's own way of asking this to quit, which matters most
+            // in a run that is hosting: the world is written down in the drop
+            // an ordinary exit reaches and a killed process does not.
+            .add(StoppingPlugin)
+    }
 }
 
 /// Where to read assets from, which is only ever a question inside a bundle.

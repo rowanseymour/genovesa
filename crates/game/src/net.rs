@@ -34,15 +34,19 @@ use std::time::Duration;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use protocol::ground::ChunkPayload;
+use protocol::survey::Soundings;
 use protocol::{
-    BoatId, PlayerId, ToClient, ToServer, Token, WorldId, DEFAULT_PORT, PROTOCOL_VERSION,
+    BeastId, BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId,
+    DEFAULT_PORT, PROTOCOL_VERSION,
 };
-use server::{Host, Server, WorldConfig};
+use server::{Host, Server};
 
 use crate::player::PlayerPlace;
 use crate::sea;
 use crate::terrain::Ground;
-use crate::{eased, matte, AppState};
+use crate::told::{eased_onto, Told};
+use crate::{matte, AppState};
 
 /// Seconds between position reports, at least. Ten a second reads as
 /// continuous once markers ease between them, and keeps an idle wire quiet.
@@ -368,13 +372,8 @@ impl Session {
     /// offered again from the menu: what the menu asks and the command line
     /// does not, a `--seed` run being a world to look at rather than one to
     /// live in.
-    pub fn open(
-        config: WorldConfig,
-        reach: Reach,
-        opening: f32,
-        keep: bool,
-    ) -> Result<Self, String> {
-        let mut server = Server::bind(reach.bound_to(), config)
+    pub fn open(seed: u32, reach: Reach, opening: f32, keep: bool) -> Result<Self, String> {
+        let mut server = Server::bind(reach.bound_to(), seed)
             .map_err(|error| format!("cannot open a world: {error}"))?
             .opening_at(opening);
         if keep {
@@ -474,9 +473,9 @@ impl Dialing {
 
     /// Starts opening a world on this machine — see [`Session::open`], which
     /// this is the off-the-frame-loop way to reach.
-    pub fn opening(config: WorldConfig, reach: Reach, opening: f32, keep: bool) -> Self {
+    pub fn opening(seed: u32, reach: Reach, opening: f32, keep: bool) -> Self {
         Self::on(reach.described(), move || {
-            Session::open(config, reach, opening, keep)
+            Session::open(seed, reach, opening, keep)
         })
     }
 
@@ -589,56 +588,96 @@ impl Online {
     }
 }
 
-/// Marks another player's marker, and where the server last put them.
+/// Marks another player's marker. Where the server last put them is the
+/// [`Told`] beside this, which every other told thing on screen carries too.
 #[derive(Component)]
 pub struct RemotePlayer {
     pub id: PlayerId,
-    /// Where they are heading — eased towards, like the camera's own focus.
-    target: Vec2,
 }
 
 pub struct NetPlugin;
 
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
-        // What `receive` writes the weather to and `place_markers` floats
-        // on. Also initialised by the plugins that draw and ride the sea;
-        // initialising a resource twice is free, and each plugin's tests
-        // run it alone.
-        app.init_resource::<sea::Forecast>()
+        // The words themselves, and then the two sets that give them their
+        // order: everything reading them runs after the drain that wrote
+        // them, so a word lands on the frame it arrived rather than the one
+        // after. The run condition is here rather than repeated on every
+        // reader, which is most of what a set is for — and an app built
+        // without this plugin leaves the sets unconfigured, which is what a
+        // module's own lean tests want.
+        app.add_message::<GroundArrived>()
+            .add_message::<CoastSurveyed>()
+            .add_message::<WindChanged>()
+            .add_message::<HourTold>()
+            .add_message::<BeastSeen>()
+            .add_message::<BeastGone>()
+            .add_message::<HullTold>()
+            .add_message::<HullGone>()
+            .add_message::<PutDown>()
+            .add_message::<CairnSeen>()
+            .add_message::<Uncharted>()
+            .add_message::<ServerReplied>()
+            .add_message::<VocabularyTaught>()
+            .configure_sets(
+                Update,
+                (Wire::Heard, Wire::Read)
+                    .chain()
+                    .run_if(in_state(AppState::InWorld)),
+            )
+            // What `place_markers` floats on. Also initialised by the plugins
+            // that draw and ride the sea; initialising a resource twice is
+            // free, and each plugin's tests run it alone.
             .init_resource::<sea::SeaConditions>()
-            .init_resource::<crate::sky::Sky>()
-            .init_resource::<crate::beasts::Beasts>()
+            // And the fleet, which this module both reports through and
+            // shades markers by.
             .init_resource::<crate::boat::Fleet>()
-            .init_resource::<crate::cairn::Cairns>()
-            .init_resource::<crate::console::Console>()
             .add_systems(
                 OnEnter(AppState::InWorld),
                 enter_afoot.run_if(resource_exists::<Online>),
             )
             .add_systems(
                 Update,
-                (
-                    receive,
-                    ask_for_ground,
-                    report_position,
-                    // Shading before placing, so that a marker coming back
-                    // out from under a hull is put where it belongs before
-                    // the same frame stands it on the ground there.
-                    shade_markers,
-                    place_markers,
-                )
+                receive
+                    .in_set(Wire::Heard)
+                    .run_if(resource_exists::<Online>),
+            )
+            // The markers, which are the one word this module reads itself.
+            //
+            // After the hulls, and that is not tidiness: a marker is hidden
+            // while its player is at a helm, and which helms are held is
+            // something a `Boat` telling this same frame may have changed.
+            .add_systems(
+                Update,
+                // Shading before placing, so that a marker coming back out
+                // from under a hull is put where it belongs before the same
+                // frame eases and stands it on the ground there.
+                (shade_markers, place_markers)
                     .chain()
+                    .after(crate::boat::take_the_hulls)
+                    .in_set(Wire::Read)
+                    .run_if(resource_exists::<Online>),
+            )
+            // And what goes back the other way, after every word of this
+            // frame has been acted on. `report_position` says whether this
+            // player is at a helm, which the frame's own tellings decide, so
+            // reporting before they are read would report the helm they held
+            // a frame ago.
+            .add_systems(
+                Update,
+                (ask_for_ground, report_position)
+                    .after(Wire::Read)
                     .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Online>)),
             )
             .add_systems(
                 OnExit(AppState::InWorld),
-                // The fleet forgotten here as well as by the boat plugin, and
-                // the cairns as well as by theirs — forgetting twice is
-                // clearing an empty map twice, and an app with only one of
-                // each pair of plugins (the lean net tests') must still not
-                // carry one world's hulls or stones into the next.
-                (disconnect, crate::boat::scuttle, crate::cairn::strike),
+                // The fleet forgotten here as well as by the boat plugin,
+                // because this module holds one too — the helm decides which
+                // way a position is reported and which markers are shaded.
+                // Forgetting twice is clearing an empty map twice, and an app
+                // with this plugin and not that one must still not carry one
+                // world's hulls into the next.
+                (disconnect, crate::boat::scuttle),
             );
     }
 }
@@ -666,41 +705,186 @@ fn marker_color(id: PlayerId) -> Color {
     Color::hsl((id.0 as f32 * 137.508) % 360.0, 0.65, 0.55)
 }
 
-/// Where a server's word lands when it is not an entity: the wind the sea is
-/// drawn under, the hour the world is lit at, the beasts in its water, the
-/// coast on the chart and the console a reply is printed on. Resources
-/// belonging to other modules, taken together because [`receive`] is the one
-/// place any of them is written and none is this module's to interpret.
-#[derive(SystemParam)]
-struct Told<'w> {
-    forecast: ResMut<'w, sea::Forecast>,
-    sky: ResMut<'w, crate::sky::Sky>,
-    beasts: ResMut<'w, crate::beasts::Beasts>,
-    console: ResMut<'w, crate::console::Console>,
-    fleet: ResMut<'w, crate::boat::Fleet>,
-    cairns: ResMut<'w, crate::cairn::Cairns>,
-    /// Optional where the rest are not: the sheet exists only inside a world,
-    /// and the lean tests of this module run without one.
-    chart: Option<ResMut<'w, crate::chart::Chart>>,
-    /// Optional for a different reason: the control socket exists only in a
-    /// run that was asked for one, and most runs are not.
-    control: Option<ResMut<'w, crate::control::Control>>,
+// ---------------------------------------------------------------------------
+// The words of a session, as this app's own
+//
+// One per thing a server can say that is not the session's own bookkeeping,
+// written by `receive` and read by whichever module owns the thing it is
+// about. Nothing below interprets anything: a message is the wire's sentence
+// with its bytes already read and its numbers already vetted, and what it
+// *means* belongs to the module that draws the thing.
+//
+// The arrangement is worth the extra names. `receive` used to apply every word
+// itself, which made this module the one place that knew how a beast is drawn,
+// what a chart records, where a hull is moored and what the console prints —
+// twelve modules reached into from one system, and a thirteenth waiting for
+// the next word a server learns. Now a module hears what is its own, one word
+// can be heard by two modules that owe each other nothing (a cairn is a stone
+// in the world *and* a letter on the chart), and the wire knows about none of
+// them.
+//
+// Believing is still done here, once, in `receive`: a message exists only if
+// its numbers are ones this machine can safely draw with for the rest of the
+// session. See the notes there — every reader may take what it is handed at
+// face value.
+
+/// One chunk of ground, or the open water that is the absence of it — see
+/// [`protocol::ToClient::Chunk`]. Read by [`crate::terrain`], which asked.
+#[derive(Message)]
+pub struct GroundArrived {
+    pub chunk: IVec2,
+    pub ground: Option<ChunkPayload>,
 }
 
-/// Applies what the server said since last frame: players joining, moving
-/// and leaving, as markers coming, easing and going — and the boats, whose
-/// assets travel in the [`crate::boat::HullKit`] the markers' own meshes
-/// and materials now come through too, one system not being allowed two
-/// hands on one store.
-#[allow(clippy::too_many_arguments)]
+/// Coast this player has now surveyed — see [`protocol::ToClient::Surveyed`].
+/// Read by [`crate::chart`], which is where ink lands.
+#[derive(Message)]
+pub struct CoastSurveyed {
+    pub found: Vec<(IVec2, Soundings)>,
+}
+
+/// The wind over the whole world. Read by [`crate::sea`], which wears it.
+#[derive(Message)]
+pub struct WindChanged {
+    pub wind: Vec2,
+}
+
+/// Where the world's day stands, as a phase. Read by [`crate::sky`], which
+/// runs the clock on between tellings.
+#[derive(Message)]
+pub struct HourTold {
+    pub phase: f32,
+}
+
+/// A beast, wherever it has got to — introduction and movement in one word,
+/// as the wire has it. Read by [`crate::beasts`].
+#[derive(Message)]
+pub struct BeastSeen {
+    pub id: BeastId,
+    pub kind: BeastKind,
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub surfaced: bool,
+}
+
+/// The server has stopped minding a beast. Read by [`crate::beasts`].
+#[derive(Message)]
+pub struct BeastGone {
+    pub id: BeastId,
+}
+
+/// A boat, wherever it lies and in whosever hands. Read by [`crate::boat`].
+#[derive(Message)]
+pub struct HullTold {
+    pub id: BoatId,
+    pub kind: BoatKind,
+    pub position: Vec2,
+    pub heading: f32,
+    pub occupant: Option<PlayerId>,
+}
+
+/// A boat is out of the world. Read by [`crate::boat`].
+#[derive(Message)]
+pub struct HullGone {
+    pub id: BoatId,
+}
+
+/// The world has moved this player, whatever they thought — see
+/// [`protocol::ToClient::PutDown`], which is the one word that overrules a
+/// client about its own place.
+///
+/// Read by [`crate::player`], which moves whatever is carrying them, and by
+/// [`crate::control`], where a driver may be waiting on the ground at the far
+/// end. It must be read *after* [`HullTold`]: a player seated at a helm in the
+/// same breath is carried by that hull, so the seating has to have been heard
+/// before this is acted on. See [`Wire`].
+#[derive(Message)]
+pub struct PutDown {
+    pub position: Vec2,
+    pub heading: Option<f32>,
+}
+
+/// A cairn: seen from a distance, come near enough to read, or just raised.
+///
+/// Read by two modules that owe each other nothing — [`crate::cairn`] stands
+/// the stone in the world, [`crate::chart`] letters the sheet — which is the
+/// arrangement that made messages worth having.
+#[derive(Message)]
+pub struct CairnSeen {
+    pub island: IVec2,
+    pub at: Vec2,
+    /// What the claim covers, in world metres — see
+    /// [`protocol::ToClient::Cairn`]'s `covers`. The sheet's, the standing
+    /// stone having no use for it.
+    pub covers: Rect,
+    pub name: String,
+    pub yours: bool,
+}
+
+/// The answer to a claim from ground whose island the asker has not finished
+/// surveying — see [`protocol::ToClient::Uncharted`]. Read by
+/// [`crate::notice`], which is the one line it becomes.
+#[derive(Message)]
+pub struct Uncharted;
+
+/// What the server said to a console line. Read by [`crate::console`], which
+/// prints it, and by [`crate::control`], where a driver may be waiting on it.
+#[derive(Message)]
+pub struct ServerReplied {
+    pub text: String,
+}
+
+/// The server's console vocabulary, for tab completion. Read by
+/// [`crate::console`].
+#[derive(Message)]
+pub struct VocabularyTaught {
+    pub phrases: Vec<String>,
+}
+
+/// The two halves of a frame's worth of wire.
+///
+/// A module reading the words that are its own puts its system in
+/// [`Wire::Read`] and is then ordered after the drain without having to know
+/// what does the draining. Nothing is chained across the whole of `Read` —
+/// most of the words are about different things and may land in any order —
+/// except the one pair that has to hold: see [`PutDown`].
+///
+/// [`NetPlugin`] is what gives these sets their order and their run
+/// condition. An app built without it — a module's own lean tests — leaves
+/// them unconfigured, which is a set that simply runs, and is what those
+/// tests want.
+///
+/// A reader that forgets [`Wire::Read`] is the one mistake here that does not
+/// announce itself: it still hears every word, a frame late, for ever. (A
+/// word nobody registered, by contrast, panics the first time it is written.)
+/// So the set is not decoration on a system that would work without it.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Wire {
+    /// Draining the socket into the words above: [`receive`], alone.
+    Heard,
+    /// Acting on them, each module on its own.
+    Read,
+}
+
+/// Turns everything the server said since last frame into this app's own
+/// words, and applies the one part of it that is nobody else's: the markers
+/// other players stand as.
+///
+/// Believing happens here and only here. The three checks are all the same
+/// check — a number this machine will ease towards, and go on easing towards,
+/// every frame from now on. One non-finite telling is a marker, a hull, a
+/// beast or a sky at NaN for the rest of the session, and no later good word
+/// mends it. The ceilings sit far above anything honest rather than at it, so
+/// a server that learns to blow harder is not silently ignored.
+///
+/// A word that fails is dropped whole, which leaves the world exactly as this
+/// client last heard it — the same answer a lost packet gives, and the only
+/// one that is safe without knowing what the word was for.
 fn receive(
     mut commands: Commands,
     mut online: ResMut<Online>,
-    mut ground: Option<ResMut<Ground>>,
     mut kit: crate::boat::HullKit,
-    mut told: Told,
-    players: crate::player::Players,
-    poses: Query<&Transform, With<crate::boat::Vessel>>,
+    mut said: Words,
     mut lost: Local<bool>,
 ) {
     let (messages, connected) = online.connection.drain();
@@ -717,10 +901,8 @@ fn receive(
                 let marker = commands
                     .spawn((
                         Name::new(id.to_string()),
-                        RemotePlayer {
-                            id,
-                            target: position,
-                        },
+                        RemotePlayer { id },
+                        told_marker(position),
                         DespawnOnExit(AppState::InWorld),
                         Mesh3d(kit.meshes.add(Capsule3d::new(MARKER_RADIUS, MARKER_LENGTH))),
                         MeshMaterial3d(kit.materials.add(matte(marker_color(id)))),
@@ -743,10 +925,7 @@ fn receive(
                     // yet, only a spawn queued ahead of this. Overwriting is
                     // the whole of the update — where the server last put a
                     // player is all a marker knows about them.
-                    commands.entity(marker).insert(RemotePlayer {
-                        id,
-                        target: position,
-                    });
+                    commands.entity(marker).insert(told_marker(position));
                 }
             }
             ToClient::Left { id } => {
@@ -758,49 +937,34 @@ fn receive(
                 chunk,
                 ground: sent,
             } => {
-                // Only while a world is open. A chunk answered after leaving
-                // one is about a world that no longer exists here, and there
-                // is nothing left for it to be part of.
-                if let Some(ground) = ground.as_mut() {
-                    ground.deliver(chunk, sent);
-                }
+                said.ground.write(GroundArrived {
+                    chunk,
+                    ground: sent,
+                });
             }
             ToClient::Surveyed { found } => {
-                // Only while a world is open, on the ground's own terms: ink
-                // arriving after the sheet has been rolled up is about a
-                // world that no longer exists here. Nothing is checked — a
-                // mark is two bytes and cannot be non-finite, and what a
-                // coast *means* is the wire's own arithmetic rather than
-                // something a client re-derives and could disagree about.
-                if let Some(chart) = told.chart.as_mut() {
-                    for (chunk, soundings) in found {
-                        chart.record(chunk, soundings);
-                    }
-                }
+                // Nothing is checked — a mark is two bytes and cannot be
+                // non-finite, and what a coast *means* is the wire's own
+                // arithmetic rather than something a client re-derives and
+                // could disagree about.
+                said.coast.write(CoastSurveyed { found });
             }
             ToClient::Weather { wind } => {
                 // A target, not an order: the drawn sea eases towards it —
-                // see [`sea::settle_conditions`] — so the server's occasional
-                // quantised updates arrive as weather rather than as steps.
-                //
-                // Believed only within reason. The server is the authority on
-                // the sky, but a hostile or broken one must not get to poison
-                // the arithmetic every vertex of the sea runs on — a
-                // non-finite wind, once eased into the conditions, is NaN for
-                // good. The ceiling sits far above any honest gale rather
-                // than at it, so a server that learns to blow harder is not
-                // silently ignored here.
+                // see [`crate::sea::settle_conditions`] — so the server's
+                // occasional quantised updates arrive as weather rather than
+                // as steps. Which is also why it is vetted: a non-finite
+                // wind, once eased into the conditions, is NaN for good.
                 if wind.is_finite() && wind.length() < 100.0 {
-                    told.forecast.wind = Some(wind);
+                    said.wind.write(WindChanged { wind });
                 }
             }
             ToClient::Daylight { phase } => {
-                // Believed within the same reason as the weather: an hour
-                // outside the day is a broken or hostile server, and a
-                // non-finite one eased into the clock would leave this
+                // An hour outside the day is a broken or hostile server, and
+                // a non-finite one eased into the clock would leave this
                 // machine with no time of day at all, for good.
                 if phase.is_finite() && (0.0..1.0).contains(&phase) {
-                    told.sky.told(phase);
+                    said.hour.write(HourTold { phase });
                 }
             }
             ToClient::Beast {
@@ -810,35 +974,25 @@ fn receive(
                 velocity,
                 surfaced,
             } => {
-                // Believed within the same reason as the sky: a beast is
-                // eased towards and drawn out of this arithmetic every
-                // frame, and one telling of a non-finite place would be a
-                // shark at NaN for good. The pace ceiling sits far above any
-                // honest beast rather than at it.
                 if position.is_finite() && velocity.is_finite() && velocity.length() < 50.0 {
-                    told.beasts
-                        .seen(&mut commands, id, kind, position, velocity, surfaced);
+                    said.beast.write(BeastSeen {
+                        id,
+                        kind,
+                        position,
+                        velocity,
+                        surfaced,
+                    });
                 }
             }
-            ToClient::BeastGone { id } => told.beasts.gone(&mut commands, id),
-            // Whatever the server said to a console line, said where it was
-            // typed. Only ever sent asked-for, so a quiet session pays
-            // nothing here.
+            ToClient::BeastGone { id } => {
+                said.beast_gone.write(BeastGone { id });
+            }
             ToClient::Reply { text } => {
-                told.console.say(&text);
-                // And to the socket, if that is where the line came from. A
-                // reply is fire-and-forget both ways, so there is nothing to
-                // match it against but who is waiting — see
-                // [`crate::control::Control::answered`], which drops one
-                // nobody is.
-                if let Some(control) = told.control.as_mut() {
-                    control.answered(&text);
-                }
+                said.reply.write(ServerReplied { text });
             }
-            // The server's phrases, for tab at the console — see
-            // [`crate::console`], which owns what completion means and
-            // still sends every line verbatim.
-            ToClient::Vocabulary { phrases } => told.console.teach(phrases),
+            ToClient::Vocabulary { phrases } => {
+                said.vocabulary.write(VocabularyTaught { phrases });
+            }
             ToClient::Boat {
                 id,
                 kind,
@@ -846,45 +1000,22 @@ fn receive(
                 heading,
                 occupant,
             } => {
-                // Believed within the sky's reason: a hull is eased towards
-                // and drawn every frame, and one telling of a non-finite
-                // pose would moor it at NaN for good.
                 if position.is_finite() && heading.is_finite() {
-                    told.fleet.told(
-                        &mut commands,
-                        &mut kit,
-                        &players,
-                        &poses,
-                        online.connection.id,
+                    said.hull.write(HullTold {
                         id,
                         kind,
                         position,
                         heading,
                         occupant,
-                    );
+                    });
                 }
             }
-            ToClient::BoatGone { id } => told.fleet.gone(&mut commands, &players, &poses, id),
+            ToClient::BoatGone { id } => {
+                said.hull_gone.write(HullGone { id });
+            }
             ToClient::PutDown { position, heading } => {
-                // Believed within the same reason a hull's telling is: what
-                // this writes is drawn every frame from here on, and one
-                // telling of a place that is not a place would strand the
-                // player at NaN for the rest of the session.
                 if position.is_finite() && heading.is_none_or(f32::is_finite) {
-                    crate::player::put_down(
-                        &mut commands,
-                        &told.fleet,
-                        &players,
-                        position,
-                        heading,
-                    );
-                    // A driver waiting on the line that caused this is not
-                    // waiting for the server's word but for the ground where
-                    // the player now is — see
-                    // [`crate::control::Control::put_down`].
-                    if let Some(control) = told.control.as_mut() {
-                        control.put_down();
-                    }
+                    said.put_down.write(PutDown { position, heading });
                 }
             }
             ToClient::Cairn {
@@ -894,40 +1025,60 @@ fn receive(
                 name,
                 yours,
             } => {
-                // Believed within the same reason the beasts are: a cairn is
-                // stood on the ground at this point every frame until the
-                // ground arrives, and one telling of a place that is not a
-                // place would be a pillar at NaN for the rest of the session.
                 if at.is_finite() && covers.0.is_finite() && covers.1.is_finite() {
-                    told.cairns.told(&mut commands, island, at);
-                    // The sheet and the world hear the same word. What the
-                    // island is called is the world's to say now — a name
-                    // rides with the claim it was written on — so this is the
-                    // only way lettering reaches the chart.
-                    if let Some(chart) = told.chart.as_mut() {
-                        chart.claimed(
-                            island,
-                            at,
-                            Rect::from_corners(covers.0, covers.1),
-                            &name,
-                            yours,
-                        );
-                    }
+                    said.cairn.write(CairnSeen {
+                        island,
+                        at,
+                        covers: Rect::from_corners(covers.0, covers.1),
+                        name,
+                        yours,
+                    });
                 }
             }
-            // The one refusal with something to say: the claim key was
-            // pressed on ground whose island's coast this player has not
-            // finished surveying. The word goes to the player, there being
-            // no state anywhere for it to change.
             ToClient::Uncharted => {
-                commands.insert_resource(crate::notice::Notice::new(
-                    "There is more coast here than you have charted",
-                ));
+                said.uncharted.write(Uncharted);
             }
             // The handshake consumed its own messages; a stray one now is a
             // server bug, not something to end a match over.
             ToClient::Welcome { .. } | ToClient::Refused { .. } | ToClient::World { .. } => {}
         }
+    }
+}
+
+/// Every word [`receive`] can say, in one hand.
+///
+/// Together because they are one thing — the vocabulary of a session — and
+/// not merely to keep a system's parameter list under the sixteen Bevy allows,
+/// though twelve writers and three other parameters would have been at that
+/// wall too. Adding a word to the wire is a field here and an arm there, and
+/// nothing else in this module moves.
+#[derive(SystemParam)]
+struct Words<'w> {
+    ground: MessageWriter<'w, GroundArrived>,
+    coast: MessageWriter<'w, CoastSurveyed>,
+    wind: MessageWriter<'w, WindChanged>,
+    hour: MessageWriter<'w, HourTold>,
+    beast: MessageWriter<'w, BeastSeen>,
+    beast_gone: MessageWriter<'w, BeastGone>,
+    hull: MessageWriter<'w, HullTold>,
+    hull_gone: MessageWriter<'w, HullGone>,
+    put_down: MessageWriter<'w, PutDown>,
+    cairn: MessageWriter<'w, CairnSeen>,
+    uncharted: MessageWriter<'w, Uncharted>,
+    reply: MessageWriter<'w, ServerReplied>,
+    vocabulary: MessageWriter<'w, VocabularyTaught>,
+}
+
+/// How a marker is drawn closing on the last word about its player. No
+/// bearing: a walker's own is never reported, a capsule looks the same from
+/// every side, and a `facing` of zero would be the world spinning somebody
+/// north for no reason.
+fn told_marker(at: Vec2) -> Told {
+    Told {
+        at,
+        facing: None,
+        closing: MARKER_SMOOTHING,
+        swinging: MARKER_SMOOTHING,
     }
 }
 
@@ -1040,7 +1191,7 @@ fn enter_afoot(
 /// made, so it is not one to animate.
 fn shade_markers(
     fleet: Res<crate::boat::Fleet>,
-    mut markers: Query<(Ref<RemotePlayer>, &mut Visibility, &mut Transform)>,
+    mut markers: Query<(&RemotePlayer, Ref<Told>, &mut Visibility, &mut Transform)>,
     // Who has been under a hull and is not yet standing where they stepped
     // off. A player who leaves the world while still at one stays in here,
     // which is a handful of bytes for as long as the session lasts and
@@ -1048,22 +1199,22 @@ fn shade_markers(
     // again to be wrongly snapped.
     mut adrift: Local<HashSet<PlayerId>>,
 ) {
-    for (player, mut visibility, mut transform) in &mut markers {
+    for (player, told, mut visibility, mut transform) in &mut markers {
         if fleet.crewed(player.id) {
             *visibility = Visibility::Hidden;
             adrift.insert(player.id);
             continue;
         }
         if adrift.contains(&player.id) {
-            transform.translation.x = player.target.x;
-            transform.translation.z = player.target.y;
+            transform.translation.x = told.at.x;
+            transform.translation.z = told.at.y;
             // Held until a word about the player themself lands, because
             // the two arrive as two: the helm is told free and the step
             // ashore follows, and a frame that read only the first would
             // snap to the boarding point and then glide the whole voyage
             // anyway. Until then the snap is to a target the marker is
             // already standing on, which costs nothing.
-            if player.is_changed() {
+            if told.is_changed() {
                 adrift.remove(&player.id);
             }
         }
@@ -1077,13 +1228,12 @@ fn place_markers(
     time: Res<Time>,
     ground: Option<Res<Ground>>,
     sea: Res<sea::SeaConditions>,
-    mut markers: Query<(&RemotePlayer, &mut Transform)>,
+    mut markers: Query<(&Told, &mut Transform), With<RemotePlayer>>,
 ) {
-    let t = eased(MARKER_SMOOTHING, time.delta_secs());
+    let (dt, elapsed) = (time.delta_secs(), time.elapsed_secs_wrapped());
 
-    for (player, mut transform) in &mut markers {
-        let at = Vec2::new(transform.translation.x, transform.translation.z);
-        let at = at.lerp(player.target, t);
+    for (told, mut transform) in &mut markers {
+        let at = eased_onto(&mut transform, told, dt);
 
         // Standing on the surface, capsule half-height above it, so a player
         // crossing open ocean is sailing it rather than walking the seabed —
@@ -1091,12 +1241,9 @@ fn place_markers(
         // crossing open water would stand still in a sea everything else is
         // bobbing on. Ground still generating keeps the last height, exactly
         // as the boat and the camera's own focus do.
-        let mut height = transform.translation.y;
-        if let Some(standing) = ground.as_ref().and_then(|g| g.height(at.x, at.y)) {
-            let water = sea.water_over(ground.as_deref(), at, time.elapsed_secs_wrapped());
-            height = standing.max(water) + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
+        if let Some(surface) = sea.surface_over(ground.as_deref(), at, elapsed) {
+            transform.translation.y = surface + MARKER_LENGTH * 0.5 + MARKER_RADIUS;
         }
-        transform.translation = Vec3::new(at.x, height, at.y);
     }
 }
 
@@ -1162,6 +1309,15 @@ mod tests {
 
     /// A headless app with the net systems running in a match, and no
     /// terrain — markers then keep their height, which these tests ignore.
+    ///
+    /// The listeners are stood up by hand rather than by adding the plugins
+    /// that carry them, and that is what these tests are: the wire end to
+    /// end, from a real socket to the hulls, stones, ink and scrollback the
+    /// words are about. Their own modules test what each does with a word;
+    /// nothing but this tests that the word arrives at all, in the right
+    /// order, off a socket somebody else is writing to. Adding the real
+    /// plugins would drag a renderer, a UI tree and a boat's whole rig in to
+    /// prove it.
     fn test_app(connection: Connection) -> App {
         let mut app = App::new();
         app.add_plugins((
@@ -1181,7 +1337,34 @@ mod tests {
         .init_asset::<Mesh>()
         .init_asset::<bevy::world_serialization::WorldAsset>()
         .init_resource::<Assets<StandardMaterial>>()
-        .insert_resource(Online::new(connection));
+        // What the listeners below keep, which their own plugins would have
+        // brought.
+        .init_resource::<crate::cairn::Cairns>()
+        .init_resource::<crate::console::Console>()
+        .insert_resource(Online::new(connection))
+        .add_systems(
+            Update,
+            (
+                // The hulls before the put down, which is the one order the
+                // wire fixes — see [`PutDown`].
+                crate::boat::take_the_hulls,
+                crate::boat::lose_the_hulls,
+                crate::player::take_the_put_down,
+                crate::cairn::raise_the_cairns,
+                crate::console::hear_the_server,
+                crate::console::learn_the_vocabulary,
+            )
+                .chain()
+                .in_set(Wire::Read),
+        )
+        // The sheet is a world's, not a run's: the tests that want one insert
+        // it themselves, exactly as entering a world does.
+        .add_systems(
+            Update,
+            (crate::chart::ink_the_coast, crate::chart::letter_the_sheet)
+                .in_set(Wire::Read)
+                .run_if(resource_exists::<crate::chart::Chart>),
+        );
         app.update();
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
@@ -1192,9 +1375,9 @@ mod tests {
 
     fn markers(app: &mut App) -> Vec<(PlayerId, Vec2)> {
         app.world_mut()
-            .query::<&RemotePlayer>()
+            .query::<(&RemotePlayer, &Told)>()
             .iter(app.world())
-            .map(|player| (player.id, player.target))
+            .map(|(player, told)| (player.id, told.at))
             .collect()
     }
 
@@ -1224,12 +1407,7 @@ mod tests {
         // `Reach::Alone` is — a test run cannot collide with a real server on
         // this machine, and neither can a player.
         crate::testing::quarantine_data_dir();
-        let dialing = Dialing::opening(
-            WorldConfig { seed: 77 },
-            Reach::Alone,
-            server::OPENING,
-            false,
-        );
+        let dialing = Dialing::opening(77, Reach::Alone, server::OPENING, false);
         let session = settle(&dialing).expect("the world should be opened and joined");
 
         assert!(
@@ -1244,20 +1422,10 @@ mod tests {
     #[test]
     fn the_seed_asked_for_is_the_world_that_opens() {
         crate::testing::quarantine_data_dir();
-        let first = settle(&Dialing::opening(
-            WorldConfig { seed: 77 },
-            Reach::Alone,
-            server::OPENING,
-            false,
-        ))
-        .expect("a world should open");
-        let second = settle(&Dialing::opening(
-            WorldConfig { seed: 78 },
-            Reach::Alone,
-            server::OPENING,
-            false,
-        ))
-        .expect("a world should open");
+        let first = settle(&Dialing::opening(77, Reach::Alone, server::OPENING, false))
+            .expect("a world should open");
+        let second = settle(&Dialing::opening(78, Reach::Alone, server::OPENING, false))
+            .expect("a world should open");
         // A host can ask its own server which world it made — that is where
         // the debug readout's seed comes from.
         assert_eq!(first.hosting.as_ref().expect("hosting").seed(), 77);
@@ -1276,12 +1444,7 @@ mod tests {
         // from outside, and whoever arrives is somebody else in the same
         // world rather than the host again.
         crate::testing::quarantine_data_dir();
-        let dialing = Dialing::opening(
-            WorldConfig { seed: 3 },
-            Reach::Alone,
-            server::OPENING,
-            false,
-        );
+        let dialing = Dialing::opening(3, Reach::Alone, server::OPENING, false);
         let session = settle(&dialing).expect("the world should be opened and joined");
         let port = session.hosting.as_ref().expect("hosting").addr().port();
 
@@ -2236,7 +2399,7 @@ mod tests {
         let _server = socket.recv().expect("the fake server keeps its socket");
         let mut app = test_app(connection);
         app.insert_resource(Hosting(
-            Server::bind("127.0.0.1:0", WorldConfig::default())
+            Server::bind("127.0.0.1:0", 7)
                 .expect("bind")
                 .spawn()
                 .expect("spawn"),
