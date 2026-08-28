@@ -513,6 +513,78 @@ const GRAIN_SCALE: f32 = 4.7;
 /// mesh, and a lone loud octave with quiet neighbours read as crumpled paper
 /// rather than ground; the middle band does that work now.
 const GRAIN_RELIEF: f32 = 0.5;
+
+// --- Crags: what bare rock does instead of rolling -------------------------
+//
+// The rugged dial says what kind of *country* this is; the crag pass answers
+// a different question — whether anything grows here. Soil smooths ground and
+// bare rock breaks it, so wherever the palette strips the ground bare (the
+// spray zone and the mountain band) the finished ground is reworked into rock
+// forms, and grassy hills keep rolling right beside them. A first attempt
+// added a quiet ridged band instead, and it read as a bump map on the same
+// smooth hills: relief far below the landform's own can only ever decorate
+// it. What says *rock formation* is structure — ridges warped until they
+// gnarl, crests sharpened into stacks and pinnacles, clefts cut between them,
+// and the whole part-terraced into strata — at amplitudes that compete with
+// the hills they stand on.
+//
+// See [`TerrainGenerator::crags`] for how the parts compose and the
+// waterline guarantees that keep the coast the landform's — the lesson
+// [`APRON_DRY`] already paid for.
+
+/// Wavelength of the crag backbone, in metres — the ridged field the spires
+/// and clefts are both read off. Incommensurate with the metre grid for the
+/// reason [`GRAIN_SCALE`] spells out.
+const CRAG_SCALE: f32 = 23.3;
+/// Wavelength and reach of the warp the backbone is read through, in metres.
+/// Unwarped ridged noise is even-tempered — every crest the same width, every
+/// gully the same depth — and reads as corrugation; pushed through a warp the
+/// crests pinch, fork and wander, which is most of what makes rock look
+/// grown rather than stamped.
+const CRAG_WARP_SCALE: f32 = 41.0;
+/// See [`CRAG_WARP_SCALE`].
+const CRAG_WARP: f32 = 11.0;
+/// The exponent the backbone is sharpened by. Raised to a power, most of the
+/// field lies low and the crests stab — isolated stacks and pinnacles rather
+/// than an even swell of bumps.
+const CRAG_SHARP: f32 = 2.6;
+/// How far a spire may stand above the ground it grew from, in metres, where
+/// the ground is wholly bare. Sized against [`DETAIL_RELIEF`] rather than the
+/// fine bands: a form shorter than the hills cannot contrast with them.
+const CRAG_SPIRE: f32 = 11.0;
+/// How deep the clefts between spires cut, in metres — bounded at each point
+/// by [`CRAG_HEADROOM`] of the headroom above the shore band, so no cleft
+/// ever reaches the water.
+const CRAG_CLEFT: f32 = 7.0;
+/// The share of that headroom a cleft may spend. The margin the remainder
+/// leaves is small and nothing downstream would notice a retune eating it,
+/// which is why `crags_never_reach_the_shore_band` pins it.
+const CRAG_HEADROOM: f32 = 0.8;
+/// The strata: bare rock is pulled part of the way onto terraces this many
+/// metres apart. Horizontal bedding is the one regularity real rock wears,
+/// and with flat-shaded facets a level tread against a sheer riser is the
+/// strongest "rock, not hill" signal the mesh can draw. Not a whole number,
+/// so treads and the metre mesh stay out of phase.
+const CRAG_STEP: f32 = 2.7;
+/// How far toward those terraces the ground is pulled, 0 none to 1 fully.
+const CRAG_STRATA: f32 = 0.65;
+/// The slice of each strata interval the riser climbs through, as a share of
+/// [`CRAG_STEP`]. A hard `floor` was tried and is a true discontinuity, which
+/// the one-tile central differences behind [`TerrainGenerator::normal`]
+/// cannot see — so paint and plants read "flat" at the very lip of a sheer
+/// step. A finite riser leans with the ground underneath it instead: broad
+/// and visible where the backbone is gentle, near-sheer where it is already
+/// steep and painted rock anyway.
+const CRAG_RISER: f32 = 0.3;
+/// Height above which the crag pass is fully faded in, in metres. The fade
+/// starts at [`SHORE_TOP`], so the waterline and the drawn shore stay the
+/// landform's. Long on purpose: at 4.0 the first metres behind a rocky
+/// waterline carried enough crag to read as cliff, and the coast-agreement
+/// test rightly objected — a rocky shore is the middle ground, and its
+/// foreshore has to stay walkable. The forms this pass exists for stand on
+/// clifftops and summits, well above the fade.
+const CRAG_FULL: f32 = 7.0;
+
 /// The waterline apron: the altitude band, in landform metres, across which
 /// the whole detail stack fades in from nothing. Below [`APRON_DRY`] the
 /// ground is the bare landform, so the drawn coast is the landform's own
@@ -696,7 +768,10 @@ const COAST_GRID: f32 = 4.0;
 /// rock is a good deal smaller than this; much below it and they stop being
 /// wide enough to make a facet.
 const SKERRY_SCALE: f32 = 34.0;
-/// How far a skerry stands out of the water, in metres.
+/// How far a skerry stands out of the water, in metres, as the skerry pass
+/// itself leaves it. The crag pass runs after and builds on the barest of
+/// them — the sea's rocks get the same treatment as everything else the
+/// spray strips — so the tallest stacks finish near twice this.
 const SKERRY_HEIGHT: f32 = 2.5;
 
 /// Height, in metres, up to which ground is drawn as shore rather than as what
@@ -704,6 +779,28 @@ const SKERRY_HEIGHT: f32 = 2.5;
 /// ground that makes a beach broad, so raising this would only smear the same
 /// band of colour up the rocky shores and the cliffs as well.
 const SHORE_TOP: f32 = 0.6;
+
+/// How far in from the waterline the sea has any say over what grows, in
+/// metres. Height is what the bands above [`SHORE_TOP`] answer to, so
+/// distance is what the spray has to be — the rule that holds the mountains
+/// off the coast, holding the grass off the spray — and a scrap of land
+/// whose every point is within reach is sprayed *everywhere*, which is what
+/// keeps a skerry's flat top and a one-chunk islet from coming out as lawns
+/// standing in the sea. Read only through [`TerrainGenerator::sprayed`].
+const SPRAY_REACH: f32 = 30.0;
+
+/// How far the spray's edge wanders off the pure distance, in metres — the
+/// same job [`BAND_WANDER`] does for the treeline, and driven by the same
+/// field, because a contour parallel to the coast is as mechanical a line as
+/// a level one.
+const SPRAY_WANDER: f32 = 10.0;
+
+/// Where the spray weight is cut into painted bare rock — the paint's
+/// threshold over [`TerrainGenerator::sprayed`], whose doc says why the two
+/// consumers share one number. Falls at about nine metres of collar on an
+/// ordinary rocky shore and twenty on a cliff coast, and a beach's zero
+/// weight never reaches it.
+const SPRAY_BARE: f32 = 0.2;
 
 /// How far a lake's reed margin reaches from its own edge, in metres, on both
 /// sides of it — so the fringe is [`LAKE_MARGIN`] of wet ground and the same
@@ -1698,12 +1795,13 @@ impl TerrainGenerator {
         // the line the flood found. The detail keeps its freedom to shape the
         // bed and the banks, and loses only its freedom to carry either across
         // the surface.
-        h = base + (h - base) * self.lakes.ground_weight(wx, wz);
+        let lake_calm = self.lakes.ground_weight(wx, wz);
+        h = base + (h - base) * lake_calm;
 
         // Everything above is the same landscape whatever the coast does with
         // it; the rest of this decides what happens where it meets the sea.
         let distance = self.coast.metres(wx, wz);
-        let shore = self.shore_character(wx, wz);
+        let shore = self.shore_character(wx, wz, distance);
 
         // Faded out inland rather than cut off at a height. Most of this map's
         // land is under [`CLIFF_HEIGHT`] — it is a gentle island — so a rule
@@ -1711,6 +1809,41 @@ impl TerrainGenerator {
         // terracing plains half a kilometre from the sea.
         h += (shape_coast(h, distance, shore, self.coast_scale) - h) * coastal_weight(distance);
         h = self.skerries(wx, wz, h, shore);
+
+        // The crag pass reworks the *finished* ground — see the constants'
+        // header — because the bare coast it exists for is mostly shaped by
+        // the coastal pass above. Where it stands is where the palette bares
+        // rock: the spray weight is [`sprayed`], the same call the paint
+        // thresholds, and the mountain band is read off the same wandered
+        // height the parcel rows read — so relief and paint stray on one
+        // tide. Faded in above the shore and calmed by lakes like the rest
+        // of the detail; the outer test is only a cheap skip for the open
+        // sea and the lowland interior, where the weight is identically 0.
+        //
+        // [`sprayed`]: TerrainGenerator::sprayed
+        if distance < SPRAY_REACH + SPRAY_WANDER || h > MOOR_HEIGHT - BAND_WANDER {
+            let wander = self
+                .detail
+                .fbm(wx / BAND_SCALE - 53.0, wz / BAND_SCALE + 29.0, 4);
+            let barren = self.sprayed(distance, shore, wander).max(smoothstep(
+                MOOR_HEIGHT,
+                MOUNTAIN_HEIGHT,
+                h + BAND_WANDER * wander,
+            ));
+            let cragging = barren * smoothstep(SHORE_TOP, CRAG_FULL, h) * lake_calm;
+            if cragging > 0.0 {
+                let cragged = self.crags(wx, wz, h, cragging);
+                // A tarn's surface caps the cut the way the sea's shore band
+                // does — [`LAKE_RELIEF`] budgets only the detail stack, and a
+                // full cleft out-cuts it — and a drowned bank is not reworked
+                // at all: the bed keeps the shape the flood read.
+                h = match self.lakes.level(wx, wz) {
+                    Some(level) if h >= level => cragged.max(level),
+                    Some(_) => h,
+                    None => cragged,
+                };
+            }
+        }
 
         h.max(-MAX_DEPTH)
     }
@@ -1746,8 +1879,9 @@ impl TerrainGenerator {
     /// middle of every neck and strait. A distance field's slope is 1
     /// everywhere except approaching that crest, where it collapses — so the
     /// collapse *is* the detector, and the displacement is faded out on it.
-    fn shore_character(&self, wx: f32, wz: f32) -> f32 {
-        let distance = self.coast.metres(wx, wz);
+    /// `distance` is [`CoastDistance::metres`] at the same point, which every
+    /// caller already holds.
+    fn shore_character(&self, wx: f32, wz: f32, distance: f32) -> f32 {
         let step = COAST_GRID;
         let gradient = Vec2::new(
             self.coast.metres(wx + step, wz) - self.coast.metres(wx - step, wz),
@@ -1770,7 +1904,62 @@ impl TerrainGenerator {
 
     /// Which of the three kinds of coast the character field lands on here.
     fn shore(&self, wx: f32, wz: f32) -> Shore {
-        Shore::of(self.shore_character(wx, wz))
+        let distance = self.coast.metres(wx, wz);
+        Shore::of(self.shore_character(wx, wz, distance))
+    }
+
+    /// How hard the sea's spray bears on this ground, 0 untouched to 1 fully
+    /// bare: the shore character's say, squared, fading out over
+    /// [`SPRAY_REACH`] of wandered distance from the waterline.
+    ///
+    /// The one reading of the spray zone. The palette cuts this at
+    /// [`SPRAY_BARE`] to paint the collar and the crag pass reworks ground by
+    /// it, so where bare rock is painted and where rock forms stand cannot
+    /// drift apart — they are the same number. The square is what keeps a
+    /// middling-rocky stretch from wearing a collar half the reach wide; the
+    /// `wander` is the band field both callers already hold, so the collar's
+    /// edge strays off the coast-parallel the way the treeline strays off the
+    /// level.
+    fn sprayed(&self, distance: f32, character: f32, wander: f32) -> f32 {
+        let bare = smoothstep(ROCKY_SHORE, CLIFF_SHORE, character);
+        let seaward = distance + SPRAY_WANDER * wander;
+        bare * bare * (1.0 - smoothstep(0.0, SPRAY_REACH, seaward))
+    }
+
+    /// Bare ground reworked into rock forms — see the [`CRAG_SCALE`] header
+    /// for why and the shape of the parts. `weight` is how bare this point is,
+    /// 0 to 1, and everything below scales with it.
+    ///
+    /// Order matters: spires and clefts first, strata last, so the terraces
+    /// cut *across* the forms — ledges running through a stack's flank — as
+    /// bedding does, rather than each spire carrying its own private steps.
+    ///
+    /// The waterline holds by construction and not by the fade alone: a cleft
+    /// spends at most [`CRAG_HEADROOM`] of the headroom above the shore band,
+    /// and the strata pull toward treads that are never below zero —
+    /// `crags_never_reach_the_shore_band` pins the margin that leaves.
+    fn crags(&self, wx: f32, wz: f32, h: f32, weight: f32) -> f32 {
+        let qx = self
+            .detail
+            .fbm(wx / CRAG_WARP_SCALE + 71.0, wz / CRAG_WARP_SCALE - 17.0, 2);
+        let qz = self
+            .detail
+            .fbm(wx / CRAG_WARP_SCALE - 43.0, wz / CRAG_WARP_SCALE + 59.0, 2);
+        let (cx, cz) = (wx + qx * CRAG_WARP, wz + qz * CRAG_WARP);
+
+        let ridge = self.ridges.ridged(cx / CRAG_SCALE, cz / CRAG_SCALE, 3);
+        let spire = pow(ridge, CRAG_SHARP) * CRAG_SPIRE;
+        let cleft = (CRAG_CLEFT * (1.0 - ridge)).min((h - SHORE_TOP).max(0.0) * CRAG_HEADROOM);
+        let jagged = h + (spire - cleft) * weight;
+
+        let steps = jagged / CRAG_STEP;
+        let riser = smoothstep(
+            0.5 - CRAG_RISER / 2.0,
+            0.5 + CRAG_RISER / 2.0,
+            steps.fract(),
+        );
+        let tread = (steps.floor() + riser) * CRAG_STEP;
+        jagged + (tread - jagged) * CRAG_STRATA * weight
     }
 
     /// Rock heads standing offshore of a rocky coast, and only there.
@@ -1862,10 +2051,21 @@ impl TerrainGenerator {
         // turquoise ring. How wide that ring is comes from the landform rather
         // than from anything here — [`shape_coast`] gives a beach a long
         // shallow apron and drops a cliff straight past it.
-        if height < -SEABED_DEPTH {
-            return Material::Seabed;
-        }
         if height < -SHALLOW_DEPTH {
+            // Before either bed colour, a wall is rock: a cell this steep is a
+            // cliff's underwater face, and one Shallow cell there is a
+            // ten-metre streak of turquoise up the rock, because a cell's
+            // colour is stretched over however much face its corners span.
+            // Dark at [`ROCK_SLOPE`] where the dry cascade waits for
+            // [`CLIFF_SLOPE`], deliberately: below the waterline rock is wet
+            // and wet rock is dark, so the flip to the lighter dry grey at
+            // the shore band is a tide line, not a seam.
+            if slope > ROCK_SLOPE {
+                return Material::RockDark;
+            }
+            if height < -SEABED_DEPTH {
+                return Material::Seabed;
+            }
             return Material::Shallow;
         }
 
@@ -1937,6 +2137,21 @@ impl TerrainGenerator {
         } else {
             4
         };
+
+        // Salt spray, before anything is allowed to grow: the one spray
+        // weight — [`TerrainGenerator::sprayed`], the same call the crag pass
+        // works ground by — cut at [`SPRAY_BARE`]. The character read hides
+        // behind the cheap distance test, so the interior never pays for it.
+        // Painted from the mountain row rather than as one material: bare is
+        // bare, one palette row, and a collar tens of metres wide in a single
+        // flat colour was exactly the slab the patchwork exists to prevent.
+        let distance = self.coast.metres(wx, wz);
+        if distance < SPRAY_REACH + SPRAY_WANDER {
+            let character = self.shore_character(wx, wz, distance);
+            if self.sprayed(distance, character, wander) > SPRAY_BARE {
+                return MOUNTAIN_PARCELS[bucket];
+            }
+        }
 
         // Which row of the palette that parcel is drawn from — the only thing
         // height decides up here.
@@ -3451,8 +3666,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0xCF31_58F8_CAEC_2E18u64),
-            (99, UVec2::new(3, 2), 0x4CCE_40DC_59D0_7DBFu64),
+            (20_040_112u32, UVec2::new(4, 4), 0x14DC_93A4_566B_C197u64),
+            (99, UVec2::new(3, 2), 0xC171_0209_1C7A_C7FBu64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -3634,6 +3849,40 @@ mod tests {
             (0.05..0.7).contains(&rocky),
             "rocky shores came out {:.0}% steep, which is a beach or a cliff",
             rocky * 100.0
+        );
+    }
+
+    #[test]
+    fn crags_never_reach_the_shore_band() {
+        // The crag pass promises the drawn shore stays the landform's: however
+        // hard it cuts, ground that entered above the shore band leaves above
+        // it. That holds by arithmetic — the cleft spends [`CRAG_HEADROOM`] of
+        // the headroom, the strata pull [`CRAG_STRATA`] of the way to a tread
+        // — but the margin it leaves is centimetres, and nothing else goes red
+        // when a retune of any of the four constants eats it. So this sweeps
+        // the worst case the fade allows: the weight at each height is the
+        // most the caller can ever hand crags(), and the positions sweep the
+        // ridge and warp fields through their range.
+        let (_, gen) = generator(4, 4, 20_040_112);
+
+        let mut clearance = f32::INFINITY;
+        for iz in 0..32 {
+            for ix in 0..32 {
+                let (wx, wz) = (ix as f32 * 37.3 - 600.0, iz as f32 * 41.7 - 650.0);
+                let mut h = SHORE_TOP + 0.01;
+                while h < 60.0 {
+                    let weight = smoothstep(SHORE_TOP, CRAG_FULL, h);
+                    clearance = clearance.min(gen.crags(wx, wz, h, weight) - SHORE_TOP);
+                    h += 0.19;
+                }
+            }
+        }
+
+        println!("worst crag clearance over the shore band: {clearance:.3} m");
+        assert!(
+            clearance > 0.0,
+            "a crag cut reached the shore band, by {:.3} m",
+            -clearance
         );
     }
 
