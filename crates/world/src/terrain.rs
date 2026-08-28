@@ -705,6 +705,28 @@ const SKERRY_HEIGHT: f32 = 2.5;
 /// band of colour up the rocky shores and the cliffs as well.
 const SHORE_TOP: f32 = 0.6;
 
+/// How far in from the waterline the sea keeps the ground bare, in metres,
+/// where the coast is at its most exposed. The shore character scales it:
+/// nothing in from a beach, the full reach in from a cliff. Height is what the
+/// bands above [`SHORE_TOP`] read, so distance is what this has to be — the
+/// same rule that holds the mountains off the coast holds the grass off the
+/// spray, and a scrap of land whose every point is within reach goes bare
+/// *everywhere*, which is what keeps a skerry's flat top and a one-chunk
+/// islet from coming out as lawns standing in the sea.
+///
+/// The character's say is squared before it scales the reach: read linearly,
+/// every middling-rocky stretch wore a collar half this wide and a big island
+/// came out sitting in a stone bowl. Squared, the ordinary rocky shore keeps
+/// a few metres of bare lip and the full reach is kept for the coasts that
+/// have actually earned a cliff.
+const SPRAY_REACH: f32 = 30.0;
+
+/// How far the spray band's inland edge wanders off the pure distance, in
+/// metres — the same job [`BAND_WANDER`] does for the treeline, and driven by
+/// the same field, because a contour parallel to the coast is as mechanical a
+/// line as a level one.
+const SPRAY_WANDER: f32 = 10.0;
+
 /// How far a lake's reed margin reaches from its own edge, in metres, on both
 /// sides of it — so the fringe is [`LAKE_MARGIN`] of wet ground and the same
 /// again of weed standing in the water.
@@ -1898,6 +1920,19 @@ impl TerrainGenerator {
         let wander = self
             .detail
             .fbm(wx / BAND_SCALE - 53.0, wz / BAND_SCALE + 29.0, 4);
+
+        // Salt spray, before anything is allowed to grow — see [`SPRAY_REACH`].
+        // The character read is behind the cheap distance test, so land past
+        // any possible reach never pays for it. Painted [`Material::Rock`] and
+        // never `RockDark`, which stays the slope tests' own — a dark facet
+        // still always means a crag.
+        let seaward = self.coast.metres(wx, wz) + SPRAY_WANDER * wander;
+        if seaward < SPRAY_REACH {
+            let bare = smoothstep(ROCKY_SHORE, CLIFF_SHORE, self.shore_character(wx, wz));
+            if seaward < SPRAY_REACH * bare * bare {
+                return Material::Rock;
+            }
+        }
 
         // The height everything reads its band off.
         let banded = height + BAND_WANDER * wander;
@@ -3451,8 +3486,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0xCF31_58F8_CAEC_2E18u64),
-            (99, UVec2::new(3, 2), 0x4CCE_40DC_59D0_7DBFu64),
+            (20_040_112u32, UVec2::new(4, 4), 0x939A_78AA_092D_C2A2u64),
+            (99, UVec2::new(3, 2), 0xBA15_34ED_070B_814Au64),
         ];
 
         for (seed, chunks, expected) in cases {
