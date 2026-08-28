@@ -249,7 +249,7 @@ mod tests {
         let recorded = [
             (20_040_112u32, 0x5E7B_DBD0_BC5D_DEBAu64),
             (1, 0xDBBD_1689_3CD7_0BA1),
-            (7, 0xF8F7_48C3_FA15_1B58),
+            (7, 0xF7E7_6B75_F215_DF3D),
         ];
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()

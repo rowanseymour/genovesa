@@ -513,6 +513,29 @@ const GRAIN_SCALE: f32 = 4.7;
 /// mesh, and a lone loud octave with quiet neighbours read as crumpled paper
 /// rather than ground; the middle band does that work now.
 const GRAIN_RELIEF: f32 = 0.5;
+
+/// Wavelength of the extra jag bare rock carries, in metres — incommensurate
+/// with the metre grid for the reason [`GRAIN_SCALE`] spells out.
+///
+/// The rugged dial says what kind of *country* this is; this band answers a
+/// different question — whether anything grows here. Soil smooths ground and
+/// bare rock breaks it, so the two places the palette strips the ground bare
+/// (the spray zone and the mountain band) carry a short ridged band the
+/// detail stack's power law would otherwise forbid, and grassy hills keep
+/// rolling right beside broken grey ones. Without it the spray zone was the
+/// smooth landform painted grey — the detail apron fades the whole stack out
+/// exactly where the spray band paints — and it read as lawns in fancy dress.
+const JAG_SCALE: f32 = 7.3;
+/// How far the jag lifts or drops bare rock, in metres, where the ground is
+/// wholly bare. Deliberately louder than the spectral share a band this short
+/// would earn: the break *is* the message.
+const JAG_RELIEF: f32 = 1.6;
+/// Height above which the jag is fully faded in, in metres. The fade starts
+/// at [`SHORE_TOP`], so the waterline and the drawn shore stay the
+/// landform's — the lesson [`APRON_DRY`] already paid for — and no downward
+/// jag can reach the water from inside the fade.
+const JAG_FULL: f32 = 4.0;
+
 /// The waterline apron: the altitude band, in landform metres, across which
 /// the whole detail stack fades in from nothing. Below [`APRON_DRY`] the
 /// ground is the bare landform, so the drawn coast is the landform's own
@@ -1720,7 +1743,8 @@ impl TerrainGenerator {
         // the line the flood found. The detail keeps its freedom to shape the
         // bed and the banks, and loses only its freedom to carry either across
         // the surface.
-        h = base + (h - base) * self.lakes.ground_weight(wx, wz);
+        let lake_calm = self.lakes.ground_weight(wx, wz);
+        h = base + (h - base) * lake_calm;
 
         // Everything above is the same landscape whatever the coast does with
         // it; the rest of this decides what happens where it meets the sea.
@@ -1733,6 +1757,21 @@ impl TerrainGenerator {
         // terracing plains half a kilometre from the sea.
         h += (shape_coast(h, distance, shore, self.coast_scale) - h) * coastal_weight(distance);
         h = self.skerries(wx, wz, h, shore);
+
+        // The jag rides on the *finished* ground — see [`JAG_SCALE`] — because
+        // the bare coast it exists for is mostly shaped by the coastal pass
+        // above. Where it stands is where the palette bares rock: the spray
+        // zone, read from the same character and distance the paint reads, and
+        // the mountain band. Faded in above the shore, and calmed by lakes the
+        // way the rest of the detail is.
+        let bare = smoothstep(ROCKY_SHORE, CLIFF_SHORE, shore);
+        let sprayed = bare * bare * (1.0 - smoothstep(0.0, SPRAY_REACH, distance));
+        let barren = sprayed.max(smoothstep(MOOR_HEIGHT, MOUNTAIN_HEIGHT, h));
+        let jagging = barren * smoothstep(SHORE_TOP, JAG_FULL, h) * lake_calm;
+        if jagging > 0.0 {
+            let jag = self.ridges.ridged(wx / JAG_SCALE, wz / JAG_SCALE, 2) * 2.0 - 1.0;
+            h += jag * JAG_RELIEF * jagging;
+        }
 
         h.max(-MAX_DEPTH)
     }
@@ -1884,10 +1923,17 @@ impl TerrainGenerator {
         // turquoise ring. How wide that ring is comes from the landform rather
         // than from anything here — [`shape_coast`] gives a beach a long
         // shallow apron and drops a cliff straight past it.
-        if height < -SEABED_DEPTH {
-            return Material::Seabed;
-        }
         if height < -SHALLOW_DEPTH {
+            // Before either bed colour, a wall is rock: a cell this steep is a
+            // cliff's underwater face, and one Shallow cell there is a
+            // ten-metre streak of turquoise up the rock, because a cell's
+            // colour is stretched over however much face its corners span.
+            if slope > ROCK_SLOPE {
+                return Material::RockDark;
+            }
+            if height < -SEABED_DEPTH {
+                return Material::Seabed;
+            }
             return Material::Shallow;
         }
 
@@ -3486,8 +3532,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x939A_78AA_092D_C2A2u64),
-            (99, UVec2::new(3, 2), 0xBA15_34ED_070B_814Au64),
+            (20_040_112u32, UVec2::new(4, 4), 0x8F5A_168A_551A_FEB2u64),
+            (99, UVec2::new(3, 2), 0x39C9_F36F_3387_274Du64),
         ];
 
         for (seed, chunks, expected) in cases {
