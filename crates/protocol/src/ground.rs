@@ -171,12 +171,14 @@ pub fn dequantize(stored: u16) -> f32 {
 /// below reads as a section through an island, and a material's number says
 /// roughly where it is found.
 ///
-/// The order is the wire's: a material travels as its own number, so adding to
-/// the end is the cheap change and anything shuffled or removed repaints the
-/// world of every build that disagrees. Either way it is a change to the
-/// format — re-record `the_wire_is_a_format` and rebuild both ends together,
-/// because a client that has never heard of a material cannot draw the cell
-/// it names.
+/// The order is also the wire's: a material travels as its own number, so
+/// anything inserted, shuffled or removed repaints the world of every build
+/// that disagrees. That is a change to the format — re-record
+/// `the_wire_is_a_format` and the map digests, and rebuild both ends together,
+/// because a client that has never heard of a material cannot draw the cell it
+/// names. Appending would dodge the repaint, and is still the wrong answer: a
+/// number that no longer says where the material is found costs more than a
+/// re-record nobody is left running to be broken by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Material {
@@ -211,11 +213,12 @@ pub enum Material {
     /// wetter uphill rather than as two.
     Jungle = 12,
     Canopy = 13,
-    /// Moorland, above the trees and below the bare rock. [`Material::Heath`] and
-    /// [`Material::Fell`] are what the darkest and lightest lowland parcels turn
-    /// into as they climb — the one still half green, the other already most
-    /// of the way to stone — so that the upland reads as the same country
-    /// drained of colour rather than as a different map laid over the top.
+    /// Moorland, above the trees and below the bare rock. [`Material::Heath`]
+    /// and [`Material::Fell`] are what the darkest and lightest parcels of the
+    /// wet forest below turn into as they climb — the one still half green,
+    /// the other already most of the way to stone — so that the upland reads
+    /// as the same country drained of colour rather than as a different map
+    /// laid over the top.
     Heath = 14,
     Upland = 15,
     Fell = 16,
