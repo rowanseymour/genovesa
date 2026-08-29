@@ -161,10 +161,15 @@ pub fn dequantize(stored: u16) -> f32 {
 // --- The palette ------------------------------------------------------------
 
 /// The ground materials. Small and flat on purpose — every cell of ground is
-/// exactly one of these, so the whole world is made of eighteen substances.
-/// In the reference palette they are saturated well past anything natural,
-/// because flat shading has no texture or gradient to carry the picture and
-/// the colour has to do that work on its own.
+/// exactly one of these, so the whole world is made of twenty-three
+/// substances. In the reference palette they are saturated well past anything
+/// natural, because flat shading has no texture or gradient to carry the
+/// picture and the colour has to do that work on its own.
+///
+/// They are numbered in the order the ground climbs, sea bed to summit, and
+/// within each zone from its shadiest cover to its barest — so the palette
+/// below reads as a section through an island, and a material's number says
+/// roughly where it is found.
 ///
 /// The order is the wire's: a material travels as its own number, so adding to
 /// the end is the cheap change and anything shuffled or removed repaints the
@@ -184,42 +189,59 @@ pub enum Material {
     /// so a shingle beach reads as its own thing next to the cliffs rather
     /// than as more of them.
     Shingle = 3,
-    Forest = 4,
-    GrassDark = 5,
-    Grass = 6,
-    GrassLight = 7,
-    Meadow = 8,
+    /// Dry brush: the darkest cover the arid coastal country carries, and the
+    /// only green in it. Warm where [`Material::Heath`] is cool, the two being
+    /// the shadiest parcel of their own zone and never seen at one height.
+    Scrub = 4,
+    /// Sun-bleached grass, standing between the brush and the bare ground.
+    Parched = 5,
+    /// Bare dry earth, which is what the arid zone comes to where nothing
+    /// holds. Browner and darker than [`Material::Sand`]: a beach is washed,
+    /// and this is only unwatered.
+    Dust = 6,
+    Forest = 7,
+    GrassDark = 8,
+    Grass = 9,
+    GrassLight = 10,
+    Meadow = 11,
+    /// The closed canopy of the humid country above the grassland, and
+    /// [`Material::Canopy`] its lighter crowns. Deeper than
+    /// [`Material::Forest`], which is the same woodland thinning out as it
+    /// runs down into the grass — so the three read as one forest getting
+    /// wetter uphill rather than as two.
+    Jungle = 12,
+    Canopy = 13,
     /// Moorland, above the trees and below the bare rock. [`Material::Heath`] and
     /// [`Material::Fell`] are what the darkest and lightest lowland parcels turn
     /// into as they climb — the one still half green, the other already most
     /// of the way to stone — so that the upland reads as the same country
     /// drained of colour rather than as a different map laid over the top.
-    Heath = 9,
-    Upland = 10,
-    Fell = 11,
-    Rock = 12,
-    RockDark = 13,
+    Heath = 14,
+    Upland = 15,
+    Fell = 16,
+    Rock = 17,
+    RockDark = 18,
     /// Bare stone bleached by the weather — the palest the summits get.
-    Scree = 14,
+    Scree = 19,
     /// The bed of standing fresh water, deep enough to be dark. Green where
     /// [`Material::Seabed`] is blue, and darker than it: a lake bottoms out in
     /// silt and drowned vegetation rather than in sand, and it is what a lake
     /// is *seen through* that has to say fresh water rather than sea.
-    Silt = 15,
+    Silt = 20,
     /// The weedy shallows of a lake — what [`Material::Shallow`] is to the sea,
     /// except that it deliberately refuses the turquoise. A ring of bright
     /// water is the strongest thing that says *coast* in this palette, so a
     /// lake wearing one reads as an arm of the sea that happens to be inland.
-    Shoal = 16,
+    Shoal = 21,
     /// The margin a lake leaves around itself: reed, mud and wet ground, from
     /// just under the waterline to just above it. Takes the place a beach
     /// holds on the sea coast, and is dull and dark where sand is bright —
     /// fresh water has no surf to wash a shore clean.
-    Marsh = 17,
+    Marsh = 22,
 }
 
 /// The sRGB the materials stand for, in the order they are numbered.
-const PALETTE: [Vec3; 18] = [
+const PALETTE: [Vec3; 23] = [
     Vec3::new(0.16, 0.34, 0.38), // Seabed
     Vec3::new(0.46, 0.68, 0.62), // Shallow
     // A step darker than it once was (0.90, 0.83, 0.58): the surf paints
@@ -227,11 +249,16 @@ const PALETTE: [Vec3; 18] = [
     // shoulder it read as more foam rather than as the beach under it.
     Vec3::new(0.86, 0.78, 0.52), // Sand
     Vec3::new(0.70, 0.65, 0.55), // Shingle
+    Vec3::new(0.44, 0.42, 0.27), // Scrub
+    Vec3::new(0.66, 0.56, 0.30), // Parched
+    Vec3::new(0.76, 0.66, 0.48), // Dust
     Vec3::new(0.21, 0.42, 0.22), // Forest
     Vec3::new(0.33, 0.55, 0.23), // GrassDark
     Vec3::new(0.44, 0.66, 0.26), // Grass
     Vec3::new(0.56, 0.75, 0.31), // GrassLight
     Vec3::new(0.66, 0.73, 0.34), // Meadow
+    Vec3::new(0.13, 0.29, 0.17), // Jungle
+    Vec3::new(0.18, 0.37, 0.20), // Canopy
     Vec3::new(0.38, 0.45, 0.27), // Heath
     Vec3::new(0.50, 0.50, 0.31), // Upland
     Vec3::new(0.63, 0.60, 0.42), // Fell
@@ -282,19 +309,24 @@ impl Material {
             1 => Self::Shallow,
             2 => Self::Sand,
             3 => Self::Shingle,
-            4 => Self::Forest,
-            5 => Self::GrassDark,
-            6 => Self::Grass,
-            7 => Self::GrassLight,
-            8 => Self::Meadow,
-            9 => Self::Heath,
-            10 => Self::Upland,
-            11 => Self::Fell,
-            12 => Self::Rock,
-            13 => Self::RockDark,
-            14 => Self::Scree,
-            15 => Self::Silt,
-            16 => Self::Shoal,
+            4 => Self::Scrub,
+            5 => Self::Parched,
+            6 => Self::Dust,
+            7 => Self::Forest,
+            8 => Self::GrassDark,
+            9 => Self::Grass,
+            10 => Self::GrassLight,
+            11 => Self::Meadow,
+            12 => Self::Jungle,
+            13 => Self::Canopy,
+            14 => Self::Heath,
+            15 => Self::Upland,
+            16 => Self::Fell,
+            17 => Self::Rock,
+            18 => Self::RockDark,
+            19 => Self::Scree,
+            20 => Self::Silt,
+            21 => Self::Shoal,
             _ => Self::Marsh,
         })
     }

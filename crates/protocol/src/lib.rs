@@ -2355,7 +2355,7 @@ mod tests {
         let materials = 15 + CORNERS * CORNERS * 2;
         assert_eq!(
             ground[materials..materials + 3],
-            [0, 2, 4],
+            [0, 2, 7],
             "seabed, sand, forest"
         );
 

@@ -195,6 +195,36 @@ const MOUNTAIN_FRACTION: f32 = 0.11;
 /// bare and a range starts reading as a range from across the map.
 const MOUNTAIN_HEIGHT: f32 = 45.0;
 
+/// Heights at which the lowland changes climate, in metres: where the arid
+/// coastal country gives way to grassland, and where the grassland closes into
+/// wet forest.
+///
+/// Altitude is the whole of how climate is decided here, and it can be,
+/// because altitude on this map is *earned by distance from the sea* — the
+/// ceiling that holds mountains off the coast means high ground is inland
+/// ground. So a line drawn at a height draws a collar of dry country round
+/// every shore without ever measuring a distance, and an island reads arid,
+/// then grass, then forest as it is walked inland. That sequence is legible
+/// from a boat, which is the argument for it over any hidden field: a green
+/// summit on the horizon promises water before anyone has landed.
+///
+/// The pair moves together per island by [`CLIMATE_SWING`], so the archipelago
+/// is not one climate repeated. What the swing changes is where the whole
+/// sequence sits, not how deep any band of it is — a dry island is dry all the
+/// way up rather than dry at the shore and wet on top.
+const ARID_HEIGHT: f32 = 10.0;
+/// See [`ARID_HEIGHT`].
+const HUMID_HEIGHT: f32 = 25.0;
+
+/// How far either way an island's climate lines are swung from those heights,
+/// in metres — see [`ARID_HEIGHT`]. On top of [`BAND_WANDER`], which moves an
+/// edge about within one island; this moves the island.
+const CLIMATE_SWING: f32 = 5.0;
+
+/// Salts [`seed_draw`] for that swing, the way [`LAND_LUCK_SALT`] does for the
+/// land share.
+const CLIMATE_SALT: u32 = 0x6172_6964; // "arid" in ASCII, and nothing more
+
 /// Height at which the trees give out and the ground turns to moor, in metres.
 /// Set higher than where the treeline is actually wanted, to pay for the wander
 /// below it: there is far more land low down than high up, so an edge swinging
@@ -633,14 +663,10 @@ const RUGGED_SWELL_FLOOR: f32 = 0.35;
 /// what makes both legible.
 const RUGGED_FINE_FLOOR: f32 = 0.08;
 
-/// Wavelength of the woodland/meadow patchwork, in metres. Field-sized on
-/// purpose: at the default zoom the camera sees ~50 m of ground, so parcels much
-/// bigger than this mean the whole screen is one colour.
-const PATCH_SCALE: f32 = 30.0;
 /// Wavelength of the variation within a parcel, in metres.
 const MOTTLE_SCALE: f32 = 18.0;
 /// How hard the mottle field pushes on the parcel bucket, as a fraction of
-/// [`PATCH_SCALE`]'s own field.
+/// the swell's own field.
 ///
 /// Judged by eye on nine seeds, because what it changes is the *shape* of the
 /// parcels and no count of them moves enough to measure: at 0.5 the parcels
@@ -888,11 +914,12 @@ const BAND_SCALE: f32 = 150.0;
 /// is left behind on the other side reads as an outlying island.
 const BAND_WANDER: f32 = 9.0;
 
-/// What each parcel of the patchwork is drawn as, at each height it can reach.
+/// What each parcel of the patchwork is drawn as, in each band of ground it
+/// can reach.
 ///
 /// One row per band and one column per parcel, indexed by the *same* bucket of
-/// the *same* noise field however high the ground is. That carries the blend: a
-/// wood running up a hillside keeps its outline as it crosses the treeline and
+/// the *same* field however high the ground is. That carries the blend: a wood
+/// running up a hillside keeps its outline as it crosses the treeline and
 /// comes out the other side as heather.
 ///
 /// The rows get flatter towards the top — five greens, three shades of moor,
@@ -901,12 +928,30 @@ const BAND_WANDER: f32 = 9.0;
 /// the relief up there is drawn by the slope tests instead;
 /// [`Material::RockDark`] is left to them, so a dark facet on a mountain always
 /// means a crag.
+///
+/// The three lowest rows are one climate each — see [`ARID_HEIGHT`] — and read
+/// downwards as a section through an island: bare dry ground at the sea,
+/// grassland behind it, closed wet forest on the shoulders above.
+const ARID_PARCELS: [Material; 5] = [
+    Material::Scrub,
+    Material::Scrub,
+    Material::Parched,
+    Material::Parched,
+    Material::Dust,
+];
 const LOWLAND_PARCELS: [Material; 5] = [
     Material::Forest,
     Material::GrassDark,
     Material::Grass,
     Material::GrassLight,
     Material::Meadow,
+];
+const HUMID_PARCELS: [Material; 5] = [
+    Material::Jungle,
+    Material::Jungle,
+    Material::Canopy,
+    Material::Forest,
+    Material::GrassDark,
 ];
 const MOOR_PARCELS: [Material; 5] = [
     Material::Heath,
@@ -1035,6 +1080,9 @@ pub struct TerrainGenerator {
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
     coast_scale: f32,
+    /// Metres this island's climate lines stand above where the constants put
+    /// them — one draw, the whole island's weather. See [`ARID_HEIGHT`].
+    climate: f32,
     half_extent: Vec2,
     /// The falloff's per-map numbers, worked out once so the per-sample path
     /// doesn't have to: the shared part of the warp's drift in excess of what
@@ -1154,6 +1202,7 @@ impl TerrainGenerator {
             inland: CoastDistance::default(),
             lakes: Lakes::default(),
             coast_scale: 1.0,
+            climate: CLIMATE_SWING * (2.0 * seed_draw(seed, CLIMATE_SALT) - 1.0),
             half_extent: config.half_extent(),
             drift_excess: Vec2::ZERO,
             bend_gain: 0.25 + 0.75 * room,
@@ -2102,30 +2151,38 @@ impl TerrainGenerator {
         // The height everything reads its band off.
         let banded = height + BAND_WANDER * wander;
 
-        // The patchwork. Quantising a low-frequency noise field into a few
-        // buckets gives irregular parcels with hard edges — woodland against
-        // pasture against crop — instead of one smooth green wash.
+        // The patchwork. Quantising a low-frequency field into a few buckets
+        // gives irregular parcels with hard edges — woodland against pasture
+        // against crop — instead of one smooth green wash.
         //
-        // Two fields go into the one bucket, at different scales. The broad
-        // one lays out the parcels; the finer [`MOTTLE_SCALE`] one nudges the
-        // total, which breaks a big parcel into patches of its neighbours in
-        // the palette row rather than leaving it one flat slab. That used to
-        // be a brightness step riding on top of the tone, which meant the
-        // wire carried a rendering instruction — how much to scale a colour
-        // by — next to the material it applied to. Saying *grass, but the
-        // lighter kind* with a second material costs nothing extra on the
-        // wire and leaves the byte naming a substance and nothing else.
-        let patch = self
-            .detail
-            .fbm(wx / PATCH_SCALE + 11.0, wz / PATCH_SCALE - 7.0, 3);
+        // The field it quantises is the *swell*: the same call, at the same
+        // scale and the same offset, that [`TerrainGenerator::height`] raises
+        // the ground's undulations with. So a parcel is not laid out beside
+        // the landscape but out of it — the dark cover lands in the hollows of
+        // the very rolls a player walks over, and the pale cover on their
+        // crests, which is where the water goes and so where the cover would
+        // be. It used to be an unrelated field at its own wavelength, and up
+        // close that reads perfectly well; from the air it read as noise
+        // sitting on top of the terrain rather than as anything the terrain
+        // had done, because that is exactly what it was.
+        //
+        // The finer [`MOTTLE_SCALE`] field still nudges the total, which
+        // breaks a big parcel into patches of its neighbours in the palette
+        // row rather than leaving it one flat slab. That used to be a
+        // brightness step riding on top of the tone, which meant the wire
+        // carried a rendering instruction — how much to scale a colour by —
+        // next to the material it applied to. Saying *grass, but the lighter
+        // kind* with a second material costs nothing extra on the wire and
+        // leaves the byte naming a substance and nothing else.
+        let swell = self.detail.fbm(wx / DETAIL_SCALE, wz / DETAIL_SCALE, 3);
         let mottle = self.detail.fbm(wx / MOTTLE_SCALE, wz / MOTTLE_SCALE, 2);
-        let field = patch + MOTTLE_WEIGHT * mottle;
+        let field = swell + MOTTLE_WEIGHT * mottle;
         // Thresholds are set off the summed field's measured distribution,
         // not off its nominal range, so all five actually get used: it reaches
         // about ±0.7, but four fifths of it is inside ±0.24, which leaves the
-        // two outer parcels a quarter of it between them. Measured on the
-        // total rather than on [`PATCH_SCALE`]'s field alone — the mottle
-        // widens it, a little.
+        // two outer parcels a quarter of it between them. They survived the
+        // move to the swell unchanged, both fields being the same three-octave
+        // fbm and so the same distribution; only where it falls has moved.
         let bucket = if field < -0.20 {
             0
         } else if field < -0.07 {
@@ -2154,13 +2211,18 @@ impl TerrainGenerator {
         }
 
         // Which row of the palette that parcel is drawn from — the only thing
-        // height decides up here.
+        // height decides up here, and with the two climate lines the whole of
+        // what decides where one country ends and the next begins.
         if banded > MOUNTAIN_HEIGHT {
             MOUNTAIN_PARCELS[bucket]
         } else if banded > MOOR_HEIGHT {
             MOOR_PARCELS[bucket]
-        } else {
+        } else if banded > HUMID_HEIGHT + self.climate {
+            HUMID_PARCELS[bucket]
+        } else if banded > ARID_HEIGHT + self.climate {
             LOWLAND_PARCELS[bucket]
+        } else {
+            ARID_PARCELS[bucket]
         }
     }
 }
@@ -3666,8 +3728,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x14DC_93A4_566B_C197u64),
-            (99, UVec2::new(3, 2), 0xC171_0209_1C7A_C7FBu64),
+            (20_040_112u32, UVec2::new(4, 4), 0xF057_D86C_EE90_5A64u64),
+            (99, UVec2::new(3, 2), 0x4A6C_DBC2_ABC2_F51Bu64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -4155,9 +4217,9 @@ mod tests {
         // on a field whose 99th percentile was 0.38 — so the palette rows are
         // held to actually being used.
         //
-        // On a map big enough to carry all three bands. A small island is all
-        // lowland and honestly has no moor row to use, so asking it for heath
-        // would be holding the generator to something untrue.
+        // On a map big enough to carry every band. A small island is all arid
+        // coast and grass and honestly has no moor row to use, so asking it
+        // for heath would be holding the generator to something untrue.
         let (config, gen) = generator(12, 12, 77);
         let half = config.half_extent();
 
@@ -4171,7 +4233,9 @@ mod tests {
         }
 
         for (band, parcels) in [
+            ("arid", ARID_PARCELS),
             ("lowland", LOWLAND_PARCELS),
+            ("humid", HUMID_PARCELS),
             ("moor", MOOR_PARCELS),
             ("mountain", MOUNTAIN_PARCELS),
         ] {

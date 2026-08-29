@@ -129,6 +129,10 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
     // Asked of the painter rather than worked out again from the height, for
     // the reason the palms' sand test gives: what a plant stands on has to be
     // the ground a player can *see*, and there is one thing that decides that.
+    //
+    // Every green the lowland has, and the wet forest above it, but nothing
+    // the arid coast is painted in: a clump wants a floor that holds water,
+    // and the dry country is where the ground stops doing that.
     if !matches!(
         island.material(at.x, at.y, height, normal),
         Material::Forest
@@ -136,6 +140,8 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
             | Material::Grass
             | Material::GrassLight
             | Material::Meadow
+            | Material::Jungle
+            | Material::Canopy
             | Material::Marsh
     ) {
         return None;
@@ -227,9 +233,9 @@ mod tests {
         // are printed. If you did not, a platform has stopped agreeing about
         // what a seed means.
         let recorded = [
-            (20_040_112u32, 0x82CA_8E64_6F17_FC66u64),
-            (1, 0x48EF_B68C_665B_9B9D),
-            (7, 0x7C4E_5C49_E727_C4C9),
+            (20_040_112u32, 0x9DA8_FE85_9915_7746u64),
+            (1, 0x15E8_0F7F_4ACB_5426),
+            (7, 0xC23A_344B_BBC0_0061),
         ];
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()
