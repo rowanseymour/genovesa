@@ -4,7 +4,9 @@
 //! world, the chart unrolled over it, a menu. The pictures land in
 //! `screenshots/` beside the worlds and logbooks — see [`server::data_dir`] —
 //! numbered in the order they were taken, and each one's path goes to the log
-//! as it is asked for.
+//! once the file is written. Written rather than asked for, and said once:
+//! a picture takes a few frames to reach its file and the writing can fail,
+//! so a line said on the way would be a success announced before it was one.
 //!
 //! The key is hard-wired rather than a [`crate::bindings::Action`], the way
 //! the console's backquote is: photographing the screen is a control of the
@@ -38,7 +40,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 
-use crate::debug::Machine;
+use crate::debug::Stamp;
 
 /// What the stamp is filed under in the file. Read it back with any reader of
 /// PNG text chunks — the chunk is the format's own, not this game's.
@@ -58,7 +60,7 @@ impl Plugin for ShotsPlugin {
 /// listens the same whatever is up.
 fn shot_key(
     keys: Res<ButtonInput<KeyCode>>,
-    machine: Machine,
+    stamp: Stamp,
     mut taken: Local<u32>,
     mut commands: Commands,
 ) {
@@ -77,8 +79,7 @@ fn shot_key(
     *taken = number;
     commands
         .spawn(Screenshot::primary_window())
-        .observe(save_stamped(path.clone(), machine.stamp()));
-    info!("shot {}", path.display());
+        .observe(save_stamped(path, stamp.text()));
 }
 
 /// Where the next picture goes: one past the highest number standing in the
@@ -106,7 +107,7 @@ fn numbered(name: &std::ffi::OsStr) -> Option<u32> {
         .ok()
 }
 
-/// Writes the picture, with what [`Machine::stamp`] said about where it was
+/// Writes the picture, with what [`Stamp::text`] said about where it was
 /// taken from written into it.
 ///
 /// Bevy's own `save_to_disk` goes through `image`, which encodes a PNG but
@@ -149,14 +150,24 @@ fn write_stamped(path: &Path, image: &Image, stamp: Option<&str>) -> Result<(), 
     }
     encoder
         .write_header()
-        .and_then(|mut writer| writer.write_image_data(&picture))
+        .and_then(|mut writer| {
+            writer.write_image_data(&picture)?;
+            // Finished rather than dropped, which is the difference between a
+            // half-written picture being reported and being swallowed: the
+            // last of the pixels are still in the `BufWriter` here, and both
+            // the closing chunk and that flush can fail. Dropping discards
+            // either error — `png`'s own `Drop` writes the end chunk with the
+            // result thrown away — and this call is what a full disk has to
+            // travel through to reach the log, and to stop `control`'s `shot`
+            // answering a driver with a path to a truncated file.
+            writer.finish()
+        })
         .map_err(|why| why.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera::View;
     use crate::debug::Toggles;
 
     /// A directory of this test's own to number pictures in.
@@ -251,7 +262,6 @@ mod tests {
             // What a picture is stamped with, which the key reads whether or
             // not the overlay drawing the same words is up.
             .init_resource::<Toggles>()
-            .init_resource::<View>()
             .add_systems(Update, shot_key);
 
         app.world_mut()

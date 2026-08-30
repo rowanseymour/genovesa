@@ -11,9 +11,9 @@
 //! ground it is still waiting on. The last line reads the world and the view
 //! back in the words that put them there — `--seed`, then `goto`, `yaw` and
 //! `zoom` — so a screenshot of the overlay is the whole of what it takes to
-//! stand here again. The same words go into every picture as
-//! [`Machine::stamp`], which is that promise kept for the pictures nobody
-//! remembered to turn the readout on for — see [`crate::shots`].
+//! stand here again. The same words go into every picture as [`stamp`], which
+//! is that promise kept for the pictures nobody remembered to turn the readout
+//! on for — see [`crate::shots`].
 //!
 //! The switches are [`Toggles`], and they are set from the console — see
 //! [`crate::console`], whose `client` lines are their only writer. They used to
@@ -323,6 +323,72 @@ pub struct Machine<'w, 's> {
     hosting: Option<Res<'w, Hosting>>,
 }
 
+/// The same reading as [`Machine::stamp`], for a caller that only wants to
+/// *read* it — which is [`crate::shots`], on the frame a key goes down.
+///
+/// A parameter of its own rather than a method on [`Machine`], because a
+/// system's access is declared for the whole run and not for the frames it
+/// does anything: taking `Machine` to stamp a picture would hold the switches,
+/// the view and every camera against the systems that move them, on every
+/// frame of a game, to serve a key that is hardly ever pressed.
+///
+/// The two cannot be one parameter and cannot be held together — a system
+/// carrying both would be asking for [`Toggles`] mutably and immutably at once
+/// — so what they share is [`stamp`], which does the work for either.
+#[derive(SystemParam)]
+pub struct Stamp<'w, 's> {
+    toggles: Res<'w, Toggles>,
+    cameras: Query<'w, 's, &'static MapCamera>,
+    /// Read exactly as [`Machine::afloat`] reads it, and for the same reason.
+    afloat: Option<Res<'w, State<AppState>>>,
+    hosting: Option<Res<'w, Hosting>>,
+}
+
+impl Stamp<'_, '_> {
+    /// What a picture taken now is stamped with — see [`stamp`].
+    pub fn text(&self) -> Option<String> {
+        let view = afloat(self.afloat.as_deref())
+            .then(|| self.cameras.single().ok())
+            .flatten()?;
+        stamp(
+            self.hosting.as_ref().map(|hosting| hosting.0.seed()),
+            Some(View {
+                focus: view.focus,
+                distance: view.distance,
+                yaw: view.yaw,
+            }),
+            &self.toggles,
+        )
+    }
+}
+
+/// What a picture of a view is stamped with — see [`crate::shots`], which is
+/// what puts it in the file.
+///
+/// The overlay's own last two lines, and deliberately not a second account of
+/// them: the words that would stand somebody here again are [`view_line`]'s,
+/// and what admits to a doctored picture is [`Toggles::line`]'s. A stamp
+/// saying it its own way would be a fact written twice, and the one nobody is
+/// looking at is the one that rots.
+///
+/// `None` where there is no world being looked at, a menu screen being a
+/// picture of nowhere: better no stamp than a place for a player who is not
+/// anywhere.
+fn stamp(seed: Option<u32>, view: Option<View>, toggles: &Toggles) -> Option<String> {
+    Some(
+        std::iter::once(view_line(seed, view?))
+            .chain(toggles.line())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// Whether there is a world under the camera — see [`Machine::afloat`], whose
+/// question this is, asked where both parameters can reach it.
+fn afloat(state: Option<&State<AppState>>) -> bool {
+    state.is_some_and(|state| *state.get() == AppState::InWorld)
+}
+
 impl Machine<'_, '_> {
     /// This machine's picture, as a `client` line reaches it.
     pub fn picture(&mut self) -> Picture<'_> {
@@ -354,34 +420,20 @@ impl Machine<'_, '_> {
         })
     }
 
-    /// What a picture of this view is stamped with — see [`crate::shots`],
-    /// which is what puts it in the file.
-    ///
-    /// The overlay's own last two lines, and deliberately not a second
-    /// account of them: the words that would stand somebody here again are
-    /// [`view_line`]'s, and what admits to a doctored picture is
-    /// [`Toggles::line`]'s. A stamp saying it its own way would be a fact
-    /// written twice, and the one nobody is looking at is the one that rots.
-    ///
-    /// `None` where there is no world being looked at, a menu screen being a
-    /// picture of nowhere: better no stamp than a place for a player who is
-    /// not anywhere.
+    /// What a picture of this view is stamped with — see [`stamp`], which is
+    /// the whole of it. Here as well as on [`Stamp`] because the socket's
+    /// `shot` already carries a [`Machine`] and cannot carry both.
     pub fn stamp(&self) -> Option<String> {
-        let view = self.seen()?;
-        let seed = self.hosting.as_ref().map(|hosting| hosting.0.seed());
-        Some(
-            std::iter::once(view_line(seed, view))
-                .chain(self.toggles.line())
-                .collect::<Vec<_>>()
-                .join("\n"),
+        stamp(
+            self.hosting.as_ref().map(|hosting| hosting.0.seed()),
+            self.seen(),
+            &self.toggles,
         )
     }
 
-    /// Whether there is a world under the camera — see [`Machine::afloat`].
+    /// Whether there is a world under the camera — see [`afloat`].
     fn afloat(&self) -> bool {
-        self.afloat
-            .as_ref()
-            .is_some_and(|state| *state.get() == AppState::InWorld)
+        afloat(self.afloat.as_deref())
     }
 }
 
@@ -1002,15 +1054,13 @@ mod tests {
             yaw: std::f32::consts::FRAC_PI_2,
         }));
 
-        let stamp = app
-            .world_mut()
-            .run_system_cached(|machine: Machine| machine.stamp())
-            .expect("the stamp to be read");
-
-        assert_eq!(
-            stamp.as_deref(),
-            Some("seed 4242 / goto 480 -1200 / yaw 90 / zoom 240\ndebug: no haze")
-        );
+        let said = "seed 4242 / goto 480 -1200 / yaw 90 / zoom 240\ndebug: no haze";
+        assert_eq!(machines_stamp(&mut app).as_deref(), Some(said));
+        // And the read-only parameter the key takes says it too. Two ways in
+        // because a system carrying `Machine` cannot also carry `Stamp` — see
+        // [`Stamp`] — which is exactly the arrangement that could drift, so
+        // both are asked the same question here.
+        assert_eq!(stamps_text(&mut app).as_deref(), Some(said));
     }
 
     /// A picture of a menu screen is a picture of nowhere, and says so by
@@ -1026,12 +1076,22 @@ mod tests {
         // existing is what the stamp must not read as a place.
         app.world_mut().spawn(MapCamera::default());
 
-        assert_eq!(
-            app.world_mut()
-                .run_system_cached(|machine: Machine| machine.stamp())
-                .expect("the stamp to be read"),
-            None
-        );
+        assert_eq!(machines_stamp(&mut app), None);
+        assert_eq!(stamps_text(&mut app), None);
+    }
+
+    /// The stamp as the socket's `shot` reaches it, carrying a [`Machine`].
+    fn machines_stamp(app: &mut App) -> Option<String> {
+        app.world_mut()
+            .run_system_cached(|machine: Machine| machine.stamp())
+            .expect("the stamp to be read")
+    }
+
+    /// And as the key reaches it, carrying only [`Stamp`].
+    fn stamps_text(app: &mut App) -> Option<String> {
+        app.world_mut()
+            .run_system_cached(|stamp: Stamp| stamp.text())
+            .expect("the stamp to be read")
     }
 
     #[test]
