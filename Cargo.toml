@@ -22,9 +22,18 @@ bevy_ecs = "0.19"
 glam = "0.32"
 
 # Optimise dependencies even in debug builds, otherwise terrain generation and
-# rendering crawl.
+# rendering crawl. They carry no debug info: 567 crates get compiled here and
+# 67 of them are Bevy, so full DWARF for the lot is most of what `target/` ever
+# weighs — 7.9G a build, and a build per worktree. Nothing here is debugged by
+# stepping into Bevy, and the symbol names survive, so a backtrace still names
+# the engine frames it passes through; it just cannot give them a line number.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
+# `line-tables-only` is the whole of what a backtrace needs — file and line for
+# every frame — without the type and variable descriptions a debugger would
+# want and nothing here asks for. Panics still point at the source.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"

@@ -118,6 +118,43 @@ Two rules that have an answer rather than asking for judgement:
 Match the kind of the surrounding language. A worthy subject earns a comment,
 not a long one.
 
+## The build outweighs the checkout
+
+The source is 43M. A single `target/` is 2.7G, and there is one per worktree.
+Left alone this reached 243G across the project, so the shape of a build is
+worth as much care here as the shape of the code.
+
+Three things keep it down, and the first two are load-bearing in ways that are
+easy to undo by accident:
+
+- **The dev profile is tuned for size** — dependencies carry no debug info at
+  all, workspace members carry line tables only. `Cargo.toml` says why. This is
+  most of the difference between 2.7G and 7.9G, and it costs nothing: the
+  builds are marginally *faster*, and a panic still points at the line in our
+  own code that caused it. What it gives up is stepping into Bevy, which
+  nothing here does.
+
+- **Never point two worktrees at one `CARGO_TARGET_DIR`.** It is the obvious
+  way to stop paying for the ground twice and it is silently wrong: worktrees
+  get separate library artifacts but collide on the binary, so whichever built
+  last wins and the others' `cargo build` reports success while leaving the
+  wrong binary in place. A `mapgen` run in one worktree then draws another
+  worktree's world — the exact disagreement the digest tests exist to catch,
+  arriving somewhere they cannot see it. Each worktree gets its own `target/`.
+
+- **`tools/sweep.sh` reaps what cargo abandons.** Cargo never reclaims an
+  artifact whose fingerprint has stopped matching, so a directory grows without
+  bound across rebuilds even when nothing else changes. A weekly launchd agent
+  (`com.rowanseymour.genovesa-sweep`) runs it; `tools/sweep.sh 7` sweeps harder
+  by hand, and the script's own comments say which flag is doing the work.
+
+Deleting a `target/` is cheap because sccache sits between cargo and rustc —
+see `~/.cargo/config.toml`. Cheap for a worktree that has been built before,
+which is the case that matters after a sweep; a *new* worktree still pays for
+the third of the tree that bakes its own path into the artifact, so cutting one
+per feature branch is not free and the branches are worth retiring. Removing a
+worktree takes its `target/` with it.
+
 ## Odds and ends
 
 - Only `game` may see Bevy. After moving things between crates, check both that
