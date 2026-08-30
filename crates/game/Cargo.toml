@@ -40,6 +40,12 @@ bevy = { workspace = true, features = [
     "system_font_discovery",
     "pbr_light_textures",
 ] }
+# Writes the pictures `shots` takes, rather than Bevy's `save_to_disk`, for the
+# one thing `image` does not expose: a tEXt chunk. What the overlay says about
+# where the camera stood goes into the file itself — see `shots` — and that
+# needs the encoder underneath. Already in the tree behind Bevy, which reaches
+# it through `image`, so it costs a line here and nothing to build.
+png = "0.18"
 
 [dev-dependencies]
 # Reads assets/models/boat.glb in the tests that hold the model to what the collision
