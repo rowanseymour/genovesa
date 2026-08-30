@@ -914,6 +914,82 @@ const BAND_SCALE: f32 = 150.0;
 /// is left behind on the other side reads as an outlying island.
 const BAND_WANDER: f32 = 9.0;
 
+/// The eight bearings the ground is asked about around a point, as unit
+/// vectors.
+///
+/// Written out as constants rather than turned out of a loop over sines,
+/// because a seed has to raise the same islands on every machine and two libms
+/// need not agree about `sin` to the last bit. Eight rather than four so that a
+/// valley is told from a hillside: half a ring is higher than a point on any
+/// slope, and it is the *other* half that says whether the ground closes in.
+const AROUND: [Vec2; 8] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(DIAGONAL, DIAGONAL),
+    Vec2::new(0.0, 1.0),
+    Vec2::new(-DIAGONAL, DIAGONAL),
+    Vec2::new(-1.0, 0.0),
+    Vec2::new(-DIAGONAL, -DIAGONAL),
+    Vec2::new(0.0, -1.0),
+    Vec2::new(DIAGONAL, -DIAGONAL),
+];
+
+/// Each half of a diagonal of [`AROUND`], as a unit vector.
+const DIAGONAL: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// How far out the ground is asked whether it closes in, in metres.
+///
+/// Wide enough to reach the sides of a valley rather than the roughness of its
+/// floor: at a few metres every dip between two facets would qualify, and the
+/// world would find hollows in its own noise.
+const HOLLOW_REACH: f32 = 22.0;
+
+/// How much higher a bearing has to stand to count as ground rising away, in
+/// metres, and how many of the eight must be for a point to be a hollow.
+///
+/// Five of eight is what tells a valley from a hillside. On any slope four of
+/// the eight are uphill, so requiring a clear majority means the ground has to
+/// close in from more directions than a single gradient can account for. It is
+/// also why this is a count and not a mean height around the ring: a valley
+/// runs *somewhere*, so two bearings are always level with the floor and would
+/// drag an average back down, while the sides that make it a valley are
+/// unmistakable one bearing at a time.
+///
+/// The rise was 2.5 m while this question was asked of the finished height
+/// field, one rule at a time. Measured against the landform instead it is a
+/// stiffer test at the same number — the detail octaves and the crags are
+/// gone, and with them a good deal of what used to clear 2.5 m over a 22 m
+/// reach — so it is refitted here. Judged over nine seeds by how much of an
+/// island comes out hollow, which lands within about a tenth of what the old
+/// rule found on most of them and short of it on the smallest islands, where
+/// the ground the old rule was reading was largely its own roughness.
+const HOLLOW_RISE: f32 = 1.75;
+const HOLLOW_CLOSED: f32 = 5.0;
+
+/// The lie of the ground around a point — how it sits in what surrounds it,
+/// as against how high it stands or what grows on it.
+///
+/// A separate axis from [`Country`] rather than a sub-type of one, because
+/// hollows happen in every country: a rule wanting shelter wants it in the
+/// grassland and on the moor alike, and nesting this inside the countries
+/// would make it list them.
+///
+/// Non-local, which is why it is a field the island carries rather than a
+/// question asked on the spot — see [`enclosure`]. That is also what lets it
+/// ride on every cell: a rule may afford eight height samples for the few
+/// points it is seriously considering, and no cell of ground could afford
+/// them while a chunk was being built.
+///
+/// Not [`TerrainGenerator::landform`], which is a height — the landscape
+/// before the coast gets to it. This is the shape that height makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lie {
+    /// Ground that rises away on most sides — a valley floor, a basin head,
+    /// the shelter water and cold air collect in.
+    Hollow,
+    /// Everything else: a slope, a crest, open level ground.
+    Open,
+}
+
 /// Where a point is, in the sense that decides what could live there.
 ///
 /// The countries are the *places* an island is made of, and they are what a
@@ -977,6 +1053,9 @@ pub enum LakeZone {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ground {
     pub country: Country,
+    /// How this point sits in the ground around it — an axis of its own,
+    /// since a hollow is a hollow in any country.
+    pub lie: Lie,
     /// What a client would draw here — the country's cover, unless a slope or
     /// the salt has overruled it.
     pub material: Material,
@@ -1147,6 +1226,11 @@ pub struct TerrainGenerator {
     /// which reads as a world whose only water is the sea's; nothing asks
     /// before the fit is done.
     lakes: Lakes,
+    /// How many of the eight bearings around each point of the fitting grid
+    /// rise away from it — what [`Lie`] is read off. Empty until the landform
+    /// it measures exists, which reads as open ground everywhere. See
+    /// [`enclosure`].
+    enclosure: GridField,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
     coast_scale: f32,
@@ -1271,6 +1355,7 @@ impl TerrainGenerator {
             coast: CoastDistance::default(),
             inland: CoastDistance::default(),
             lakes: Lakes::default(),
+            enclosure: GridField::default(),
             coast_scale: 1.0,
             climate: CLIMATE_SWING * (2.0 * seed_draw(seed, CLIMATE_SALT) - 1.0),
             half_extent: config.half_extent(),
@@ -1306,18 +1391,26 @@ impl TerrainGenerator {
         // is not finished until the ceiling can bind, and a basin flooded
         // before its rim was held down would carry the wrong level ever
         // after.
-        generator.lakes = generator.find_lakes(&raw);
+        let ground = generator.landform_grid(&raw);
+        generator.lakes = Lakes::from_ground(&ground);
+        generator.enclosure = enclosure(&ground);
         generator.fit_coast_scale(&raw);
         generator
     }
 
-    /// Floods the finished landform and keeps what stands — see [`Lakes`].
+    /// The finished landform in metres, on the fitting grid.
     ///
-    /// The metres grid is rebuilt from the raw samples rather than from
+    /// Rebuilt from the raw samples rather than from
     /// [`TerrainGenerator::landform`], which would resample every octave of
     /// noise for values the fitting grid already holds; cell for cell this is
     /// the same arithmetic that function performs, on the same inputs.
-    fn find_lakes(&self, raw: &GridField) -> Lakes {
+    ///
+    /// The one height field the questions about the *shape* of the ground are
+    /// all asked of — where the water stands and where the ground closes in.
+    /// Sharing it is not only thrift: a hollow and a lake basin are the same
+    /// question asked at two depths, and read off two height fields they could
+    /// disagree about the shape of the ground a lake was sitting in.
+    fn landform_grid(&self, raw: &GridField) -> GridField {
         let (nx, nz) = raw.dims;
         let mut metres = Vec::with_capacity(nx * nz);
         for iz in 0..nz {
@@ -1330,7 +1423,7 @@ impl TerrainGenerator {
                 ));
             }
         }
-        Lakes::from_ground(&GridField::new(metres, raw.dims, raw.origin))
+        GridField::new(metres, raw.dims, raw.origin)
     }
 
     /// One round of fitting: where the ranges sit, how tall they stand, what
@@ -2140,10 +2233,15 @@ impl TerrainGenerator {
         // 0 on flat ground, approaching 1 on a cliff face.
         let slope = 1.0 - normal.y;
 
+        // Whether the ground closes in around here, which every country
+        // answers for and none of them decides — see [`Lie`].
+        let lie = self.lie(wx, wz);
+
         // A country whose material is settled by something other than cover,
         // and which no salt can bare further than it already is.
         let bare = |country, material| Ground {
             country,
+            lie,
             material,
             sprayed: false,
         };
@@ -2327,6 +2425,7 @@ impl TerrainGenerator {
             if self.sprayed(distance, character, wander) > SPRAY_BARE {
                 return Ground {
                     country,
+                    lie,
                     material: MOUNTAIN_COVER[bucket],
                     sprayed: true,
                 };
@@ -2335,8 +2434,19 @@ impl TerrainGenerator {
 
         Ground {
             country,
+            lie,
             material: cover[bucket],
             sprayed: false,
+        }
+    }
+
+    /// How a point sits in the ground around it — [`Lie`], read off the
+    /// [`enclosure`] field.
+    pub fn lie(&self, wx: f32, wz: f32) -> Lie {
+        if self.enclosure.at(wx, wz) >= HOLLOW_CLOSED {
+            Lie::Hollow
+        } else {
+            Lie::Open
         }
     }
 }
@@ -3161,6 +3271,52 @@ fn priority_flood(ground: &GridField) -> Vec<f32> {
         }
     }
     fill
+}
+
+/// How many of the eight bearings around each point rise away from it, over
+/// the whole fitting grid — the field [`Lie`] is read off.
+///
+/// The measure is the one a rule used to make for itself, moved to where every
+/// rule can have it: [`AROUND`] sampled [`HOLLOW_REACH`] out, counting the
+/// bearings standing [`HOLLOW_RISE`] above. Doing it here rather than on the
+/// spot is what makes it affordable per cell — eight samples of the finished
+/// height field cost nine octaves of noise apiece, where eight reads of a grid
+/// cost nothing worth naming.
+///
+/// Sampled through [`GridField::at`] at the true reach rather than by stepping
+/// a whole number of cells, so the diagonals stand where they should instead of
+/// √2 too far out.
+///
+/// Deliberately not blurred, though an integer field on a square lattice looks
+/// like it wants to be. A blur was tried and it eats hollows: the threshold
+/// sits at five of a possible eight, so a cell that just clears it is nearly
+/// always the highest count in its neighbourhood and gets averaged back under.
+/// It cost two thirds of the hollows in the world. The bilinear read is the
+/// only smoothing this wants.
+///
+/// Outside the grid the read clamps, so a point past the map's edge is
+/// measured against the frame. Nothing grows out there — every island keeps a
+/// sea margin inside its frame — and the alternative is padding a grid by a
+/// window whose whole purpose is to describe ground that is not there.
+fn enclosure(ground: &GridField) -> GridField {
+    let (nx, nz) = ground.dims;
+    let mut counts = Vec::with_capacity(nx * nz);
+    for iz in 0..nz {
+        let wz = ground.origin.y + iz as f32 * COAST_GRID;
+        for ix in 0..nx {
+            let wx = ground.origin.x + ix as f32 * COAST_GRID;
+            let here = ground.cells[iz * nx + ix];
+            let rising = AROUND
+                .iter()
+                .filter(|step| {
+                    let probe = Vec2::new(wx, wz) + **step * HOLLOW_REACH;
+                    ground.at(probe.x, probe.y) > here + HOLLOW_RISE
+                })
+                .count();
+            counts.push(rising as f32);
+        }
+    }
+    GridField::new(counts, ground.dims, ground.origin)
 }
 
 /// A grid of values over the map at [`COAST_GRID`] spacing, read back with

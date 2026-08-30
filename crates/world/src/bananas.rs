@@ -21,8 +21,8 @@ use glam::{IVec2, Vec2};
 use protocol::ground::{Kind, Plant, CHUNK_METRES};
 
 use crate::archipelago::Island;
-use crate::plants::{draw, mix, AROUND};
-use crate::terrain::{Country, LakeZone};
+use crate::plants::{draw, mix};
+use crate::terrain::{Country, LakeZone, Lie};
 
 /// Metres between the cells a clump may stand in.
 ///
@@ -62,22 +62,6 @@ const LEVEL: f32 = 0.90;
 /// hillside — and above the water rather than in it, since the lake grid
 /// answers on both sides of its own shoreline.
 const BANK: f32 = 2.5;
-
-/// How far out a cell looks to see whether the ground closes in around it.
-///
-/// Wide enough to reach the sides of a valley rather than the roughness of its
-/// floor: at a few metres every hollow between two facets would qualify, and
-/// the world would grow bananas in its own noise.
-const REACH: f32 = 22.0;
-
-/// How much higher a bearing has to be to count as ground rising away, in
-/// metres, and how many of the eight must be for a cell to be a valley floor.
-///
-/// Five of eight is what tells a valley from a hillside. On any slope, four of
-/// the eight are uphill; requiring a clear majority means the ground has to
-/// close in from more directions than a single gradient can account for.
-const RISE: f32 = 2.5;
-const CLOSED_IN: usize = 5;
 
 /// Every banana clump on one chunk of an island.
 ///
@@ -157,7 +141,13 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
         return None;
     }
 
-    if !(beside_water(island, at, height) || closed_in(island, at, height)) {
+    // Shelter or wet feet, and the island answers for both. A hollow used to
+    // be worked out here, eight height samples at a time, which a rule can
+    // afford for the few points it is seriously considering and no cell of
+    // ground could — so it was knowledge this module kept to itself. It is
+    // [`Lie`] now, and the ferns and the land animals that will want the same
+    // shelter will not each be inventing their own valley.
+    if ground.lie != Lie::Hollow && !beside_water(island, at, height) {
         return None;
     }
 
@@ -180,24 +170,6 @@ fn beside_water(island: &Island, at: Vec2, height: f32) -> bool {
     island
         .lake_level(at.x, at.y)
         .is_some_and(|level| height > level && height <= level + BANK)
-}
-
-/// Whether the ground rises away from this point on most sides — a valley
-/// floor, a hollow, the head of a basin.
-///
-/// A count of bearings rather than an average height around the ring: a valley
-/// runs *somewhere*, so two of the eight are always level with the floor and
-/// would drag a mean back down, while the sides that make it a valley are
-/// unmistakable one bearing at a time.
-fn closed_in(island: &Island, at: Vec2, height: f32) -> bool {
-    AROUND
-        .iter()
-        .filter(|step| {
-            let probe = at + **step * REACH;
-            island.height(probe.x, probe.y) > height + RISE
-        })
-        .count()
-        >= CLOSED_IN
 }
 
 #[cfg(test)]
@@ -243,9 +215,9 @@ mod tests {
         // are printed. If you did not, a platform has stopped agreeing about
         // what a seed means.
         let recorded = [
-            (20_040_112u32, 0x9DA8_FE85_9915_7746u64),
-            (1, 0x15E8_0F7F_4ACB_5426),
-            (7, 0xC23A_344B_BBC0_0061),
+            (20_040_112u32, 0xB009_6AA0_16F4_D121u64),
+            (1, 0x1C8A_CF26_9D11_DFFF),
+            (7, 0xE16F_5E2F_FF77_1C81),
         ];
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()
@@ -299,8 +271,10 @@ mod tests {
                 island.normal(at.x, at.y).y >= LEVEL,
                 "a clump stands on a slope it could not hold onto"
             );
+            let normal = island.normal(at.x, at.y);
             assert!(
-                beside_water(&island, at, height) || closed_in(&island, at, height),
+                island.ground(at.x, at.y, height, normal).lie == Lie::Hollow
+                    || beside_water(&island, at, height),
                 "a clump stands on open ground, neither in a hollow nor beside water"
             );
             counted += 1;
