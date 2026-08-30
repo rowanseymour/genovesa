@@ -11,7 +11,9 @@
 //! ground it is still waiting on. The last line reads the world and the view
 //! back in the words that put them there — `--seed`, then `goto`, `yaw` and
 //! `zoom` — so a screenshot of the overlay is the whole of what it takes to
-//! stand here again.
+//! stand here again. The same words go into every picture as
+//! [`Machine::stamp`], which is that promise kept for the pictures nobody
+//! remembered to turn the readout on for — see [`crate::shots`].
 //!
 //! The switches are [`Toggles`], and they are set from the console — see
 //! [`crate::console`], whose `client` lines are their only writer. They used to
@@ -315,6 +317,10 @@ pub struct Machine<'w, 's> {
     /// `None` in a run with no states at all, which is a test harness rather
     /// than a screen, and is read as no world for the same reason.
     afloat: Option<Res<'w, State<AppState>>>,
+    /// The world this machine is serving itself, where it is serving one. Only
+    /// for [`Machine::stamp`] — see [`server::Host::seed`] for why a guest has
+    /// none to read.
+    hosting: Option<Res<'w, Hosting>>,
 }
 
 impl Machine<'_, '_> {
@@ -346,6 +352,29 @@ impl Machine<'_, '_> {
             distance: camera.distance,
             yaw: camera.yaw,
         })
+    }
+
+    /// What a picture of this view is stamped with — see [`crate::shots`],
+    /// which is what puts it in the file.
+    ///
+    /// The overlay's own last two lines, and deliberately not a second
+    /// account of them: the words that would stand somebody here again are
+    /// [`view_line`]'s, and what admits to a doctored picture is
+    /// [`Toggles::line`]'s. A stamp saying it its own way would be a fact
+    /// written twice, and the one nobody is looking at is the one that rots.
+    ///
+    /// `None` where there is no world being looked at, a menu screen being a
+    /// picture of nowhere: better no stamp than a place for a player who is
+    /// not anywhere.
+    pub fn stamp(&self) -> Option<String> {
+        let view = self.seen()?;
+        let seed = self.hosting.as_ref().map(|hosting| hosting.0.seed());
+        Some(
+            std::iter::once(view_line(seed, view))
+                .chain(self.toggles.line())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     }
 
     /// Whether there is a world under the camera — see [`Machine::afloat`].
@@ -942,6 +971,66 @@ mod tests {
                 }
             ),
             "goto 98 -317 / yaw 0 / zoom 150"
+        );
+    }
+
+    /// A stamp is not a second account of the view: it is the overlay's own
+    /// last lines, the ones a driver would type back. This holds it to that —
+    /// the words the readout draws in the corner and the words that go into
+    /// the file are one string, doctoring confessed and all.
+    #[test]
+    fn a_stamp_is_the_overlays_own_words() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .insert_state(AppState::InWorld)
+            .init_resource::<View>()
+            // Haze off, so the stamp has something to own up to: a picture
+            // taken with the far ground stripped bare has to say so wherever
+            // it says anything at all.
+            .insert_resource(Toggles {
+                haze: false,
+                ..default()
+            });
+        let host = server::Server::bind(("127.0.0.1", 0), 4242)
+            .expect("a server should bind")
+            .spawn()
+            .expect("a server should serve");
+        app.insert_resource(Hosting(host));
+        app.world_mut().spawn(MapCamera::looking(View {
+            focus: Vec3::new(480.0, 0.0, -1200.0),
+            distance: 240.0,
+            yaw: std::f32::consts::FRAC_PI_2,
+        }));
+
+        let stamp = app
+            .world_mut()
+            .run_system_cached(|machine: Machine| machine.stamp())
+            .expect("the stamp to be read");
+
+        assert_eq!(
+            stamp.as_deref(),
+            Some("seed 4242 / goto 480 -1200 / yaw 90 / zoom 240\ndebug: no haze")
+        );
+    }
+
+    /// A picture of a menu screen is a picture of nowhere, and says so by
+    /// saying nothing — see [`Machine::stamp`].
+    #[test]
+    fn a_picture_of_nowhere_is_stamped_with_nothing() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .insert_state(AppState::MainMenu)
+            .init_resource::<View>()
+            .init_resource::<Toggles>();
+        // A camera all the same, pointed wherever it was last left: its
+        // existing is what the stamp must not read as a place.
+        app.world_mut().spawn(MapCamera::default());
+
+        assert_eq!(
+            app.world_mut()
+                .run_system_cached(|machine: Machine| machine.stamp())
+                .expect("the stamp to be read"),
+            None
         );
     }
 

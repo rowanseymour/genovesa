@@ -2682,6 +2682,7 @@ name = "game"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "png",
  "protocol",
  "serde_json",
  "server",

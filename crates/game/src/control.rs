@@ -71,7 +71,7 @@ use bevy::image::Image;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::render::view::screenshot::Screenshot;
 
 use crate::bindings::{self, Action, KeyBindings};
 use crate::camera::MapCamera;
@@ -80,6 +80,7 @@ use crate::debug::{Machine, Toggles};
 use crate::menu::MenuButton;
 use crate::net::Online;
 use crate::settings;
+use crate::shots::save_stamped;
 use crate::terrain::{ChunkBuild, Ground};
 
 /// How tall a picture a windowless run writes until the console says
@@ -712,7 +713,10 @@ impl Doing {
                             Some(target) => commands.spawn(Screenshot::image(target.clone())),
                             None => commands.spawn(Screenshot::primary_window()),
                         };
-                        asked.observe(save_to_disk(path.clone()));
+                        // Read here rather than when the line arrived: a
+                        // `shot` waits for the ground, and the view it waited
+                        // out is the one the picture is of.
+                        asked.observe(save_stamped(path.clone(), hands.machine.stamp()));
                         (Stage::Asked, 0)
                     }
                     Stage::Arriving => (Stage::Arriving, hands.waited(*waited)),
