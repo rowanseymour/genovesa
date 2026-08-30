@@ -940,14 +940,34 @@ const BAND_WANDER: f32 = 9.0;
 /// exactly where the dither is meant to be taking one apart.
 const DITHER_SCALE: f32 = 3.0;
 
-/// How far the dither moves the two climate lines, in metres of height.
+/// How far the dither moves a band edge, in metres of height.
 ///
-/// Only the climate lines take it. The treeline and the edge of the bare rock
-/// have relief across them — the crag pass works off the same wandered height
-/// the paint does, deliberately — so fraying their paint alone would set the
-/// two straying. The climate lines are the ones with nothing but colour to
-/// break them up, which is exactly why they are the ones that read as drawn on.
+/// Every edge below the bare rock takes it: the two climate lines and the
+/// treeline. What decides that is whether the ground itself does anything
+/// across the edge, and only one of them it does. The crag pass reads
+/// `smoothstep(MOOR_HEIGHT, MOUNTAIN_HEIGHT, ..)`, which is *zero* at
+/// [`MOOR_HEIGHT`] and reaches its full cut only by [`MOUNTAIN_HEIGHT`] — so
+/// the treeline has no more relief across it than a climate line does, and
+/// leaving it out on the grounds that it had was reading the top of that ramp
+/// as though it held at the bottom. Dithered along with the rest, it stops
+/// being the one drawn line left on the map.
+///
+/// [`MOUNTAIN_HEIGHT`] is where the ramp does hold, and is left alone. The
+/// ground is fully cragged by there, so the edge already comes apart on relief
+/// the paint is following; fraying the paint alone would set the two straying
+/// off a shape they are meant to share.
+///
+/// The moor is entered by a frayed edge and left by a firm one, so unlike
+/// [`BAND_WANDER`] this does not slide it as one piece — it squeezes it, by up
+/// to this much off a band [`MOUNTAIN_HEIGHT`] less [`MOOR_HEIGHT`] deep.
+/// Comfortably short of pinching it out, and the assertion below says so
+/// rather than leaving it to arithmetic done once in a comment.
 const FRAY: f32 = 3.0;
+
+const _: () = assert!(
+    FRAY < MOUNTAIN_HEIGHT - MOOR_HEIGHT,
+    "the fray can squeeze the moor out of existence"
+);
 
 /// The most [`FRAY`] can move a line, in metres — what the fray is skipped
 /// outside of, since past it the field cannot change which side a point falls.
@@ -2214,17 +2234,19 @@ impl TerrainGenerator {
         // The height everything reads its band off.
         let banded = height + BAND_WANDER * wander;
 
-        // And the height the two climate lines alone read — see [`FRAY`].
+        // And the height every edge below the bare rock reads — see [`FRAY`].
         //
-        // The field is only asked for within [`FRAY_REACH`] of a line, which
-        // is the whole of where it could change the answer; four fifths of the
-        // land is nowhere near one and pays two subtractions instead of an
-        // fbm. The lines are the swung ones rather than the constants, or the
-        // skip would miss the fray on a dry island and catch it on a wet one.
+        // The field is only asked for within [`FRAY_REACH`] of one of those
+        // edges, which is the whole of where it could change the answer; most
+        // of the land is nowhere near one and pays three subtractions instead
+        // of an fbm. The climate lines are the swung ones rather than the
+        // constants, or the skip would miss the fray on a dry island and catch
+        // it on a wet one.
         let arid = ARID_HEIGHT + self.climate;
         let humid = HUMID_HEIGHT + self.climate;
         let mut frayed = banded;
-        if (banded - arid).abs() < FRAY_REACH || (banded - humid).abs() < FRAY_REACH {
+        let near = |edge: f32| (banded - edge).abs() < FRAY_REACH;
+        if near(arid) || near(humid) || near(MOOR_HEIGHT) {
             let fray = self
                 .detail
                 .fbm(wx / DITHER_SCALE + 31.0, wz / DITHER_SCALE - 17.0, 2);
@@ -2269,7 +2291,15 @@ impl TerrainGenerator {
         // about ±0.7, but four fifths of it is inside ±0.24, which leaves the
         // two outer parcels a quarter of it between them. They survived the
         // move to the swell unchanged, both fields being the same three-octave
-        // fbm and so the same distribution; only where it falls has moved.
+        // fbm and so the same distribution; only where it falls had moved.
+        //
+        // [`PARCEL_DITHER`] widens that distribution — not much beside a
+        // spread of ±0.24, but it is a third term the numbers below were not
+        // measured against, and what it widens by lands in the outer parcels.
+        // `every_parcel_of_every_band_gets_used` is what would catch it going
+        // far enough to matter, in the direction it could actually go wrong.
+        // Anyone re-cutting these four should measure the field as it is now,
+        // dither included, rather than trusting the figures above.
         let bucket = if field < -0.20 {
             0
         } else if field < -0.07 {
@@ -2298,11 +2328,16 @@ impl TerrainGenerator {
         }
 
         // Which row of the palette that parcel is drawn from — the only thing
-        // height decides up here, and with the two climate lines the whole of
-        // what decides where one country ends and the next begins.
+        // height decides up here, and with the climate lines the whole of what
+        // decides where one country ends and the next begins.
+        //
+        // The bare rock reads the firm height and everything below it the
+        // frayed one, which is the whole of [`FRAY`]'s rule said in code. The
+        // two cannot come apart: [`MOUNTAIN_HEIGHT`] is tested first, so
+        // ground above it is rock whatever the fray did to the edge below.
         if banded > MOUNTAIN_HEIGHT {
             MOUNTAIN_PARCELS[bucket]
-        } else if banded > MOOR_HEIGHT {
+        } else if frayed > MOOR_HEIGHT {
             MOOR_PARCELS[bucket]
         } else if frayed > humid {
             HUMID_PARCELS[bucket]
@@ -3815,7 +3850,7 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0x1FB9_3F98_E483_DA2Bu64),
+            (20_040_112u32, UVec2::new(4, 4), 0x6D18_D6EC_95ED_C8BCu64),
             (99, UVec2::new(3, 2), 0x2B7A_E2D3_59E7_11FCu64),
         ];
 
@@ -4296,22 +4331,39 @@ mod tests {
 
     #[test]
     fn the_fray_stays_inside_its_guard() {
-        // [`FRAY_REACH`] is what the climate lines' fray is skipped outside
-        // of, so it has to be at least as far as the fray can actually reach.
-        // If it ever is not, the skip starts answering for ground the field
-        // would have moved, and the error lands as a hard edge at a fixed
-        // height — a level contour, which is the one thing every band edge
-        // here is shaped to avoid, and it would be drawn by the very constant
-        // meant to prevent it.
+        // [`FRAY_REACH`] is what the fray is skipped outside of, so it has to
+        // be at least as far as the fray can actually reach. If it ever is
+        // not, the skip starts answering for ground the field would have
+        // moved, and the error lands as a hard edge at a fixed height — a
+        // level contour, which is the one thing every band edge here is shaped
+        // to avoid, and it would be drawn by the very constant meant to
+        // prevent it.
         //
-        // Measured on the field rather than assumed from it: [`Noise::get`]
-        // is documented as *roughly* -1..1, and roughly is not a bound.
-        let (config, gen) = generator(8, 8, 20_040_112);
-        let half = config.half_extent();
+        // A dense sample and not a proof, which is the honest description:
+        // [`Noise::get`] is documented as *roughly* -1..1 and roughly is not a
+        // bound, so the alternative to sampling is trusting a range the noise
+        // does not promise. What sampling has to earn is a step fine enough to
+        // land near the field's peaks, and that is a question about the field
+        // rather than about the map — hence a step cut from [`DITHER_SCALE`]
+        // rather than a fixed number of metres, so tuning the grain finer
+        // tightens the sample with it instead of quietly leaving it behind.
+        //
+        // Offset half a step, because whole metres are exactly what the
+        // generator never asks about: a material is decided at a cell's
+        // centre. A lattice sharing the map's own is the one lattice whose
+        // answers are guaranteed not to be the ones that matter.
+        const STEP: f32 = DITHER_SCALE / 8.0;
+        const SPAN: f32 = 384.0;
+
+        // The field is the seed's, not the map's, so the cheapest map that
+        // carries one will do — nothing here reads the terrain.
+        let (_, gen) = generator(1, 1, 20_040_112);
+        let reach = (SPAN / STEP) as i32;
         let mut worst = 0.0f32;
-        for iz in 0..config.tiles().y {
-            for ix in 0..config.tiles().x {
-                let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
+        for iz in 0..reach {
+            for ix in 0..reach {
+                let wx = (ix as f32 + 0.5) * STEP - SPAN * 0.5;
+                let wz = (iz as f32 + 0.5) * STEP - SPAN * 0.5;
                 let fray = FRAY
                     * gen
                         .detail
@@ -4319,7 +4371,10 @@ mod tests {
                 worst = worst.max(fray.abs());
             }
         }
-        println!("the fray reaches {worst:.3} m of the {FRAY_REACH:.3} m guarded");
+        println!(
+            "the fray reaches {worst:.3} m of the {FRAY_REACH:.3} m guarded, \
+             sampled every {STEP:.3} m"
+        );
         assert!(
             worst < FRAY_REACH,
             "the fray reaches {worst} m, past the {FRAY_REACH} m it is skipped outside of"
