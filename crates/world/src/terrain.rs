@@ -239,7 +239,7 @@ const MOOR_HEIGHT: f32 = 37.0;
 /// the widest-spread number on the map — the same settings gave one seed a
 /// hundred metres and another nearly three hundred — and it is most of what
 /// makes one map feel tame and the next absurd.
-const HEIGHT_SCALE: f32 = 125.0;
+pub const HEIGHT_SCALE: f32 = 125.0;
 
 /// The steepest a map may climb from its waterline to its summit, in metres of
 /// height per metre of ground. Derived rather than tuned: it is exactly the

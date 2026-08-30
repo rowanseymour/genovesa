@@ -12,7 +12,9 @@ use glam::{UVec2, Vec2, Vec3};
 use protocol::ground::{Material, LAKE_WATER, SEA_WATER};
 
 use crate::archipelago::{chunk_at, Archipelago, Island, IslandSpec};
-use crate::terrain::{MapConfig, TerrainGenerator, CHUNK_TILES};
+use crate::terrain::{
+    Country, Ground, LakeZone, Lie, MapConfig, TerrainGenerator, CHUNK_TILES, HEIGHT_SCALE,
+};
 
 /// An RGB8 image, as wide and tall as it says, ready to write out.
 pub struct Image {
@@ -55,6 +57,146 @@ impl Image {
     }
 }
 
+/// What a plan render paints.
+///
+/// The generator answers several questions about a point and only one of them
+/// has ever been drawn. That is a poor bargain for the one tool whose whole
+/// job is looking hard at what a seed produced: a country and a hollow are
+/// decisions with shapes, and a shape is the thing a page can show and a test
+/// cannot.
+///
+/// A row of the table below is a layer — its word, the line `--help` prints
+/// for it, and one function from a point to the colour it is drawn in.
+/// `mapgen`'s option list is a fold over [`Layer::EVERY`], so a layer added
+/// here is one the binary already advertises, and
+/// `every_layer_answers_for_itself` holds the table to that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// The world as it looks: the palette a client would be sent, tinted for
+    /// water and hill-shaded.
+    Ground,
+    /// Which country each point stands in, flat — see [`Country`].
+    Countries,
+    /// Height above sea level, as a ramp, with the sea by depth.
+    ///
+    /// The ramp is absolute, against [`HEIGHT_SCALE`], so two maps' altitudes
+    /// can be read against each other. A small map genuinely tops out in the
+    /// greens — its peaks are lower, the summit fit only reaching the full
+    /// scale on a map with room for a range — and normalising that away would
+    /// be the layer lying to make itself look busier.
+    Altitude,
+    /// Where the ground closes in around a point — see [`Lie`].
+    Hollows,
+}
+
+impl Layer {
+    pub const EVERY: [Layer; 4] = [
+        Layer::Ground,
+        Layer::Countries,
+        Layer::Altitude,
+        Layer::Hollows,
+    ];
+
+    /// The word this layer is asked for by.
+    pub fn word(self) -> &'static str {
+        match self {
+            Layer::Ground => "ground",
+            Layer::Countries => "country",
+            Layer::Altitude => "altitude",
+            Layer::Hollows => "hollows",
+        }
+    }
+
+    /// The line `--help` prints for it. One line, since the option list folds
+    /// them into a column.
+    pub fn help(self) -> &'static str {
+        match self {
+            Layer::Ground => "the world as it looks, in the client's own palette",
+            Layer::Countries => "which country each point stands in",
+            Layer::Altitude => "height above sea level, as a ramp",
+            Layer::Hollows => "the ground that closes in around itself",
+        }
+    }
+
+    /// The layer a word names, or `None` for one no row answers to.
+    pub fn from_word(word: &str) -> Option<Self> {
+        Layer::EVERY.into_iter().find(|l| l.word() == word)
+    }
+
+    /// The colour one point is drawn in. Everything a layer could want about
+    /// a point arrives together, since the caller had to sample it all to
+    /// decide anything at all.
+    fn paint(self, ground: Ground, height: f32, lake: Option<f32>, normal: Vec3) -> [u8; 3] {
+        match self {
+            Layer::Ground => shade(ground.material.color(), height, lake, normal),
+            // Painted out of the palette rather than out of colours of its
+            // own, so that a country map can be held against a ground map and
+            // read: the country wears a material it actually paints somewhere.
+            // Flat, so its edges are the decision and nothing else.
+            Layer::Countries => shade(
+                match ground.country {
+                    Country::Sea => Material::Seabed,
+                    Country::Lake(LakeZone::Bed) => Material::Silt,
+                    Country::Lake(LakeZone::Shallows) => Material::Shoal,
+                    Country::Lake(LakeZone::Margin) => Material::Marsh,
+                    Country::Shore(_) => Material::Sand,
+                    Country::Arid => Material::Parched,
+                    Country::Lowland => Material::Grass,
+                    Country::Humid => Material::Jungle,
+                    Country::Moor => Material::Upland,
+                    Country::Mountain => Material::Rock,
+                }
+                .color(),
+                height,
+                lake,
+                normal,
+            ),
+            // Unshaded on purpose: the ramp is the height, and a hill shade
+            // over it would be the same information twice, disagreeing at
+            // every slope about which way is up.
+            Layer::Altitude => {
+                let c = if height < 0.0 {
+                    let deep = (-height / crate::terrain::MAX_DEPTH).clamp(0.0, 1.0);
+                    Vec3::new(0.42, 0.62, 0.72).lerp(Vec3::new(0.04, 0.10, 0.24), deep)
+                } else {
+                    ramp((height / HEIGHT_SCALE).clamp(0.0, 1.0))
+                };
+                let c = c.clamp(Vec3::ZERO, Vec3::ONE) * 255.0;
+                [c.x as u8, c.y as u8, c.z as u8]
+            }
+            // The hollows picked out over a drained version of the ground, so
+            // that where they fall can be read against the shape of the land
+            // they fall in. Drawing them alone gives a page of blobs with
+            // nothing to hold them against.
+            Layer::Hollows => {
+                let under = ground.material.color().dot(Vec3::splat(1.0 / 3.0));
+                let base = Vec3::splat(0.25 + 0.45 * under);
+                let c = match ground.lie {
+                    Lie::Hollow => Vec3::new(0.90, 0.44, 0.20),
+                    Lie::Open => base,
+                };
+                shade(c, height, lake, normal)
+            }
+        }
+    }
+}
+
+/// A hypsometric ramp over `0.0..=1.0`: the greens of low ground, through the
+/// browns of the hills, to bare white at the top of the range.
+fn ramp(t: f32) -> Vec3 {
+    const STOPS: [Vec3; 5] = [
+        Vec3::new(0.18, 0.40, 0.24),
+        Vec3::new(0.55, 0.68, 0.32),
+        Vec3::new(0.85, 0.78, 0.44),
+        Vec3::new(0.66, 0.48, 0.34),
+        Vec3::new(0.98, 0.98, 0.98),
+    ];
+    let span = (STOPS.len() - 1) as f32;
+    let at = (t * span).clamp(0.0, span);
+    let low = (at.floor() as usize).min(STOPS.len() - 2);
+    STOPS[low].lerp(STOPS[low + 1], at - low as f32)
+}
+
 /// One pixel of any plan render: the map's own colour, tinted for the bed
 /// below whatever water stands there, and hill-shaded by a sun over the
 /// -x/-z corner so relief reads in plan.
@@ -84,7 +226,7 @@ fn shade(color: Vec3, height: f32, lake: Option<f32>, normal: Vec3) -> [u8; 3] {
 ///
 /// Shared by every layout below, so that a map looks the same whether it is
 /// being examined on its own or compared with eight others.
-pub fn render(config: &MapConfig, width: u32, height: u32) -> Image {
+pub fn render(config: &MapConfig, width: u32, height: u32, layer: Layer) -> Image {
     let gen = TerrainGenerator::new(config);
     let half = config.half_extent();
     let step = config.extent() / Vec2::new(width as f32, height as f32);
@@ -96,9 +238,9 @@ pub fn render(config: &MapConfig, width: u32, height: u32) -> Image {
             let wz = iz as f32 * step.y - half.y;
             let normal = gen.normal(wx, wz);
             let height = gen.height(wx, wz);
-            let material = gen.material(wx, wz, height, normal);
+            let ground = gen.ground(wx, wz, height, normal);
             let lake = gen.lake_level(wx, wz);
-            pixels.extend_from_slice(&shade(material.color(), height, lake, normal));
+            pixels.extend_from_slice(&layer.paint(ground, height, lake, normal));
         }
     }
     Image {
@@ -115,7 +257,13 @@ pub fn render(config: &MapConfig, width: u32, height: u32) -> Image {
 /// The one honest way to judge the layout: any measure of island spacing or
 /// size mix is an average, and averages are exactly how a layout that clumps
 /// or stripes slips through. A few kilometres on the page shows it.
-pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32) -> Image {
+pub fn render_region(
+    world: &Archipelago,
+    centre: Vec2,
+    extent: Vec2,
+    width: u32,
+    layer: Layer,
+) -> Image {
     let height = (width as f32 * extent.y / extent.x).round().max(1.0) as u32;
     let step = extent / Vec2::new(width as f32, height as f32);
     let origin = centre - extent * 0.5;
@@ -155,8 +303,13 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
                 // Exactly the palette's deep sea bed, which is what an
                 // island's own skirt reaches: any difference between the two
                 // would print every island's frame onto the water.
-                None => shade(
-                    Material::Seabed.color(),
+                None => layer.paint(
+                    Ground {
+                        country: Country::Sea,
+                        lie: Lie::Open,
+                        material: Material::Seabed,
+                        sprayed: false,
+                    },
                     -crate::archipelago::OCEAN_DEPTH,
                     None,
                     Vec3::Y,
@@ -164,9 +317,9 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
                 Some(island) => {
                     let normal = island.normal(wx, wz);
                     let height = island.height(wx, wz);
-                    let material = island.material(wx, wz, height, normal);
+                    let ground = island.ground(wx, wz, height, normal);
                     let lake = island.lake_level(wx, wz);
-                    shade(material.color(), height, lake, normal)
+                    layer.paint(ground, height, lake, normal)
                 }
             };
             pixels.extend_from_slice(&pixel);
@@ -180,9 +333,14 @@ pub fn render_region(world: &Archipelago, centre: Vec2, extent: Vec2, width: u32
 }
 
 /// Renders one map at `metres_per_pixel`, with each axis at least one pixel.
-pub fn render_at_scale(config: &MapConfig, metres_per_pixel: f32) -> Image {
+pub fn render_at_scale(config: &MapConfig, metres_per_pixel: f32, layer: Layer) -> Image {
     let extent = config.extent() / metres_per_pixel;
-    render(config, (extent.x as u32).max(1), (extent.y as u32).max(1))
+    render(
+        config,
+        (extent.x as u32).max(1),
+        (extent.y as u32).max(1),
+        layer,
+    )
 }
 
 /// The `count` seeds a layout of many maps draws, spread from one seed by the
@@ -232,7 +390,7 @@ pub const GRID_SHAPES: [UVec2; 5] = [
 /// Drawing the same nine seeds at every shape is also a straight answer to
 /// what a shape does to a given map: the noise is the same, only how much of
 /// it fits has changed.
-pub fn grid(chunks: UVec2, seeds: &[u32], metres_per_pixel: f32) -> Image {
+pub fn grid(chunks: UVec2, seeds: &[u32], metres_per_pixel: f32, layer: Layer) -> Image {
     let extent = (chunks * CHUNK_TILES).as_vec2() / metres_per_pixel;
     let (cell_w, cell_h) = ((extent.x as u32).max(1), (extent.y as u32).max(1));
 
@@ -240,7 +398,7 @@ pub fn grid(chunks: UVec2, seeds: &[u32], metres_per_pixel: f32) -> Image {
     // right to its own edge is still told apart from its neighbour.
     let mut out = Image::blank(cell_w * 3 + 2, cell_h * 3 + 2);
     for (i, &seed) in seeds.iter().enumerate() {
-        let cell = render(&MapConfig { chunks, seed }, cell_w, cell_h);
+        let cell = render(&MapConfig { chunks, seed }, cell_w, cell_h, layer);
         let (cx, cz) = (i as u32 % 3, i as u32 / 3);
         out.blit(&cell, cx * (cell_w + 1), cz * (cell_h + 1));
     }
@@ -303,6 +461,7 @@ pub fn collage(seeds: &[u32]) -> Image {
             &config,
             w * COLLAGE_SCALE - 2 * COLLAGE_GUTTER,
             h * COLLAGE_SCALE - 2 * COLLAGE_GUTTER,
+            Layer::Ground,
         );
         out.blit(
             &cell,
@@ -315,6 +474,45 @@ pub fn collage(seeds: &[u32]) -> Image {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_layer_answers_for_itself() {
+        // A layer that is not in `EVERY` is one `mapgen` neither lists nor
+        // accepts, which is the whole failure this table was built to make
+        // impossible — so the match below is exhaustive on purpose. A new
+        // layer fails to compile here until somebody has looked at this test,
+        // and the assertions then hold it to advertising itself properly.
+        fn listed(layer: Layer) -> bool {
+            match layer {
+                Layer::Ground | Layer::Countries | Layer::Altitude | Layer::Hollows => {
+                    Layer::EVERY.contains(&layer)
+                }
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for layer in Layer::EVERY {
+            assert!(listed(layer), "{layer:?} is not in EVERY");
+            let word = layer.word();
+            assert!(
+                !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase()),
+                "{layer:?} answers to `{word}`, which is not a plain word"
+            );
+            assert!(seen.insert(word), "two layers answer to `{word}`");
+            assert_eq!(
+                Layer::from_word(word),
+                Some(layer),
+                "`{word}` does not come back as the layer that offered it"
+            );
+            let help = layer.help();
+            assert!(
+                !help.is_empty() && !help.contains('\n'),
+                "{layer:?} needs one line of help, and has {help:?}"
+            );
+        }
+        assert_eq!(seen.len(), Layer::EVERY.len(), "EVERY repeats a layer");
+        assert_eq!(Layer::from_word("nowhere"), None);
+    }
+
     use super::*;
 
     #[test]
@@ -350,6 +548,7 @@ mod tests {
                 seed: 1,
             },
             GRID_METRES_PER_PIXEL,
+            Layer::Ground,
         );
         assert!(map.width > 0 && map.height > 0);
     }
