@@ -144,9 +144,11 @@ easy to undo by accident:
 
 - **`tools/sweep.sh` reaps what cargo abandons.** Cargo never reclaims an
   artifact whose fingerprint has stopped matching, so a directory grows without
-  bound across rebuilds even when nothing else changes. A weekly launchd agent
-  (`com.rowanseymour.genovesa-sweep`) runs it; `tools/sweep.sh 7` sweeps harder
-  by hand, and the script's own comments say which flag is doing the work.
+  bound across rebuilds even when nothing else changes. It sweeps roots rather
+  than this project — `sweep.sh 7 ~/code` sweeps every Rust checkout there,
+  harder — so a second one is covered by naming a path, not by copying the
+  script. A weekly launchd agent runs it over `~/code`, and the script's own
+  comments say which flag is doing the work.
 
 Deleting a `target/` is cheap because sccache sits between cargo and rustc —
 see `~/.cargo/config.toml`. Cheap for a worktree that has been built before,
