@@ -193,7 +193,7 @@ pub enum Material {
     Shingle = 3,
     /// Dry brush: the darkest cover the arid coastal country carries, and the
     /// only green in it. Warm where [`Material::Heath`] is cool, the two being
-    /// the shadiest parcel of their own zone and never seen at one height.
+    /// the shadiest cover of their own zone and never seen at one height.
     Scrub = 4,
     /// Sun-bleached grass, standing between the brush and the bare ground.
     Parched = 5,
@@ -214,8 +214,8 @@ pub enum Material {
     Jungle = 12,
     Canopy = 13,
     /// Moorland, above the trees and below the bare rock. [`Material::Heath`]
-    /// and [`Material::Fell`] are what the darkest and lightest parcels of the
-    /// wet forest below turn into as they climb — the one still half green,
+    /// and [`Material::Fell`] are what the darkest and lightest cover of the
+    /// wet forest below turns into as it climbs — the one still half green,
     /// the other already most of the way to stone — so that the upland reads
     /// as the same country drained of colour rather than as a different map
     /// laid over the top.
