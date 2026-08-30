@@ -18,10 +18,11 @@
 //! digests pin.
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{Kind, Material, Plant, CHUNK_METRES};
+use protocol::ground::{Kind, Plant, CHUNK_METRES};
 
 use crate::archipelago::Island;
 use crate::plants::{draw, mix};
+use crate::terrain::{Country, LakeZone};
 
 /// Metres between the cells a mangrove may stand in — half the palms' spacing
 /// and a quarter of the bananas'.
@@ -172,22 +173,24 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
         return None;
     }
 
-    // Asked of the painter rather than measured again here, for the reason the
-    // palms' sand test gives — but it is doing more work than that this time.
-    // A lake's tones are laid out by distance from its own edge rather than by
-    // depth, precisely because a bed shelves too gently for a depth line to
-    // fall anywhere sensible on it. So the tone *is* the band: marsh for the
-    // reeds at the edge, weed for the shallows behind them, and bare silt
-    // beyond — where the water is open lake and a tree standing in it would be
-    // one that had walked out from the shore.
+    // How far out from the lake's own edge this stands, which is what a
+    // lake's three places are: reeds at the margin, weed in the shallows
+    // behind them, and open water beyond — where a tree would be one that had
+    // walked out from the shore. Measured out from the edge rather than down
+    // from the surface because a bed shelves too gently for a depth line to
+    // fall anywhere sensible on it; see [`LakeZone`].
     //
-    // And it is the band the thicket thins across, which is the other half of
-    // why the tone is asked for rather than a depth: out in the weed a cell
-    // has to beat [`OFFSHORE`] of the threshold it has already beaten, so the
-    // stand crowds the waterline and straggles away from it.
-    let thinner = match island.material(at.x, at.y, height, normal) {
-        Material::Marsh => 1.0,
-        Material::Shoal => OFFSHORE,
+    // It is also what the thicket thins across, so the stand crowds the
+    // waterline and straggles away from it: out in the weed a cell has to
+    // beat [`OFFSHORE`] of the threshold it has already beaten.
+    //
+    // This used to read the material and match on marsh and weed. Those are
+    // the colours the zones are painted, so it worked, but it made a rule
+    // about where a tree can root depend on how a lake is drawn — and the
+    // comment defending it had to argue that the tone *was* the band.
+    let thinner = match island.ground(at.x, at.y, height, normal).country {
+        Country::Lake(LakeZone::Margin) => 1.0,
+        Country::Lake(LakeZone::Shallows) => OFFSHORE,
         _ => return None,
     };
     if dice > DENSITY * thickness * thinner {
@@ -305,8 +308,10 @@ mod tests {
             );
             assert!(
                 matches!(
-                    island.material(at.x, at.y, height, island.normal(at.x, at.y)),
-                    Material::Marsh | Material::Shoal
+                    island
+                        .ground(at.x, at.y, height, island.normal(at.x, at.y))
+                        .country,
+                    Country::Lake(LakeZone::Margin | LakeZone::Shallows)
                 ),
                 "a mangrove stands on ground a lake has no say over"
             );

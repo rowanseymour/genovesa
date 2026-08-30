@@ -18,10 +18,11 @@
 //! two habitats rather than as one scatter in two shapes.
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{Kind, Material, Plant, CHUNK_METRES};
+use protocol::ground::{Kind, Plant, CHUNK_METRES};
 
 use crate::archipelago::Island;
 use crate::plants::{draw, mix, AROUND};
+use crate::terrain::{Country, LakeZone};
 
 /// Metres between the cells a clump may stand in.
 ///
@@ -126,24 +127,33 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
         return None;
     }
 
-    // Asked of the painter rather than worked out again from the height, for
-    // the reason the palms' sand test gives: what a plant stands on has to be
-    // the ground a player can *see*, and there is one thing that decides that.
+    // The grassland, the wet forest above it, and the reed margin of a lake —
+    // but nothing the arid coast holds: a clump wants a floor that keeps
+    // water, and the dry country is where the ground stops doing that.
     //
-    // Every green the lowland has, and the wet forest above it, but nothing
-    // the arid coast is painted in: a clump wants a floor that holds water,
-    // and the dry country is where the ground stops doing that.
+    // Asked as a country rather than as a list of materials. The list this
+    // replaces was exactly the lowland and humid rows written out, which made
+    // it a copy of two tables with nothing holding it to them — moving a
+    // material between rows moved the bananas, silently. It also could not
+    // say what it meant: `Forest` and `GrassDark` stand in both rows, so no
+    // reading of a material can tell lowland woodland from the wet forest
+    // above it.
+    let ground = island.ground(at.x, at.y, height, normal);
     if !matches!(
-        island.material(at.x, at.y, height, normal),
-        Material::Forest
-            | Material::GrassDark
-            | Material::Grass
-            | Material::GrassLight
-            | Material::Meadow
-            | Material::Jungle
-            | Material::Canopy
-            | Material::Marsh
+        ground.country,
+        Country::Lowland | Country::Humid | Country::Lake(LakeZone::Margin)
     ) {
+        return None;
+    }
+
+    // And not where the salt has got at it. Spray bares ground the country
+    // would otherwise have covered, and a clump wanting shelter is the last
+    // thing that belongs in a collar of it. This used to come for free from
+    // reading the material — sprayed ground is painted out of the mountain
+    // row, which was in no list here — and saying it outright is the point:
+    // whether a plant minds salt is the rule's business, not something it
+    // should inherit from a colour it happened not to match.
+    if ground.sprayed {
         return None;
     }
 

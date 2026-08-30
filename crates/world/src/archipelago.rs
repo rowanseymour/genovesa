@@ -38,7 +38,7 @@ use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH};
 use crate::noise::smoothstep;
 use crate::sunlight::Sunlight;
 use crate::terrain::{
-    cell_materials, corner_heights, corner_lit, corner_water, normal_at, MapConfig,
+    cell_materials, corner_heights, corner_lit, corner_water, normal_at, Ground, MapConfig,
     TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
 };
 
@@ -439,8 +439,16 @@ impl Island {
     /// What the ground is painted at a world point, matching
     /// [`Island::height`].
     pub fn material(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Material {
+        self.ground(wx, wz, height, normal).material
+    }
+
+    /// Where a world point is and what is showing there —
+    /// [`TerrainGenerator::ground`], in world coordinates. What a rule about
+    /// growing asks: a material alone cannot say what country a bared cell
+    /// was bared out of.
+    pub fn ground(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Ground {
         let local = Vec2::new(wx, wz) - self.spec.centre();
-        self.generator.material(local.x, local.y, height, normal)
+        self.generator.ground(local.x, local.y, height, normal)
     }
 
     /// Surface normal at a world point, from central differences one tile out.
