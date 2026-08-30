@@ -1403,7 +1403,7 @@ mod tests {
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0x49FB_11E9_A669_3026, "the ground changed");
         assert_eq!(
-            sent, 0xF637_287A_4EC2_F680,
+            sent, 0x8F79_73FD_997A_6EFE,
             "what a client would be sent changed"
         );
     }

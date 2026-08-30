@@ -898,7 +898,7 @@ const CLIFF_SLOPE: f32 = 0.55;
 // against a mountainside really is fairly crisp.
 
 /// Wavelength of the field the band edges wander by, in metres. Sits between
-/// [`PATCH_SCALE`] and [`FEATURE_SCALE`]: the coarse octaves have to move a
+/// [`MOTTLE_SCALE`] and [`FEATURE_SCALE`]: the coarse octaves have to move a
 /// whole hillside's worth of edge at once, or the boundary reads as a fringe
 /// applied to a contour rather than as a boundary that was never level.
 const BAND_SCALE: f32 = 150.0;
@@ -913,6 +913,69 @@ const BAND_SCALE: f32 = 150.0;
 /// lands entirely above or below where a level band would have put it, and what
 /// is left behind on the other side reads as an outlying island.
 const BAND_WANDER: f32 = 9.0;
+
+/// Wavelength of the grain both of the dithers below are drawn on, in metres.
+///
+/// Every edge in the palette is a threshold crossed, and a threshold crossed
+/// by a smooth field is a smooth line. [`BAND_WANDER`] bends those lines at
+/// the scale of a hillside without ever stopping them being lines; this is the
+/// other end of the scale, short enough that neighbouring *cells* disagree
+/// about which side of a threshold they fall, so an edge comes apart into
+/// interleaved cells of both sides.
+///
+/// Two octaves at this wavelength puts the second at half of it — under the
+/// metre a cell is wide, and deliberately so. That octave cannot draw a shape
+/// on a grid too coarse to hold one, and does not try to: what it does is
+/// disagree from one cell to the next, which is the difference between an edge
+/// that wobbles and an edge that is dithered. The first octave does the shapes.
+/// Cutting the wavelength until only the fine one is left gives static, and
+/// doubling it gives blobs — an ecotone rather than a dither, which is where
+/// this started.
+///
+/// One grain, two amplitudes, because the two thresholds it is spent on are
+/// measured in different things: [`FRAY`] moves a height against a climate
+/// line, [`PARCEL_DITHER`] moves the parcel field against a bucket edge. They
+/// are read at different offsets so the two cannot land on top of each other —
+/// a cell nudged the same way across both at once would put a compound edge
+/// exactly where the dither is meant to be taking one apart.
+const DITHER_SCALE: f32 = 3.0;
+
+/// How far the dither moves the two climate lines, in metres of height.
+///
+/// Only the climate lines take it. The treeline and the edge of the bare rock
+/// have relief across them — the crag pass works off the same wandered height
+/// the paint does, deliberately — so fraying their paint alone would set the
+/// two straying. The climate lines are the ones with nothing but colour to
+/// break them up, which is exactly why they are the ones that read as drawn on.
+const FRAY: f32 = 3.0;
+
+/// The most [`FRAY`] can move a line, in metres — what the fray is skipped
+/// outside of, since past it the field cannot change which side a point falls.
+///
+/// Not `FRAY` itself: [`Noise::get`] is bounded only *roughly* by one, so a
+/// guard cut at the nominal reach would draw a hard seam everywhere the field
+/// overshot it — the one artefact this whole constant exists to prevent, and
+/// it would land in a ruler-straight line at a fixed height. The margin is
+/// held to the field's real spread by `the_fray_stays_inside_its_guard`.
+const FRAY_REACH: f32 = FRAY * 1.5;
+
+/// How far the dither moves the parcel bucket, in units of the field the
+/// buckets are cut from.
+///
+/// Sized against the *thresholds*, not against the field: they sit about 0.14
+/// apart, so this is a bit over a quarter of the gap between two parcels. A
+/// cell close to an edge can be pushed across it and a cell anywhere else
+/// cannot be pushed anywhere at all, which is what keeps the dither to the
+/// edges without a test for where the edges are. Half the gap was tried and
+/// is too much: the fringes off two neighbouring edges meet in the middle, and
+/// a parcel that is all fringe has stopped being a parcel — the patchwork
+/// reads as one mottled wash again, which is what it exists to prevent.
+///
+/// The ground distance this buys is not fixed, and comes out a few metres:
+/// what it works against is the parcel field's own gradient, and that field is
+/// the swell, which crosses its whole range in a quarter of
+/// [`DETAIL_SCALE`].
+const PARCEL_DITHER: f32 = 0.04;
 
 /// What each parcel of the patchwork is drawn as, in each band of ground it
 /// can reach.
@@ -2151,6 +2214,23 @@ impl TerrainGenerator {
         // The height everything reads its band off.
         let banded = height + BAND_WANDER * wander;
 
+        // And the height the two climate lines alone read — see [`FRAY`].
+        //
+        // The field is only asked for within [`FRAY_REACH`] of a line, which
+        // is the whole of where it could change the answer; four fifths of the
+        // land is nowhere near one and pays two subtractions instead of an
+        // fbm. The lines are the swung ones rather than the constants, or the
+        // skip would miss the fray on a dry island and catch it on a wet one.
+        let arid = ARID_HEIGHT + self.climate;
+        let humid = HUMID_HEIGHT + self.climate;
+        let mut frayed = banded;
+        if (banded - arid).abs() < FRAY_REACH || (banded - humid).abs() < FRAY_REACH {
+            let fray = self
+                .detail
+                .fbm(wx / DITHER_SCALE + 31.0, wz / DITHER_SCALE - 17.0, 2);
+            frayed += FRAY * fray;
+        }
+
         // The patchwork. Quantising a low-frequency field into a few buckets
         // gives irregular parcels with hard edges — woodland against pasture
         // against crop — instead of one smooth green wash.
@@ -2174,9 +2254,16 @@ impl TerrainGenerator {
         // next to the material it applied to. Saying *grass, but the lighter
         // kind* with a second material costs nothing extra on the wire and
         // leaves the byte naming a substance and nothing else.
+        // And the parcel edges are dithered on the same grain the climate
+        // lines are — see [`PARCEL_DITHER`]. Unguarded, unlike the fray: a
+        // bucket edge is not at a known height the way a climate line is, so
+        // there is nowhere to be far from and nothing to skip.
         let swell = self.detail.fbm(wx / DETAIL_SCALE, wz / DETAIL_SCALE, 3);
         let mottle = self.detail.fbm(wx / MOTTLE_SCALE, wz / MOTTLE_SCALE, 2);
-        let field = swell + MOTTLE_WEIGHT * mottle;
+        let grain = self
+            .detail
+            .fbm(wx / DITHER_SCALE - 7.0, wz / DITHER_SCALE + 43.0, 2);
+        let field = swell + MOTTLE_WEIGHT * mottle + PARCEL_DITHER * grain;
         // Thresholds are set off the summed field's measured distribution,
         // not off its nominal range, so all five actually get used: it reaches
         // about ±0.7, but four fifths of it is inside ±0.24, which leaves the
@@ -2217,9 +2304,9 @@ impl TerrainGenerator {
             MOUNTAIN_PARCELS[bucket]
         } else if banded > MOOR_HEIGHT {
             MOOR_PARCELS[bucket]
-        } else if banded > HUMID_HEIGHT + self.climate {
+        } else if frayed > humid {
             HUMID_PARCELS[bucket]
-        } else if banded > ARID_HEIGHT + self.climate {
+        } else if frayed > arid {
             LOWLAND_PARCELS[bucket]
         } else {
             ARID_PARCELS[bucket]
@@ -3728,8 +3815,8 @@ mod tests {
         // which is what lets this pass on more than the machine that recorded
         // it.
         let cases = [
-            (20_040_112u32, UVec2::new(4, 4), 0xF057_D86C_EE90_5A64u64),
-            (99, UVec2::new(3, 2), 0x4A6C_DBC2_ABC2_F51Bu64),
+            (20_040_112u32, UVec2::new(4, 4), 0x1FB9_3F98_E483_DA2Bu64),
+            (99, UVec2::new(3, 2), 0x2B7A_E2D3_59E7_11FCu64),
         ];
 
         for (seed, chunks, expected) in cases {
@@ -4205,6 +4292,38 @@ mod tests {
         assert_eq!(at(3, 0), Material::Sand, "three cells along x");
         assert_eq!(at(0, 5), Material::Forest, "five rows along z");
         assert_eq!(at(3, 5), Material::Grass, "the diagonal is nobody's");
+    }
+
+    #[test]
+    fn the_fray_stays_inside_its_guard() {
+        // [`FRAY_REACH`] is what the climate lines' fray is skipped outside
+        // of, so it has to be at least as far as the fray can actually reach.
+        // If it ever is not, the skip starts answering for ground the field
+        // would have moved, and the error lands as a hard edge at a fixed
+        // height — a level contour, which is the one thing every band edge
+        // here is shaped to avoid, and it would be drawn by the very constant
+        // meant to prevent it.
+        //
+        // Measured on the field rather than assumed from it: [`Noise::get`]
+        // is documented as *roughly* -1..1, and roughly is not a bound.
+        let (config, gen) = generator(8, 8, 20_040_112);
+        let half = config.half_extent();
+        let mut worst = 0.0f32;
+        for iz in 0..config.tiles().y {
+            for ix in 0..config.tiles().x {
+                let (wx, wz) = (ix as f32 - half.x, iz as f32 - half.y);
+                let fray = FRAY
+                    * gen
+                        .detail
+                        .fbm(wx / DITHER_SCALE + 31.0, wz / DITHER_SCALE - 17.0, 2);
+                worst = worst.max(fray.abs());
+            }
+        }
+        println!("the fray reaches {worst:.3} m of the {FRAY_REACH:.3} m guarded");
+        assert!(
+            worst < FRAY_REACH,
+            "the fray reaches {worst} m, past the {FRAY_REACH} m it is skipped outside of"
+        );
     }
 
     #[test]
