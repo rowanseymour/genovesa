@@ -77,7 +77,7 @@ struct Shading {
     // What each material is drawn as, indexed by a window texel's number
     // less one — `Material::KINDS` entries; the length is held to the Rust
     // side's by the bind group, which refuses a buffer of any other size.
-    palette: array<vec4<f32>, 18>,
+    palette: array<vec4<f32>, 23>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> shading: Shading;
