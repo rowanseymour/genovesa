@@ -201,9 +201,9 @@ mod tests {
         // with --nocapture and the new values are printed. If you did not, a
         // platform has stopped agreeing about what a seed means.
         let recorded = [
-            (20_040_112u32, 0x5270_4D95_DECF_DD5Eu64),
-            (1, 0x5830_8619_7C87_F46A),
-            (7, 0xF7BC_B4B7_D8AB_F697),
+            (20_040_112u32, 0xFB0E_41B3_1D69_742Eu64),
+            (1, 0x505E_3728_FAB8_61F7),
+            (7, 0xF2B4_00FA_12A4_89E9),
         ];
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()
