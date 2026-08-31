@@ -1,27 +1,56 @@
-# The tests only mean something if more than one machine runs them. Several of
-# them — the map digest, the archipelago layout and ground digests, the pinned
-# bytes of every protocol message — exist to catch a build that has quietly
-# stopped agreeing with every other build about what a seed means or what a
-# message looks like, and a test like that run on one laptop is a test that has
-# never once done its job. So the workspace is tested on Linux, and on main
-# the crates that hold those pins are tested again on macOS and Windows: three
-# operating systems and two processor architectures, all asked whether seed
-# 20040112 still makes the same island and whether the wire is still the same
-# format.
+# The tests only mean something if more than one machine runs them. The map
+# digest, the archipelago layout, the pinned bytes of every protocol message —
+# each exists to catch a build that has quietly stopped agreeing with every
+# other build about what a seed means, and a test like that run on one laptop
+# is a test that has never once done its job.
+#
+# What that costs decides the shape of this file more than taste does. A
+# private repository gets 2,000 Actions minutes a month, every job bills as a
+# whole minute however few seconds it took, a Windows minute counts as two and
+# a macOS minute as ten. Against a hundred-odd merges a month that budget buys
+# about six billed minutes a run, and the arithmetic answers three questions:
+#
+#   - macOS is gone, and its absence is not a gap. This is developed on arm64
+#     macOS, so every local `cargo test` already runs that side of the
+#     comparison. Ten billed minutes for forty seconds of work is a bad price
+#     for a platform that is covered before a branch is ever pushed. Anyone
+#     developing this somewhere else should put it back.
+#   - Windows is the platform nobody here can run, so it stays — but weekly
+#     rather than per-merge. A platform disagreement is a slow thing, a
+#     toolchain or libm shift rather than a bad branch, and a week is a fine
+#     lag for a failure that arrives about once a year.
+#   - Pushes to main build only when they move the dependency graph, because
+#     that is now the only thing main is for: leaving a cache warm enough that
+#     a branch never compiles Bevy from cold. What that gives up is catching a
+#     bad interaction between two green branches at the merge itself — but the
+#     next PR branches from the new main and builds it, so that arrives within
+#     a PR rather than within a week.
 name: CI
 
 on:
-  # Pull requests are where the checking actually happens; main is run again
-  # after a merge so that a bad interaction between two green branches can't
-  # sit there unnoticed. Widen this to a bare `push:` if you want every push to
-  # every branch built, at the cost of running each PR commit twice.
+  pull_request:
+    # Documentation is generated here rather than written, and neither it nor
+    # a README can fail a test. Assets are not on this list: the game's tests
+    # read assets/models/boat.glb.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   push:
     branches: [main]
-  pull_request:
+    paths:
+      - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
+  # Monday morning: the cross-platform comparison, and a rebuild of main's
+  # cache against whatever rustc stable has become in the meantime.
+  schedule:
+    - cron: '0 6 * * 1'
+  # Before a release, or after anything that moves the generator: ask for the
+  # full set on demand rather than waiting for Monday.
+  workflow_dispatch:
 
 # One run per branch. A second push while the first is still compiling Bevy
-# makes the first irrelevant, so don't pay for it — but let main's runs finish,
-# since those are the record of what the branch actually did.
+# makes the first irrelevant, so don't pay for it — but let main and the weekly
+# run finish, since those are what leaves the cache behind.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -30,41 +59,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Formatting compiles nothing, so it answers in seconds and doesn't need the
-  # system libraries or the cache. On its own so that a stray blank line can't
-  # hide a real test failure behind it.
-  format:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  # Clippy and the tests share a job, and therefore a target directory — but
-  # not, as this comment used to claim, the work of building Bevy. Clippy is a
-  # *check* build: it stops at metadata, so the dependencies come out as
-  # `.rmeta` and there is not an `.rlib` among them for a test build to link
-  # against. `cargo test` therefore compiles the whole of Bevy again, properly,
-  # and on a cold cache this job pays for it twice — a few minutes to check and
-  # the better part of an hour to compile. That is not a hang, however much it
-  # looks like one; the step is compiling `bevy_ui_render` and will get there.
+  # Formatting, linting and the tests in one job, which is one restore of a
+  # target directory this size rather than three. Formatting goes first and
+  # before the machine is prepared for anything else: it needs no system
+  # libraries and no cache, so a stray blank line ends the job inside fifteen
+  # seconds and bills one minute instead of six.
   #
-  # Sharing the job is still right, for the reasons that survive: one restore
-  # and one save of a target directory this size rather than two, and a clippy
-  # failure that skips the test build rather than racing it. Splitting them
-  # would run the two builds in parallel and cost a second cache of the same
-  # several gigabytes to do it.
-  #
-  # Only the first run after a dependency change pays any of this. Every run
-  # that restores a warm cache is a few minutes end to end.
+  # Clippy and the tests do not share the work of building Bevy, only the
+  # directory it lands in. Clippy is a *check* build: it stops at metadata, so
+  # the dependencies come out as `.rmeta` and there is not an `.rlib` among
+  # them for a test build to link against. `cargo test` therefore compiles the
+  # whole of Bevy again, properly, and on a cold cache this job pays for it
+  # twice — a few minutes to check and the better part of an hour to compile.
+  # That is not a hang, however much it looks like one; the step is compiling
+  # `bevy_ui_render` and will get there. Only a run that restores nothing pays
+  # any of it, which is why the cache below is worth the care it gets.
   lint-and-test:
     name: Lint and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
 
       # What Bevy 0.19 asks for on a Linux builder — alsa and udev are what its
       # -sys crates go looking for through pkg-config, and wayland matches the
@@ -86,18 +104,21 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             libasound2-dev libudev-dev libwayland-dev libfontconfig1-dev
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      # `cache-on-failure` because the default is a trap for exactly this
-      # workspace. The cache is normally written only by a job that passed, so
-      # a job that fails its tests saves nothing and the next run compiles the
-      # engine from cold again — three quarters of an hour, every time, for as
-      # long as the branch is red. That is backwards: a red branch is when the
-      # loop most needs to be short. The engine underneath is the same whether
-      # the tests passed or not, so cache it either way.
+      # Only main writes a cache, and that is the whole reason main still
+      # builds. Caches are scoped to the branch that saved them and a branch
+      # can read only its own and the default branch's, so a pull request that
+      # saved its own would be spending the repository's ten gigabytes on
+      # something no other branch can ever restore — and evicting main's copy,
+      # the one every branch does restore, to do it. Restoring counts as use,
+      # so main's stays alive on daily reads between the rare pushes that
+      # rewrite it.
+      #
+      # `cache-on-failure` so that a main run which builds and then fails a
+      # test still leaves the engine underneath it cached; the dependencies are
+      # the same either way.
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Clippy
@@ -115,38 +136,17 @@ jobs:
 
   # The pinned things again, somewhere that isn't x86-64 Linux: the world's
   # digests and the protocol's exact bytes, with the server that sits on both.
-  # These are the crates that hold no Bevy and need nothing from the system, so
-  # the whole matrix costs a fraction of what one game build does — and they
-  # are, not by coincidence, where every value that must match across machines
-  # is written down. Anything new that pins bytes or digests belongs here too.
-  # Linux isn't in this matrix because the job above already ran these tests
-  # there as part of the workspace.
-  #
-  # Main only, though these were once run on every PR push too. On a private
-  # repository a macOS minute bills as ten and a Windows minute as two, which
-  # made these few-minute jobs the most expensive thing in the workflow —
-  # nearly two thirds of the monthly bill for a sliver of the compute. A PR
-  # still runs every one of these tests on Linux in the job above; what a PR
-  # loses is only the cross-platform *comparison*, and that lands minutes
-  # later when the merge commit runs here. A platform disagreement is a rare,
-  # slow-moving kind of failure — a toolchain or libm shift, not a bad branch —
-  # so catching it just after merge instead of just before costs one revert in
-  # the unlucky case, not a corrupted main.
+  # These crates hold no Bevy and need nothing from the system, so this is a
+  # cold build of a few minutes and never more — and they are, not by
+  # coincidence, where every value that must match across machines is written
+  # down. Anything new that pins bytes or digests belongs here too.
   determinism:
-    name: Determinism (${{ matrix.os }})
-    if: github.event_name == 'push'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # Let both finish. Which platforms disagree is the interesting part, and
-      # a cancelled sibling job doesn't say.
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
+    name: Determinism (Windows)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      # Same reasoning as above, and this matrix is where a red branch is most
-      # likely: these are the jobs that fail when a platform stops agreeing.
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
