@@ -308,7 +308,7 @@ pub fn render_region(
                         country: Country::Sea,
                         lie: Lie::Open,
                         material: Material::Seabed,
-                        sprayed: false,
+                        bared_by_salt: false,
                     },
                     -crate::archipelago::OCEAN_DEPTH,
                     None,
@@ -445,7 +445,7 @@ const COLLAGE_GUTTER: u32 = 2;
 pub const COLLAGE_SEEDS: u32 = COLLAGE.len() as u32;
 
 /// Renders the collage at the top of the README, one seed per slot.
-pub fn collage(seeds: &[u32]) -> Image {
+pub fn collage(seeds: &[u32], layer: Layer) -> Image {
     let mut out = Image::blank(
         COLLAGE_SPAN.x * COLLAGE_SCALE,
         COLLAGE_SPAN.y * COLLAGE_SCALE,
@@ -461,7 +461,7 @@ pub fn collage(seeds: &[u32]) -> Image {
             &config,
             w * COLLAGE_SCALE - 2 * COLLAGE_GUTTER,
             h * COLLAGE_SCALE - 2 * COLLAGE_GUTTER,
-            Layer::Ground,
+            layer,
         );
         out.blit(
             &cell,

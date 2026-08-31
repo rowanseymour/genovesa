@@ -922,7 +922,7 @@ const BAND_WANDER: f32 = 9.0;
 /// need not agree about `sin` to the last bit. Eight rather than four so that a
 /// valley is told from a hillside: half a ring is higher than a point on any
 /// slope, and it is the *other* half that says whether the ground closes in.
-const AROUND: [Vec2; 8] = [
+pub(crate) const AROUND: [Vec2; 8] = [
     Vec2::new(1.0, 0.0),
     Vec2::new(DIAGONAL, DIAGONAL),
     Vec2::new(0.0, 1.0),
@@ -941,7 +941,7 @@ const DIAGONAL: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// Wide enough to reach the sides of a valley rather than the roughness of its
 /// floor: at a few metres every dip between two facets would qualify, and the
 /// world would find hollows in its own noise.
-const HOLLOW_REACH: f32 = 22.0;
+pub(crate) const HOLLOW_REACH: f32 = 22.0;
 
 /// How much higher a bearing has to stand to count as ground rising away, in
 /// metres, and how many of the eight must be for a point to be a hollow.
@@ -1059,10 +1059,19 @@ pub struct Ground {
     /// What a client would draw here — the country's cover, unless a slope or
     /// the salt has overruled it.
     pub material: Material,
-    /// Whether salt spray has bared this cell. Not derivable from the pair
-    /// above: sprayed ground is painted out of the mountain row, so a sprayed
-    /// lowland cell and a crag in one are the same byte.
-    pub sprayed: bool,
+    /// Whether the salt is what bared this cell — the spray beating
+    /// [`SPRAY_BARE`] and painting cover out of the mountain row. Not
+    /// derivable from the pair above: a salt-bared lowland cell and a crag in
+    /// one are the same byte.
+    ///
+    /// **Not a test for whether a cell is exposed to salt**, which is why it
+    /// is not called `sprayed`. It is false on every beach, every sea cliff
+    /// and every foot of shoreline in the world — not because they are out of
+    /// the spray, which they emphatically are not, but because what they are
+    /// made of was settled by the shore or the slope before the spray was
+    /// ever asked. A rule wanting salt *exposure* wants a distance from the
+    /// coast, which [`TerrainGenerator::coast`] answers everywhere.
+    pub bared_by_salt: bool,
 }
 
 /// What each grade of cover is drawn as, in each band of ground it can reach.
@@ -2237,13 +2246,16 @@ impl TerrainGenerator {
         // answers for and none of them decides — see [`Lie`].
         let lie = self.lie(wx, wz);
 
-        // A country whose material is settled by something other than cover,
-        // and which no salt can bare further than it already is.
+        // A country whose material is settled by something other than cover:
+        // by water, by the shoreline, or by a slope too steep to hold any. The
+        // salt has nothing left to bare in any of them — which is a statement
+        // about the *material*, not about how much spray lands there. See
+        // [`Ground::bared_by_salt`], whose doc is the place that matters.
         let bare = |country, material| Ground {
             country,
             lie,
             material,
-            sprayed: false,
+            bared_by_salt: false,
         };
 
         // A lake first, out of fresh water's own three materials, which is the
@@ -2427,7 +2439,7 @@ impl TerrainGenerator {
                     country,
                     lie,
                     material: MOUNTAIN_COVER[bucket],
-                    sprayed: true,
+                    bared_by_salt: true,
                 };
             }
         }
@@ -2436,7 +2448,7 @@ impl TerrainGenerator {
             country,
             lie,
             material: cover[bucket],
-            sprayed: false,
+            bared_by_salt: false,
         }
     }
 

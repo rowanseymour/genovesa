@@ -3,10 +3,18 @@
 //! Bananas want what a palm does not: shelter, still air and wet feet. So they
 //! are put where water collects and stays — the floor of a valley, and the
 //! margin of a lake — rather than anywhere a rule about *height* would put
-//! them. Both of those are things the finished island can be asked about
-//! without inventing a second opinion: a hollow is ground with higher ground
-//! most of the way round it, and a lake margin is where the lake grid says
-//! there is water just below the ground being stood on.
+//! them. Both are things the island answers for, so nothing here invents a
+//! second opinion about either: a lake margin is where the lake grid says
+//! there is water just below the ground being stood on, and a hollow is
+//! [`crate::terrain::Lie`].
+//!
+//! Which is worth knowing the shape of rather than trusting blindly. `Lie` is
+//! measured once per island on the same grid the lakes are flooded from — the
+//! landform, before the detail octaves, the crags and the coastal reshaping,
+//! and at a spacing that cannot resolve a gully narrower than about 8 m. So it
+//! is the island's own answer and the only one, but it is an answer about the
+//! shape of the land rather than about the ground underfoot, and near a coast
+//! the two can part company.
 //!
 //! Nothing here shapes ground or paints it, exactly as in [`crate::palms`] —
 //! the arithmetic only ever reads, so adding bananas to a world cannot move
@@ -130,14 +138,17 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
         return None;
     }
 
-    // And not where the salt has got at it. Spray bares ground the country
-    // would otherwise have covered, and a clump wanting shelter is the last
-    // thing that belongs in a collar of it. This used to come for free from
-    // reading the material — sprayed ground is painted out of the mountain
-    // row, which was in no list here — and saying it outright is the point:
-    // whether a plant minds salt is the rule's business, not something it
-    // should inherit from a colour it happened not to match.
-    if ground.sprayed {
+    // And not where the salt has stripped the cover off. This used to come
+    // for free from reading the material — salt-bared ground is painted out of
+    // the mountain row, which was in no list here — and saying it outright is
+    // the point: whether a plant minds salt is the rule's business, not
+    // something it should inherit from a colour it happened not to match.
+    //
+    // It is the right test here only because a clump stands well inland of the
+    // shore already: [`LOW`] keeps it above the beach, where the flag would
+    // have been false however much spray was landing. See
+    // [`Ground::bared_by_salt`].
+    if ground.bared_by_salt {
         return None;
     }
 
@@ -176,6 +187,7 @@ fn beside_water(island: &Island, at: Vec2, height: f32) -> bool {
 mod tests {
     use super::*;
     use crate::archipelago::{Archipelago, WorldConfig};
+    use crate::terrain::{AROUND, HOLLOW_REACH};
     use crate::testing::{digest, floats};
     use protocol::ground::chunk_at;
 
@@ -247,12 +259,45 @@ mod tests {
         }
     }
 
+    /// How far a bearing has to rise, and how many of the eight must, for the
+    /// finished ground to be called closed in here.
+    ///
+    /// Deliberately far weaker than the rule that placed the clump — any rise
+    /// at all, on a quarter of the ring. The rule reads [`Lie`], which is
+    /// measured on the landform grid: no detail octaves, no crags, no coastal
+    /// reshaping, and nothing narrower than about 8 m. The finished ground a
+    /// player walks is a different field, and the two legitimately disagree
+    /// about the edge of a valley — asserting the placement rule back at
+    /// itself here would only be re-reading the array the rule read.
+    ///
+    /// What this catches is the class of failure that array can suffer:
+    /// inverted, misindexed, built from the wrong grid, or left empty — any of
+    /// which puts clumps on crests and knolls, where nothing rises at all. On
+    /// the seed below every clump not beside water clears five of eight; two
+    /// is the worst seen on any seed measured, so this holds with margin
+    /// without being fitted to one favourite map.
+    const TEST_RISE: f32 = 0.0;
+    const TEST_RISING: usize = 2;
+
+    /// The eight bearings, live off the finished height field.
+    fn rising_around(island: &Island, at: Vec2, height: f32) -> usize {
+        AROUND
+            .iter()
+            .filter(|step| {
+                let probe = at + **step * HOLLOW_REACH;
+                island.height(probe.x, probe.y) > height + TEST_RISE
+            })
+            .count()
+    }
+
     #[test]
     fn every_clump_stands_where_the_rule_says() {
-        // The whole of the rule, checked against the finished island rather
-        // than against the arithmetic that placed them — so a change to how
-        // valleys are shaped or painted shows up here as bananas standing
-        // somewhere silly, which is what it would be.
+        // Checked against the finished island rather than against the
+        // arithmetic that placed them, which is the only way this test can
+        // fail for a reason worth knowing about. The country, the band and the
+        // slope below are all read live; the shelter is re-derived by
+        // `rising_around` rather than read back off [`Lie`], whose whole point
+        // is that it is a cached field — see [`TEST_RISING`].
         let world = world(7);
         let mut counted = 0;
         for (chunk, clump) in all_bananas(&world) {
@@ -271,11 +316,11 @@ mod tests {
                 island.normal(at.x, at.y).y >= LEVEL,
                 "a clump stands on a slope it could not hold onto"
             );
-            let normal = island.normal(at.x, at.y);
+            let rising = rising_around(&island, at, height);
             assert!(
-                island.ground(at.x, at.y, height, normal).lie == Lie::Hollow
-                    || beside_water(&island, at, height),
-                "a clump stands on open ground, neither in a hollow nor beside water"
+                rising >= TEST_RISING || beside_water(&island, at, height),
+                "a clump stands with the ground rising on {rising} of eight bearings \
+                 and no water beside it — that is a crest, not a hollow"
             );
             counted += 1;
         }

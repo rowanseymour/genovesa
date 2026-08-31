@@ -336,7 +336,7 @@ fn grid(args: &Args) -> Result<(), String> {
 fn collage(args: &Args) -> Result<(), String> {
     let base = args.seed.unwrap_or(DEFAULT_SET_SEED);
     let seeds = plan::seed_set(base, plan::COLLAGE_SEEDS);
-    let image = plan::collage(&seeds);
+    let image = plan::collage(&seeds, args.layer);
     let path = args.out.clone().unwrap_or_else(|| "collage.png".into());
     write(
         &image,
