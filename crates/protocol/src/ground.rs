@@ -488,6 +488,7 @@ pub enum Kind {
     Palm = 0,
     Banana = 1,
     Mangrove = 2,
+    Cactus = 3,
 }
 
 impl Kind {
@@ -498,6 +499,7 @@ impl Kind {
             0 => Some(Self::Palm),
             1 => Some(Self::Banana),
             2 => Some(Self::Mangrove),
+            3 => Some(Self::Cactus),
             _ => None,
         }
     }
@@ -530,6 +532,14 @@ impl Kind {
             // variety. They also all raced the same water in, so a stand of
             // them really is much of an age.
             Self::Mangrove => (0.82, 1.14),
+            // The widest of the four, and the arid ground is what earns it.
+            // A mangrove is judged against its neighbours and a palm against a
+            // beach full of palms; a cactus stands alone on open dust with
+            // nothing beside it to be wrong against, so a spread that would
+            // read as inconsistency in a thicket reads here as age. Which it
+            // is: nothing in this world grows slower or lives longer, so the
+            // young and the old genuinely are two sizes of the same plant.
+            Self::Cactus => (0.62, 1.42),
         }
     }
 }
