@@ -2404,24 +2404,39 @@ mod tests {
         let water = lit + ground::LIT_BYTES;
         assert_eq!(lake[water..water + 6], [0, 0, 0x8B, 0x03, 0x16, 0x07]);
 
-        // And a plant, which goes on the end of everything else: its kind
-        // first, then its position as a pair of little-endian sixteenths of a
-        // chunk, then its bearing and its size as single bytes. The kind
+        // And the plants, which go on the end of everything else. Each is its
+        // kind first, then its position as a pair of little-endian sixteenths
+        // of a chunk, then its bearing and its size as single bytes. The kind
         // leads because the size cannot be read without it — a size is a step
         // through the range that kind is drawn at.
+        //
+        // One of every kind, in the order the kinds are numbered, because the
+        // numbering is the format too: a build that renumbered them would read
+        // another build's dry country as a beach. This used to plant a palm
+        // and only a palm, which pinned the byte 0 and left every kind added
+        // after it unpinned — a gap the cactus walked straight through.
         let mut planted = a_chunk();
-        planted.plants = vec![ground::Plant {
-            kind: ground::Kind::Palm,
+        planted.plants = [
+            ground::Kind::Palm,
+            ground::Kind::Banana,
+            ground::Kind::Mangrove,
+            ground::Kind::Cactus,
+        ]
+        .into_iter()
+        .map(|kind| ground::Plant {
+            kind,
             at: Vec2::new(2.0, 96.0),
             yaw: std::f32::consts::FRAC_PI_2,
-            scale: ground::Kind::Palm.scale().1,
-        }];
+            scale: kind.scale().1,
+        })
+        .collect();
+        let grown = planted.plants.len();
         let stand = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::new(5, -3),
             ground: Some(planted),
         });
-        assert_eq!(stand.len(), ground.len() + ground::PLANT_BYTES);
-        assert_eq!(stand[14], 1, "the count says one thing grows on it");
+        assert_eq!(stand.len(), ground.len() + grown * ground::PLANT_BYTES);
+        assert_eq!(stand[14], 4, "the count says four things grow on it");
         let plant = 15 + ground::PAYLOAD_BYTES;
         assert_eq!(
             stand[plant..plant + ground::PLANT_BYTES],
@@ -2434,6 +2449,17 @@ mod tests {
             ],
             "one palm, on the end of the ground it stands on"
         );
+        // The three behind it differ in the kind byte alone, every other
+        // number about them having been chosen the same — so this reads as
+        // the numbering and nothing else.
+        for (nth, kind) in [1u8, 2, 3].into_iter().enumerate() {
+            let at = plant + (nth + 1) * ground::PLANT_BYTES;
+            assert_eq!(
+                stand[at..at + ground::PLANT_BYTES],
+                [kind, 0x00, 0x04, 0xFF, 0xBF, 64, 255],
+                "the kind numbered {kind} no longer travels as {kind}"
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //!
 //! A kind knows where its own sort grows — [`crate::palms`] at the back of a
 //! beach, [`crate::bananas`] on a wet valley floor, [`crate::mangroves`] in the
-//! shallows of a lake — and this is where their answers are put together. The
+//! shallows of a lake, [`crate::cacti`] on the dry collar between the first
+//! two — and this is where their answers are put together. The
 //! gathering is here rather than in any of them because the wire carries one
 //! list under one ceiling: whoever spends the last of it has to be somewhere
 //! that can see every claim, not whichever module happened to be asked first.
@@ -11,7 +12,7 @@
 //! palette does: two kinds drawing from two hashes would be two answers to
 //! the same question, and a seed has to mean one thing.
 
-use glam::{IVec2, Vec2};
+use glam::IVec2;
 use protocol::ground::{Plant, MAX_PLANTS};
 
 use crate::archipelago::Island;
@@ -25,6 +26,7 @@ pub fn plants(island: &Island, chunk: IVec2) -> Vec<Plant> {
     let mut found = crate::palms::palms(island, chunk);
     found.extend(crate::bananas::bananas(island, chunk));
     found.extend(crate::mangroves::mangroves(island, chunk));
+    found.extend(crate::cacti::cacti(island, chunk));
 
     // The ceiling is what a chunk's count byte can say, and nothing here comes
     // anywhere near it: the fullest chunk yet measured is a mangrove thicket
@@ -70,25 +72,3 @@ pub(crate) fn draw(seed: u64, nth: u32) -> f32 {
     // same word gives the same float on any machine.
     (z >> 40) as f32 / (1u32 << 24) as f32
 }
-
-/// The eight bearings a rule looks around itself along, as unit vectors.
-///
-/// Written out as constants rather than turned out of a loop over sines,
-/// because a seed has to raise the same islands on every machine and two
-/// libms need not agree about `sin` to the last bit. Eight rather than four so
-/// that a valley is told from a hillside: half a ring is higher than a point
-/// on any slope, and it is the *other* half that says whether the ground
-/// closes in.
-pub(crate) const AROUND: [Vec2; 8] = [
-    Vec2::new(1.0, 0.0),
-    Vec2::new(D, D),
-    Vec2::new(0.0, 1.0),
-    Vec2::new(-D, D),
-    Vec2::new(-1.0, 0.0),
-    Vec2::new(-D, -D),
-    Vec2::new(0.0, -1.0),
-    Vec2::new(D, -D),
-];
-
-/// Each half of a diagonal of [`AROUND`], as a unit vector.
-const D: f32 = std::f32::consts::FRAC_1_SQRT_2;

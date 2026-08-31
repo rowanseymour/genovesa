@@ -193,7 +193,7 @@ pub enum Material {
     Shingle = 3,
     /// Dry brush: the darkest cover the arid coastal country carries, and the
     /// only green in it. Warm where [`Material::Heath`] is cool, the two being
-    /// the shadiest parcel of their own zone and never seen at one height.
+    /// the shadiest cover of their own zone and never seen at one height.
     Scrub = 4,
     /// Sun-bleached grass, standing between the brush and the bare ground.
     Parched = 5,
@@ -214,8 +214,8 @@ pub enum Material {
     Jungle = 12,
     Canopy = 13,
     /// Moorland, above the trees and below the bare rock. [`Material::Heath`]
-    /// and [`Material::Fell`] are what the darkest and lightest parcels of the
-    /// wet forest below turn into as they climb — the one still half green,
+    /// and [`Material::Fell`] are what the darkest and lightest cover of the
+    /// wet forest below turns into as it climbs — the one still half green,
     /// the other already most of the way to stone — so that the upland reads
     /// as the same country drained of colour rather than as a different map
     /// laid over the top.
@@ -488,6 +488,7 @@ pub enum Kind {
     Palm = 0,
     Banana = 1,
     Mangrove = 2,
+    Cactus = 3,
 }
 
 impl Kind {
@@ -498,6 +499,7 @@ impl Kind {
             0 => Some(Self::Palm),
             1 => Some(Self::Banana),
             2 => Some(Self::Mangrove),
+            3 => Some(Self::Cactus),
             _ => None,
         }
     }
@@ -530,6 +532,14 @@ impl Kind {
             // variety. They also all raced the same water in, so a stand of
             // them really is much of an age.
             Self::Mangrove => (0.82, 1.14),
+            // The widest of the four, and the arid ground is what earns it.
+            // A mangrove is judged against its neighbours and a palm against a
+            // beach full of palms; a cactus stands alone on open dust with
+            // nothing beside it to be wrong against, so a spread that would
+            // read as inconsistency in a thicket reads here as age. Which it
+            // is: nothing in this world grows slower or lives longer, so the
+            // young and the old genuinely are two sizes of the same plant.
+            Self::Cactus => (0.62, 1.42),
         }
     }
 }

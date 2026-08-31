@@ -11,7 +11,13 @@
 //! cargo run --release --bin mapgen -- map --size 1536x1024 --seed 99
 //! cargo run --release --bin mapgen -- collage --out collage.png
 //! cargo run --release --bin mapgen -- world --seed 7 --span 8192
+//! cargo run --release --bin mapgen -- map --seed 7 --layer country
 //! ```
+//!
+//! What a map is painted *with* is a layer — see [`Layer`]. The default draws
+//! the world as it looks; the rest draw decisions the generator makes and
+//! nothing else could show, a country and a hollow being shapes rather than
+//! numbers a test could hold.
 //!
 //! The collage that ships in the README is not written by hand from here:
 //! `tools/readme-collage.sh` runs this binary and quantises the result on the
@@ -22,7 +28,7 @@ use std::process::ExitCode;
 use glam::{UVec2, Vec2};
 
 use world::archipelago::{Archipelago, WorldConfig};
-use world::plan;
+use world::plan::{self, Layer};
 use world::terrain::{MapConfig, CHUNK_TILES};
 
 /// The seed the grid and collage spread their set from when none is given.
@@ -34,6 +40,19 @@ const DEFAULT_SET_SEED: u32 = 1;
 /// from the constants themselves and cannot drift.
 fn usage() -> String {
     let map_seed = MapConfig::default().seed;
+    // Folded over the table rather than written out, so a layer added there
+    // is one this already advertises. The column is as wide as the longest
+    // word plus a gutter, measured rather than counted by hand.
+    let width = Layer::EVERY
+        .iter()
+        .map(|l| l.word().len())
+        .max()
+        .expect("a layer");
+    let default_layer = Layer::Ground.word();
+    let layers = Layer::EVERY
+        .iter()
+        .map(|l| format!("\n                     {:width$}  {}", l.word(), l.help()))
+        .collect::<String>();
     format!(
         "\
 Renders Genovesa maps in plan, as PNG.
@@ -56,6 +75,7 @@ Options:
   --scale <m>      metres of ground per pixel (map, grid, world)
   --focus <x,z>    world point a `world` render is centred on [default: 0,0]
   --span <W|WxD>   metres of world a `world` render covers [default: 8192]
+  --layer <name>   what to paint [default: {default_layer}]{layers}
   --out <path>     where to write; grids get one file per shape, each
                    suffixed with its size unless --size named just one
 "
@@ -81,6 +101,7 @@ struct Args {
     scale: Option<f32>,
     focus: Option<Vec2>,
     span: Option<Vec2>,
+    layer: Layer,
     out: Option<String>,
 }
 
@@ -112,6 +133,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
         scale: None,
         focus: None,
         span: None,
+        layer: Layer::Ground,
         out: None,
     };
 
@@ -143,6 +165,12 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
                     return Err("--scale must be more than zero metres per pixel".into());
                 }
                 parsed.scale = Some(scale);
+            }
+            "--layer" => {
+                parsed.layer = Layer::from_word(value).ok_or_else(|| {
+                    let words: Vec<_> = Layer::EVERY.iter().map(|l| l.word()).collect();
+                    format!("`{value}` is not a layer — try {}", words.join(", "))
+                })?
             }
             "--focus" => parsed.focus = Some(focus(value)?),
             "--span" => parsed.span = Some(span(value)?),
@@ -252,7 +280,7 @@ fn map(args: &Args) -> Result<(), String> {
         .scale
         .unwrap_or_else(|| (tiles.x.max(tiles.y) as f32 / 1024.0).max(1.0));
 
-    let image = plan::render_at_scale(&config, scale);
+    let image = plan::render_at_scale(&config, scale, args.layer);
     let path = args.out.clone().unwrap_or_else(|| "map.png".into());
     write(
         &image,
@@ -283,7 +311,7 @@ fn grid(args: &Args) -> Result<(), String> {
     let named = shapes.len() == 1;
 
     for chunks in shapes {
-        let image = plan::grid(chunks, &seeds, scale);
+        let image = plan::grid(chunks, &seeds, scale, args.layer);
         let extent = chunks * CHUNK_TILES;
         // One file per shape, named for it — except when a shape was asked
         // for outright, where the path given is the path meant.
@@ -308,7 +336,7 @@ fn grid(args: &Args) -> Result<(), String> {
 fn collage(args: &Args) -> Result<(), String> {
     let base = args.seed.unwrap_or(DEFAULT_SET_SEED);
     let seeds = plan::seed_set(base, plan::COLLAGE_SEEDS);
-    let image = plan::collage(&seeds);
+    let image = plan::collage(&seeds, args.layer);
     let path = args.out.clone().unwrap_or_else(|| "collage.png".into());
     write(
         &image,
@@ -333,6 +361,7 @@ fn world(args: &Args) -> Result<(), String> {
         focus,
         span,
         (span.x / scale).round().max(1.0) as u32,
+        args.layer,
     );
     let path = args.out.clone().unwrap_or_else(|| "world.png".into());
     write(

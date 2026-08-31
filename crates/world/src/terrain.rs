@@ -239,7 +239,7 @@ const MOOR_HEIGHT: f32 = 37.0;
 /// the widest-spread number on the map — the same settings gave one seed a
 /// hundred metres and another nearly three hundred — and it is most of what
 /// makes one map feel tame and the next absurd.
-const HEIGHT_SCALE: f32 = 125.0;
+pub const HEIGHT_SCALE: f32 = 125.0;
 
 /// The steepest a map may climb from its waterline to its summit, in metres of
 /// height per metre of ground. Derived rather than tuned: it is exactly the
@@ -663,18 +663,18 @@ const RUGGED_SWELL_FLOOR: f32 = 0.35;
 /// what makes both legible.
 const RUGGED_FINE_FLOOR: f32 = 0.08;
 
-/// Wavelength of the variation within a parcel, in metres.
+/// Wavelength of the variation within one stretch of cover, in metres.
 const MOTTLE_SCALE: f32 = 18.0;
-/// How hard the mottle field pushes on the parcel bucket, as a fraction of
+/// How hard the mottle field pushes on the cover bucket, as a fraction of
 /// the swell's own field.
 ///
 /// Judged by eye on nine seeds, because what it changes is the *shape* of the
-/// parcels and no count of them moves enough to measure: at 0.5 the parcels
+/// cover and no count of anything moves enough to measure: at 0.5 the stretches
 /// stop being shapes at all and the lowland reads as static, and at 0.1 the
 /// picture is indistinguishable from leaving the field out. Here it works as
-/// a finer grain within a parcel — a wood with lighter clearings in it — which
-/// is the job the brightness step used to do before a tone stopped carrying
-/// one.
+/// a finer grain within one stretch — a wood with lighter clearings in it —
+/// which is the job the brightness step used to do before a tone stopped
+/// carrying one.
 const MOTTLE_WEIGHT: f32 = 0.25;
 
 /// Deepest the sea bed is allowed to go, in metres below sea level.
@@ -934,7 +934,7 @@ const BAND_WANDER: f32 = 9.0;
 ///
 /// One grain, two amplitudes, because the two thresholds it is spent on are
 /// measured in different things: [`FRAY`] moves a height against a climate
-/// line, [`PARCEL_DITHER`] moves the parcel field against a bucket edge. They
+/// line, [`COVER_DITHER`] moves the cover field against a bucket edge. They
 /// are read at different offsets so the two cannot land on top of each other —
 /// a cell nudged the same way across both at once would put a compound edge
 /// exactly where the dither is meant to be taking one apart.
@@ -979,71 +979,229 @@ const _: () = assert!(
 /// held to the field's real spread by `the_fray_stays_inside_its_guard`.
 const FRAY_REACH: f32 = FRAY * 1.5;
 
-/// How far the dither moves the parcel bucket, in units of the field the
+/// How far the dither moves the cover bucket, in units of the field the
 /// buckets are cut from.
 ///
 /// Sized against the *thresholds*, not against the field: they sit about 0.14
-/// apart, so this is a bit over a quarter of the gap between two parcels. A
+/// apart, so this is a bit over a quarter of the gap between two grades. A
 /// cell close to an edge can be pushed across it and a cell anywhere else
 /// cannot be pushed anywhere at all, which is what keeps the dither to the
 /// edges without a test for where the edges are. Half the gap was tried and
 /// is too much: the fringes off two neighbouring edges meet in the middle, and
-/// a parcel that is all fringe has stopped being a parcel — the patchwork
+/// a grade that is all fringe has stopped being a grade — the patchwork
 /// reads as one mottled wash again, which is what it exists to prevent.
 ///
 /// The ground distance this buys is not fixed, and comes out a few metres:
-/// what it works against is the parcel field's own gradient, and that field is
+/// what it works against is the cover field's own gradient, and that field is
 /// the swell, which crosses its whole range in a quarter of
 /// [`DETAIL_SCALE`].
-const PARCEL_DITHER: f32 = 0.04;
+const COVER_DITHER: f32 = 0.04;
 
-/// What each parcel of the patchwork is drawn as, in each band of ground it
-/// can reach.
+/// The eight bearings the ground is asked about around a point, as unit
+/// vectors.
 ///
-/// One row per band and one column per parcel, indexed by the *same* bucket of
-/// the *same* field however high the ground is. That carries the blend: a wood
-/// running up a hillside keeps its outline as it crosses the treeline and
-/// comes out the other side as heather.
+/// Written out as constants rather than turned out of a loop over sines,
+/// because a seed has to raise the same islands on every machine and two libms
+/// need not agree about `sin` to the last bit. Eight rather than four so that a
+/// valley is told from a hillside: half a ring is higher than a point on any
+/// slope, and it is the *other* half that says whether the ground closes in.
+pub(crate) const AROUND: [Vec2; 8] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(DIAGONAL, DIAGONAL),
+    Vec2::new(0.0, 1.0),
+    Vec2::new(-DIAGONAL, DIAGONAL),
+    Vec2::new(-1.0, 0.0),
+    Vec2::new(-DIAGONAL, -DIAGONAL),
+    Vec2::new(0.0, -1.0),
+    Vec2::new(DIAGONAL, -DIAGONAL),
+];
+
+/// Each half of a diagonal of [`AROUND`], as a unit vector.
+const DIAGONAL: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// How far out the ground is asked whether it closes in, in metres.
+///
+/// Wide enough to reach the sides of a valley rather than the roughness of its
+/// floor: at a few metres every dip between two facets would qualify, and the
+/// world would find hollows in its own noise.
+pub(crate) const HOLLOW_REACH: f32 = 22.0;
+
+/// How much higher a bearing has to stand to count as ground rising away, in
+/// metres, and how many of the eight must be for a point to be a hollow.
+///
+/// Five of eight is what tells a valley from a hillside. On any slope four of
+/// the eight are uphill, so requiring a clear majority means the ground has to
+/// close in from more directions than a single gradient can account for. It is
+/// also why this is a count and not a mean height around the ring: a valley
+/// runs *somewhere*, so two bearings are always level with the floor and would
+/// drag an average back down, while the sides that make it a valley are
+/// unmistakable one bearing at a time.
+///
+/// The rise was 2.5 m while this question was asked of the finished height
+/// field, one rule at a time. Measured against the landform instead it is a
+/// stiffer test at the same number — the detail octaves and the crags are
+/// gone, and with them a good deal of what used to clear 2.5 m over a 22 m
+/// reach — so it is refitted here. Judged over nine seeds by how much of an
+/// island comes out hollow, which lands within about a tenth of what the old
+/// rule found on most of them and short of it on the smallest islands, where
+/// the ground the old rule was reading was largely its own roughness.
+const HOLLOW_RISE: f32 = 1.75;
+const HOLLOW_CLOSED: f32 = 5.0;
+
+/// The lie of the ground around a point — how it sits in what surrounds it,
+/// as against how high it stands or what grows on it.
+///
+/// A separate axis from [`Country`] rather than a sub-type of one, because
+/// hollows happen in every country: a rule wanting shelter wants it in the
+/// grassland and on the moor alike, and nesting this inside the countries
+/// would make it list them.
+///
+/// Non-local, which is why it is a field the island carries rather than a
+/// question asked on the spot — see [`enclosure`]. That is also what lets it
+/// ride on every cell: a rule may afford eight height samples for the few
+/// points it is seriously considering, and no cell of ground could afford
+/// them while a chunk was being built.
+///
+/// Not [`TerrainGenerator::landform`], which is a height — the landscape
+/// before the coast gets to it. This is the shape that height makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lie {
+    /// Ground that rises away on most sides — a valley floor, a basin head,
+    /// the shelter water and cold air collect in.
+    Hollow,
+    /// Everything else: a slope, a crest, open level ground.
+    Open,
+}
+
+/// Where a point is, in the sense that decides what could live there.
+///
+/// The countries are the *places* an island is made of, and they are what a
+/// rule about growing wants to name. A material is the wrong thing to ask:
+/// it says what a square metre looks like after every accident has been
+/// applied to it, so a crag in wet forest and a crag on a summit paint the
+/// same byte and a rule reading it cannot tell the forest it is standing in.
+/// See [`Ground`], which carries both.
+///
+/// Three of them carry a sub-type, and it is the same idea each time — a
+/// place within a place, decided by something that is not altitude. The
+/// coast's is the oldest and the model for the rest: [`Shore`] is drawn from
+/// a character field read along the shoreline, so a stretch of coast is a
+/// beach or a cliff as a whole rather than metre by metre.
+///
+/// Not on the wire, and not needed there: a client draws from a material and
+/// has nothing to say about country. It would have to travel the day
+/// something client-side names a place out loud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Country {
+    /// Under the open sea.
+    Sea,
+    /// Under, or on the margin of, standing fresh water.
+    Lake(LakeZone),
+    /// Between the low-water mark and the back of the beach.
+    Shore(Shore),
+    /// The dry collar every coast wears — see [`ARID_HEIGHT`] for why a height
+    /// line draws one without measuring a distance.
+    Arid,
+    /// The grassland behind the arid collar.
+    Lowland,
+    /// The wet forest on the shoulders above the grassland.
+    Humid,
+    /// Moorland, above the trees and below the bare rock.
+    Moor,
+    /// Bare summit rock.
+    Mountain,
+}
+
+/// How far out into a lake a point stands, which is the whole of what a lake's
+/// own three places are. Measured out from the water's *edge* rather than down
+/// from its surface, for the reason [`LAKE_MARGIN`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LakeZone {
+    /// The reed margin, from just under the waterline to just above it.
+    Margin,
+    /// The weedy shallows a mangrove can still root in.
+    Shallows,
+    /// Open water, bottoming out in bare silt.
+    Bed,
+}
+
+/// Everything the generator knows about one point of ground that is not its
+/// height: where it is, what is showing there, and whether the sea has bared
+/// it.
+///
+/// Two answers rather than one because they are two questions, and collapsing
+/// them is what made every rule about growing read a colour and guess. The
+/// country survives the accidents: a wind-bared cell in the lowland is still
+/// lowland, and says so, while its material has gone to rock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ground {
+    pub country: Country,
+    /// How this point sits in the ground around it — an axis of its own,
+    /// since a hollow is a hollow in any country.
+    pub lie: Lie,
+    /// What a client would draw here — the country's cover, unless a slope or
+    /// the salt has overruled it.
+    pub material: Material,
+    /// Whether the salt is what bared this cell — the spray beating
+    /// [`SPRAY_BARE`] and painting cover out of the mountain row. Not
+    /// derivable from the pair above: a salt-bared lowland cell and a crag in
+    /// one are the same byte.
+    ///
+    /// **Not a test for whether a cell is exposed to salt**, which is why it
+    /// is not called `sprayed`. It is false on every beach, every sea cliff
+    /// and every foot of shoreline in the world — not because they are out of
+    /// the spray, which they emphatically are not, but because what they are
+    /// made of was settled by the shore or the slope before the spray was
+    /// ever asked. A rule wanting salt *exposure* wants a distance from the
+    /// coast, which [`TerrainGenerator::coast`] answers everywhere.
+    pub bared_by_salt: bool,
+}
+
+/// What each grade of cover is drawn as, in each band of ground it can reach.
+///
+/// One row per band and one column per grade — shadiest cover to barest —
+/// indexed by the *same* bucket of the *same* field however high the ground
+/// is. That carries the blend: a wood running up a hillside keeps its outline
+/// as it crosses the treeline and comes out the other side as heather.
 ///
 /// The rows get flatter towards the top — five greens, three shades of moor,
 /// two of rock — so the patchwork thins out with the vegetation without
-/// stopping dead. Bare rock has nothing growing on it to make parcels of, and
-/// the relief up there is drawn by the slope tests instead;
-/// [`Material::RockDark`] is left to them, so a dark facet on a mountain always
-/// means a crag.
+/// stopping dead. Bare rock has no cover to grade, and the relief up there is
+/// drawn by the slope tests instead; [`Material::RockDark`] is left to them,
+/// so a dark facet on a mountain always means a crag.
 ///
 /// The three lowest rows are one climate each — see [`ARID_HEIGHT`] — and read
 /// downwards as a section through an island: bare dry ground at the sea,
 /// grassland behind it, closed wet forest on the shoulders above.
-const ARID_PARCELS: [Material; 5] = [
+const ARID_COVER: [Material; 5] = [
     Material::Scrub,
     Material::Scrub,
     Material::Parched,
     Material::Parched,
     Material::Dust,
 ];
-const LOWLAND_PARCELS: [Material; 5] = [
+const LOWLAND_COVER: [Material; 5] = [
     Material::Forest,
     Material::GrassDark,
     Material::Grass,
     Material::GrassLight,
     Material::Meadow,
 ];
-const HUMID_PARCELS: [Material; 5] = [
+const HUMID_COVER: [Material; 5] = [
     Material::Jungle,
     Material::Jungle,
     Material::Canopy,
     Material::Forest,
     Material::GrassDark,
 ];
-const MOOR_PARCELS: [Material; 5] = [
+const MOOR_COVER: [Material; 5] = [
     Material::Heath,
     Material::Heath,
     Material::Upland,
     Material::Fell,
     Material::Fell,
 ];
-const MOUNTAIN_PARCELS: [Material; 5] = [
+const MOUNTAIN_COVER: [Material; 5] = [
     Material::Rock,
     Material::Rock,
     Material::Rock,
@@ -1160,6 +1318,11 @@ pub struct TerrainGenerator {
     /// which reads as a world whose only water is the sea's; nothing asks
     /// before the fit is done.
     lakes: Lakes,
+    /// How many of the eight bearings around each point of the fitting grid
+    /// rise away from it — what [`Lie`] is read off. Empty until the landform
+    /// it measures exists, which reads as open ground everywhere. See
+    /// [`enclosure`].
+    enclosure: GridField,
     /// How much taller this seed's coastal band is than the one the constants
     /// were tuned on. See [`TerrainGenerator::fit_coast_scale`].
     coast_scale: f32,
@@ -1284,6 +1447,7 @@ impl TerrainGenerator {
             coast: CoastDistance::default(),
             inland: CoastDistance::default(),
             lakes: Lakes::default(),
+            enclosure: GridField::default(),
             coast_scale: 1.0,
             climate: CLIMATE_SWING * (2.0 * seed_draw(seed, CLIMATE_SALT) - 1.0),
             half_extent: config.half_extent(),
@@ -1319,18 +1483,26 @@ impl TerrainGenerator {
         // is not finished until the ceiling can bind, and a basin flooded
         // before its rim was held down would carry the wrong level ever
         // after.
-        generator.lakes = generator.find_lakes(&raw);
+        let ground = generator.landform_grid(&raw);
+        generator.lakes = Lakes::from_ground(&ground);
+        generator.enclosure = enclosure(&ground);
         generator.fit_coast_scale(&raw);
         generator
     }
 
-    /// Floods the finished landform and keeps what stands — see [`Lakes`].
+    /// The finished landform in metres, on the fitting grid.
     ///
-    /// The metres grid is rebuilt from the raw samples rather than from
+    /// Rebuilt from the raw samples rather than from
     /// [`TerrainGenerator::landform`], which would resample every octave of
     /// noise for values the fitting grid already holds; cell for cell this is
     /// the same arithmetic that function performs, on the same inputs.
-    fn find_lakes(&self, raw: &GridField) -> Lakes {
+    ///
+    /// The one height field the questions about the *shape* of the ground are
+    /// all asked of — where the water stands and where the ground closes in.
+    /// Sharing it is not only thrift: a hollow and a lake basin are the same
+    /// question asked at two depths, and read off two height fields they could
+    /// disagree about the shape of the ground a lake was sitting in.
+    fn landform_grid(&self, raw: &GridField) -> GridField {
         let (nx, nz) = raw.dims;
         let mut metres = Vec::with_capacity(nx * nz);
         for iz in 0..nz {
@@ -1343,7 +1515,7 @@ impl TerrainGenerator {
                 ));
             }
         }
-        Lakes::from_ground(&GridField::new(metres, raw.dims, raw.origin))
+        GridField::new(metres, raw.dims, raw.origin)
     }
 
     /// One round of fitting: where the ranges sit, how tall they stand, what
@@ -1947,7 +2119,7 @@ impl TerrainGenerator {
         // the coastal pass above. Where it stands is where the palette bares
         // rock: the spray weight is [`sprayed`], the same call the paint
         // thresholds, and the mountain band is read off the same wandered
-        // height the parcel rows read — so relief and paint stray on one
+        // height the cover rows read — so relief and paint stray on one
         // tide. Faded in above the shore and calmed by lakes like the rest
         // of the detail; the outer test is only a cheap skip for the open
         // sea and the lowland interior, where the weight is identically 0.
@@ -2126,6 +2298,14 @@ impl TerrainGenerator {
 
     /// What one cell of ground is made of, picked from a fixed palette.
     ///
+    /// The material alone — see [`TerrainGenerator::ground`] for the country
+    /// it was drawn from, which anything deciding what may grow wants instead.
+    pub fn material(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Material {
+        self.ground(wx, wz, height, normal).material
+    }
+
+    /// Where one point of ground is, and what is showing there.
+    ///
     /// Nothing here blends. Every choice is a hard threshold, so a cell gets
     /// exactly one material — that is what makes the ground read as flat
     /// shapes rather than as a wash of gradient, and it is what lets a cell
@@ -2134,11 +2314,32 @@ impl TerrainGenerator {
     /// Which means the work of getting from one band to the next is done by the
     /// *shape* of the boundary rather than by mixing the colours across it. Two
     /// things do it: the edges wander off the level by [`BAND_WANDER`], and the
-    /// patchwork either side of them is cut from one field, so the parcels line
-    /// up through the join. See [`LOWLAND_PARCELS`].
-    pub fn material(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Material {
+    /// patchwork either side of them is cut from one field, so the cover lines
+    /// up through the join. See [`LOWLAND_COVER`].
+    ///
+    /// The order of the questions is the order of what they cost, and the
+    /// cheap ones are also the ones that overrule: water and slope decide a
+    /// cell outright, so the bands below are only ever reached by ground that
+    /// is dry and gentle enough to wear cover at all.
+    pub fn ground(&self, wx: f32, wz: f32, height: f32, normal: Vec3) -> Ground {
         // 0 on flat ground, approaching 1 on a cliff face.
         let slope = 1.0 - normal.y;
+
+        // Whether the ground closes in around here, which every country
+        // answers for and none of them decides — see [`Lie`].
+        let lie = self.lie(wx, wz);
+
+        // A country whose material is settled by something other than cover:
+        // by water, by the shoreline, or by a slope too steep to hold any. The
+        // salt has nothing left to bare in any of them — which is a statement
+        // about the *material*, not about how much spray lands there. See
+        // [`Ground::bared_by_salt`], whose doc is the place that matters.
+        let bare = |country, material| Ground {
+            country,
+            lie,
+            material,
+            bared_by_salt: false,
+        };
 
         // A lake first, out of fresh water's own three materials, which is the
         // whole of what tells a lake from an inlet. The sea's bed brightens
@@ -2166,15 +2367,16 @@ impl TerrainGenerator {
         let drowned = self.lakes.level(wx, wz).is_some_and(|level| height < level);
         if shore < LAKE_MARGIN || drowned {
             if shore < -LAKE_SHALLOWS {
-                return Material::Silt;
+                return bare(Country::Lake(LakeZone::Bed), Material::Silt);
             }
             if shore < -LAKE_MARGIN {
-                return Material::Shoal;
+                return bare(Country::Lake(LakeZone::Shallows), Material::Shoal);
             }
+            let margin = Country::Lake(LakeZone::Margin);
             return if slope > ROCK_SLOPE {
-                Material::RockDark
+                bare(margin, Material::RockDark)
             } else {
-                Material::Marsh
+                bare(margin, Material::Marsh)
             };
         }
 
@@ -2193,12 +2395,12 @@ impl TerrainGenerator {
             // and wet rock is dark, so the flip to the lighter dry grey at
             // the shore band is a tide line, not a seam.
             if slope > ROCK_SLOPE {
-                return Material::RockDark;
+                return bare(Country::Sea, Material::RockDark);
             }
             if height < -SEABED_DEPTH {
-                return Material::Seabed;
+                return bare(Country::Sea, Material::Seabed);
             }
-            return Material::Shallow;
+            return bare(Country::Sea, Material::Shallow);
         }
 
         // The shore itself, from the low-water mark to the back of the beach.
@@ -2206,24 +2408,18 @@ impl TerrainGenerator {
         // rather than sand; on a beach there is no slope to speak of, so it
         // never fires and the sand stays clean.
         if height < SHORE_TOP {
+            let character = self.shore(wx, wz);
             if slope > ROCK_SLOPE {
-                return Material::RockDark;
+                return bare(Country::Shore(character), Material::RockDark);
             }
-            return match self.shore(wx, wz) {
-                Shore::Beach => Material::Sand,
-                Shore::Rocky => Material::Shingle,
-                Shore::Cliff => Material::RockDark,
-            };
-        }
-
-        // Steep ground is bare rock whatever height it's at. Above the shore
-        // this is what paints the cliff faces, and inland it picks out crags on
-        // the hills the same way.
-        if slope > CLIFF_SLOPE {
-            return Material::RockDark;
-        }
-        if slope > ROCK_SLOPE {
-            return Material::Rock;
+            return bare(
+                Country::Shore(character),
+                match character {
+                    Shore::Beach => Material::Sand,
+                    Shore::Rocky => Material::Shingle,
+                    Shore::Cliff => Material::RockDark,
+                },
+            );
         }
 
         // How far this spot's band edges have strayed from the level.
@@ -2253,13 +2449,51 @@ impl TerrainGenerator {
             frayed += FRAY * fray;
         }
 
+        // Which country that puts this in, and the palette row its cover is
+        // drawn from — the only thing height decides up here, and with the two
+        // climate lines the whole of what decides where one country ends and
+        // the next begins.
+        //
+        // Read before the slope and the salt rather than after, which is what
+        // makes a crag in the forest say *forest*. The material either of them
+        // leaves is the same bare rock everywhere, so a country read from the
+        // material afterwards could only ever answer "mountain" — which is how
+        // this collapsed the two questions into one byte before there was
+        // anywhere else to put the answer.
+        //
+        // The bare rock reads the firm height and everything below it the
+        // frayed one, which is the whole of [`FRAY`]'s rule said in code. The
+        // two cannot come apart: [`MOUNTAIN_HEIGHT`] is tested first, so
+        // ground above it is rock whatever the fray did to the edge below.
+        let (country, cover) = if banded > MOUNTAIN_HEIGHT {
+            (Country::Mountain, &MOUNTAIN_COVER)
+        } else if frayed > MOOR_HEIGHT {
+            (Country::Moor, &MOOR_COVER)
+        } else if frayed > humid {
+            (Country::Humid, &HUMID_COVER)
+        } else if frayed > arid {
+            (Country::Lowland, &LOWLAND_COVER)
+        } else {
+            (Country::Arid, &ARID_COVER)
+        };
+
+        // Steep ground is bare rock whatever height it's at. Above the shore
+        // this is what paints the cliff faces, and inland it picks out crags on
+        // the hills the same way.
+        if slope > CLIFF_SLOPE {
+            return bare(country, Material::RockDark);
+        }
+        if slope > ROCK_SLOPE {
+            return bare(country, Material::Rock);
+        }
+
         // The patchwork. Quantising a low-frequency field into a few buckets
-        // gives irregular parcels with hard edges — woodland against pasture
-        // against crop — instead of one smooth green wash.
+        // gives irregular stretches of cover with hard edges — woodland against
+        // pasture against crop — instead of one smooth green wash.
         //
         // The field it quantises is the *swell*: the same call, at the same
         // scale and the same offset, that [`TerrainGenerator::height`] raises
-        // the ground's undulations with. So a parcel is not laid out beside
+        // the ground's undulations with. So the cover is not laid out beside
         // the landscape but out of it — the dark cover lands in the hollows of
         // the very rolls a player walks over, and the pale cover on their
         // crests, which is where the water goes and so where the cover would
@@ -2269,15 +2503,15 @@ impl TerrainGenerator {
         // had done, because that is exactly what it was.
         //
         // The finer [`MOTTLE_SCALE`] field still nudges the total, which
-        // breaks a big parcel into patches of its neighbours in the palette
+        // breaks a big stretch into patches of its neighbours in the palette
         // row rather than leaving it one flat slab. That used to be a
         // brightness step riding on top of the tone, which meant the wire
         // carried a rendering instruction — how much to scale a colour by —
         // next to the material it applied to. Saying *grass, but the lighter
         // kind* with a second material costs nothing extra on the wire and
         // leaves the byte naming a substance and nothing else.
-        // And the parcel edges are dithered on the same grain the climate
-        // lines are — see [`PARCEL_DITHER`]. Unguarded, unlike the fray: a
+        // And the cover edges are dithered on the same grain the climate
+        // lines are — see [`COVER_DITHER`]. Unguarded, unlike the fray: a
         // bucket edge is not at a known height the way a climate line is, so
         // there is nowhere to be far from and nothing to skip.
         let swell = self.detail.fbm(wx / DETAIL_SCALE, wz / DETAIL_SCALE, 3);
@@ -2285,19 +2519,20 @@ impl TerrainGenerator {
         let grain = self
             .detail
             .fbm(wx / DITHER_SCALE - 7.0, wz / DITHER_SCALE + 43.0, 2);
-        let field = swell + MOTTLE_WEIGHT * mottle + PARCEL_DITHER * grain;
+        let field = swell + MOTTLE_WEIGHT * mottle + COVER_DITHER * grain;
         // Thresholds are set off the summed field's measured distribution,
         // not off its nominal range, so all five actually get used: it reaches
         // about ±0.7, but four fifths of it is inside ±0.24, which leaves the
-        // two outer parcels a quarter of it between them. They survived the
+        // two outer grades a quarter of it between them. They survived the
         // move to the swell unchanged, both fields being the same three-octave
         // fbm and so the same distribution; only where it falls had moved.
         //
-        // [`PARCEL_DITHER`] widens that distribution — not much beside a
+        // [`COVER_DITHER`] widens that distribution — not much beside a
         // spread of ±0.24, but it is a third term the numbers below were not
-        // measured against, and what it widens by lands in the outer parcels.
-        // `every_parcel_of_every_band_gets_used` is what would catch it going
-        // far enough to matter, in the direction it could actually go wrong.
+        // measured against, and what it widens by lands in the outer grades.
+        // `every_grade_of_cover_of_every_band_gets_used` is what would catch
+        // it going far enough to matter, in the direction it could actually go
+        // wrong.
         // Anyone re-cutting these four should measure the field as it is now,
         // dither included, rather than trusting the figures above.
         let bucket = if field < -0.20 {
@@ -2323,28 +2558,30 @@ impl TerrainGenerator {
         if distance < SPRAY_REACH + SPRAY_WANDER {
             let character = self.shore_character(wx, wz, distance);
             if self.sprayed(distance, character, wander) > SPRAY_BARE {
-                return MOUNTAIN_PARCELS[bucket];
+                return Ground {
+                    country,
+                    lie,
+                    material: MOUNTAIN_COVER[bucket],
+                    bared_by_salt: true,
+                };
             }
         }
 
-        // Which row of the palette that parcel is drawn from — the only thing
-        // height decides up here, and with the climate lines the whole of what
-        // decides where one country ends and the next begins.
-        //
-        // The bare rock reads the firm height and everything below it the
-        // frayed one, which is the whole of [`FRAY`]'s rule said in code. The
-        // two cannot come apart: [`MOUNTAIN_HEIGHT`] is tested first, so
-        // ground above it is rock whatever the fray did to the edge below.
-        if banded > MOUNTAIN_HEIGHT {
-            MOUNTAIN_PARCELS[bucket]
-        } else if frayed > MOOR_HEIGHT {
-            MOOR_PARCELS[bucket]
-        } else if frayed > humid {
-            HUMID_PARCELS[bucket]
-        } else if frayed > arid {
-            LOWLAND_PARCELS[bucket]
+        Ground {
+            country,
+            lie,
+            material: cover[bucket],
+            bared_by_salt: false,
+        }
+    }
+
+    /// How a point sits in the ground around it — [`Lie`], read off the
+    /// [`enclosure`] field.
+    pub fn lie(&self, wx: f32, wz: f32) -> Lie {
+        if self.enclosure.at(wx, wz) >= HOLLOW_CLOSED {
+            Lie::Hollow
         } else {
-            ARID_PARCELS[bucket]
+            Lie::Open
         }
     }
 }
@@ -3171,6 +3408,52 @@ fn priority_flood(ground: &GridField) -> Vec<f32> {
     fill
 }
 
+/// How many of the eight bearings around each point rise away from it, over
+/// the whole fitting grid — the field [`Lie`] is read off.
+///
+/// The measure is the one a rule used to make for itself, moved to where every
+/// rule can have it: [`AROUND`] sampled [`HOLLOW_REACH`] out, counting the
+/// bearings standing [`HOLLOW_RISE`] above. Doing it here rather than on the
+/// spot is what makes it affordable per cell — eight samples of the finished
+/// height field cost nine octaves of noise apiece, where eight reads of a grid
+/// cost nothing worth naming.
+///
+/// Sampled through [`GridField::at`] at the true reach rather than by stepping
+/// a whole number of cells, so the diagonals stand where they should instead of
+/// √2 too far out.
+///
+/// Deliberately not blurred, though an integer field on a square lattice looks
+/// like it wants to be. A blur was tried and it eats hollows: the threshold
+/// sits at five of a possible eight, so a cell that just clears it is nearly
+/// always the highest count in its neighbourhood and gets averaged back under.
+/// It cost two thirds of the hollows in the world. The bilinear read is the
+/// only smoothing this wants.
+///
+/// Outside the grid the read clamps, so a point past the map's edge is
+/// measured against the frame. Nothing grows out there — every island keeps a
+/// sea margin inside its frame — and the alternative is padding a grid by a
+/// window whose whole purpose is to describe ground that is not there.
+fn enclosure(ground: &GridField) -> GridField {
+    let (nx, nz) = ground.dims;
+    let mut counts = Vec::with_capacity(nx * nz);
+    for iz in 0..nz {
+        let wz = ground.origin.y + iz as f32 * COAST_GRID;
+        for ix in 0..nx {
+            let wx = ground.origin.x + ix as f32 * COAST_GRID;
+            let here = ground.cells[iz * nx + ix];
+            let rising = AROUND
+                .iter()
+                .filter(|step| {
+                    let probe = Vec2::new(wx, wz) + **step * HOLLOW_REACH;
+                    ground.at(probe.x, probe.y) > here + HOLLOW_RISE
+                })
+                .count();
+            counts.push(rising as f32);
+        }
+    }
+    GridField::new(counts, ground.dims, ground.origin)
+}
+
 /// A grid of values over the map at [`COAST_GRID`] spacing, read back with
 /// bilinear interpolation, clamped to its edges outside it.
 ///
@@ -3394,7 +3677,7 @@ fn water_fraction(wet: &[f32], dims: (usize, usize), radius: usize) -> Vec<f32> 
 /// The three kinds of coast, in the order the character field runs through
 /// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shore {
+pub enum Shore {
     /// Shelves gently away: broad sand, and a wide turquoise shallows offshore.
     Beach,
     /// Neither one thing nor the other — pebble and boulder, roughly at the
@@ -4382,7 +4665,7 @@ mod tests {
     }
 
     #[test]
-    fn every_parcel_of_every_band_gets_used() {
+    fn every_grade_of_cover_of_every_band_gets_used() {
         // The thresholds are set off the noise field's measured distribution
         // rather than its nominal range, which is the kind of number that
         // rots silently: a field whose spread moves leaves the outer buckets
@@ -4406,17 +4689,17 @@ mod tests {
             }
         }
 
-        for (band, parcels) in [
-            ("arid", ARID_PARCELS),
-            ("lowland", LOWLAND_PARCELS),
-            ("humid", HUMID_PARCELS),
-            ("moor", MOOR_PARCELS),
-            ("mountain", MOUNTAIN_PARCELS),
+        for (band, cover) in [
+            ("arid", ARID_COVER),
+            ("lowland", LOWLAND_COVER),
+            ("humid", HUMID_COVER),
+            ("moor", MOOR_COVER),
+            ("mountain", MOUNTAIN_COVER),
         ] {
-            for parcel in parcels {
+            for grade in cover {
                 assert!(
-                    seen.contains(&(parcel as u8)),
-                    "no {parcel:?} anywhere on this map, though the {band} row calls for it"
+                    seen.contains(&(grade as u8)),
+                    "no {grade:?} anywhere on this map, though the {band} row calls for it"
                 );
             }
         }
