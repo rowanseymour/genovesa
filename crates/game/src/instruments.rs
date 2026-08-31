@@ -674,7 +674,7 @@ mod tests {
     /// Ground with one chunk of bed at the origin, and a point standing on it.
     fn over_a_bed(height: f32) -> (Ground, Vec2) {
         let mut ground = Ground::default();
-        ground.deliver(IVec2::ZERO, Some(bed_at(height)));
+        ground.deliver(IVec2::ZERO, None, Some(bed_at(height)));
         (ground, Vec2::splat(CELL_METRES))
     }
 

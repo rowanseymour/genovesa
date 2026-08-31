@@ -106,6 +106,42 @@ pub fn towards_the_sun(phase: f32) -> Vec3 {
     Vec3::new(east, up * SUN_TILT.cos(), up * SUN_TILT.sin())
 }
 
+/// The lightest the sky ever blows, in metres per second — a light air, so
+/// there is always *some* wind and it always names a bearing.
+///
+/// Here rather than with the generator that honours it because two things
+/// need the same number: the weather, which never hands out a shorter vector
+/// than this, and [`sheltered`], which may not take one below it either. A
+/// sailing hull has no other engine, and a client that honours the no-go zone
+/// has nothing at all to sail on under a dead sky — so a lee that could
+/// close the last of the wind off would be the becalming hatch that killing
+/// the dead sky was meant to shut, reopened somewhere the weather cannot see.
+pub const LIGHT_AIR: f32 = 1.5;
+
+/// The wind actually blowing at a point: the world's wind, cut down by how
+/// exposed the point is — `exposure` in `0.0..=1.0` as
+/// [`ground::shelter_across`] gives it, `1.0` being open water.
+///
+/// The bearing is untouched. Real air bends round a headland as well as
+/// slowing behind it, and this deliberately does not: a heading is what a
+/// player steers by, and one that swung with the coast would be a boat
+/// disagreeing with its own compass for reasons nothing on screen explains.
+/// The strength alone is what a lee is *for*.
+///
+/// Floored at [`LIGHT_AIR`], never scaled into it, so the deepest lee in a
+/// gale is still a sailable breeze and the deepest lee in a calm is simply
+/// the calm. Both ends call this rather than each applying the fraction its
+/// own way — the server owns the wind, but a hull's drive and the sea's
+/// height are read from it on the client, and one of them arriving at a
+/// different number would be a boat sailing a wind the water is not wearing.
+pub fn sheltered(wind: Vec2, exposure: f32) -> Vec2 {
+    let strength = wind.length();
+    if strength <= LIGHT_AIR {
+        return wind;
+    }
+    wind * (strength * exposure.clamp(0.0, 1.0)).max(LIGHT_AIR) / strength
+}
+
 /// A phase of the day as [`ground::ChunkPayload::lit`] spells it: the day cut
 /// into 256 equal steps, rounded to the nearest, wrapping at midnight —
 /// [`SUNRISE`] is 64 and [`SUNSET`] is 192. [`dequantize_phase`] reads one
@@ -241,7 +277,11 @@ pub fn surveyed_bytes(found: &survey::Soundings) -> usize {
 /// send here instead of arriving as garbage — and so that "how much can one
 /// answer cost" has one answer, written down.
 const MAX_SERVER_FRAME: u32 = {
-    let ground = 1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS);
+    // Tag, coordinates, the lee's flag and lattice, the ground's flag and
+    // plant count, and the payload itself — a chunk carrying everything it
+    // can carry at once.
+    let ground =
+        1 + 8 + 1 + ground::SHELTER_BYTES + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS);
     let batch = if SURVEY_BATCH_BYTES > 8 + survey::SOUNDINGS_BYTES {
         SURVEY_BATCH_BYTES
     } else {
@@ -624,8 +664,22 @@ pub enum ToClient {
     ///
     /// Ground that carries a lake costs half as much again — see
     /// [`ChunkPayload::water`] — and is a small minority of the ground.
+    ///
+    /// `shelter` is how much of the wind reaches this chunk from each
+    /// quarter — [`ground::SHELTER_COUNT`] lattice points, row-major and
+    /// south-west first, read back by [`ground::shelter_across`]. `None`
+    /// means open to the wind from everywhere, which is most of the sea.
+    ///
+    /// Beside the ground rather than inside it because the two answers do
+    /// not go together. A chunk of bare ocean bed needs no payload and is
+    /// precisely the water an island's headlands shelter — the whole skirt
+    /// of every island is like this — so a lee carried inside the payload
+    /// could only be sent by sending the flat bed with it, at eighty
+    /// kilobytes and a mesh apiece to say what six hundred bytes says. And a
+    /// chunk of *land* wants both: a bay has ground under it.
     Chunk {
         chunk: IVec2,
+        shelter: Option<Vec<ground::Exposure>>,
         ground: Option<ChunkPayload>,
     },
     /// What the weather is doing: the wind over the whole world, as a
@@ -1155,9 +1209,26 @@ impl ToClient {
                     soundings.put(&mut payload);
                 }
             }
-            Self::Chunk { chunk, ground } => {
+            Self::Chunk {
+                chunk,
+                shelter,
+                ground,
+            } => {
                 payload.push(5);
                 put_ivec2(&mut payload, *chunk);
+                // The lee first, and behind a flag of its own: it is the one
+                // part of this message a chunk may carry whether or not it
+                // has ground, so folding it into the ground flag below would
+                // double that flag's states for no gain.
+                match shelter {
+                    None => payload.push(0),
+                    Some(lattice) => {
+                        payload.push(1);
+                        for point in lattice {
+                            payload.extend_from_slice(point);
+                        }
+                    }
+                }
                 match ground {
                     // A flag byte rather than three tags, so that what kind of
                     // answer this is is one thing a reader tests and the
@@ -1213,6 +1284,13 @@ impl ToClient {
             },
             5 => {
                 let chunk = payload.ivec2()?;
+                let shelter = match payload.u8()? {
+                    0 => None,
+                    1 => Some(payload.shelter_lattice()?),
+                    flag => {
+                        return Err(corrupt(format!("chunk {chunk}'s lee flagged {flag}")));
+                    }
+                };
                 let ground = match payload.u8()? {
                     0 => None,
                     flag @ (1 | 2) => {
@@ -1221,7 +1299,11 @@ impl ToClient {
                     }
                     flag => return Err(corrupt(format!("chunk {chunk} flagged {flag}"))),
                 };
-                Self::Chunk { chunk, ground }
+                Self::Chunk {
+                    chunk,
+                    shelter,
+                    ground,
+                }
             }
             6 => Self::Weather {
                 wind: payload.vec2()?,
@@ -1483,6 +1565,16 @@ impl<'a> Payload<'a> {
         })
     }
 
+    /// One chunk's shelter lattice — see [`ToClient::Chunk`]. Fixed length,
+    /// so nothing precedes it but the flag saying it is there at all.
+    fn shelter_lattice(&mut self) -> io::Result<Vec<ground::Exposure>> {
+        let bytes = self.take(ground::SHELTER_BYTES)?;
+        Ok(bytes
+            .chunks_exact(ground::BEARINGS)
+            .map(|point| point.try_into().expect("a bearing's worth of bytes"))
+            .collect())
+    }
+
     fn finish(self) -> io::Result<()> {
         if !self.bytes.is_empty() {
             return Err(corrupt(format!(
@@ -1580,6 +1672,15 @@ mod tests {
             water: None,
             plants: Vec::new(),
         }
+    }
+
+    /// A shelter lattice whose every byte differs from every other, so a
+    /// reader that transposed it or read it a bearing out fails rather than
+    /// agreeing with itself.
+    fn a_lee() -> Vec<ground::Exposure> {
+        (0..ground::SHELTER_COUNT)
+            .map(|i| std::array::from_fn(|b| ((i * ground::BEARINGS + b) * 7 % 241) as u8))
+            .collect()
     }
 
     /// The same chunk with a lake on it, its levels a different function of
@@ -1738,16 +1839,28 @@ mod tests {
             ToClient::Vocabulary {
                 phrases: Vec::new(),
             },
+            // All four answers a chunk can be: open water, open water in
+            // something's lee, ground, and ground with a lake on it — the
+            // lee and the ground being independent of each other is the
+            // whole of why they are two flags.
             ToClient::Chunk {
                 chunk: IVec2::new(3, -8),
+                shelter: None,
+                ground: None,
+            },
+            ToClient::Chunk {
+                chunk: IVec2::new(4, -8),
+                shelter: Some(a_lee()),
                 ground: None,
             },
             ToClient::Chunk {
                 chunk: IVec2::new(-2, 7),
+                shelter: Some(a_lee()),
                 ground: Some(a_chunk()),
             },
             ToClient::Chunk {
                 chunk: IVec2::new(6, -1),
+                shelter: None,
                 ground: Some(a_chunk_with_a_lake()),
             },
             ToClient::Surveyed {
@@ -1778,6 +1891,34 @@ mod tests {
             let bytes = bytes_of_server(&message);
             assert_eq!(ToClient::read(&mut bytes.as_slice()).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn a_lee_takes_the_wind_down_but_never_out() {
+        let gale = Vec2::new(0.0, -16.0);
+        let open = sheltered(gale, 1.0);
+        assert_eq!(open, gale, "open water is not sheltered from anything");
+
+        let lee = sheltered(gale, 0.25);
+        assert!(
+            (lee.length() - 4.0).abs() < 1e-4,
+            "a quarter-exposed lee blew {} of a 16 m/s gale",
+            lee.length()
+        );
+        assert!(
+            lee.normalize().abs_diff_eq(gale.normalize(), 1e-6),
+            "the lee turned the wind as well as slowing it"
+        );
+
+        // The floor, which is the whole reason this is one function: the
+        // deepest lee in the hardest blow is still air a sail can hold.
+        let deepest = sheltered(gale, 0.0);
+        assert_eq!(deepest.length(), LIGHT_AIR);
+
+        // And a calm is a calm everywhere — there is nothing under the floor
+        // for a lee to take away, so it takes nothing.
+        let calm = Vec2::new(LIGHT_AIR, 0.0);
+        assert_eq!(sheltered(calm, 0.0), calm);
     }
 
     #[test]
@@ -2297,19 +2438,43 @@ mod tests {
             ],
         );
 
-        // Open water: the whole message, since there is nothing in it.
+        // Open water, open to the wind: the whole message, since there is
+        // nothing in it but the two flags saying so.
         assert_eq!(
             bytes_of_server(&ToClient::Chunk {
                 chunk: IVec2::new(5, -3),
+                shelter: None,
                 ground: None,
             }),
             [
-                10, 0, 0, 0, // length
+                11, 0, 0, 0, // length
                 5, // tag
                 5, 0, 0, 0, // x = 5
                 0xFD, 0xFF, 0xFF, 0xFF, // z = -3
-                0,    // no ground here
+                0,    // nothing shelters it
+                0,    // and no ground here
             ],
+        );
+
+        // Open water in something's lee: the same message with a lattice
+        // between the flags, which is the answer a skerry's skirt gives and
+        // the whole reason the lee is not inside the payload.
+        let lee = bytes_of_server(&ToClient::Chunk {
+            chunk: IVec2::new(5, -3),
+            shelter: Some(a_lee()),
+            ground: None,
+        });
+        assert_eq!(lee.len(), 4 + 1 + 8 + 1 + ground::SHELTER_BYTES + 1);
+        assert_eq!(lee[13], 1, "the flag says this water is sheltered");
+        assert_eq!(
+            lee[14..14 + ground::BEARINGS],
+            [0, 7, 14, 21, 28, 35, 42, 49],
+            "the eight bearings of the first lattice point"
+        );
+        assert_eq!(
+            *lee.last().expect("a framed message"),
+            0,
+            "and no ground under it"
         );
 
         // Ground: too long to write out, so the head, the length and a
@@ -2318,9 +2483,10 @@ mod tests {
         // pairs, where the materials start, and how a surface packs.
         let ground = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::new(5, -3),
+            shelter: None,
             ground: Some(a_chunk()),
         });
-        let framed = 1 + 8 + 1 + 1 + ground::PAYLOAD_BYTES;
+        let framed = 1 + 8 + 1 + 1 + 1 + ground::PAYLOAD_BYTES;
         assert_eq!(ground.len(), 4 + framed);
         assert_eq!(
             ground[..13],
@@ -2341,18 +2507,19 @@ mod tests {
             ],
             "the head of a ground answer"
         );
-        assert_eq!(ground[13], 1, "the flag says there is dry ground");
-        assert_eq!(ground[14], 0, "and the count says nothing grows on it");
+        assert_eq!(ground[13], 0, "nothing shelters this chunk");
+        assert_eq!(ground[14], 1, "the flag says there is dry ground");
+        assert_eq!(ground[15], 0, "and the count says nothing grows on it");
 
-        // Heights start at 15. Corner 0 is 0, corner 1 is 601, corner 2 is
+        // Heights start at 16. Corner 0 is 0, corner 1 is 601, corner 2 is
         // 1202 — little-endian pairs.
-        assert_eq!(ground[15..21], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
+        assert_eq!(ground[16..22], [0, 0, 0x59, 0x02, 0xB2, 0x04]);
 
         // Materials start once the heights are done, one byte per cell naming a
         // material and nothing else — the low bits used to carry a brightness
         // step, which is why a material is its own number now rather than one
         // shifted up by two.
-        let materials = 15 + CORNERS * CORNERS * 2;
+        let materials = 16 + CORNERS * CORNERS * 2;
         assert_eq!(
             ground[materials..materials + 3],
             [0, 2, 7],
@@ -2372,9 +2539,10 @@ mod tests {
         // tail.
         let lake = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::new(5, -3),
+            shelter: None,
             ground: Some(a_chunk_with_a_lake()),
         });
-        let wet = 1 + 8 + 1 + 1 + ground::payload_bytes(true, 0);
+        let wet = 1 + 8 + 1 + 1 + 1 + ground::payload_bytes(true, 0);
         assert_eq!(lake.len(), 4 + wet);
         assert_eq!(
             lake[..4],
@@ -2387,14 +2555,14 @@ mod tests {
             "a watered chunk is longer by exactly its water grid"
         );
         assert_eq!(
-            lake[4..13],
-            ground[4..13],
+            lake[4..14],
+            ground[4..14],
             "the head is the same either way"
         );
-        assert_eq!(lake[13], 2, "the flag says there is water on this ground");
+        assert_eq!(lake[14], 2, "the flag says there is water on this ground");
         assert_eq!(
-            lake[14..lit + ground::LIT_BYTES],
-            ground[14..lit + ground::LIT_BYTES],
+            lake[15..lit + ground::LIT_BYTES],
+            ground[15..lit + ground::LIT_BYTES],
             "the water moved the heights, the materials or the light"
         );
 
@@ -2433,11 +2601,12 @@ mod tests {
         let grown = planted.plants.len();
         let stand = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::new(5, -3),
+            shelter: None,
             ground: Some(planted),
         });
         assert_eq!(stand.len(), ground.len() + grown * ground::PLANT_BYTES);
-        assert_eq!(stand[14], 4, "the count says four things grow on it");
-        let plant = 15 + ground::PAYLOAD_BYTES;
+        assert_eq!(stand[15], 4, "the count says four things grow on it");
+        let plant = 16 + ground::PAYLOAD_BYTES;
         assert_eq!(
             stand[plant..plant + ground::PLANT_BYTES],
             [
@@ -2529,20 +2698,31 @@ mod tests {
         ];
         let biggest = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
+            shelter: Some(a_lee()),
             ground: Some(most),
         });
         assert_eq!(
             biggest.len() - 4,
-            1 + 8 + 1 + 1 + ground::payload_bytes(true, ground::MAX_PLANTS),
-            "a watered chunk under a full stand of plants costs what it costs"
+            1 + 8
+                + 1
+                + ground::SHELTER_BYTES
+                + 1
+                + 1
+                + ground::payload_bytes(true, ground::MAX_PLANTS),
+            "a sheltered watered chunk under a full stand of plants costs what it costs"
         );
         assert!(biggest.len() - 4 <= MAX_SERVER_FRAME as usize);
+        // Both carrying the same lee as `biggest`, so that the differences
+        // below isolate the water and the plants rather than picking up a
+        // lattice one of them has and another has not.
         let lake = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
+            shelter: Some(a_lee()),
             ground: Some(a_chunk_with_a_lake()),
         });
         let ground = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::ZERO,
+            shelter: Some(a_lee()),
             ground: Some(a_chunk()),
         });
         assert_eq!(lake.len() - ground.len(), ground::WATER_BYTES);
@@ -2624,6 +2804,7 @@ mod tests {
         // most split.
         let message = ToClient::Chunk {
             chunk: IVec2::new(-2, 7),
+            shelter: None,
             ground: Some(a_chunk_with_a_lake()),
         };
         let wire = bytes_of_server(&message);

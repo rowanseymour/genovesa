@@ -22,7 +22,10 @@
 //! module decides which name; the protocol says what each one looks like.
 
 use glam::{UVec2, Vec2, Vec3};
-use protocol::ground::{Material, CELLS, CELL_COUNT, CELL_METRES, CHUNK_METRES, CORNERS};
+use protocol::ground::{
+    Exposure, Material, CELLS, CELL_COUNT, CELL_METRES, CHUNK_METRES, CORNERS, SHELTER_CORNERS,
+    SHELTER_COUNT, SHELTER_METRES,
+};
 
 use crate::noise::{smoothstep, Noise};
 
@@ -2657,6 +2660,25 @@ pub(crate) fn corner_water(
 /// is where the answer lives; see [`crate::sunlight`].
 pub(crate) fn corner_lit(base: Vec2, lit: impl Fn(f32, f32) -> [u8; 2]) -> Vec<[u8; 2]> {
     corner_grid(base, lit)
+}
+
+/// How exposed each point of one chunk's shelter lattice is, row-major and
+/// south-west first — the order a payload carries them in, and a far coarser
+/// grid than the corners: see [`protocol::ground::SHELTER_METRES`].
+///
+/// The lattice runs to and including the chunk's far edge, which is the
+/// neighbour's near edge, so the two chunks either side of a boundary sample
+/// that line at the same world points and store the same answer for it.
+/// Anything reading across the seam gets one field rather than two.
+pub(crate) fn shelter_lattice(base: Vec2, shelter: impl Fn(f32, f32) -> Exposure) -> Vec<Exposure> {
+    let mut lattice = Vec::with_capacity(SHELTER_COUNT);
+    for iz in 0..SHELTER_CORNERS {
+        let wz = base.y + iz as f32 * SHELTER_METRES;
+        for ix in 0..SHELTER_CORNERS {
+            lattice.push(shelter(base.x + ix as f32 * SHELTER_METRES, wz));
+        }
+    }
+    lattice
 }
 
 /// The material of every cell of one chunk's grid, row-major — the order a

@@ -1087,10 +1087,10 @@ fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
                 return;
             };
 
-            let ground = shared.world.chunk_payload(request.chunk);
             let answer = ToClient::Chunk {
                 chunk: request.chunk,
-                ground,
+                shelter: shared.world.chunk_shelter(request.chunk),
+                ground: shared.world.chunk_payload(request.chunk),
             };
 
             // Posted under the roster's lock, like everything else a player

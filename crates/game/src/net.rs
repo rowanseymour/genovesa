@@ -733,6 +733,11 @@ fn marker_color(id: PlayerId) -> Color {
 #[derive(Message)]
 pub struct GroundArrived {
     pub chunk: IVec2,
+    /// How much of the wind reaches this chunk, or `None` where nothing
+    /// shelters it — see [`protocol::ToClient::Chunk`]. Beside the ground
+    /// rather than inside it because a chunk with no ground at all may still
+    /// lie in a headland's lee.
+    pub shelter: Option<Vec<protocol::ground::Exposure>>,
     pub ground: Option<ChunkPayload>,
 }
 
@@ -935,10 +940,12 @@ fn receive(
             }
             ToClient::Chunk {
                 chunk,
+                shelter,
                 ground: sent,
             } => {
                 said.ground.write(GroundArrived {
                     chunk,
+                    shelter,
                     ground: sent,
                 });
             }

@@ -761,6 +761,7 @@ mod tests {
             for cx in -6..=6 {
                 ground.deliver(
                     IVec2::new(cx, cz),
+                    None,
                     Some(ChunkPayload {
                         heights: vec![quantize(-depth); CORNERS * CORNERS],
                         materials: vec![Material::Sand; CELL_COUNT],
@@ -783,7 +784,7 @@ mod tests {
     fn an_eagle_watches_an_interior_summit() {
         let mut ground = Ground::default();
         let chunk = IVec2::new(3, -2);
-        ground.deliver(chunk, Some(a_hill((20, 40), 80.0)));
+        ground.deliver(chunk, None, Some(a_hill((20, 40), 80.0)));
         let centre = eyrie(&ground, chunk).expect("a summit this high holds an eagle");
         // The summit's corner is at facet coordinates times the facet stride,
         // in the chunk's own frame; the circle is flown above it.
@@ -801,7 +802,7 @@ mod tests {
     fn no_eagle_below_the_mountains() {
         let mut ground = Ground::default();
         let chunk = IVec2::new(3, -2);
-        ground.deliver(chunk, Some(a_hill((20, 40), EYRIE_HEIGHT - 5.0)));
+        ground.deliver(chunk, None, Some(a_hill((20, 40), EYRIE_HEIGHT - 5.0)));
         assert_eq!(eyrie(&ground, chunk), None);
     }
 

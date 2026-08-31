@@ -1397,7 +1397,7 @@ mod tests {
         let mut ground = Ground::default();
         // Due east of the origin, well inside sight.
         let island = IVec2::new(3, 0);
-        ground.deliver(island, Some(a_hill()));
+        ground.deliver(island, None, Some(a_hill()));
 
         let found = land_in_sight(&ground, &Chart::default(), Vec2::splat(CHUNK_METRES / 2.0));
         let lit: Vec<usize> = (0..SECTORS).filter(|s| found[*s].is_some()).collect();
@@ -1424,7 +1424,7 @@ mod tests {
     #[test]
     fn the_ground_underfoot_marks_nothing() {
         let mut ground = Ground::default();
-        ground.deliver(IVec2::ZERO, Some(a_hill()));
+        ground.deliver(IVec2::ZERO, None, Some(a_hill()));
 
         let found = land_in_sight(&ground, &Chart::default(), Vec2::splat(CHUNK_METRES / 2.0));
         assert!(
@@ -1439,7 +1439,7 @@ mod tests {
         let mut app = test_app();
 
         let mut ground = Ground::default();
-        ground.deliver(IVec2::new(3, 0), Some(a_hill()));
+        ground.deliver(IVec2::new(3, 0), None, Some(a_hill()));
         app.insert_resource(ground);
         app.insert_resource(Chart::default());
 
@@ -1490,7 +1490,7 @@ mod tests {
         // A chunk the server sent for the shelf around an island, every corner
         // of it under water. Ground, but not land.
         let mut shelf = Ground::default();
-        shelf.deliver(IVec2::new(3, 0), Some(a_shoal()));
+        shelf.deliver(IVec2::new(3, 0), None, Some(a_shoal()));
         assert!(
             land_in_sight(&shelf, &chart, at)
                 .iter()
@@ -1505,7 +1505,7 @@ mod tests {
         // beyond sight.
         let beyond = (SIGHT / CHUNK_METRES).ceil() as i32;
         let mut far = Ground::default();
-        far.deliver(IVec2::new(beyond, 0), Some(a_hill()));
+        far.deliver(IVec2::new(beyond, 0), None, Some(a_hill()));
         assert!(
             land_in_sight(&far, &chart, at).iter().all(Option::is_none),
             "land past the haze was marked"

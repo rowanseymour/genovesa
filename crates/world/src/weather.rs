@@ -51,11 +51,10 @@ const WEATHER_PACE: f32 = 240.0;
 /// the other side before it moves.
 const MAX_WIND: f32 = 16.0;
 
-/// The lightest the sky ever blows, in metres per second — a light air, so
-/// there is always *some* wind and it always names a bearing. The wind is the
-/// only engine a sailing hull has, and a client that honours the no-go zone
-/// has nothing at all to sail on under a dead sky — which the walk used to
-/// deliver freely: strengths ran straight down to zero, and judged across
+/// The lightest the sky ever blows — [`protocol::LIGHT_AIR`], which is where
+/// the number lives now that a lee has to honour it too.
+///
+/// The walk used to run strengths straight down to zero, and judged across
 /// seeds the sky spent about a minute in seven below half a metre a second,
 /// mostly in spells of half a minute, occasionally in ones several minutes
 /// long — long enough to be a spell somebody is stuck inside rather than a
@@ -64,7 +63,7 @@ const MAX_WIND: f32 = 16.0;
 /// ignoring the weather; killing the dead sky here is what let that hatch
 /// close. The strength is *rescaled* into `MIN..MAX` rather than clamped, so
 /// a lull still breathes instead of sitting pinned at the floor.
-const MIN_WIND: f32 = 1.5;
+const MIN_WIND: f32 = protocol::LIGHT_AIR;
 
 /// The wind over the whole world at a moment, as a velocity in metres per
 /// second: its length is the wind's strength, its bearing the way the air is

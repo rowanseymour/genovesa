@@ -327,6 +327,7 @@ impl Client {
             ToClient::Chunk {
                 chunk: answered,
                 ground,
+                ..
             } => {
                 assert_eq!(answered, chunk, "an answer about the wrong chunk");
                 ground

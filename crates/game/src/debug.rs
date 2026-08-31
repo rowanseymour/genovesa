@@ -1123,8 +1123,8 @@ mod tests {
         // and which is why that line stays about what is *held* while the two
         // above it are about what is drawn.
         let mut ground = Ground::default();
-        ground.deliver(IVec2::ZERO, Some(a_chunk()));
-        ground.deliver(IVec2::new(1, 0), None);
+        ground.deliver(IVec2::ZERO, None, Some(a_chunk()));
+        ground.deliver(IVec2::new(1, 0), None, None);
         app.insert_resource(ground);
 
         // And a world of this machine's own behind it, which is what the seed

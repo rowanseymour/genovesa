@@ -84,9 +84,9 @@ use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, Tex
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, lit_across, material_index, ChunkPayload, Material, Plant, CELLS,
-    CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER, LIT_ALL_DAY, NO_WATER,
-    OCEAN_DEPTH, SEA_WATER,
+    chunk_at, dequantize, lit_across, material_index, shelter_across, ChunkPayload, Exposure,
+    Material, Plant, CELLS, CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER,
+    LIT_ALL_DAY, NO_WATER, OCEAN_DEPTH, SEA_WATER, SHELTER_CELLS, SHELTER_CORNERS, SHELTER_METRES,
 };
 
 use crate::camera::{MapCamera, View};
@@ -316,9 +316,11 @@ pub struct Tally {
 /// What one chunk turned out to be.
 enum Chunk {
     /// Open water. The sea and floor planes already draw it, so there is
-    /// nothing here but the fact of having asked — which is what stops
-    /// [`ask_for_ground`] asking again next frame, forever.
-    Ocean,
+    /// nothing here to draw *with* — but there may still be a wind to
+    /// report, since the water an island's headlands shelter is mostly this:
+    /// bare bed with no mesh worth building. `None` is water open to the
+    /// wind, which is most of the sea.
+    Ocean { shelter: Option<Arc<[Exposure]>> },
     /// Ground, with the corner heights it was sent — the same grid its mesh is
     /// built from, so anything standing on it stands on what can be seen.
     Land {
@@ -337,6 +339,13 @@ enum Chunk {
         /// mesh has baked its own copy into vertex colour — see
         /// [`refresh_materials`].
         materials: Arc<[Material]>,
+        /// How exposed the chunk is to the wind from each quarter, kept as
+        /// sent — see [`protocol::ToClient::Chunk`], and `None` for ground
+        /// nothing shelters. Nothing bakes a copy of this into a mesh the
+        /// way the light is: shelter is read by world point, by the water and
+        /// by whatever is sailing on it, and both of those are asking about
+        /// places no chunk's corners ever reached.
+        shelter: Option<Arc<[Exposure]>>,
         /// The entity drawing it, once [`spawn_arrivals`] has made one.
         mesh: Option<Entity>,
     },
@@ -358,11 +367,17 @@ impl Ground {
     /// because what stands on the ground wants them this frame and what draws
     /// it can wait: dequantising sixteen thousand corners is arithmetic,
     /// meshing is ninety-eight thousand vertices.
-    pub fn deliver(&mut self, chunk: IVec2, payload: Option<ChunkPayload>) {
+    pub fn deliver(
+        &mut self,
+        chunk: IVec2,
+        shelter: Option<Vec<Exposure>>,
+        payload: Option<ChunkPayload>,
+    ) {
         self.outstanding.remove(&chunk);
+        let shelter: Option<Arc<[Exposure]>> = shelter.map(Into::into);
         match payload {
             None => {
-                self.chunks.insert(chunk, Chunk::Ocean);
+                self.chunks.insert(chunk, Chunk::Ocean { shelter });
             }
             Some(payload) => {
                 let heights: Arc<[f32]> = payload.heights.iter().copied().map(dequantize).collect();
@@ -374,6 +389,7 @@ impl Ground {
                         heights: heights.clone(),
                         lit: lit.clone(),
                         materials: materials.clone(),
+                        shelter,
                         mesh: None,
                     },
                 );
@@ -412,7 +428,7 @@ impl Ground {
             ocean: self
                 .chunks
                 .values()
-                .filter(|chunk| matches!(chunk, Chunk::Ocean))
+                .filter(|chunk| matches!(chunk, Chunk::Ocean { .. }))
                 .count(),
             requested: self.outstanding.len() + self.to_ask.len(),
         }
@@ -457,7 +473,7 @@ impl Ground {
         let at = Vec2::new(x, z);
         let chunk = chunk_at(at);
         match self.chunks.get(&chunk)? {
-            Chunk::Ocean => Some(-OCEAN_DEPTH),
+            Chunk::Ocean { .. } => Some(-OCEAN_DEPTH),
             Chunk::Land { heights, .. } => {
                 Some(height_at(heights, at - chunk.as_vec2() * CHUNK_METRES))
             }
@@ -484,7 +500,7 @@ impl Ground {
         let at = Vec2::new(x, z);
         let chunk = chunk_at(at);
         let lit = match self.chunks.get(&chunk)? {
-            Chunk::Ocean => return Some(LIT_ALL_DAY),
+            Chunk::Ocean { .. } => return Some(LIT_ALL_DAY),
             Chunk::Land { lit, .. } => lit,
         };
         let local = (at - chunk.as_vec2() * CHUNK_METRES) / CELL_METRES;
@@ -508,6 +524,53 @@ impl Ground {
         ))
     }
 
+    /// How much of the wind reaches a world point when it is blowing
+    /// `toward` — `1.0` in the open, smaller in some island's lee, and
+    /// `None` for a chunk that has not arrived.
+    ///
+    /// Fully exposed over open water, `None` for a chunk still on its way:
+    /// the same split of answers [`Ground::lit`] makes and for the same
+    /// reason. The caller decides what a missing chunk means — the sea draws
+    /// it exposed, since ground nobody has heard of cannot be sheltering
+    /// anything the eye can see either, while a hull keeps the wind it had
+    /// rather than being gusted by the streaming.
+    ///
+    /// Read on the shelter lattice, which is far coarser than the corner grid
+    /// [`Ground::lit`] walks — see [`protocol::ground::SHELTER_METRES`] — and
+    /// blended by [`shelter_across`], which owns both halves of the blend.
+    pub fn exposure(&self, x: f32, z: f32, toward: Vec2) -> Option<f32> {
+        let at = Vec2::new(x, z);
+        let chunk = chunk_at(at);
+        let shelter = match self.chunks.get(&chunk)? {
+            Chunk::Ocean { shelter } | Chunk::Land { shelter, .. } => shelter.as_ref(),
+        };
+        // No lattice is the answer "nothing shelters this", which a chunk of
+        // any kind may give — see [`protocol::ToClient::Chunk`].
+        let Some(shelter) = shelter else {
+            return Some(1.0);
+        };
+        let local = (at - chunk.as_vec2() * CHUNK_METRES) / SHELTER_METRES;
+        // Clamped exactly as [`Ground::lit`] clamps, and the far point of the
+        // cell is the chunk's own last lattice point rather than the
+        // neighbour's — which both chunks store the same value for anyway,
+        // which is what [`SHELTER_CORNERS`] is for.
+        let (x0, z0) = (
+            (local.x.floor() as usize).min(SHELTER_CELLS - 1),
+            (local.y.floor() as usize).min(SHELTER_CELLS - 1),
+        );
+        let point = |cx: usize, cz: usize| shelter[cz * SHELTER_CORNERS + cx];
+        Some(shelter_across(
+            [
+                point(x0, z0),
+                point(x0 + 1, z0),
+                point(x0, z0 + 1),
+                point(x0 + 1, z0 + 1),
+            ],
+            Vec2::new(local.x - x0 as f32, local.y - z0 as f32),
+            toward,
+        ))
+    }
+
     /// What the ground is made of at a world point — the cell's own material,
     /// no interpolation, since a material is a name rather than a quantity.
     /// [`Material::Seabed`] over open water and `None` for a chunk that has
@@ -518,7 +581,7 @@ impl Ground {
         let at = Vec2::new(x, z);
         let chunk = chunk_at(at);
         let materials = match self.chunks.get(&chunk)? {
-            Chunk::Ocean => return Some(Material::Seabed),
+            Chunk::Ocean { .. } => return Some(Material::Seabed),
             Chunk::Land { materials, .. } => materials,
         };
         let local = ((at - chunk.as_vec2() * CHUNK_METRES) / CELL_METRES).floor();
@@ -540,7 +603,7 @@ impl Ground {
     /// `Arc` bump, so the reader is not holding the world still while it works.
     pub fn heights(&self, chunk: IVec2) -> Option<Arc<[f32]>> {
         match self.chunks.get(&chunk)? {
-            Chunk::Ocean => None,
+            Chunk::Ocean { .. } => None,
             Chunk::Land { heights, .. } => Some(heights.clone()),
         }
     }
@@ -1608,7 +1671,7 @@ fn take_the_answers(
     mut arrivals: ResMut<Messages<crate::net::GroundArrived>>,
 ) {
     for arrival in arrivals.drain() {
-        ground.deliver(arrival.chunk, arrival.ground);
+        ground.deliver(arrival.chunk, arrival.shelter, arrival.ground);
     }
 }
 
@@ -1908,6 +1971,87 @@ mod tests {
     }
 
     #[test]
+    fn shelter_is_read_off_the_lattice_by_world_point() {
+        use protocol::ground::{BEARINGS, EXPOSED, SHELTER_COUNT};
+
+        let mut ground = Ground::default();
+        assert_eq!(
+            ground.exposure(10.0, 10.0, Vec2::NEG_Y),
+            None,
+            "a chunk that never came"
+        );
+        ground.deliver(IVec2::ZERO, None, None);
+        assert_eq!(
+            ground.exposure(10.0, 10.0, Vec2::NEG_Y),
+            Some(1.0),
+            "open water is exposed to a wind nothing stands in front of"
+        );
+
+        // A chunk sheltered from the north and open from every other quarter.
+        // Both bearings are asked at the same point, so what this catches is
+        // the lattice being read at the wrong slot rather than at the wrong
+        // place.
+        let mut lee = [EXPOSED; BEARINGS];
+        lee[4] = 0;
+        ground.deliver(
+            IVec2::new(1, 0),
+            Some(vec![lee; SHELTER_COUNT]),
+            Some(a_slope()),
+        );
+
+        let at = Vec2::new(CHUNK_METRES + 40.0, 40.0);
+        let southward = ground
+            .exposure(at.x, at.y, Vec2::Y)
+            .expect("the chunk arrived");
+        let northward = ground
+            .exposure(at.x, at.y, Vec2::NEG_Y)
+            .expect("the chunk arrived");
+        assert_eq!(southward, 0.0, "a wind blowing south read the wrong slot");
+        assert_eq!(northward, 1.0, "a wind blowing north read the wrong slot");
+    }
+
+    #[test]
+    fn the_shelter_lattice_meets_itself_across_a_chunk_boundary() {
+        // Two chunks side by side, the western one in a lee and the eastern
+        // one open. The lattice runs to and including each chunk's far edge,
+        // so the shared line is stored twice with the same value in it — and
+        // a reading taken a whisker either side of the boundary has to come
+        // back with the same answer, or a boat crossing it feels the wind
+        // step. This is what SHELTER_CORNERS being one more than the cells
+        // buys, and it is the one thing about the lattice that a plain
+        // grid-per-chunk would get wrong.
+        use protocol::ground::{BEARINGS, EXPOSED, SHELTER_CORNERS, SHELTER_COUNT};
+
+        let mut ground = Ground::default();
+        let edge = |western: bool| {
+            (0..SHELTER_COUNT)
+                .map(|i| {
+                    // A ramp across each chunk that meets at the seam: the
+                    // west chunk climbs to half-cover at its east edge and
+                    // the east chunk carries on from exactly there.
+                    let ix = i % SHELTER_CORNERS;
+                    let across = ix as f32 / (SHELTER_CORNERS - 1) as f32;
+                    let along = if western { across } else { 1.0 + across };
+                    [(along * 0.5 * EXPOSED as f32) as u8; BEARINGS]
+                })
+                .collect()
+        };
+        ground.deliver(IVec2::ZERO, Some(edge(true)), Some(a_slope()));
+        ground.deliver(IVec2::new(1, 0), Some(edge(false)), Some(a_slope()));
+
+        let just_west = ground
+            .exposure(CHUNK_METRES - 0.01, 40.0, Vec2::NEG_Y)
+            .expect("the western chunk");
+        let just_east = ground
+            .exposure(CHUNK_METRES + 0.01, 40.0, Vec2::NEG_Y)
+            .expect("the eastern chunk");
+        assert!(
+            (just_west - just_east).abs() < 1e-3,
+            "the wind steps across a chunk line: {just_west} west of it, {just_east} east"
+        );
+    }
+
+    #[test]
     fn every_cell_is_split_on_the_diagonal_its_parity_calls_for() {
         // The split alternates like a checkerboard, and the indices are where
         // it shows. A cell's six indices name its four corners either way;
@@ -2090,7 +2234,7 @@ mod tests {
         let mut ground = Ground::default();
         assert_eq!(ground.surface(10.0, 10.0), None);
 
-        ground.deliver(IVec2::ZERO, None);
+        ground.deliver(IVec2::ZERO, None, None);
         assert_eq!(ground.surface(10.0, 10.0), Some(0.0), "open water floats");
     }
 
@@ -2104,7 +2248,7 @@ mod tests {
         let mut ground = Ground::default();
         assert_eq!(ground.lit(10.0, 10.0), None, "a chunk that never came");
 
-        ground.deliver(IVec2::ZERO, None);
+        ground.deliver(IVec2::ZERO, None, None);
         assert_eq!(
             ground.lit(10.0, 10.0),
             Some(LIT_ALL_DAY),
@@ -2120,7 +2264,7 @@ mod tests {
                 [LIT_ALL_DAY[0] + ix as u8 % 8, LIT_ALL_DAY[1]]
             })
             .collect();
-        ground.deliver(IVec2::new(1, 0), Some(payload));
+        ground.deliver(IVec2::new(1, 0), None, Some(payload));
 
         let base = CHUNK_METRES;
         let corner = |ix: usize| {
@@ -2150,7 +2294,7 @@ mod tests {
         let mut ground = Ground::default();
         let payload = a_slope();
         let heights: Vec<f32> = payload.heights.iter().copied().map(dequantize).collect();
-        ground.deliver(IVec2::ZERO, Some(payload));
+        ground.deliver(IVec2::ZERO, None, Some(payload));
 
         // Every corner of the grid, at its own world position.
         for iz in 0..CORNERS {
@@ -2325,7 +2469,7 @@ mod tests {
         );
 
         // Answered, so likewise.
-        ground.deliver(IVec2::ZERO, None);
+        ground.deliver(IVec2::ZERO, None, None);
         ground.want(IVec2::ZERO);
         assert!(
             ground.take_requests().is_empty(),
@@ -2618,8 +2762,8 @@ mod tests {
     #[test]
     fn the_ground_answers_what_it_is_made_of() {
         let mut ground = Ground::default();
-        ground.deliver(IVec2::new(1, 0), Some(a_slope()));
-        ground.deliver(IVec2::new(-1, -1), None);
+        ground.deliver(IVec2::new(1, 0), None, Some(a_slope()));
+        ground.deliver(IVec2::new(-1, -1), None, None);
 
         // A land chunk answers with the cell's own material, anywhere in the
         // cell — a_slope is Grass throughout.

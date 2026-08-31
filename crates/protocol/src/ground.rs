@@ -42,6 +42,31 @@
 //! shadow out of them is its own business, like the grid itself. The same
 //! pair asked with `phase + 0.5` answers for the moon, which rides the same
 //! arc half a day out of phase.
+//!
+//! And for **shelter**. Land takes the wind out of the water behind it, and
+//! the headland doing it may be chunks upwind of the bay that is calmed — so
+//! this is the sunlight problem again, and it crosses the wire for the same
+//! reason: only whoever holds the whole island can say. What travels is a
+//! coarse lattice of exposures, one per [`BEARINGS`] compass points, read
+//! back anywhere by [`shelter_across`].
+//!
+//! It rides beside a chunk's ground rather than inside it — see
+//! [`crate::ToClient::Chunk`] — because the two are not the same question.
+//! Most of an island's own chunks are bare ocean floor that no client needs
+//! a mesh for, and they are exactly the water its headlands shelter: a lee
+//! carried inside the payload would mean sending eighty kilobytes of flat
+//! bed to say something a few hundred bytes says, for every skirt chunk of
+//! every island in the world.
+//!
+//! Coarse on purpose, and coarse on one axis only. Shelter is a wake: it
+//! varies smoothly across the water, so [`SHELTER_METRES`] samples it far
+//! more sparsely than the ground is drawn and loses nothing. It does *not*
+//! vary smoothly with the wind's bearing — swing the wind thirty degrees and
+//! a headland stops covering you outright — so the bearings are where the
+//! resolution goes. Four of them would be worse than useless: two islands
+//! with a strait between them read as sheltered from north and from east,
+//! and a plain blend would call the north-east channel sheltered too, when
+//! it is the one direction the wind comes howling down.
 
 use glam::{IVec2, Vec2, Vec3};
 
@@ -116,6 +141,128 @@ pub const CORNERS: usize = CELLS + 1;
 /// client flat-shade the ground and another paint it while both draw the same
 /// world.
 pub const CELL_COUNT: usize = CELLS * CELLS;
+
+// --- Shelter ----------------------------------------------------------------
+
+/// Compass points the shelter lattice answers for, evenly spaced and
+/// starting at [`NORTH`], running clockwise the way a card does: N, NE, E,
+/// SE, S, SW, W, NW.
+///
+/// Eight rather than four because a blend across 90° smears a headland's
+/// cover over a quadrant and inverts outright at a strait — the module doc
+/// has the case. Eight puts the samples 45° apart, which a plain blend
+/// between neighbours reconstructs honestly enough that nothing cleverer
+/// than [`shelter_across`] is called for.
+pub const BEARINGS: usize = 8;
+
+/// Metres between points of the shelter lattice.
+///
+/// Sixteen times [`CELL_METRES`], and deliberately nothing like as fine. A
+/// wake is a smooth field — walk twenty metres further into a bay and the
+/// cover changes by a little, never by a lot — so sampling it at the
+/// ground's own density would be storing the same number over and over.
+/// What that coarseness costs is a headland's *edge*, which arrives as a
+/// gradient a chunk-sixteenth wide rather than as a line; on water, where
+/// there is no relief for the eye to hold it against, that is what it should
+/// look like anyway.
+pub const SHELTER_METRES: f32 = 16.0;
+
+/// Cells along one edge of the shelter lattice.
+pub const SHELTER_CELLS: usize = (CHUNK_METRES / SHELTER_METRES) as usize;
+
+/// Points along one edge of it — one more than the cells, exactly as
+/// [`CORNERS`] is, and for a reason worth more than the symmetry: the extra
+/// point is the chunk's far edge, which is its neighbour's near edge, so the
+/// two chunks either side of a boundary carry the *same* sample there and a
+/// blend across the seam is continuous. Without it a boat crossing a chunk
+/// line would find the wind step.
+pub const SHELTER_CORNERS: usize = SHELTER_CELLS + 1;
+
+/// Points on one chunk's shelter lattice.
+pub const SHELTER_COUNT: usize = SHELTER_CORNERS * SHELTER_CORNERS;
+
+/// What a point wide open to the wind stores — the top of the byte, so that
+/// the sea a client has not been told about, which reads as untouched
+/// ground, is also the sea nothing is sheltering.
+pub const EXPOSED: u8 = u8::MAX;
+
+/// One lattice point's exposure to a wind blowing toward each of
+/// [`BEARINGS`], as a fraction of the open sea's wind over `255` —
+/// [`EXPOSED`] for water nothing stands upwind of, and smaller the deeper
+/// into some island's lee the point lies.
+///
+/// A *fraction of the wind* rather than a shadow depth, because that is the
+/// quantity both ends want and neither should be deriving: how a wake's
+/// height above the water turns into air a sail can hold is the generator's
+/// question, settled once where the terrain is, not twice where it is not.
+pub type Exposure = [u8; BEARINGS];
+
+/// The exposure somewhere inside a lattice cell, blended across the four
+/// points around it and across the two bearings the wind falls between —
+/// `points` in the south-west, south-east, north-west, north-east order the
+/// material grid uses, `at` in lattice widths from the south-west one, and
+/// `toward` the way the wind is blowing, as [`crate::ToClient::Weather`]
+/// gives it. Comes back in `0.0..=1.0`.
+///
+/// The two blends are done in that order and could be done in either: both
+/// are weighted sums with weights the other does not touch, so bilinear
+/// first — over eight numbers once instead of over one number four times —
+/// is arithmetic, not a shortcut.
+///
+/// **No angle is taken anywhere.** `atan2` is a libm function like the sine
+/// this crate's weather goes out of its way to avoid, it is not
+/// correctly-rounded, and it drifts between platforms — and this is read on
+/// both sides of the wire, so a server and a client disagreeing in the last
+/// bit would be a boat drawing a wind it is not sailing. The blend runs off
+/// the ratio of the wind's smaller component to its larger, which is exact,
+/// monotone across the sector, and lands on `0` and `1` at the sector's own
+/// ends. It is `tan` rather than the angle, so the sweep across a sector is
+/// very slightly uneven; against a field this coarse that is nothing, and
+/// against a wind whose bearing has to mean the same thing on two machines
+/// it is the point.
+pub fn shelter_across(points: [Exposure; 4], at: Vec2, toward: Vec2) -> f32 {
+    let weights = [
+        (1.0 - at.x) * (1.0 - at.y),
+        at.x * (1.0 - at.y),
+        (1.0 - at.x) * at.y,
+        at.x * at.y,
+    ];
+    let mut slots = [0.0f32; BEARINGS];
+    for (point, weight) in points.into_iter().zip(weights) {
+        for (slot, stored) in slots.iter_mut().zip(point) {
+            *slot += stored as f32 * weight;
+        }
+    }
+    exposure_toward(slots, toward) / EXPOSED as f32
+}
+
+/// One lattice point's exposure to a wind blowing `toward`, blended between
+/// the two bearings either side of it — still on the stored `0..=255` scale.
+/// See [`shelter_across`], which is the whole of why this takes no angle.
+fn exposure_toward(slots: [f32; BEARINGS], toward: Vec2) -> f32 {
+    // North is up the card, so the quadrant is read off the wind's east and
+    // *north* components — the second being the negative of its y, since
+    // NORTH is NEG_Y. Each quadrant runs from one cardinal to the next, and
+    // both components are non-negative once measured from its own corner.
+    let north = -toward.y;
+    let (base, from, to) = match (toward.x >= 0.0, north >= 0.0) {
+        (true, true) => (0, north, toward.x),
+        (true, false) => (2, toward.x, -north),
+        (false, false) => (4, -north, -toward.x),
+        (false, true) => (6, -toward.x, north),
+    };
+
+    // Which half of the quadrant, and how far across it. The half is decided
+    // by which component is larger, so the ratio below is always the smaller
+    // over the larger and never leaves `0.0..=1.0`; and the second half is
+    // walked backwards, since there the ratio shrinks as the wind swings on.
+    let (a, b, t) = if from >= to {
+        (base, base + 1, if from > 0.0 { to / from } else { 0.0 })
+    } else {
+        (base + 1, (base + 2) % BEARINGS, 1.0 - from / to)
+    };
+    slots[a] * (1.0 - t) + slots[b] * t
+}
 
 // --- Heights ----------------------------------------------------------------
 
@@ -690,6 +837,11 @@ pub const PAYLOAD_BYTES: usize = CORNERS * CORNERS * 2 + CELL_COUNT + LIT_BYTES;
 /// saying.
 pub const LIT_BYTES: usize = CORNERS * CORNERS * 2;
 
+/// Bytes a chunk's shelter lattice occupies when it carries one — one per
+/// bearing per lattice point. See [`crate::ToClient::Chunk`], which is what
+/// carries it.
+pub const SHELTER_BYTES: usize = SHELTER_COUNT * BEARINGS;
+
 /// Bytes a chunk's water grid adds when it carries one — two per corner,
 /// like the heights it is compared against.
 pub const WATER_BYTES: usize = CORNERS * CORNERS * 2;
@@ -845,6 +997,11 @@ mod tests {
         assert_eq!(CELLS as f32 * CELL_METRES, CHUNK_METRES);
         assert_eq!(CORNERS, 129);
         assert_eq!(CELL_COUNT, 16_384);
+        assert_eq!(SHELTER_CELLS, 8);
+        assert_eq!(SHELTER_CORNERS, 9);
+        assert_eq!(SHELTER_COUNT, 81);
+        assert_eq!(SHELTER_BYTES, 81 * 8);
+        assert_eq!(SHELTER_CELLS as f32 * SHELTER_METRES, CHUNK_METRES);
         assert_eq!(PAYLOAD_BYTES, 129 * 129 * 2 + 16_384 + 129 * 129 * 2);
         assert_eq!(WATER_BYTES, 129 * 129 * 2);
         assert_eq!(LIT_BYTES, 129 * 129 * 2);
@@ -854,6 +1011,128 @@ mod tests {
             payload_bytes(true, 3),
             PAYLOAD_BYTES + WATER_BYTES + 3 * PLANT_BYTES
         );
+    }
+
+    /// The eight compass points, in the order the lattice stores them, as
+    /// unit vectors a wind could be blowing along.
+    fn the_eight() -> [Vec2; BEARINGS] {
+        let d = 0.5f32.sqrt();
+        [
+            Vec2::new(0.0, -1.0),
+            Vec2::new(d, -d),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(d, d),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(-d, d),
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(-d, -d),
+        ]
+    }
+
+    #[test]
+    fn a_wind_on_a_compass_point_reads_that_points_own_slot() {
+        // The blend has to be exact at the eight, or every stored value is
+        // read somewhere other than where it was measured — and since the
+        // sectors are walked forwards in one half and backwards in the other,
+        // an off-by-one in that split shows here and nowhere else.
+        for (slot, toward) in the_eight().into_iter().enumerate() {
+            let mut slots = [0.0f32; BEARINGS];
+            slots[slot] = 200.0;
+            let read = exposure_toward(slots, toward);
+            assert!(
+                (read - 200.0).abs() < 1e-3,
+                "the wind toward slot {slot} read {read}, not the 200 stored there"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wind_between_two_points_reads_between_their_slots() {
+        // Halfway between north and north-east, by bearing. The blend runs
+        // off a tangent rather than an angle — see `shelter_across` — so this
+        // does not land on the arithmetic mean, and pinning it to one would
+        // be pinning the warp rather than the property that matters: the
+        // answer is strictly between the two neighbours and touches neither.
+        let mut slots = [0.0f32; BEARINGS];
+        slots[0] = 0.0;
+        slots[1] = 240.0;
+        let toward = Vec2::new(22.5f32.to_radians().sin(), -22.5f32.to_radians().cos());
+        let read = exposure_toward(slots, toward);
+        assert!(
+            read > 1.0 && read < 239.0,
+            "a wind between north and north-east read {read}, which is one of them"
+        );
+        // And nothing outside the pair leaks in: the other six slots are full
+        // and the answer still sits under the only one of the two that is.
+        let mut only = [255.0f32; BEARINGS];
+        only[0] = 0.0;
+        only[1] = 0.0;
+        assert_eq!(
+            exposure_toward(only, toward),
+            0.0,
+            "a bearing between north and north-east read a slot that is neither"
+        );
+    }
+
+    #[test]
+    fn a_strait_between_two_islands_is_not_read_as_sheltered() {
+        // The case the module doc says four bearings would get backwards, run
+        // against the eight: land due north and land due east, open channel
+        // between them. A blend that only had the cardinals to work with
+        // would average two sheltered readings into a sheltered channel; with
+        // north-east stored in its own slot the wind down it comes through.
+        let mut point = [EXPOSED; BEARINGS];
+        point[0] = 20;
+        point[2] = 20;
+        let d = 0.5f32.sqrt();
+        let down_the_strait = shelter_across([point; 4], Vec2::splat(0.5), Vec2::new(d, -d));
+        assert!(
+            down_the_strait > 0.9,
+            "the channel between two islands read {down_the_strait} exposed"
+        );
+        let onto_the_land = shelter_across([point; 4], Vec2::splat(0.5), Vec2::new(0.0, -1.0));
+        assert!(
+            onto_the_land < 0.1,
+            "the lee of the northern island read {onto_the_land} exposed"
+        );
+    }
+
+    #[test]
+    fn shelter_reads_across_the_four_points_around_it() {
+        // A lattice cell sheltered along its west edge and open along its
+        // east: the reading has to walk between them, and land on each
+        // point's own value at that point's own corner.
+        let (lee, open) = ([0u8; BEARINGS], [EXPOSED; BEARINGS]);
+        let north = Vec2::new(0.0, -1.0);
+        let cell = [lee, open, lee, open];
+        assert_eq!(shelter_across(cell, Vec2::ZERO, north), 0.0);
+        assert_eq!(shelter_across(cell, Vec2::new(1.0, 0.0), north), 1.0);
+        let middle = shelter_across(cell, Vec2::new(0.5, 0.5), north);
+        assert!(
+            (middle - 0.5).abs() < 1e-3,
+            "halfway across the cell read {middle}"
+        );
+    }
+
+    #[test]
+    fn every_wind_reads_somewhere_between_nothing_and_everything() {
+        // Swept right round the card, including the exact axes where the
+        // quadrant test flips and the diagonals where the sector does. A
+        // blend that ran off the end of the ratio would overshoot here rather
+        // than panicking, and an overshoot is wind out of nowhere.
+        let slots: [u8; BEARINGS] = std::array::from_fn(|b| (b * 31) as u8);
+        for step in 0..720 {
+            let angle = step as f32 * 0.5f32.to_radians() * 2.0;
+            let toward = Vec2::new(angle.sin(), -angle.cos());
+            let read = shelter_across([slots; 4], Vec2::splat(0.5), toward);
+            assert!(
+                (0.0..=1.0).contains(&read),
+                "a wind {step} half-degrees round the card read {read}"
+            );
+        }
+        // And the zero vector, which names no bearing at all and must still
+        // come back with a number rather than a NaN.
+        assert!(shelter_across([slots; 4], Vec2::splat(0.5), Vec2::ZERO).is_finite());
     }
 
     #[test]

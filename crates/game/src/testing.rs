@@ -227,7 +227,22 @@ const TEST_ISLAND_PITCH: f32 = 0.35;
 /// [`test_shore`] — is a coast gentle enough to stand on, which this one, being
 /// a wall at the waterline, has nowhere.
 pub fn test_ground() -> Ground {
-    hand_of_chunks(test_island_height)
+    hand_of_chunks(
+        test_island_height,
+        [protocol::ground::EXPOSED; protocol::ground::BEARINGS],
+    )
+}
+
+/// The same island with every one of its chunks in a dead lee from every
+/// quarter — the water close under a headland, in little.
+///
+/// One exposure over the whole hand rather than a modelled wake, because
+/// what a test wants of it is the *reading*: that a hull and the water it
+/// sits in take their wind from where they are. Whether a real island casts
+/// a lee of the right size is the generator's question and is answered on
+/// the generator's own side, in `world::shelter`.
+pub fn sheltered_ground() -> Ground {
+    hand_of_chunks(test_island_height, [0; protocol::ground::BEARINGS])
 }
 
 /// The test island's height field: a broad top falling to the ocean floor at
@@ -286,7 +301,10 @@ pub const SHORE_TOP: f32 = TEST_ISLAND_REACH
 /// [`SHORE_BLUFF_FOOT`] so a test can say which side of it somebody ended up
 /// on.
 pub fn test_shore() -> Ground {
-    hand_of_chunks(shore_island_height)
+    hand_of_chunks(
+        shore_island_height,
+        [protocol::ground::EXPOSED; protocol::ground::BEARINGS],
+    )
 }
 
 /// The shore island's height field: ocean floor out beyond
@@ -321,19 +339,22 @@ const PLUNGE_PITCH: f32 = 4.0;
 /// climbs. What happens there is a rule of its own — see
 /// [`crate::player::walk`] — and this is the shape it is written against.
 pub fn plunging_shore() -> Ground {
-    hand_of_chunks(|at| {
-        if at.x <= 0.0 {
-            // Barely a slope, so nothing about the dry half is under test.
-            -at.x * 0.05
-        } else {
-            (-at.x * PLUNGE_PITCH).max(-OCEAN_DEPTH * 4.0)
-        }
-    })
+    hand_of_chunks(
+        |at| {
+            if at.x <= 0.0 {
+                // Barely a slope, so nothing about the dry half is under test.
+                -at.x * 0.05
+            } else {
+                (-at.x * PLUNGE_PITCH).max(-OCEAN_DEPTH * 4.0)
+            }
+        },
+        [protocol::ground::EXPOSED; protocol::ground::BEARINGS],
+    )
 }
 
 /// A height field turned into the chunks a server would have sent of it: the
 /// island and a ring of open water round it, delivered as answers.
-fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
+fn hand_of_chunks(height: impl Fn(Vec2) -> f32, shelter: protocol::ground::Exposure) -> Ground {
     let mut ground = Ground::default();
 
     // Enough chunks to hold the island and a ring of open water around it, so
@@ -367,7 +388,13 @@ fn hand_of_chunks(height: impl Fn(Vec2) -> f32) -> Ground {
                     // Nor anything the palm rule would call a beach.
                     plants: Vec::new(),
                 });
-            ground.deliver(chunk, payload);
+            // The lee goes on every chunk, ground or open water alike: the
+            // island a test builds is one lump of weather, and what a reader
+            // is being held to is where it looks the answer up rather than
+            // how the answer varies.
+            let lee = (shelter != [protocol::ground::EXPOSED; protocol::ground::BEARINGS])
+                .then(|| vec![shelter; protocol::ground::SHELTER_COUNT]);
+            ground.deliver(chunk, lee, payload);
         }
     }
     ground

@@ -62,7 +62,8 @@ struct SeaParams {
     // height wanders about; w padding.
     caps: vec4<f32>,
     // The field that wandering is read off: x the size of its coarsest cell
-    // in metres, y how fast it drifts downwind; zw padding.
+    // in metres, y how fast it drifts downwind; z the least of the open sea's
+    // height a lee leaves standing (`sea::LEE_SEA`); w padding.
     breaking: vec4<f32>,
     // The depth window: xy the world coordinates of its corner, z one over
     // its extent, w the depth a full texel encodes.
@@ -139,6 +140,22 @@ fn sunlight_at(at: vec2<f32>) -> f32 {
     let edge = sea.daylight.y;
     return smoothstep(first - edge, first + edge, hour)
         * (1.0 - smoothstep(last - edge, last + edge, hour));
+}
+
+// How much of the wind reaches a point, from the window's fourth channel —
+// resolved against the wind of the moment by `sea::texel`, so there is no
+// bearing to work out here. 1.0 is open water.
+fn exposure_at(at: vec2<f32>) -> f32 {
+    let uv = (at - sea.window.xy) * sea.window.z;
+    return textureSampleLevel(sea_depth, sea_depth_sampler, uv, 0.0).a;
+}
+
+// What that exposure does to the height of the deep trains — the twin of
+// `sea::lee_scale`, which owns why the sea's cut is gentler than the wind's
+// and why the shore wave is left out of it.
+fn lee_scale(exposure: f32) -> f32 {
+    let lee = sea.breaking.z;
+    return lee + (1.0 - lee) * clamp(exposure, 0.0, 1.0);
 }
 
 // How much of the swell at a depth is the shore wave rather than the open
@@ -360,7 +377,7 @@ fn wake_foam(at: vec2<f32>) -> f32 {
 fn swell(at: vec2<f32>, time: f32, depth: f32) -> f32 {
     let shore = shore_cap(depth) * sin(shore_phase(at, time, depth));
     let w = shore_weight(depth);
-    return deep(at, time) * (1.0 - w) + shore * w;
+    return deep(at, time) * lee_scale(exposure_at(at)) * (1.0 - w) + shore * w;
 }
 
 // Whether a point of the surface stands inside some open hull, and so is not
