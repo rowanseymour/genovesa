@@ -79,8 +79,8 @@ impl Plugin for DebugOverlayPlugin {
 ///
 /// Four times a second is fast enough that a sag is visible as it happens and
 /// slow enough to read. The frame rate itself is smoothed long before it gets
-/// here — see [`Diagnostic::smoothed`] — so this samples an average rather
-/// than decimating a raw signal.
+/// here — see [`bevy::diagnostic::Diagnostic::smoothed`] — so this samples an
+/// average rather than decimating a raw signal.
 const REFRESH_SECONDS: f32 = 0.25;
 
 /// When the readout is next due. Zero on the first frame, so a run that has

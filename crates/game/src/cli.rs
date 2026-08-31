@@ -129,8 +129,8 @@ Debugging:
                     for this machine's own switches, anything else for the
                     server.
                     Plus the words a keyboard never needed — `shot`, `press`,
-                    `click`, `zoom`, `yaw`, `hold` and `quit`. Send `help`
-                    for the whole vocabulary
+                    `click`, `hold` and `quit`. Send `help` for the whole
+                    vocabulary
   --headless        no window: draw off screen and be driven down the socket
                     alone
 
@@ -367,6 +367,36 @@ mod tests {
                 "`{line}` should be refused — it is said down the socket now"
             );
         }
+    }
+
+    /// The `--debug` paragraph names the socket's own words, and a sentence is
+    /// the one thing [`crate::control`]'s table cannot generate — so this is
+    /// what holds it. It had already drifted: the list went on offering `zoom`
+    /// and `yaw` for a while after the view became `client zoom` and `client
+    /// yaw`, which is a run refused at the socket by the option that told you
+    /// to try it.
+    ///
+    /// `client` and `help` are left out of the comparison because the prose
+    /// names them itself, on either side of the list.
+    #[test]
+    fn the_usage_names_the_words_the_socket_serves() {
+        let listed: Vec<String> = usage()
+            .split_once("a keyboard never needed — ")
+            .expect("the usage should say what the socket adds")
+            .1
+            .split_once('.')
+            .expect("and stop at the end of the sentence")
+            .0
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(String::from)
+            .collect();
+        let served: Vec<String> = crate::control::verbs()
+            .filter(|word| !matches!(*word, "client" | "help"))
+            .map(String::from)
+            .collect();
+        assert_eq!(listed, served);
     }
 
     #[test]

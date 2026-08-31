@@ -17,8 +17,9 @@ use crate::chart::{INK, INK_DIM, PAPER};
 
 use super::{MenuButton, StatusText};
 
-/// How big a dialog's own title is drawn — well under [`TITLE_SIZE`], since it
-/// names a screen rather than the game.
+/// How big a dialog's own title is drawn — well under
+/// [`super::main_menu::TITLE_SIZE`], since it names a screen rather than the
+/// game.
 pub(super) const HEADING_SIZE: f32 = 34.0;
 
 /// The inks a menu is drawn with.
@@ -94,7 +95,7 @@ pub(super) const OVER_THE_WORLD: Palette = Palette {
 /// What a button is filled with in each of its states.
 ///
 /// Carried on the button entity rather than looked up when one is hovered,
-/// because [`highlight_buttons`] sees every button in the app and cannot tell
+/// because [`super::highlight_buttons`] sees every button in the app and cannot tell
 /// from one which of the two sheets it was drawn on.
 #[derive(Component, Clone, Copy)]
 pub(super) struct Highlight {

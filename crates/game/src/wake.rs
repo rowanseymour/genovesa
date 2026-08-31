@@ -305,7 +305,7 @@ impl Plugin for WakePlugin {
 /// it. The write goes through the same read-compare-write two-step the depth
 /// sweep and the weather use, so a boat lying at anchor with its wake gone
 /// re-uploads nothing frame after frame.
-fn lay_the_wake(
+pub(crate) fn lay_the_wake(
     time: Res<Time>,
     boats: Query<(&Transform, &Boat)>,
     mut track: ResMut<Track>,

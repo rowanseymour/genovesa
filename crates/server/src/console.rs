@@ -1,5 +1,6 @@
-//! The server's half of the debug console: what a [`ToServer::Command`]
-//! line means here, and the [`ToClient::Reply`] it earns.
+//! The server's half of the debug console: what a
+//! [`protocol::ToServer::Command`] line means here, and the
+//! [`ToClient::Reply`] it earns.
 //!
 //! The vocabulary lives on this side of the wire on purpose. A client
 //! forwards whatever was typed, verbatim, and draws whatever text comes back
@@ -14,16 +15,19 @@
 //! gate has somewhere to stand, and the host's log names the asker either
 //! way.
 //!
-//! Two shapes of line, and the first word says which. `goto`, `grant` and
+//! Three shapes of line, and the first word says which. `goto`, `grant` and
 //! `spawn` act, and answer with what happened. `world` is the dials the
 //! world itself stands on — the hour, the wind, the seed — in the three
 //! forms `client` has on the other side: the bare word lists them, a dial
 //! alone reads it, a dial and a value turns it. Reading is the half that was
 //! missing while these were verbs: a console could order a gale but never
 //! ask whether one was still ordered, and `natural` could be given back to a
-//! sky that already had it. The acts do not read: asking where somebody is
-//! is a client's own question — `client position` — and giving `goto` a
-//! second, argumentless meaning would hide a reading behind a verb.
+//! sky that already had it. And `where` reads the asker's own situation,
+//! which is the world's to answer rather than the client's for the reason
+//! [`whereabouts`] gives.
+//!
+//! The acts stay acts. Giving `goto` a second, argumentless meaning would
+//! hide a reading behind a verb, which is what `where` is there for.
 //!
 //! Every command is a row of [`COMMANDS`]: a word, the `help` lines it
 //! answers for, the fixed words that may follow it, and one function of
@@ -714,7 +718,7 @@ fn grant(asked: Asked) -> Result<String, String> {
 ///
 /// A match rather than a lookup in [`HULLS`] so that a kind added to the
 /// lineup cannot compile without a word here; that the two agree on the
-/// words they do share is [`hull_words_match_the_ones_grant_takes`]'s.
+/// words they do share is `hull_words_match_the_ones_grant_takes`'s.
 fn named(kind: BoatKind) -> &'static str {
     match kind {
         BoatKind::Sloop => "sloop",
@@ -1025,7 +1029,8 @@ mod tests {
 
     /// What a line is answered with, for the tests that care only about the
     /// words — [`Served`]'s other half is the connection's business, and
-    /// [`the_console_takes_you_places`] is where it is looked at.
+    /// `goto_takes_a_player_to_a_place_however_they_are_travelling`, over in
+    /// the session tests, is where it is looked at.
     fn answer(shared: &Shared, from: PlayerId, line: &str) -> String {
         interpret(shared, from, line).reply
     }

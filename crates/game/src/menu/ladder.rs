@@ -134,7 +134,8 @@ pub(super) fn options_actions(
 ///
 /// The controls screen is not here, and that is the whole reason this is a
 /// system of its own rather than an arm of [`helm_keys`]: there, Escape may
-/// mean "not that key" instead, and only [`settings_keys`] knows which.
+/// mean "not that key" instead, and only [`super::controls::settings_keys`]
+/// knows which.
 pub(super) fn options_keys(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<State<AppState>>,

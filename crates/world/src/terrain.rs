@@ -1,6 +1,8 @@
-//! Procedural terrain: the height field and what grows on it. Sampling that
-//! into chunks a client can be sent is the `archipelago` module; turning what
-//! arrives into meshes is the game's business and happens nowhere near here.
+//! Procedural terrain: the height field, and what each point of it turns out
+//! to be. What *grows* there is [`crate::plants`] and the four rules under it,
+//! which read this and change nothing; sampling into chunks a client can be
+//! sent is the `archipelago` module; turning what arrives into meshes is the
+//! game's business and happens nowhere near here.
 //!
 //! # Scale
 //!
@@ -127,7 +129,7 @@ fn shoal_shift(extent: Vec2) -> f32 {
 }
 
 /// A per-seed draw in `0.0..1.0`, unrelated to any noise field's phase —
-/// splitmix64 on the seed and a salt, the same mix [`crate::archipelago::ParcelRng`]
+/// splitmix64 on the seed and a salt, the same mix the layout's own `ParcelRng`
 /// uses to keep unrelated draws from one seed unrelated to each other.
 ///
 /// What this is for is [`land_fraction`]'s tiny-map swing: two islands the

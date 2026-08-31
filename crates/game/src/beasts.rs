@@ -438,9 +438,10 @@ fn school(
 /// The shark arrives as a whole scene rather than meshes pulled out one at
 /// a time, for the reason the player's figure does: a skinned mesh has to
 /// arrive as a hierarchy or it is a shape with no skeleton behind it. The
-/// file's own materials come along and [`paint`] undoes them. The rigid
-/// kinds are hung as plain meshes at their stations — a pod's members dealt
-/// from the id, so every client hangs the same dolphins in the same order.
+/// file's own materials come along and [`crate::models`] undoes them. The
+/// rigid kinds are hung as plain meshes at their stations — a pod's members
+/// dealt from the id, so every client hangs the same dolphins in the same
+/// order.
 fn dress(
     mut commands: Commands,
     assets: Res<AssetServer>,

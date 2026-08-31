@@ -427,7 +427,7 @@ impl Plugin for PlayerPlugin {
 /// Asking from a boat is not offered at all. A cairn is built by somebody
 /// standing on the ground with stones in their hands, and the key that would
 /// have done it from the helm is a key that says the world is a menu.
-fn claim_the_island(
+pub(crate) fn claim_the_island(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     online: Option<Res<Online>>,
@@ -631,7 +631,7 @@ type Vessels<'w, 's> = Query<
 /// A crossing that is *refused* — no footing, nothing in reach — leaves the
 /// glide untouched: the key that does nothing must do nothing.
 #[allow(clippy::too_many_arguments)]
-fn embark_or_land(
+pub(crate) fn embark_or_land(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     mut commands: Commands,
@@ -888,7 +888,7 @@ fn landing(ground: Option<&Ground>, boat: &Transform) -> Option<(Vec2, f32)> {
 /// And, as everywhere, [`barged`]'s: a cairn is the one built thing in this
 /// world with any substance to it, and a step into one is not taken.
 #[allow(clippy::too_many_arguments)]
-fn walk(
+pub(crate) fn walk(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     time: Res<Time>,

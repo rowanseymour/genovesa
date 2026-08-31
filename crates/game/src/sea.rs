@@ -40,9 +40,9 @@
 //! Three parties have to agree on where the water stands at a moment: the
 //! shader displacing the sea mesh, the boat riding on it, and the markers other
 //! players stand as. The parameters live once here and reach the shader through
-//! a uniform; the *formula* — [`swell`] — is written twice, here and in
-//! `assets/shaders/sea.wgsl`, and the two must be kept the same. So is time:
-//! the shader reads `globals.time`, which Bevy fills from
+//! a uniform; the *formula* — [`SeaConditions::swell`] — is written twice,
+//! here and in `assets/shaders/sea.wgsl`, and the two must be kept the same.
+//! So is time: the shader reads `globals.time`, which Bevy fills from
 //! `Time::elapsed_secs_wrapped`, so that is what every Rust caller must pass.
 //! Depth is deliberately loose — the shader reads the windowed texture and the
 //! boat asks the ground exactly, differing by at most a texel of interpolation
@@ -67,7 +67,7 @@ use crate::camera::MapCamera;
 use crate::terrain::Ground;
 
 /// Displaces the sea's vertices and shades the result — see the module doc,
-/// and the file itself, which carries the other copy of [`swell`].
+/// and the file itself, which carries the other copy of [`SeaConditions::swell`].
 const SHADER: &str = "shaders/sea.wgsl";
 
 /// The open sea's swell, as components: bearing off the wind in radians,
@@ -406,7 +406,8 @@ pub type SeaMaterial = ExtendedMaterial<StandardMaterial, SeaExtension>;
 pub struct SeaExtension {
     /// One deep wave per row: `xy` is the heading scaled by the wavenumber,
     /// `z` the angular frequency, `w` the amplitude — exactly the terms of
-    /// [`swell`], so the shader adds them up rather than deriving anything.
+    /// [`SeaConditions::swell`], so the shader adds them up rather than
+    /// deriving anything.
     #[uniform(100)]
     waves: [Vec4; WAVES.len()],
     /// `x` and `y` are [`FADE`], `z` is [`SHADING_TILT`], `w` is [`BEND`].

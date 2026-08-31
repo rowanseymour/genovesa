@@ -342,9 +342,9 @@ pub enum Aloft {
 /// Which body is up at an hour, and how far it is through its own crossing of
 /// the sky: `0.0` as it rises, `1.0` as it sets.
 ///
-/// The half-turn either side of [`towards_the_sun`]'s own horizon — the sun is
-/// up from 0.25 to 0.75, and the moon, being opposite it, holds the other
-/// half. What [`crate::instruments`] draws the day's arc from.
+/// The half-turn either side of [`protocol::towards_the_sun`]'s own horizon —
+/// the sun is up from 0.25 to 0.75, and the moon, being opposite it, holds the
+/// other half. What [`crate::instruments`] draws the day's arc from.
 ///
 /// Not a second opinion about [`Sky::is_night`], which asks a different
 /// question: that one is about which body is *lighting the world*, and the two
@@ -491,7 +491,7 @@ fn light_at(phase: f32) -> Hour {
 /// because they are not a function of the hour alone. That is what makes
 /// [`crate::terrain::cascades`] two short cascades rather than a kilometre
 /// and four.
-fn hang_the_light(mut commands: Commands) {
+pub(crate) fn hang_the_light(mut commands: Commands) {
     // Shadow map resolution. Two cascades, so two layers rather than four —
     // and the reason it is not Bevy's 2048 is the mast.
     // It is the thinnest caster in the world, and at 16 cm its shadow is a

@@ -36,10 +36,8 @@ pub(super) struct NewWorldSettings {
     /// Held as text so the field can be edited a digit at a time, including
     /// being temporarily empty.
     pub(super) seed: String,
-    /// Whether to host the world rather than keep it to ourselves. A shared
-    /// world is a served one, joined over the loopback like any other — see
-    /// [`Dialing::hosting`] — so turning this on is the whole difference
-    /// between playing alone and being somebody's server.
+    /// Whether to host the world rather than keep it to ourselves — the whole
+    /// of what [`Reach`] decides, and nothing about the session either way.
     pub(super) share: bool,
 }
 
@@ -192,7 +190,7 @@ pub(super) fn dialog_actions(
 /// comes from a server, so a world of one's own is a server too — see
 /// [`Reach`], which is the whole of what the sharing switch decides. The way
 /// in is then the way into anybody else's: dial it and wait, and
-/// [`settle_dialing`] takes the spawn from the welcome exactly as a run
+/// [`super::settle_dialing`] takes the spawn from the welcome exactly as a run
 /// started with `--join` does. Nothing about the world is settled here, not
 /// even by the machine that is about to serve it.
 pub(super) fn open_world(
@@ -240,7 +238,7 @@ pub(super) fn open_world(
 /// simply type one, and so does whatever a layout puts them on.
 ///
 /// Runs on every screen rather than only this one, for the reason
-/// [`join_keys`] does: a reader left to lag would deliver whatever was
+/// [`super::join::join_keys`] does: a reader left to lag would deliver whatever was
 /// pressed on the way here the instant the dialog opened — and on this
 /// screen that would land in the seed.
 pub(super) fn type_seed(

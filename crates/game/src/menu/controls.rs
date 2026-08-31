@@ -45,7 +45,7 @@ pub(super) fn spawn_settings(commands: Commands, bindings: Res<KeyBindings>) {
 }
 
 /// The same screen as reached from the pause menu — see
-/// [`spawn_paused_options`].
+/// [`super::ladder::spawn_paused_options`].
 pub(super) fn spawn_paused_settings(commands: Commands, bindings: Res<KeyBindings>) {
     spawn_controls(
         commands,

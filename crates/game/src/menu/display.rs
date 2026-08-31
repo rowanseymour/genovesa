@@ -41,8 +41,9 @@ pub(super) enum DisplayText {
 /// Whether the list of resolutions is down.
 ///
 /// A flag rather than an entity to go looking for, the same shape as
-/// [`Rebinding`] and for the same reason: there is one such list in the whole
-/// game, and what a system wants to know about it is never which one.
+/// [`super::controls::Rebinding`] and for the same reason: there is one such
+/// list in the whole game, and what a system wants to know about it is never
+/// which one.
 #[derive(Resource, Default)]
 pub(super) struct Picking(pub(super) bool);
 
@@ -65,7 +66,7 @@ pub(super) fn spawn_display(commands: Commands, wanted: Res<Wanted>) {
     );
 }
 
-/// And as reached from the pause menu — see [`spawn_paused_options`].
+/// And as reached from the pause menu — see [`super::ladder::spawn_paused_options`].
 pub(super) fn spawn_paused_display(commands: Commands, wanted: Res<Wanted>) {
     build_display(
         commands,
@@ -324,7 +325,7 @@ pub(super) const THE_LIST: i32 = 2;
 /// anybody is looking at it or not. Commands queued here are applied before
 /// the frame is laid out, so it appears on the frame it was asked for rather
 /// than the one after — which is also why the rung already taken is coloured
-/// here rather than left to [`highlight_buttons`], whose `Changed<Interaction>`
+/// here rather than left to [`super::highlight_buttons`], whose `Changed<Interaction>`
 /// cannot fire until the frame after these commands land.
 ///
 /// Nothing but the list going up or down is worth watching: what is *wanted*

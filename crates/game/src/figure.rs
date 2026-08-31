@@ -240,7 +240,7 @@ fn rig(
 /// mesh has to arrive as a hierarchy: the loader wires the bones, the skin and
 /// the animation targets onto the nodes as it builds them, and a mesh lifted
 /// out on its own would be a shape with no skeleton behind it. The cost is
-/// that the file's own materials come with it, which [`paint`] undoes.
+/// that the file's own materials come with it, which [`crate::models`] undoes.
 ///
 /// It stands with its soles at the player's origin, that being where the
 /// master puts them — the point `player::walk` holds on the ground and the

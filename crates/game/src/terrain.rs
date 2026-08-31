@@ -436,10 +436,8 @@ impl Ground {
     /// open ocean floats rather than walking the seabed, and one that has run
     /// aground sits in the hillside.
     ///
-    /// Read off the same facet grid the mesh is built from, and interpolated
-    /// across the same triangles, so a hull sits exactly on the ground that can
-    /// be seen under it rather than on a smoother field the picture only
-    /// approximates.
+    /// Read off the facet grid the mesh is built from — see [`height_at`] —
+    /// so a hull sits on the ground that can be seen under it.
     ///
     /// `None` where the chunk has not arrived. Absent rather than sea level,
     /// deliberately: a rider keeps the height it had for the few frames a
@@ -2215,10 +2213,10 @@ mod tests {
         // middle of every cell, so a rule written twice and changed once would
         // fail here loudly.
         //
-        // At [`Detail::FINEST`], which is the grid [`height_at`] always reads
-        // — a coarser cut is a different sheet on purpose, and
-        // `the_ground_underfoot_does_not_move_with_the_detail_drawn_over_it`
-        // is where that is said.
+        // At [`Detail::FINEST`], which is the grid [`height_at`] always reads:
+        // a coarser cut is a different sheet on purpose, and nothing has to
+        // assert that here because [`height_at`] takes no [`Detail`] to be
+        // given the wrong one.
         let heights = a_saddle();
         let mesh = chunk_mesh(
             &heights,

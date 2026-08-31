@@ -70,7 +70,7 @@ const REPORT_SWING: f32 = 0.02;
 const REPORT_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// How quickly a marker eases towards where the server last put its player,
-/// in e-foldings per second — see [`eased`]. Positions arrive a few times a
+/// in e-foldings per second — see [`crate::eased`]. Positions arrive a few times a
 /// second, so the easing is what turns the steps back into movement.
 const MARKER_SMOOTHING: f32 = 8.0;
 
@@ -1155,7 +1155,7 @@ fn report_position(
 /// what entry owes them is a walker standing where the server said they
 /// stand. The height starts at sea level and [`crate::player`] settles it
 /// onto the ground once the ground has streamed in.
-fn enter_afoot(
+pub(crate) fn enter_afoot(
     mut commands: Commands,
     online: Res<Online>,
     view: Option<Res<crate::camera::View>>,

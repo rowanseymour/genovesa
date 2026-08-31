@@ -127,9 +127,9 @@ pub(super) fn join_actions(
 /// escape leaves.
 ///
 /// Runs on every screen rather than only this one, for the reason
-/// [`settings_keys`] does: a reader left to lag would deliver whatever was
-/// pressed on the way here the instant the screen opened — and on this screen
-/// that would be typed into the address.
+/// [`super::controls::settings_keys`] does: a reader left to lag would deliver
+/// whatever was pressed on the way here the instant the screen opened — and on
+/// this screen that would be typed into the address.
 pub(super) fn join_keys(
     mut commands: Commands,
     state: Res<State<AppState>>,

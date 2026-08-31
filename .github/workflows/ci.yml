@@ -134,6 +134,19 @@ jobs:
       - name: Tests
         run: cargo test --workspace --locked
 
+      # A doc link is how a comment stays true about code in another module —
+      # rename the target and the link breaks where a reviewer is looking. But
+      # a link rustdoc cannot *resolve* is only prose in brackets: it checks
+      # nothing, and two of them here had already rotted into naming things
+      # that no longer existed. This is what makes the difference visible. The
+      # crates are already built by the step above, so it documents them and
+      # stops; `--document-private-items` because most of what one module's doc
+      # names in another is private to the crate.
+      - name: Doc links
+        run: cargo doc --workspace --no-deps --locked --document-private-items
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+
   # The pinned things again, somewhere that isn't x86-64 Linux: the world's
   # digests and the protocol's exact bytes, with the server that sits on both.
   # These crates hold no Bevy and need nothing from the system, so this is a

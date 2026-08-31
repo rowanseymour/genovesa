@@ -263,14 +263,9 @@ pub enum Helm {
     Sailing,
     /// The pause menu is up over the world.
     Paused,
-    /// The options screen, opened from the pause menu.
-    ///
-    /// Every screen from here down is doubled — one of these and one
-    /// [`AppState`] beside it — and that doubling is the point rather than an
-    /// oversight. The same screen reached from the main menu has no world
-    /// behind it; reached from the pause menu it must not take one down, and
-    /// leaving `AppState::InWorld` is exactly what would. One builder each, and
-    /// the only difference is which screen Back returns to.
+    /// The options screen, opened from the pause menu. Every screen from here
+    /// down is doubled — one of these and one [`AppState`] beside it — for the
+    /// reason [`crate::menu`]'s `ladder` gives.
     Options,
     /// The display screen, opened from the options screen — see
     /// [`AppState::Display`].

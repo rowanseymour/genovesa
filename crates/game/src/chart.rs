@@ -239,13 +239,10 @@ impl Chart {
             .filter(|name| !name.is_empty())
     }
 
-    /// Everything surveyed within a rectangle of the world, chunk by chunk.
-    ///
-    /// The rectangle is what keeps drawing bounded. A chart of a long voyage
-    /// holds far more coastline than a sheet can show, so the mesh is built
-    /// from a window on it rather than from everything ever seen — and the cost
-    /// of drawing follows how much paper there is rather than how far the
-    /// player has sailed.
+    /// Everything surveyed within a rectangle of the world, chunk by chunk —
+    /// see [`Survey::within`], which says why the window is there. This is the
+    /// drawing end of it: the cost of a sheet follows how much paper there is
+    /// rather than how far the player has sailed.
     fn within(&self, window: Rect) -> impl Iterator<Item = (IVec2, &Soundings)> {
         self.survey.within(window.min, window.max)
     }
@@ -1507,7 +1504,7 @@ fn ours(chart: &Chart, claim: IVec2) -> bool {
 /// Nothing is written on the sheet here. The name goes up, the server judges
 /// it, and the cairn is told back with whatever it now says — so the lettering
 /// a player sees is always the lettering everybody else sees.
-fn write_through(online: &Option<Res<crate::net::Online>>, claim: IVec2, draft: &str) {
+pub(crate) fn write_through(online: &Option<Res<crate::net::Online>>, claim: IVec2, draft: &str) {
     if let Some(online) = online {
         online.connection.christen(claim, draft);
     }

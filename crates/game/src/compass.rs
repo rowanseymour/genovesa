@@ -11,8 +11,8 @@
 //! The card is drawn *lying on the sea* rather than flat on the glass: against
 //! ground drawn at the camera's pitch an unforeshortened dial reads as a
 //! sticker on the screen. The tilt is the projection itself — a flat card on
-//! the ground plane seen from [`PITCH`][crate::camera::PITCH] above horizontal
-//! is its upright drawing squashed by `sin(PITCH)`, applied after the card's
+//! the ground plane seen from [`crate::camera::PITCH`] above horizontal is its
+//! upright drawing squashed by `sin(PITCH)`, applied after the card's
 //! own spin so the letters shear the way paint on a deck would. Real geometry
 //! parented to the camera differs by a keystone too small to see, and would
 //! need letters as meshes and an exemption from the fog and the lighting.

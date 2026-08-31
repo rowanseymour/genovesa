@@ -430,7 +430,7 @@ impl Island {
 
     /// Height at a world point, in metres. Inside the frame this is the
     /// island's map, untouched; across the skirt it is that same field walked
-    /// down to exactly [`-OCEAN_DEPTH`] by the skirt's outer edge, where the
+    /// down to exactly -[`OCEAN_DEPTH`] by the skirt's outer edge, where the
     /// open ocean takes over without a seam — see [`ground_height`].
     pub fn height(&self, wx: f32, wz: f32) -> f32 {
         ground_height(&self.spec, &self.generator, wx, wz)
@@ -475,7 +475,7 @@ impl Island {
 }
 
 /// [`Island::height`] before there is an [`Island`] to ask: the generator's
-/// field inside the frame, walked down to exactly [`-OCEAN_DEPTH`] across the
+/// field inside the frame, walked down to exactly -[`OCEAN_DEPTH`] across the
 /// skirt. A free function because [`Island::generate`] bakes the sunlight
 /// against this same surface while the struct is still being put together.
 ///
@@ -795,7 +795,7 @@ impl Archipelago {
 
     /// Terrain height at a world point, in metres, generating whatever island
     /// owns the point. Sea level is 0 everywhere in the world; open ocean is
-    /// flat floor at [`-OCEAN_DEPTH`].
+    /// flat floor at -[`OCEAN_DEPTH`].
     pub fn height(&self, wx: f32, wz: f32) -> f32 {
         match self.island_at(wx, wz) {
             Some(spec) => self.island(spec).height(wx, wz),
@@ -1149,7 +1149,8 @@ mod tests {
         // that a smoothstep interpolates between two equal numbers. What the
         // game actually leans on is the *result*: every sample out there is
         // exactly the floor, so island meshes and the backdrop meet at one
-        // level and `chunk_geometry` is entitled to drop the chunk entirely.
+        // level and [`Archipelago::chunk_payload`] is entitled to drop the
+        // chunk entirely.
         let world = world(1);
         let spec = specs(&world)
             .into_iter()

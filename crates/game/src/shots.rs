@@ -21,7 +21,7 @@
 //!
 //! Every picture either mouth asks for is written by [`save_stamped`], which
 //! puts where the camera stood into the file as well as on the screen. The
-//! overlay has always said it — see [`crate::debug`], whose last line reads
+//! overlay has always said it — see [`mod@crate::debug`], whose last line reads
 //! the world and the view back in the words that put them there — but only
 //! when it is switched on, and only by spending the corner of the picture on
 //! it. A shot worth arguing about is rarely the one somebody remembered to

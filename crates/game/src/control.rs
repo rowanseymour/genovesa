@@ -867,6 +867,13 @@ fn help() -> String {
         .join("\n")
 }
 
+/// Every word this end serves, for [`crate::cli`]'s prose to be held to — the
+/// `--help` text names them and no table can generate a sentence.
+#[cfg(test)]
+pub(crate) fn verbs() -> impl Iterator<Item = &'static str> {
+    VERBS.iter().map(|verb| verb.word)
+}
+
 fn begin(
     order: Order,
     commands: &mut Commands,
