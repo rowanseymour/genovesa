@@ -2,7 +2,8 @@
 //!
 //! A kind knows where its own sort grows — [`crate::palms`] at the back of a
 //! beach, [`crate::bananas`] on a wet valley floor, [`crate::mangroves`] in the
-//! shallows of a lake — and this is where their answers are put together. The
+//! shallows of a lake, [`crate::cacti`] on the dry collar between the first
+//! two — and this is where their answers are put together. The
 //! gathering is here rather than in any of them because the wire carries one
 //! list under one ceiling: whoever spends the last of it has to be somewhere
 //! that can see every claim, not whichever module happened to be asked first.
@@ -25,6 +26,7 @@ pub fn plants(island: &Island, chunk: IVec2) -> Vec<Plant> {
     let mut found = crate::palms::palms(island, chunk);
     found.extend(crate::bananas::bananas(island, chunk));
     found.extend(crate::mangroves::mangroves(island, chunk));
+    found.extend(crate::cacti::cacti(island, chunk));
 
     // The ceiling is what a chunk's count byte can say, and nothing here comes
     // anywhere near it: the fullest chunk yet measured is a mangrove thicket
