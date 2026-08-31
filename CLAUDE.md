@@ -124,8 +124,8 @@ The source is 43M. A single `target/` is 2.7G, and there is one per worktree.
 Left alone this reached 243G across the project, so the shape of a build is
 worth as much care here as the shape of the code.
 
-Three things keep it down, and the first two are load-bearing in ways that are
-easy to undo by accident:
+Two rules keep it down, and both are load-bearing in ways that are easy to
+undo by accident:
 
 - **The dev profile is tuned for size** — dependencies carry no debug info at
   all, workspace members carry line tables only. `Cargo.toml` says why. This is
@@ -142,13 +142,11 @@ easy to undo by accident:
   worktree's world — the exact disagreement the digest tests exist to catch,
   arriving somewhere they cannot see it. Each worktree gets its own `target/`.
 
-- **`tools/sweep.sh` reaps what cargo abandons.** Cargo never reclaims an
-  artifact whose fingerprint has stopped matching, so a directory grows without
-  bound across rebuilds even when nothing else changes. It sweeps roots rather
-  than this project — `sweep.sh 7 ~/code` sweeps every Rust checkout there,
-  harder — so a second one is covered by naming a path, not by copying the
-  script. A weekly launchd agent runs it over `~/code`, and the script's own
-  comments say which flag is doing the work.
+Cargo also never reclaims an artifact whose fingerprint has stopped matching,
+so a `target/` grows without bound across rebuilds even when nothing changes.
+Reaping those is a property of the machine rather than of this repo — one
+sweep covers every checkout on it — so it lives outside, in
+`~/code/rust-cleanup.sh`, weekly under a launchd agent.
 
 Deleting a `target/` is cheap because sccache sits between cargo and rustc —
 see `~/.cargo/config.toml`. Cheap for a worktree that has been built before,
