@@ -11,7 +11,7 @@
 //! palette does: two kinds drawing from two hashes would be two answers to
 //! the same question, and a seed has to mean one thing.
 
-use glam::{IVec2, Vec2};
+use glam::IVec2;
 use protocol::ground::{Plant, MAX_PLANTS};
 
 use crate::archipelago::Island;
@@ -70,25 +70,3 @@ pub(crate) fn draw(seed: u64, nth: u32) -> f32 {
     // same word gives the same float on any machine.
     (z >> 40) as f32 / (1u32 << 24) as f32
 }
-
-/// The eight bearings a rule looks around itself along, as unit vectors.
-///
-/// Written out as constants rather than turned out of a loop over sines,
-/// because a seed has to raise the same islands on every machine and two
-/// libms need not agree about `sin` to the last bit. Eight rather than four so
-/// that a valley is told from a hillside: half a ring is higher than a point
-/// on any slope, and it is the *other* half that says whether the ground
-/// closes in.
-pub(crate) const AROUND: [Vec2; 8] = [
-    Vec2::new(1.0, 0.0),
-    Vec2::new(D, D),
-    Vec2::new(0.0, 1.0),
-    Vec2::new(-D, D),
-    Vec2::new(-1.0, 0.0),
-    Vec2::new(-D, -D),
-    Vec2::new(0.0, -1.0),
-    Vec2::new(D, -D),
-];
-
-/// Each half of a diagonal of [`AROUND`], as a unit vector.
-const D: f32 = std::f32::consts::FRAC_1_SQRT_2;
