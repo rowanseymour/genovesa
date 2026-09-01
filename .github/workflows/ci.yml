@@ -57,6 +57,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # A test that fails only on the one platform nobody here can run is a test
+  # whose backtrace is the only evidence there is, and it costs a green run
+  # nothing.
+  RUST_BACKTRACE: 1
 
 jobs:
   # Formatting, linting and the tests in one job, which is one restore of a
