@@ -251,12 +251,14 @@ impl PluginGroup for GamePlugins {
 /// program only reads in `Contents/Resources`, and it is the bundle's shape
 /// that has to give, not Apple's.
 fn asset_plugin() -> AssetPlugin {
-    let mut plugin = AssetPlugin::default();
     #[cfg(target_os = "macos")]
-    if let Some(bundled) = bundled_assets() {
-        plugin.file_path = bundled;
+    if let Some(file_path) = bundled_assets() {
+        return AssetPlugin {
+            file_path,
+            ..AssetPlugin::default()
+        };
     }
-    plugin
+    AssetPlugin::default()
 }
 
 /// The assets in the bundle this is running from, if it is running from one.
