@@ -1955,7 +1955,9 @@ mod tests {
         for (triangle, corners) in indices
             .iter()
             .collect::<Vec<_>>()
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .enumerate()
         {
             let cell = triangle / 2;

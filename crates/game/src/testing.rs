@@ -467,7 +467,9 @@ pub fn triangles(name: &str, index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
     // reaches for on meshes this small.
     assert_eq!(indices["componentType"], 5123, "indices are not u16");
     read(indices, 2)
-        .chunks_exact(6)
+        .as_chunks::<6>()
+        .0
+        .iter()
         .map(|t| {
             let at = |b: &[u8]| values[u16::from_le_bytes(b.try_into().unwrap()) as usize];
             [at(&t[0..2]), at(&t[2..4]), at(&t[4..6])]
@@ -499,7 +501,9 @@ pub fn skin_weights(name: &str, index: usize) -> Vec<[f32; 4]> {
         + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
     let count = accessor["count"].as_u64().unwrap() as usize;
     buffer[start..start + count * 16]
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|v| {
             let at = |i: usize| f32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap());
             [at(0), at(1), at(2), at(3)]

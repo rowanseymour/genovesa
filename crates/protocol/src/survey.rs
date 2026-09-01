@@ -409,8 +409,10 @@ impl Soundings {
                 let (packed, after) = after.split_at_checked(marks * 2)?;
                 runs.push(Coast::new(
                     packed
-                        .chunks_exact(2)
-                        .map(|pair| Mark::unpack([pair[0], pair[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| Mark::unpack(*pair))
                         .collect(),
                     closed,
                 ));

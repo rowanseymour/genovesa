@@ -775,7 +775,7 @@ impl Plant {
     /// follows is a step through *that kind's* range, so a build guessing at
     /// the kind would be guessing at the size as well, and would stand
     /// something of the wrong sort at the wrong size on somebody's beach.
-    fn take(bytes: &[u8]) -> Option<Self> {
+    fn take(bytes: &[u8; PLANT_BYTES]) -> Option<Self> {
         let kind = Kind::from_byte(bytes[0])?;
         let axis = |pair: &[u8]| {
             u16::from_le_bytes([pair[0], pair[1]]) as f32 / u16::MAX as f32 * CHUNK_METRES
@@ -996,8 +996,10 @@ impl ChunkPayload {
         }
         let levels = |bytes: &[u8]| {
             bytes
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
                 .collect::<Vec<u16>>()
         };
         let (heights, rest) = bytes.split_at(CORNERS * CORNERS * 2);
@@ -1010,10 +1012,12 @@ impl ChunkPayload {
                 .iter()
                 .map(|byte| Material::from_byte(*byte))
                 .collect::<Option<_>>()?,
-            lit: lit.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect(),
+            lit: lit.as_chunks::<2>().0.to_vec(),
             water: (!water.is_empty()).then(|| levels(water)),
             plants: plants
-                .chunks_exact(PLANT_BYTES)
+                .as_chunks::<PLANT_BYTES>()
+                .0
+                .iter()
                 .map(Plant::take)
                 .collect::<Option<_>>()?,
         })
