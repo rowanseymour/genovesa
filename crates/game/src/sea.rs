@@ -41,10 +41,19 @@
 //!
 //! Shelter is what makes a bay a bay. The server bakes how much of the wind
 //! reaches each patch of water from each quarter and sends it with the
-//! ground; here it takes the open sea's trains down without touching what
-//! breaks on the beach, so the water inside a headland lies quiet in a blow
-//! while the sea outside it does not. See [`lee_scale`], which owns why the
-//! sea's cut is gentler than the one the same shelter gives a sail.
+//! ground; here it takes the open sea's trains down — [`lee_scale`] — so the
+//! water inside a headland lies quiet in a blow while the sea outside it
+//! does not. The sea's cut is gentler than the one the same shelter gives a
+//! sail, because they are different quantities: wind is local and immediate,
+//! the air a sail holds being the air where the sail is, while a sea has a
+//! memory and a reach — the swell running into a bay was raised where it is
+//! still blowing, and wraps in round the point rather than stopping where
+//! the wind does. So the water keeps a larger share of its height than the
+//! air keeps of its strength. The shore wave is left out of it altogether:
+//! its height is already what the depth it stands in allows, which is what a
+//! wave arriving at a beach does wherever it was made — and taking the surf
+//! out of a sheltered bay would take the waterline's breathing with it,
+//! which is the one thing [`RUNUP`] exists to keep.
 //!
 //! Three parties have to agree on where the water stands at a moment: the
 //! shader displacing the sea mesh, the boat riding on it, and the markers other
@@ -119,31 +128,22 @@ fn amplitude_scale(wind: f32) -> f32 {
     (0.12 + 0.88 * relative * relative.sqrt()).min(2.4)
 }
 
-/// How much of the open sea's height survives in the deepest lee, as a
-/// factor on the deep trains' amplitudes.
+/// Where the sea's response to shelter bottoms out: the factor on the deep
+/// trains' amplitudes at an exposure of zero.
 ///
-/// Deliberately a gentler cut than the wind itself takes — see
-/// [`crate::sea::lee_scale`] for why the sea and the sail must not share one
-/// number.
+/// An exposure of zero never arrives — the wire's floor is
+/// [`protocol::ground::LEAST_EXPOSURE`] — so the deepest lee a server sends
+/// leaves `LEE_SEA + (1 - LEE_SEA) * LEAST_EXPOSURE`, about a third, of the
+/// open sea standing. Two floors on one axis, on purpose: this one shapes
+/// how *fast* the sea lies down as the cover deepens, that one says how
+/// deep cover ever gets. Tune this expecting the other.
 const LEE_SEA: f32 = 0.22;
 
 /// What a point's exposure does to the height of the open sea's trains
-/// there: full height in the open, [`LEE_SEA`] of it in the deepest lee.
-///
-/// A wind is cut sharply by a headland and the sea behind it is not, and the
-/// two want different curves because they are different quantities. Wind is
-/// local and immediate: the air a sail holds is the air where the sail is.
-/// A sea has a memory and a reach — the swell running into a bay was raised
-/// out where it is still blowing, and it wraps in around the point rather
-/// than stopping at the line where the wind does. So the water keeps a
-/// larger share of its height than the air keeps of its strength, and what
-/// finally kills the swell in the shallows of a bay is the depth, not this.
-///
-/// The shore wave is deliberately left out of it. Its height is already what
-/// the depth it stands in allows, which is what a wave arriving at a beach
-/// does wherever it was made — and taking the surf out of a sheltered bay
-/// would take the waterline's breathing with it, which is the one thing
-/// [`RUNUP`] exists to keep.
+/// there: full height in the open, [`LEE_SEA`] of it at an exposure of
+/// zero. Gentler than the wind's own cut and applied to the deep trains
+/// alone — the module header says why the sea and the sail must not share
+/// one curve, and why the shore wave is left out.
 fn lee_scale(exposure: f32) -> f32 {
     LEE_SEA + (1.0 - LEE_SEA) * exposure.clamp(0.0, 1.0)
 }
@@ -569,7 +569,7 @@ impl SeaExtension {
             stagger: Vec4::new(stagger_vector().x, stagger_vector().y, FOAM_SLOPE, SPACING),
             feed: Vec4::new(FOAM_FEED.0, FOAM_FEED.1, MURK.0, MURK.1),
             caps: Vec4::new(WHITECAP.0, WHITECAP.1, WHITECAP.2, 0.0),
-            breaking: Vec4::new(BREAKING_FIELD.0, BREAKING_FIELD.1, LEE_SEA, 0.0),
+            breaking: Vec4::new(BREAKING_FIELD.0, BREAKING_FIELD.1, 0.0, 0.0).with_z(LEE_SEA),
             window: Self::window_uniform(origin),
             // Noon until the sky says otherwise, as the ground opens too.
             daylight: crate::terrain::DAYLIGHT_AT_NOON,
@@ -720,14 +720,23 @@ impl SeaConditions {
         self.wind
     }
 
-    /// How big a sea is running, as a factor on the reference breeze's — the
-    /// very number every drawn amplitude is scaled by, so anything reading
-    /// this is reading the water actually on screen rather than a second
-    /// opinion about the weather. A shade over zero in a flat calm and a good
-    /// deal over one in a blow; see [`amplitude_scale`]. What the sound of
-    /// the sea is worked out from.
+    /// How big the *open* sea is running, as a factor on the reference
+    /// breeze's — the number every deep amplitude starts from before the lee
+    /// is taken off it. A shade over zero in a flat calm and a good deal over
+    /// one in a blow; see [`amplitude_scale`]. Anything asking about the
+    /// water at a place wants [`SeaConditions::liveliness_at`].
     pub fn liveliness(&self) -> f32 {
         amplitude_scale(self.wind.length())
+    }
+
+    /// How big the sea is running *here*: [`SeaConditions::liveliness`] with
+    /// the lee at the point taken off, exactly as the drawn deep trains take
+    /// it — so a reader of this is reading the water on screen rather than
+    /// a second opinion about the weather. What the sound of the sea is
+    /// worked out from: a hull lying in a lee is heard in the water it lies
+    /// in, not in the gale outside the headland.
+    pub fn liveliness_at(&self, ground: Option<&Ground>, at: Vec2) -> f32 {
+        self.liveliness() * lee_scale(self.exposure(ground, at))
     }
 
     /// The shore wave's unbroken height under this wind. The breaking cap is
@@ -789,18 +798,10 @@ impl SeaConditions {
         self.swell(at, elapsed, depth, self.exposure(ground, at))
     }
 
-    /// How much of the wind reaches a point — [`Ground::exposure`] asked
-    /// about the wind the sea is currently drawn under, with ground that has
-    /// not arrived counting as open water.
-    ///
-    /// The same benefit of the doubt the depth gets above and for the same
-    /// reason: a chunk on its way is not yet anything, and a sea that guessed
-    /// *sheltered* would flatten as the world streamed in and swell back up
-    /// as it landed.
-    pub fn exposure(&self, ground: Option<&Ground>, at: Vec2) -> f32 {
-        ground
-            .and_then(|ground| ground.exposure(at.x, at.y, self.wind))
-            .unwrap_or(1.0)
+    /// How much of the wind reaches a point — [`exposure_toward`] asked
+    /// about the wind the sea is currently drawn under.
+    fn exposure(&self, ground: Option<&Ground>, at: Vec2) -> f32 {
+        exposure_toward(ground, at, self.wind)
     }
 
     /// The wind actually blowing at a point: the sea's own eased wind, cut
@@ -809,10 +810,15 @@ impl SeaConditions {
     /// driven by one number.
     ///
     /// This rather than [`SeaConditions::wind`] is what anything *at a place*
-    /// wants — a hull's drive, its trim, the pennant at its masthead. The
-    /// bare wind is still right for the things that are about the weather
-    /// rather than about a spot in it: the compass card, and the sound of
-    /// the sea.
+    /// wants — a hull's drive, its trim, the pennant at its masthead, the
+    /// sound of the water round it. The compass card alone stays on the bare
+    /// wind, and that is a choice rather than an oversight: the card is the
+    /// *weather's* instrument and the pennant is the *place's*, and a player
+    /// tucked into a bay reads the pair together — a gale on the card and a
+    /// flag hanging slack is how the screen says "you are sheltered, and it
+    /// is still blowing out there". A card that fell with the pennant would
+    /// keep the two agreeing and lose the only thing that told the player
+    /// what leaving the bay would cost.
     pub fn wind_at(&self, ground: Option<&Ground>, at: Vec2) -> Vec2 {
         protocol::sheltered(self.wind, self.exposure(ground, at))
     }
@@ -991,6 +997,22 @@ fn veered(drawn: Vec2, told: Vec2, follow: f32) -> Vec2 {
     }
 }
 
+/// How much of a wind blowing `toward` reaches a point — [`Ground::exposure`],
+/// with ground that has not arrived counting as open water.
+///
+/// The one place that decision is made, for the sea and the hull alike: a
+/// chunk on its way is not yet anything, and a sea that guessed *sheltered*
+/// would flatten as the world streamed in and swell back up as it landed. A
+/// hull reads the same answer rather than holding the wind it had — the
+/// window is a join or a `goto` long, the drive eases through it, and a
+/// hull driven by a different wind from the water it sits in would be the
+/// worse fault.
+fn exposure_toward(ground: Option<&Ground>, at: Vec2, toward: Vec2) -> f32 {
+    ground
+        .and_then(|ground| ground.exposure(at.x, at.y, toward))
+        .unwrap_or(1.0)
+}
+
 /// How much of the swell at a depth is the shore wave rather than the open
 /// sea's: none in the deep, all of it in the shallows — see [`SHOAL`].
 fn shore_weight(depth: f32) -> f32 {
@@ -1063,7 +1085,25 @@ pub struct DepthWindow {
     origin: Vec2,
     /// The row the round-robin sweep refills next.
     sweep: usize,
+    /// The way the wind was blowing when the window's exposures were last
+    /// resolved — a unit vector, held still until the wind has veered
+    /// [`RESOLVE_VEER`] from it. See [`refresh_depth`] for why the window
+    /// cannot simply follow the wind.
+    bearing: Vec2,
 }
+
+/// How far the wind may veer, in radians, before the window re-resolves its
+/// exposures against the new bearing — about six degrees, an eighth of the
+/// lattice's own sector.
+///
+/// The exposure byte is a blend across bearings, so following the eased
+/// wind exactly would move a byte somewhere in every strip that crosses a
+/// lee on nearly every visit, and one changed byte re-uploads the whole
+/// window — see [`refresh_depth`]. Holding the bearing bounds that to one
+/// pass of the sweep per step of the veer. Six degrees against a field
+/// sampled every sixteen metres is under the noise; the wave slots hold
+/// their own aim far longer ([`REAIM`]), and for a costlier reason.
+const RESOLVE_VEER: f32 = 0.1;
 
 impl DepthWindow {
     pub fn new(image: Handle<Image>, material: Handle<SeaMaterial>, focus: Vec2) -> Self {
@@ -1072,6 +1112,7 @@ impl DepthWindow {
             material,
             origin: Self::origin_under(focus),
             sweep: 0,
+            bearing: ASSUMED_WIND.normalize(),
         }
     }
 
@@ -1183,6 +1224,15 @@ fn texel(height: Option<f32>, lit: Option<[u8; 2]>, exposure: f32) -> [u8; TEXEL
 /// scroll-exposed strips all heal within a second of sweep with nothing
 /// keeping track of any of them. The rewrite only touches the image asset
 /// when some byte actually changed, so a settled view re-uploads nothing.
+///
+/// "Settled" has to include the wind, and the wind never quite is: the
+/// exposure channel depends on its bearing, and a byte that crept with every
+/// degree of veer would dirty some strip on nearly every visit — and one
+/// dirty byte uploads the whole image, since the asset is re-extracted
+/// entire. So the window resolves exposures against a bearing of its own,
+/// [`DepthWindow::bearing`], and only moves it once the wind has veered
+/// [`RESOLVE_VEER`]: between steps the channel is as still as the depth, and
+/// each step costs one lap of the sweep rather than all of them.
 pub(crate) fn refresh_depth(
     ground: Res<Ground>,
     conditions: Res<SeaConditions>,
@@ -1212,6 +1262,15 @@ pub(crate) fn refresh_depth(
         }
     }
 
+    // The bearing the exposures are read against, stepped rather than
+    // followed — see `RESOLVE_VEER`. A calm names no bearing, and the held
+    // one is as good as any until it does.
+    if let Some(blowing) = conditions.wind.try_normalize() {
+        if window.bearing.angle_to(blowing).abs() > RESOLVE_VEER {
+            window.bearing = blowing;
+        }
+    }
+
     // The sweep. Read into a scratch first and compare, so a frame that
     // changed nothing marks nothing changed and re-uploads nothing. The
     // sweep never straddles the wrap — see `the_sweep_divides_the_window`.
@@ -1223,7 +1282,7 @@ pub(crate) fn refresh_depth(
             let texel = texel(
                 ground.height(at.x, at.y),
                 ground.lit(at.x, at.y),
-                conditions.exposure(Some(&ground), at),
+                exposure_toward(Some(&ground), at, window.bearing),
             );
             let into = (r * DEPTH_TEXELS + x) * TEXEL_BYTES;
             rows[into..into + TEXEL_BYTES].copy_from_slice(&texel);
@@ -1832,12 +1891,15 @@ mod tests {
         // Deep water, where the swell is all open sea: the lee has to bite,
         // and it has to bite the *whole* train rather than a fixed number of
         // metres — so this is measured over a run of moments rather than at
-        // one, where a trough could pass for a calm.
+        // one, where a trough could pass for a calm. The lee tested is the
+        // deepest a server ever sends, not the curve's own zero, which no
+        // wire carries — see `LEE_SEA`.
+        let deepest = protocol::ground::LEAST_EXPOSURE;
         let (mut open, mut lee) = (0.0f32, 0.0f32);
         for step in 0..64 {
             let t = elapsed + step as f32 * 0.29;
             open = open.max(sea.swell(at, t, OCEAN_DEPTH, 1.0).abs());
-            lee = lee.max(sea.swell(at, t, OCEAN_DEPTH, 0.0).abs());
+            lee = lee.max(sea.swell(at, t, OCEAN_DEPTH, deepest).abs());
         }
         assert!(
             lee < open * 0.5,
@@ -1852,11 +1914,37 @@ mod tests {
         for step in 0..16 {
             let t = elapsed + step as f32 * 0.61;
             assert_eq!(
-                sea.swell(at, t, shallow, 0.0),
+                sea.swell(at, t, shallow, deepest),
                 sea.swell(at, t, shallow, 1.0),
                 "the lee took the surf out of a sheltered beach"
             );
         }
+    }
+
+    #[test]
+    fn the_lee_rides_the_lane_the_shader_reads() {
+        // One lane of a vec4, named on each side of the Rust/WGSL boundary
+        // and compiled by neither together — the order test below holds the
+        // fields to each other and says nothing about lanes. Put the lee in
+        // `w` on one side only and the shader reads padding: `lee_scale(e)`
+        // becomes `e`, a full lee flattens the drawn sea to nothing while
+        // the hull rides the Rust formula's 0.22, and nothing goes red. The
+        // needles are assembled at runtime so this test's own source, which
+        // `include_str!` sweeps up too, cannot satisfy them.
+        let shader = std::fs::read_to_string(format!(
+            "{}/../../assets/shaders/sea.wgsl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("the sea's shader under assets/shaders/");
+        let lane = 'z';
+        assert!(
+            shader.contains(&format!("sea.breaking.{lane}")),
+            "the shader takes the lee from `{lane}`"
+        );
+        assert!(
+            include_str!("sea.rs").contains(&format!(".with_{lane}(LEE_SEA)")),
+            "the packing puts the lee in `{lane}`"
+        );
     }
 
     #[test]

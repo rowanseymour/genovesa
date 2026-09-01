@@ -24,6 +24,7 @@ use bevy::prelude::*;
 use crate::boat::Boat;
 use crate::camera::{MapCamera, MAX_DISTANCE};
 use crate::sea::SeaConditions;
+use crate::terrain::Ground;
 use crate::{AppState, Helm};
 
 /// The water at a boat's bow, as a file. Twenty-three seconds of it, cut from
@@ -239,11 +240,13 @@ fn hang_the_wash(mut commands: Commands, assets: Res<AssetServer>) {
 /// moves by, because both ends of this one have to actually arrive: 0.0 to
 /// know the sink can be stopped, and the wanted level so that a boat held at a
 /// steady speed is not left a hair under its own sound forever.
+#[allow(clippy::too_many_arguments)]
 fn sound_the_wash(
     state: Res<State<AppState>>,
     helm: Option<Res<State<Helm>>>,
     time: Res<Time>,
     sea: Res<SeaConditions>,
+    ground: Option<Res<Ground>>,
     boats: Query<(&Transform, &Boat)>,
     cameras: Query<&Transform, With<MapCamera>>,
     wash: Option<Single<&mut AudioSink, With<Wash>>>,
@@ -259,9 +262,17 @@ fn sound_the_wash(
         .next()
         .map(|(at, boat)| (boat.way(), at.translation));
     let eye = cameras.iter().next().map(|eye| eye.translation);
+    // The sea as it runs *here* — in the lee the hull lies in, if it lies
+    // in one — rather than the open sea's: what is heard is the water in
+    // earshot, which is the water on screen. Ashore, the water round the eye.
+    let here = hull.map(|(_, at)| at).or(eye);
+    let liveliness = match here {
+        Some(at) => sea.liveliness_at(ground.as_deref(), Vec2::new(at.x, at.z)),
+        None => sea.liveliness(),
+    };
     let (way, range) = way_and_range(hull, eye);
     let wanted = if heard(state.get(), helm.as_ref().map(|helm| helm.get())) {
-        loudness(way, sea.liveliness(), range)
+        loudness(way, liveliness, range)
     } else {
         0.0
     };

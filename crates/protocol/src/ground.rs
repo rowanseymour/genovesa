@@ -67,6 +67,18 @@
 //! with a strait between them read as sheltered from north and from east,
 //! and a plain blend would call the north-east channel sheltered too, when
 //! it is the one direction the wind comes howling down.
+//!
+//! **No angle is taken anywhere** in reading it back. `atan2` is a libm
+//! function like the sine the weather goes out of its way to avoid: not
+//! correctly rounded, and adrift between platforms — and the lattice is read
+//! on both sides of the wire, so a server and a client disagreeing in the
+//! last bit would be a boat drawing a wind it is not sailing. The blend
+//! between two bearings runs off the ratio of the wind's smaller component
+//! to its larger, which is exact, monotone across the sector, and lands on
+//! `0` and `1` at the sector's own ends. It is `tan` rather than the angle,
+//! so the sweep across a sector is very slightly uneven; against a field
+//! this coarse that is nothing, and against a wind whose bearing has to mean
+//! the same thing on two machines it is the point.
 
 use glam::{IVec2, Vec2, Vec3};
 
@@ -155,6 +167,27 @@ pub const CELL_COUNT: usize = CELLS * CELLS;
 /// than [`shelter_across`] is called for.
 pub const BEARINGS: usize = 8;
 
+/// The eight compass points as unit vectors, in the order the lattice
+/// stores them — the one definition of that order, which the generator
+/// writes slots by and [`shelter_across`] reads them by.
+///
+/// Built from a square root rather than a sine: this feeds a bake that is
+/// under the seed digests' promise of the same island on every machine, and
+/// `sqrt` is correctly rounded where `sin` is not.
+pub fn bearings() -> [Vec2; BEARINGS] {
+    let d = 0.5f32.sqrt();
+    [
+        Vec2::new(0.0, -1.0),
+        Vec2::new(d, -d),
+        Vec2::new(1.0, 0.0),
+        Vec2::new(d, d),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(-d, d),
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(-d, -d),
+    ]
+}
+
 /// Metres between points of the shelter lattice.
 ///
 /// Sixteen times [`CELL_METRES`], and deliberately nothing like as fine. A
@@ -186,6 +219,19 @@ pub const SHELTER_COUNT: usize = SHELTER_CORNERS * SHELTER_CORNERS;
 /// ground, is also the sea nothing is sheltering.
 pub const EXPOSED: u8 = u8::MAX;
 
+/// The least of the wind any lee leaves standing, as a fraction — the floor
+/// a generator never stores a byte below, so the deepest lee on the wire is
+/// `LEAST_EXPOSURE * 255` and not zero.
+///
+/// The floor that keeps a hull sailing is [`crate::LIGHT_AIR`], in metres
+/// per second. This one is smaller-scale and about the *drawing*: it stops
+/// the deepest lee reading as a hole in the weather, so a gale behind a
+/// mountain is a quiet corner of a gale rather than a different day. Here
+/// rather than in the generator because the client's curves start from it —
+/// the sea's own floor sits on top of this one, and a reader tuning either
+/// needs to know both are there.
+pub const LEAST_EXPOSURE: f32 = 0.18;
+
 /// One lattice point's exposure to a wind blowing toward each of
 /// [`BEARINGS`], as a fraction of the open sea's wind over `255` —
 /// [`EXPOSED`] for water nothing stands upwind of, and smaller the deeper
@@ -202,24 +248,10 @@ pub type Exposure = [u8; BEARINGS];
 /// `points` in the south-west, south-east, north-west, north-east order the
 /// material grid uses, `at` in lattice widths from the south-west one, and
 /// `toward` the way the wind is blowing, as [`crate::ToClient::Weather`]
-/// gives it. Comes back in `0.0..=1.0`.
-///
-/// The two blends are done in that order and could be done in either: both
-/// are weighted sums with weights the other does not touch, so bilinear
-/// first — over eight numbers once instead of over one number four times —
-/// is arithmetic, not a shortcut.
-///
-/// **No angle is taken anywhere.** `atan2` is a libm function like the sine
-/// this crate's weather goes out of its way to avoid, it is not
-/// correctly-rounded, and it drifts between platforms — and this is read on
-/// both sides of the wire, so a server and a client disagreeing in the last
-/// bit would be a boat drawing a wind it is not sailing. The blend runs off
-/// the ratio of the wind's smaller component to its larger, which is exact,
-/// monotone across the sector, and lands on `0` and `1` at the sector's own
-/// ends. It is `tan` rather than the angle, so the sweep across a sector is
-/// very slightly uneven; against a field this coarse that is nothing, and
-/// against a wind whose bearing has to mean the same thing on two machines
-/// it is the point.
+/// gives it. Comes back in `0.0..=1.0`. Bilinear first and bearings second;
+/// both are weighted sums with weights the other does not touch, so the
+/// order is arithmetic and not a shortcut. Why no angle is taken is the
+/// module header's.
 pub fn shelter_across(points: [Exposure; 4], at: Vec2, toward: Vec2) -> f32 {
     let weights = [
         (1.0 - at.x) * (1.0 - at.y),
@@ -1013,29 +1045,13 @@ mod tests {
         );
     }
 
-    /// The eight compass points, in the order the lattice stores them, as
-    /// unit vectors a wind could be blowing along.
-    fn the_eight() -> [Vec2; BEARINGS] {
-        let d = 0.5f32.sqrt();
-        [
-            Vec2::new(0.0, -1.0),
-            Vec2::new(d, -d),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(d, d),
-            Vec2::new(0.0, 1.0),
-            Vec2::new(-d, d),
-            Vec2::new(-1.0, 0.0),
-            Vec2::new(-d, -d),
-        ]
-    }
-
     #[test]
     fn a_wind_on_a_compass_point_reads_that_points_own_slot() {
         // The blend has to be exact at the eight, or every stored value is
         // read somewhere other than where it was measured — and since the
         // sectors are walked forwards in one half and backwards in the other,
         // an off-by-one in that split shows here and nowhere else.
-        for (slot, toward) in the_eight().into_iter().enumerate() {
+        for (slot, toward) in bearings().into_iter().enumerate() {
             let mut slots = [0.0f32; BEARINGS];
             slots[slot] = 200.0;
             let read = exposure_toward(slots, toward);

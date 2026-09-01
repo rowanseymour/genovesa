@@ -20,8 +20,8 @@
 //! the sun's own direction, carrying a running shadow height that each point
 //! either ducks under or clears — a pass over the raster per sampled hour,
 //! not a ray march per point. The raster shares the wire's own grid
-//! ([`STEP_METRES`]), so a chunk corner lands on a raster point exactly and
-//! reads its pair off without interpolating.
+//! ([`protocol::ground::CELL_METRES`]), so a chunk corner lands on a raster
+//! point exactly and reads its pair off without interpolating.
 //!
 //! It shares it because a coarser raster clips the *casting* side. At 4 m —
 //! what this was for a long time — a crag a couple of metres wide falls
@@ -34,30 +34,20 @@
 //! — that a lit threshold varies over tens of metres — holds for the ground
 //! *receiving* the shade and not for the ridge casting it.
 //!
-//! That is sixteen times the raster points, which is why both passes here
-//! are threaded. Neither has anything to synchronise: the surface fill
-//! writes disjoint rows, and a phase's sweep reads only the immutable ground
-//! raster, so the arc splits into bands whose answers merge by `min` and
-//! `max` — associative, commutative, and exact on `u8`, so the bake is the
-//! same bit for bit however many threads it runs on. That matters here more
-//! than it saves time: the digest tests hold a seed to one answer.
+//! That is sixteen times the raster points, which is why the arc is split
+//! into bands of phases across threads. Each band sweeps the immutable
+//! raster for its own hours and the answers merge by `min` and `max` —
+//! associative, commutative, and exact on `u8`, so the bake is the same bit
+//! for bit however many threads it runs on. That matters here more than it
+//! saves time: the digest tests hold a seed to one answer. The raster itself,
+//! and the sweep, are [`crate::raster`]'s — the wind's bake walks the same
+//! grid the same way, with a different loss per metre.
 
 use glam::Vec2;
 
-use protocol::ground::{CELL_METRES, LIT_ALL_DAY, NEVER_LIT};
+use protocol::ground::{LIT_ALL_DAY, NEVER_LIT};
 
-/// How many threads the two passes below split across — the machine's, less
-/// one for whoever asked, and never none. Only the *speed* rides on this: the
-/// answer is the same at any count, which is what lets it be the host's.
-fn hands() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(1).max(1))
-        .unwrap_or(1)
-}
-
-/// Metres between raster points — the wire's own grid, [`CELL_METRES`], for
-/// the reasons the module header gives.
-const STEP_METRES: f32 = CELL_METRES;
+use crate::raster::{hands, sweep, Grid, Raster};
 
 /// How far above a point's own surface the swept shadow height must stand
 /// before the point counts as shadowed. Without it, the interpolation the
@@ -93,53 +83,26 @@ impl Step {
 /// One island's baked daylight: for every raster point, the first and last
 /// phase step at which the sun stands clear of the terrain around it.
 pub struct Sunlight {
-    /// World position of raster point `(0, 0)`.
-    min: Vec2,
-    /// Raster points along x and z.
-    columns: usize,
-    rows: usize,
+    grid: Grid,
     /// The pairs, row-major — `[from, until]`, [`NEVER_LIT`] where no sample
     /// of the arc ever reached the point.
     lit: Vec<[u8; 2]>,
 }
 
 impl Sunlight {
-    /// Bakes the daylight over `min..=max`, reading the visible surface —
-    /// ground or the standing water over it — from `surface`.
-    pub fn bake(min: Vec2, max: Vec2, surface: impl Fn(f32, f32) -> f32 + Sync) -> Self {
-        Self::baked_across(min, max, surface, hands())
+    /// Bakes the daylight over a raster of the visible surface — ground, or
+    /// the standing water over it — on the wire's own grid: see the module
+    /// doc for why no coarser one will do.
+    pub fn bake(ground: &Raster) -> Self {
+        Self::baked_across(ground, hands())
     }
 
     /// [`Sunlight::bake`] over a named number of threads, which only a test
     /// has any business choosing — that the choice cannot be read back out of
     /// the answer is the whole of what it checks.
-    fn baked_across(
-        min: Vec2,
-        max: Vec2,
-        surface: impl Fn(f32, f32) -> f32 + Sync,
-        hands: usize,
-    ) -> Self {
-        let columns = ((max.x - min.x) / STEP_METRES).ceil() as usize + 1;
-        let rows = ((max.y - min.y) / STEP_METRES).ceil() as usize + 1;
-        let points = columns * rows;
-
-        // The surface, by bands of whole rows — disjoint slices, so the
-        // threads never look at each other's.
-        let mut ground = vec![0.0f32; points];
-        let band = rows.div_ceil(hands);
-        std::thread::scope(|scope| {
-            for (b, rows_of) in ground.chunks_mut(band * columns).enumerate() {
-                let surface = &surface;
-                scope.spawn(move || {
-                    for (r, row) in rows_of.chunks_mut(columns).enumerate() {
-                        let wz = min.y + (b * band + r) as f32 * STEP_METRES;
-                        for (ix, point) in row.iter_mut().enumerate() {
-                            *point = surface(min.x + ix as f32 * STEP_METRES, wz);
-                        }
-                    }
-                });
-            }
-        });
+    fn baked_across(ground: &Raster, hands: usize) -> Self {
+        let grid = ground.grid;
+        let points = grid.points();
 
         // The arc, by bands of phases. Each band sweeps the whole raster for
         // its own hours into its own pairs; the merge below is what makes the
@@ -151,16 +114,20 @@ impl Sunlight {
         std::thread::scope(|scope| {
             let mut bands = Vec::new();
             for b in 0..phases.div_ceil(band) {
-                let ground = &ground;
                 bands.push(scope.spawn(move || {
                     let mut theirs = vec![NEVER_LIT; points];
                     let mut shade = vec![0.0f32; points];
                     let from = first + (b * band) as u8;
                     for phase in from..=(from + (band - 1) as u8).min(last) {
                         let step = Step::at(protocol::dequantize_phase(phase));
-                        sweep(&mut shade, ground, columns, rows, &step);
+                        sweep(
+                            &mut shade,
+                            ground,
+                            Vec2::new(step.east, step.south),
+                            step.tan,
+                        );
                         for (at, pair) in theirs.iter_mut().enumerate() {
-                            if shade[at] - ground[at] <= BIAS {
+                            if shade[at] - ground.values[at] <= BIAS {
                                 pair[0] = pair[0].min(phase);
                                 pair[1] = pair[1].max(phase);
                             }
@@ -177,88 +144,18 @@ impl Sunlight {
             }
         });
 
-        Self {
-            min,
-            columns,
-            rows,
-            lit,
-        }
+        Self { grid, lit }
     }
 
     /// The lit pair at a world point — or [`LIT_ALL_DAY`] beyond the raster,
-    /// where there is only open sea for the sun to fall on.
-    ///
-    /// The nearest raster point's own pair, not a blend of the ones around
-    /// it. The raster is on [`STEP_METRES`] and the payload asks at its
-    /// corners, so every real query lands on a point exactly and there is
-    /// nothing to blend; and a pair is not a quantity to average anyway —
-    /// [`NEVER_LIT`] is `from` past the end of the day, so weighing it
-    /// against a lit neighbour invents an hour neither corner ever saw.
-    /// Whoever needs an answer *between* corners weighs them knowing that:
-    /// [`protocol::ground::lit_across`].
+    /// where there is only open sea for the sun to fall on. The nearest
+    /// point's own pair, for the reason [`Grid::nearest`] gives: whoever
+    /// needs an answer *between* corners weighs them knowing what a
+    /// [`NEVER_LIT`] pair means — [`protocol::ground::lit_across`].
     pub fn at(&self, wx: f32, wz: f32) -> [u8; 2] {
-        let gx = (wx - self.min.x) / STEP_METRES;
-        let gz = (wz - self.min.y) / STEP_METRES;
-        if gx < 0.0 || gz < 0.0 || gx > (self.columns - 1) as f32 || gz > (self.rows - 1) as f32 {
-            return LIT_ALL_DAY;
-        }
-        let x = (gx.round() as usize).min(self.columns - 1);
-        let z = (gz.round() as usize).min(self.rows - 1);
-        self.lit[z * self.columns + x]
-    }
-}
-
-/// One pass over the raster for one hour of the arc: afterwards `shade[p]`
-/// is the height the terrain's shadow stands at over point `p` — its own
-/// surface where nothing upwind of it reaches higher.
-///
-/// The pass walks the raster away from the sun, so each point needs only the
-/// line before it: the shadow height there, read between the two nearest
-/// points, dropped by what the sun's altitude costs over one step, against
-/// the point's own surface. Beyond the raster lies open sea, whose shadow
-/// height is its own surface at zero — which is why the first line seeds
-/// from nothing.
-fn sweep(shade: &mut [f32], ground: &[f32], columns: usize, rows: usize, step: &Step) {
-    let x_major = step.east.abs() >= step.south.abs();
-    let (majors, minors, toward, cross) = if x_major {
-        (columns, rows, step.east, step.south)
-    } else {
-        (rows, columns, step.south, step.east)
-    };
-    let at = |major: usize, minor: usize| {
-        if x_major {
-            minor * columns + major
-        } else {
-            major * columns + minor
-        }
-    };
-    // The line toward the sun is walked one major step at a time, sliding
-    // this much along the minor axis — a fraction, since the major axis is
-    // by construction the direction's larger component.
-    let slide = cross / toward.abs();
-    let drop = step.tan * (1.0 + slide * slide).sqrt() * STEP_METRES;
-
-    for k in 0..majors {
-        // From the raster's sun side inward, so the line upwind of this one
-        // is already swept.
-        let (major, upwind) = if toward > 0.0 {
-            (majors - 1 - k, majors - k)
-        } else {
-            (k, k.wrapping_sub(1))
-        };
-        for minor in 0..minors {
-            let carried = if upwind >= majors {
-                0.0
-            } else {
-                let m = (minor as f32 + slide).clamp(0.0, (minors - 1) as f32);
-                let m0 = m.floor() as usize;
-                let m1 = (m0 + 1).min(minors - 1);
-                let t = m - m0 as f32;
-                shade[at(upwind, m0)] * (1.0 - t) + shade[at(upwind, m1)] * t
-            };
-            let here = at(major, minor);
-            shade[here] = ground[here].max(carried - drop);
-        }
+        self.grid
+            .nearest(wx, wz)
+            .map_or(LIT_ALL_DAY, |at| self.lit[at])
     }
 }
 
@@ -282,9 +179,10 @@ mod tests {
                 (wz / 40.0).sin() * 3.0
             }
         };
-        let one = Sunlight::baked_across(Vec2::ZERO, Vec2::splat(256.0), relief, 1);
+        let ground = Raster::sample(Vec2::ZERO, Vec2::splat(256.0), 1.0, relief, 1);
+        let one = Sunlight::baked_across(&ground, 1);
         for hands in [2, 3, 5, 16] {
-            let many = Sunlight::baked_across(Vec2::ZERO, Vec2::splat(256.0), relief, hands);
+            let many = Sunlight::baked_across(&ground, hands);
             assert_eq!(
                 one.lit, many.lit,
                 "{hands} threads baked a different day than one did"
@@ -298,7 +196,13 @@ mod tests {
 
     #[test]
     fn open_ground_is_lit_from_sunrise_to_sunset() {
-        let flat = Sunlight::bake(Vec2::ZERO, Vec2::splat(256.0), |_, _| 0.0);
+        let flat = Sunlight::bake(&Raster::sample(
+            Vec2::ZERO,
+            Vec2::splat(256.0),
+            1.0,
+            |_, _| 0.0,
+            2,
+        ));
         assert_eq!(flat.at(128.0, 128.0), LIT_ALL_DAY);
         // And past the raster there is only sea, which nothing shadows.
         assert_eq!(flat.at(-1000.0, 40.0), LIT_ALL_DAY);
@@ -311,7 +215,13 @@ mod tests {
         // starts late — later the nearer the wall — while the evening is
         // untouched, the sunset being on the ground's own side.
         let wall = |wx: f32, _wz: f32| if wx >= 256.0 { 100.0 } else { 0.0 };
-        let baked = Sunlight::bake(Vec2::ZERO, Vec2::splat(512.0), wall);
+        let baked = Sunlight::bake(&Raster::sample(
+            Vec2::ZERO,
+            Vec2::splat(512.0),
+            1.0,
+            wall,
+            2,
+        ));
 
         let near = baked.at(224.0, 256.0);
         let far = baked.at(32.0, 256.0);
@@ -336,7 +246,7 @@ mod tests {
                 0.0
             }
         };
-        let baked = Sunlight::bake(Vec2::ZERO, Vec2::splat(256.0), pit);
+        let baked = Sunlight::bake(&Raster::sample(Vec2::ZERO, Vec2::splat(256.0), 1.0, pit, 2));
         assert_eq!(baked.at(128.0, 128.0), NEVER_LIT);
     }
 }

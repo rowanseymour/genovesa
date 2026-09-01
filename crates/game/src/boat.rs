@@ -4699,16 +4699,21 @@ mod tests {
     #[test]
     fn a_boat_in_a_lee_sails_slower_than_one_in_the_open() {
         // The whole point of the shelter, end to end: the same hull, the same
-        // heading, the same weather, one of them behind land. What the drive
-        // reads has to be the wind *where the boat is*, not the wind over the
-        // world.
-        let sailed = |ground: Ground| {
+        // heading relative to the wind, the same weather, the same *world* —
+        // one of them in the lee and one in the open, on opposite sides of
+        // the island. One world rather than two, so that what the drive reads
+        // can only be the wind *where the boat is*: a reading that ignored the
+        // hull's position and took the world's would give both boats one
+        // speed, and this would see it.
+        let sailed = |side: f32| {
             let mut app = test_app();
-            app.insert_resource(ground);
+            app.insert_resource(crate::testing::lee_to_the_west());
+            // Facing away from the island on each side, so the two runs are
+            // mirror images and the ground under them is the same shape.
             place(
                 &mut app,
-                Vec2::new(TEST_ISLAND_REACH + 100.0, 0.0),
-                Vec2::new(1.0, 0.0),
+                Vec2::new(side * (TEST_ISLAND_REACH + 100.0), 0.0),
+                Vec2::new(side, 0.0),
             );
             wind_astern(&mut app, 12.0);
             tap(&mut app, KeyCode::ArrowUp);
@@ -4720,17 +4725,24 @@ mod tests {
             (boat(&mut app).translation - before).length() / (elapsed(&app) - start)
         };
 
-        let open = sailed(test_ground());
-        let lee = sailed(crate::testing::sheltered_ground());
-        // The most a lee can ever cost a hull is the width of [`DRIVE_BAND`]
-        // — a boat in a light air still makes the band's floor — so this is
-        // not a loose threshold but very nearly the whole of the effect
-        // there is. How much of the weather a sail feels is the band's
-        // business; the shelter's business is that it is the weather *here*.
-        let least = strength(protocol::LIGHT_AIR) / strength(WIND_SATURATES);
+        let open = sailed(1.0);
+        let lee = sailed(-1.0);
+        // The fixture's lee is the deepest a server sends, so what is
+        // asserted is the real effect at the real floor, with a little room
+        // either side: the exact figure is DRIVE_BAND's and the wire's to
+        // decide between them, and a test that pinned it would be pinning
+        // two other files' constants. How much of the weather a sail feels
+        // is the band's business; the shelter's business is that it is the
+        // weather *here*.
+        let floor = protocol::sheltered(Vec2::new(12.0, 0.0), protocol::ground::LEAST_EXPOSURE);
+        let least = strength(floor.length()) / strength(12.0);
         assert!(
             lee < open * (least + 0.05),
             "the lee made {lee} m/s against {open} in the open, which is barely sheltered"
+        );
+        assert!(
+            lee > open * (least - 0.05),
+            "the lee made {lee} m/s against {open}, deeper than the wire's floor allows"
         );
         // And still sailing: a lee is a quiet corner of the weather, never a
         // hole in it — see `protocol::LIGHT_AIR`, which is what holds this.

@@ -19,6 +19,7 @@ pub mod noise;
 pub mod palms;
 pub mod plan;
 pub mod plants;
+pub mod raster;
 pub mod shelter;
 pub mod sunlight;
 pub mod terrain;

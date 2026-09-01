@@ -565,8 +565,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // than from the mesh's own centre, which is the same point to within the
     // cell the mesh is snapped to, and hundreds of metres inside this fade.
     let waving = 1.0 - smoothstep(sea.fade.x, sea.fade.y, distance(at, view.world_position.xz));
+    // The heaping is the *drawn* deep swell — the lee taken off it exactly
+    // as `swell` takes it — and the bar stands where it stands: `sea.caps.y`
+    // is an absolute floor, so scaling the bar instead would leave a
+    // sheltered patch breaking at the wrong height in the other direction.
+    // Without this the caps read the open sea's height over water drawn at
+    // a fraction of it, and painted foam on glass in every bay.
     let cap = step(sea.caps.x, leading)
-        * step(cap_bar(at, globals.time), deep(at, globals.time))
+        * step(cap_bar(at, globals.time), deep(at, globals.time) * lee_scale(exposure_at(at)))
         * (1.0 - shore_weight(depth))
         * waving;
 

@@ -530,10 +530,9 @@ impl Ground {
     ///
     /// Fully exposed over open water, `None` for a chunk still on its way:
     /// the same split of answers [`Ground::lit`] makes and for the same
-    /// reason. The caller decides what a missing chunk means — the sea draws
-    /// it exposed, since ground nobody has heard of cannot be sheltering
-    /// anything the eye can see either, while a hull keeps the wind it had
-    /// rather than being gusted by the streaming.
+    /// reason. Every caller reads the `None` as open water — see
+    /// [`crate::sea::SeaConditions::exposure`], which is where that is
+    /// decided once for the sea and the hull alike.
     ///
     /// Read on the shelter lattice, which is far coarser than the corner grid
     /// [`Ground::lit`] walks — see [`protocol::ground::SHELTER_METRES`] — and

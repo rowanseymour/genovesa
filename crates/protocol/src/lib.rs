@@ -120,20 +120,13 @@ pub const LIGHT_AIR: f32 = 1.5;
 
 /// The wind actually blowing at a point: the world's wind, cut down by how
 /// exposed the point is — `exposure` in `0.0..=1.0` as
-/// [`ground::shelter_across`] gives it, `1.0` being open water.
-///
-/// The bearing is untouched. Real air bends round a headland as well as
-/// slowing behind it, and this deliberately does not: a heading is what a
-/// player steers by, and one that swung with the coast would be a boat
-/// disagreeing with its own compass for reasons nothing on screen explains.
-/// The strength alone is what a lee is *for*.
-///
-/// Floored at [`LIGHT_AIR`], never scaled into it, so the deepest lee in a
-/// gale is still a sailable breeze and the deepest lee in a calm is simply
-/// the calm. Both ends call this rather than each applying the fraction its
-/// own way — the server owns the wind, but a hull's drive and the sea's
-/// height are read from it on the client, and one of them arriving at a
-/// different number would be a boat sailing a wind the water is not wearing.
+/// [`ground::shelter_across`] gives it, `1.0` being open water. Strength
+/// only: real air bends round a headland too, but a heading that swung with
+/// the coast would be a boat disagreeing with its own compass for reasons
+/// nothing on screen explains. Floored at [`LIGHT_AIR`], never scaled into
+/// it, so the deepest lee in a gale is a sailable breeze and the deepest lee
+/// in a calm is the calm. One function for both ends, so a hull's drive and
+/// the water it sits in are never read off different winds.
 pub fn sheltered(wind: Vec2, exposure: f32) -> Vec2 {
     let strength = wind.length();
     if strength <= LIGHT_AIR {
@@ -669,14 +662,9 @@ pub enum ToClient {
     /// quarter — [`ground::SHELTER_COUNT`] lattice points, row-major and
     /// south-west first, read back by [`ground::shelter_across`]. `None`
     /// means open to the wind from everywhere, which is most of the sea.
-    ///
-    /// Beside the ground rather than inside it because the two answers do
-    /// not go together. A chunk of bare ocean bed needs no payload and is
-    /// precisely the water an island's headlands shelter — the whole skirt
-    /// of every island is like this — so a lee carried inside the payload
-    /// could only be sent by sending the flat bed with it, at eighty
-    /// kilobytes and a mesh apiece to say what six hundred bytes says. And a
-    /// chunk of *land* wants both: a bay has ground under it.
+    /// Beside the ground rather than inside it because a chunk of bare bed
+    /// needs no payload and is exactly the water a headland shelters — the
+    /// [`ground`] module's shelter note has the arithmetic.
     Chunk {
         chunk: IVec2,
         shelter: Option<Vec<ground::Exposure>>,

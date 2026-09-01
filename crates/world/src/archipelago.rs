@@ -36,6 +36,7 @@ use glam::{IVec2, UVec2, Vec2, Vec3};
 use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH};
 
 use crate::noise::smoothstep;
+use crate::raster::{hands, Raster};
 use crate::shelter::Shelter;
 use crate::sunlight::Sunlight;
 use crate::terrain::{
@@ -43,7 +44,7 @@ use crate::terrain::{
     MapConfig, TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
 };
 
-pub use protocol::ground::{chunk_at, Exposure, CHUNK_METRES, EXPOSED};
+pub use protocol::ground::{chunk_at, Exposure, CELL_METRES, CHUNK_METRES, EXPOSED};
 
 /// Depth of the open ocean floor between islands, in metres. The same floor
 /// every island's own sea bed is clamped to, so an island's rim and the ocean
@@ -424,13 +425,15 @@ impl Island {
                 None => surface,
             }
         };
-        // By reference, so the one closure serves both bakes: `&F` is itself
-        // an `Fn` and is `Copy`, where handing the closure over would move it
-        // into whichever bake ran first.
-        let surface = &surface;
+        // Sampled once, on the wire's own grid, and both bakes read it: the
+        // wind's bake takes every fourth point of the sun's rather than
+        // asking the terrain again. The lee is faded out across the skirt,
+        // so it has died by the edge of what this island answers for — see
+        // `crate::shelter`'s header for why the box is where it must die.
         let (lo, hi) = (lo.as_vec2() * CHUNK_METRES, hi.as_vec2() * CHUNK_METRES);
-        let sunlight = Sunlight::bake(lo, hi, surface);
-        let shelter = Shelter::bake(lo, hi, surface);
+        let ground = Raster::sample(lo, hi, CELL_METRES, surface, hands());
+        let sunlight = Sunlight::bake(&ground);
+        let shelter = Shelter::bake(&ground, SKIRT_METRES);
         Self {
             spec,
             generator,
@@ -888,20 +891,10 @@ impl Archipelago {
 
     /// How much of the wind reaches one chunk, from each quarter — the
     /// lattice [`protocol::ToClient::Chunk`] carries, or `None` for a chunk
-    /// open to the wind from everywhere.
-    ///
-    /// Separate from [`Archipelago::chunk_payload`] because the two answers
-    /// do not go together, and the case that separates them is the common
-    /// one rather than a corner: most of the chunks an island answers for are
-    /// bare ocean bed with no payload at all, and those are exactly the water
-    /// its headlands shelter. A skerry is the sharpest version — its lee
-    /// reaches past its own shelf into chunks that carry nothing — but every
-    /// island's skirt is the same shape of answer.
-    ///
-    /// `None` where no island answers for the chunk, since the open sea
-    /// between islands is sheltered by nothing, and `None` again where the
-    /// lattice came back untouched — the absence being worth saying outright,
-    /// exactly as it is for a chunk with no lake on it.
+    /// open to the wind from everywhere: where no island answers for it, and
+    /// where the lattice came back untouched, the absence being worth saying
+    /// outright exactly as it is for a chunk with no lake on it. Why this is
+    /// not part of [`Archipelago::chunk_payload`] is the wire's own doc.
     pub fn chunk_shelter(&self, chunk: IVec2) -> Option<Vec<Exposure>> {
         let island = self.island(self.island_at_chunk(chunk)?);
         let base = chunk.as_vec2() * CHUNK_METRES;
@@ -1270,7 +1263,7 @@ mod tests {
         let world = world(1);
         let spec = specs(&world)
             .into_iter()
-            .min_by_key(|s| s.chunks.x * s.chunks.y)
+            .max_by_key(|s| s.chunks.x * s.chunks.y)
             .expect("some island");
         let (min, max) = spec.covered();
 
@@ -1331,6 +1324,15 @@ mod tests {
     /// What one client's arrival costs a server: every chunk within a
     /// streaming radius of where a world is entered, made and measured.
     ///
+    /// What a chunk's lee costs on the wire, if it carries one — the part of
+    /// an arrival the ground/water split above cannot see, since open water
+    /// in a lee is answered with a lattice and nothing else.
+    fn world_shelter_bytes(world: &Archipelago, chunk: IVec2) -> usize {
+        world
+            .chunk_shelter(chunk)
+            .map_or(0, |_| protocol::ground::SHELTER_BYTES)
+    }
+
     /// The number that matters for the shape of the whole arrangement — a
     /// client asks for all of these at once, and the server has to make them
     /// and put them on a socket. The water is nearly free at both ends; the
@@ -1356,17 +1358,22 @@ mod tests {
             let (mut ground, mut water, mut lakes, mut bytes) = (0, 0, 0, 0usize);
             for dz in -reach..=reach {
                 for dx in -reach..=reach {
-                    match world.chunk_payload(middle + IVec2::new(dx, dz)) {
+                    let chunk = middle + IVec2::new(dx, dz);
+                    match world.chunk_payload(chunk) {
                         Some(payload) => {
                             ground += 1;
                             lakes += payload.water.is_some() as u32;
+                            bytes += world_shelter_bytes(&world, chunk);
                             bytes += protocol::ground::payload_bytes(
                                 payload.water.is_some(),
                                 payload.plants.len(),
                             );
                             std::hint::black_box(&payload);
                         }
-                        None => water += 1,
+                        None => {
+                            water += 1;
+                            bytes += world_shelter_bytes(&world, chunk);
+                        }
                     }
                 }
             }
@@ -1379,6 +1386,55 @@ mod tests {
                 "seed {seed:>9}  {ground:>4} ground ({lakes:>3} with lakes)  {water:>4} water  \
                  {:>6.1} MB  {elapsed:>8.0?}",
                 bytes as f32 / (1024.0 * 1024.0)
+            );
+        }
+    }
+
+    #[test]
+    fn the_lee_dies_inside_the_islands_own_box() {
+        // The seam the fade exists to remove, checked on real islands rather
+        // than a fixture wall: every lattice point on the boundary of what an
+        // island answers for reads open, so the chunk past it — open sea to
+        // every client, or a neighbour's skirt — meets it without a step. And
+        // one lattice row inside, the fade has already begun to let the lee
+        // through somewhere, or the fade band is wider than it says.
+        let world = world(20040112);
+        let mut specs = specs(&world);
+        specs.sort_by_key(|s| s.chunks.x * s.chunks.y);
+        for spec in [
+            specs[0],
+            specs[specs.len() / 2],
+            *specs.last().expect("an island"),
+        ] {
+            let island = world.island(spec);
+            let (lo, hi) = spec.covered();
+            let (lo, hi) = (lo.as_vec2() * CHUNK_METRES, hi.as_vec2() * CHUNK_METRES);
+            let step = protocol::ground::SHELTER_METRES;
+            let mut inside_the_ring = false;
+            let mut x = lo.x;
+            while x <= hi.x {
+                let mut z = lo.y;
+                while z <= hi.y {
+                    let on_edge = x == lo.x || x == hi.x || z == lo.y || z == hi.y;
+                    let read = island.shelter(x, z);
+                    if on_edge {
+                        assert_eq!(
+                            read,
+                            [EXPOSED; protocol::ground::BEARINGS],
+                            "island {:?} still shelters the edge of its box at ({x}, {z})",
+                            spec.chunks
+                        );
+                    } else if read != [EXPOSED; protocol::ground::BEARINGS] {
+                        inside_the_ring = true;
+                    }
+                    z += step;
+                }
+                x += step;
+            }
+            assert!(
+                inside_the_ring,
+                "island {:?} shelters nothing at all inside its box",
+                spec.chunks
             );
         }
     }
