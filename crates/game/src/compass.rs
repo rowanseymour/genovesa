@@ -985,12 +985,18 @@ fn end_window(offset: f32) -> f32 {
     ((TRACK - offset.abs()) / END_FADE).clamp(0.0, 1.0)
 }
 
-/// Blows the stream along the wind the sea is drawn under.
+/// Blows the stream along the wind where the player is.
 ///
-/// The drawn wind, not the forecast — [`SeaConditions::wind`] — for the
+/// The drawn wind, not the forecast — [`SeaConditions::wind_at`] — for the
 /// reason the card reads the camera's eased yaw: an instrument that arrived
 /// at the new weather before the water did would be pointing at a sea that
-/// is not there yet.
+/// is not there yet. And the wind *here*, cut down by whatever land stands
+/// upwind, rather than the weather's over the whole world: the card is the
+/// player's instrument, its pace and ink are what they read a hull's speed
+/// from, and a card streaming a gale over a hull crawling in a lee would be
+/// the boat disagreeing with its own compass — the one thing
+/// [`protocol::sheltered`] is built to prevent. Outside a match there is no
+/// "here", and the stream flies the weather's own wind.
 ///
 /// A calm leaves the rotation alone, so the stream fades out where it last
 /// pointed and comes back wherever the new wind is — and the drift dies with
@@ -999,11 +1005,16 @@ fn end_window(offset: f32) -> f32 {
 fn drive_the_stream(
     time: Res<Time>,
     conditions: Res<SeaConditions>,
+    ground: Option<Res<Ground>>,
+    player: PlayerPlace,
     mut streams: Query<(&mut WindStream, &mut UiTransform)>,
     mut chevrons: Query<(&Chevron, &mut UiTransform), Without<WindStream>>,
     mut ink: Query<(&ChevronInk, &mut BackgroundColor)>,
 ) {
-    let wind = conditions.wind();
+    let wind = match player.at() {
+        Some(at) => conditions.wind_at(ground.as_deref(), at.xz()),
+        None => conditions.wind(),
+    };
     let speed = wind.length();
     let alpha = wind_ink(speed);
 
@@ -1397,7 +1408,7 @@ mod tests {
         let mut ground = Ground::default();
         // Due east of the origin, well inside sight.
         let island = IVec2::new(3, 0);
-        ground.deliver(island, Some(a_hill()));
+        ground.deliver(island, None, Some(a_hill()));
 
         let found = land_in_sight(&ground, &Chart::default(), Vec2::splat(CHUNK_METRES / 2.0));
         let lit: Vec<usize> = (0..SECTORS).filter(|s| found[*s].is_some()).collect();
@@ -1424,12 +1435,62 @@ mod tests {
     #[test]
     fn the_ground_underfoot_marks_nothing() {
         let mut ground = Ground::default();
-        ground.deliver(IVec2::ZERO, Some(a_hill()));
+        ground.deliver(IVec2::ZERO, None, Some(a_hill()));
 
         let found = land_in_sight(&ground, &Chart::default(), Vec2::splat(CHUNK_METRES / 2.0));
         assert!(
             found.iter().all(Option::is_none),
             "the chunk the player stands on claimed a bearing"
+        );
+    }
+
+    #[test]
+    fn the_stream_flies_the_wind_where_the_player_is() {
+        // One world with a lee on one side of a chunk line and open water on
+        // the other, the same gale over both, and the player stood first on
+        // one side and then the other. The ink is the strength reading, and
+        // it has to be the strength *here*: a card that streamed the weather's
+        // gale over a player in a lee would be the boat disagreeing with its
+        // own compass, which is exactly what reading the local wind is for.
+        // A gale rather than the reference breeze, since only past the
+        // wire's floor does the lee move the ink at all.
+        use protocol::ground::{BEARINGS, LEAST_EXPOSURE, SHELTER_COUNT};
+        let most_ink = |x: f32| -> f32 {
+            let mut app = test_app();
+            let mut ground = Ground::default();
+            let deepest = (LEAST_EXPOSURE * 255.0).round() as u8;
+            ground.deliver(
+                IVec2::new(-1, 0),
+                Some(vec![[deepest; BEARINGS]; SHELTER_COUNT]),
+                None,
+            );
+            ground.deliver(IVec2::ZERO, None, None);
+            app.insert_resource(ground);
+            app.insert_resource(SeaConditions::blowing(Vec2::new(0.0, -16.0)));
+            app.world_mut()
+                .spawn((Player, Transform::from_xyz(x, 0.0, CHUNK_METRES / 2.0)));
+            app.update();
+            app.world_mut()
+                .query_filtered::<&BackgroundColor, With<ChevronInk>>()
+                .iter(app.world())
+                .map(|colour| colour.0.alpha())
+                .fold(0.0, f32::max)
+        };
+        let open = most_ink(CHUNK_METRES / 2.0);
+        let lee = most_ink(-CHUNK_METRES / 2.0);
+        assert!(
+            lee < open,
+            "the stream carried {lee} of its ink in the lee against {open} in the open"
+        );
+        // And what it shows in the lee is the wind the hull would sail, not
+        // something of its own: the ink of exactly `sheltered`'s answer, read
+        // off the byte the lattice actually stores rather than the constant
+        // it was rounded from.
+        let deepest = (LEAST_EXPOSURE * 255.0).round() / 255.0;
+        let sailed = protocol::sheltered(Vec2::new(0.0, -16.0), deepest);
+        assert!(
+            (lee - wind_ink(sailed.length())).abs() < 1e-5,
+            "the lee's ink {lee} is not the ink of the sheltered wind"
         );
     }
 
@@ -1439,7 +1500,7 @@ mod tests {
         let mut app = test_app();
 
         let mut ground = Ground::default();
-        ground.deliver(IVec2::new(3, 0), Some(a_hill()));
+        ground.deliver(IVec2::new(3, 0), None, Some(a_hill()));
         app.insert_resource(ground);
         app.insert_resource(Chart::default());
 
@@ -1490,7 +1551,7 @@ mod tests {
         // A chunk the server sent for the shelf around an island, every corner
         // of it under water. Ground, but not land.
         let mut shelf = Ground::default();
-        shelf.deliver(IVec2::new(3, 0), Some(a_shoal()));
+        shelf.deliver(IVec2::new(3, 0), None, Some(a_shoal()));
         assert!(
             land_in_sight(&shelf, &chart, at)
                 .iter()
@@ -1505,7 +1566,7 @@ mod tests {
         // beyond sight.
         let beyond = (SIGHT / CHUNK_METRES).ceil() as i32;
         let mut far = Ground::default();
-        far.deliver(IVec2::new(beyond, 0), Some(a_hill()));
+        far.deliver(IVec2::new(beyond, 0), None, Some(a_hill()));
         assert!(
             land_in_sight(&far, &chart, at).iter().all(Option::is_none),
             "land past the haze was marked"

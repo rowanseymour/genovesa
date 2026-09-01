@@ -1789,6 +1789,7 @@ fn sail_trim(bow: Vec2, wind: Vec2) -> f32 {
 /// under full sail.
 fn trim_the_sails(
     conditions: Res<sea::SeaConditions>,
+    ground: Option<Res<Ground>>,
     boats: Hulls<Without<Sail>>,
     mut sails: Query<(&ChildOf, &mut Transform, &mut Visibility), With<Sail>>,
 ) {
@@ -1808,7 +1809,8 @@ fn trim_the_sails(
             *visibility = shown;
         }
         if set {
-            let trimmed = Quat::from_rotation_y(sail_trim(hull.forward().xz(), conditions.wind()));
+            let wind = conditions.wind_at(ground.as_deref(), hull.translation.xz());
+            let trimmed = Quat::from_rotation_y(sail_trim(hull.forward().xz(), wind));
             if transform.rotation != trimmed {
                 transform.rotation = trimmed;
             }
@@ -1853,6 +1855,7 @@ fn pennant_pose(apparent: Vec2, flying: f32) -> (f32, f32) {
 fn fly_the_pennant(
     time: Res<Time>,
     conditions: Res<sea::SeaConditions>,
+    ground: Option<Res<Ground>>,
     boats: Hulls<Without<Pennant>>,
     mut pennants: Query<(&mut Pennant, &ChildOf, &mut Transform)>,
 ) {
@@ -1860,9 +1863,11 @@ fn fly_the_pennant(
         let Ok((boat, hull)) = boats.get(of.parent()) else {
             continue;
         };
-        // Every flag in the world flies on the same wind. Our own hull adds
-        // the wind of its way; a told hull's way is not on the wire, so its
-        // flag reads the true wind alone — moored hulls have no way anyway.
+        // Each flag flies on the wind where its own hull lies, which is how a
+        // boat rounding a point sees its pennant fall before anything else
+        // tells it the wind has gone. Our own hull adds the wind of its way;
+        // a told hull's way is not on the wire, so its flag reads the true
+        // wind alone — moored hulls have no way anyway.
         let way = boat.map_or(0.0, |boat| boat.way);
         // A pennant is only ever spawned on a masted rig — the rowboat flies
         // nothing — so a flag on a hull with no [`Boat`] is a moored ship's,
@@ -1871,7 +1876,8 @@ fn fly_the_pennant(
             continue;
         };
         let masthead = Vec3::new(0.0, mast.head, mast.station);
-        let apparent = conditions.wind() - hull.forward().xz() * way;
+        let here = conditions.wind_at(ground.as_deref(), hull.translation.xz());
+        let apparent = here - hull.forward().xz() * way;
         let (bearing, droop) = pennant_pose(apparent, pennant.bearing);
         pennant.bearing = bearing;
 
@@ -2342,18 +2348,24 @@ pub(crate) fn steer(
         transform.rotate_y(helm * hull.turn_rate * time.delta_secs());
     }
 
+    // The wind where the hull actually is, which behind a headland is not the
+    // wind out at sea — see [`sea::SeaConditions::wind_at`]. Read after the
+    // helm for the same reason the drive is, and read once: a sail's drive
+    // and the boom laid on it must not be answering different winds.
+    let wind = conditions.wind_at(ground, transform.translation.xz());
+
     // The target after the helm, so the drive is read off the heading this
     // frame settled on — the same rule the grounding poses live by.
     let astern = !boat.sails_set && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
     let target = if boat.sails_set {
         match hull.mast {
-            Some(_) => hull.speed * sail_drive(transform.forward().xz(), conditions.wind()),
+            Some(_) => hull.speed * sail_drive(transform.forward().xz(), wind),
             // Rowed: the oars pull whatever the wind is doing, and what the
             // wind does is help or hinder them — see [`row_drive`]. Even
             // within a stroke still: the hull glides at one speed while the
             // blades circle, and giving the surge to the stroke is the step
             // not yet taken.
-            None => hull.speed * row_drive(transform.forward().xz(), conditions.wind()),
+            None => hull.speed * row_drive(transform.forward().xz(), wind),
         }
     } else if astern {
         -hull.astern_speed
@@ -4406,6 +4418,7 @@ mod tests {
             offshore,
             elapsed(&app),
             -ground(&app, offshore),
+            1.0,
         );
         assert_eq!(
             floated, water,
@@ -4488,6 +4501,7 @@ mod tests {
                     Vec2::new(point.x, point.z),
                     elapsed(&app),
                     depth,
+                    1.0,
                 )
             };
             let asks_pitch = water_at(Vec3::new(0.0, 0.0, -SHIP.length / 2.0))
@@ -4683,6 +4697,62 @@ mod tests {
     }
 
     #[test]
+    fn a_boat_in_a_lee_sails_slower_than_one_in_the_open() {
+        // The whole point of the shelter, end to end: the same hull, the same
+        // heading relative to the wind, the same weather, the same *world* —
+        // one of them in the lee and one in the open, on opposite sides of
+        // the island. One world rather than two, so that what the drive reads
+        // can only be the wind *where the boat is*: a reading that ignored the
+        // hull's position and took the world's would give both boats one
+        // speed, and this would see it.
+        let sailed = |side: f32| {
+            let mut app = test_app();
+            app.insert_resource(crate::testing::lee_to_the_west());
+            // Facing away from the island on each side, so the two runs are
+            // mirror images and the ground under them is the same shape.
+            place(
+                &mut app,
+                Vec2::new(side * (TEST_ISLAND_REACH + 100.0), 0.0),
+                Vec2::new(side, 0.0),
+            );
+            wind_astern(&mut app, 12.0);
+            tap(&mut app, KeyCode::ArrowUp);
+            run_frames(&mut app, SETTLED);
+
+            let before = boat(&mut app).translation;
+            let start = elapsed(&app);
+            run_frames(&mut app, 60);
+            (boat(&mut app).translation - before).length() / (elapsed(&app) - start)
+        };
+
+        let open = sailed(1.0);
+        let lee = sailed(-1.0);
+        // The fixture's lee is the deepest a server sends, so what is
+        // asserted is the real effect at the real floor, with a little room
+        // either side: the exact figure is DRIVE_BAND's and the wire's to
+        // decide between them, and a test that pinned it would be pinning
+        // two other files' constants. How much of the weather a sail feels
+        // is the band's business; the shelter's business is that it is the
+        // weather *here*.
+        let floor = protocol::sheltered(Vec2::new(12.0, 0.0), protocol::ground::LEAST_EXPOSURE);
+        let least = strength(floor.length()) / strength(12.0);
+        assert!(
+            lee < open * (least + 0.05),
+            "the lee made {lee} m/s against {open} in the open, which is barely sheltered"
+        );
+        assert!(
+            lee > open * (least - 0.05),
+            "the lee made {lee} m/s against {open}, deeper than the wire's floor allows"
+        );
+        // And still sailing: a lee is a quiet corner of the weather, never a
+        // hole in it — see `protocol::LIGHT_AIR`, which is what holds this.
+        assert!(
+            lee > 0.0,
+            "the lee becalmed the boat outright, which the light-air floor forbids"
+        );
+    }
+
+    #[test]
     fn a_boat_put_down_inland_drives_back_to_the_sea() {
         // What a `focus` on an island leaves behind, and the case that says
         // the ground holds a boat without ever trapping one.
@@ -4710,7 +4780,12 @@ mod tests {
             .expect("the boat sailed off the ground it was given");
         assert_eq!(
             at.y,
-            crate::sea::SeaConditions::default().swell(Vec2::new(at.x, at.z), elapsed(&app), depth),
+            crate::sea::SeaConditions::default().swell(
+                Vec2::new(at.x, at.z),
+                elapsed(&app),
+                depth,
+                1.0
+            ),
             "the boat never made it back to the water"
         );
         let afloat = from_the_island(&mut app);

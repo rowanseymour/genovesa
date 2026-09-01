@@ -36,13 +36,15 @@ use glam::{IVec2, UVec2, Vec2, Vec3};
 use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH};
 
 use crate::noise::smoothstep;
+use crate::raster::{hands, Raster};
+use crate::shelter::Shelter;
 use crate::sunlight::Sunlight;
 use crate::terrain::{
-    cell_materials, corner_heights, corner_lit, corner_water, normal_at, Ground, MapConfig,
-    TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
+    cell_materials, corner_heights, corner_lit, corner_water, normal_at, shelter_lattice, Ground,
+    MapConfig, TerrainGenerator, CHUNK_TILES, MAX_DEPTH, TILE_SIZE,
 };
 
-pub use protocol::ground::{chunk_at, CHUNK_METRES};
+pub use protocol::ground::{chunk_at, Exposure, CELL_METRES, CHUNK_METRES, EXPOSED};
 
 /// Depth of the open ocean floor between islands, in metres. The same floor
 /// every island's own sea bed is clamped to, so an island's rim and the ocean
@@ -400,31 +402,43 @@ pub struct Island {
     /// lakes already flooded, because only whoever holds the whole island
     /// can say. See [`crate::sunlight`].
     sunlight: Sunlight,
+    /// How much of the wind reaches every point of the island, from each
+    /// quarter — baked here for the same reason and off the same surface as
+    /// `sunlight`, a headland's lee being as much an island-wide question as
+    /// its shadow. See [`crate::shelter`].
+    shelter: Shelter,
 }
 
 impl Island {
     fn generate(spec: IslandSpec) -> Self {
         let generator = TerrainGenerator::new(&spec.config());
         // Over every chunk the island answers for, reading the surface the
-        // sun actually strikes: the ground, the sea over the drowned shelf,
-        // or the lake standing in a basin.
+        // sun strikes and the wind crosses — which is one surface, so the two
+        // bakes share one reading of it: the ground, the sea over the drowned
+        // shelf, or the lake standing in a basin, whichever is on top.
         let (lo, hi) = spec.covered();
-        let sunlight = Sunlight::bake(
-            lo.as_vec2() * CHUNK_METRES,
-            hi.as_vec2() * CHUNK_METRES,
-            |wx, wz| {
-                let surface = ground_height(&spec, &generator, wx, wz).max(0.0);
-                let local = Vec2::new(wx, wz) - spec.centre();
-                match generator.lake_level(local.x, local.y) {
-                    Some(level) => surface.max(level),
-                    None => surface,
-                }
-            },
-        );
+        let surface = |wx: f32, wz: f32| {
+            let surface = ground_height(&spec, &generator, wx, wz).max(0.0);
+            let local = Vec2::new(wx, wz) - spec.centre();
+            match generator.lake_level(local.x, local.y) {
+                Some(level) => surface.max(level),
+                None => surface,
+            }
+        };
+        // Sampled once, on the wire's own grid, and both bakes read it: the
+        // wind's bake takes every fourth point of the sun's rather than
+        // asking the terrain again. The lee is faded out across the skirt,
+        // so it has died by the edge of what this island answers for — see
+        // `crate::shelter`'s header for why the box is where it must die.
+        let (lo, hi) = (lo.as_vec2() * CHUNK_METRES, hi.as_vec2() * CHUNK_METRES);
+        let ground = Raster::sample(lo, hi, CELL_METRES, surface, hands());
+        let sunlight = Sunlight::bake(&ground);
+        let shelter = Shelter::bake(&ground, SKIRT_METRES);
         Self {
             spec,
             generator,
             sunlight,
+            shelter,
         }
     }
 
@@ -471,6 +485,14 @@ impl Island {
     /// [`protocol::ground::ChunkPayload::lit`] for what the pair means.
     pub fn lit(&self, wx: f32, wz: f32) -> [u8; 2] {
         self.sunlight.at(wx, wz)
+    }
+
+    /// How much of the wind reaches a world point from each quarter — the
+    /// island's bake, read back for every lattice point a payload carries.
+    /// See [`protocol::ToClient::Chunk`] for what the eight
+    /// bytes mean.
+    pub fn shelter(&self, wx: f32, wz: f32) -> Exposure {
+        self.shelter.at(wx, wz)
     }
 }
 
@@ -865,6 +887,23 @@ impl Archipelago {
             water: corner_water(base, &heights, |wx, wz| island.lake_level(wx, wz)),
             plants: crate::plants::plants(&island, chunk),
         })
+    }
+
+    /// How much of the wind reaches one chunk, from each quarter — the
+    /// lattice [`protocol::ToClient::Chunk`] carries, or `None` for a chunk
+    /// open to the wind from everywhere: where no island answers for it, and
+    /// where the lattice came back untouched, the absence being worth saying
+    /// outright exactly as it is for a chunk with no lake on it. Why this is
+    /// not part of [`Archipelago::chunk_payload`] is the wire's own doc.
+    pub fn chunk_shelter(&self, chunk: IVec2) -> Option<Vec<Exposure>> {
+        let island = self.island(self.island_at_chunk(chunk)?);
+        let base = chunk.as_vec2() * CHUNK_METRES;
+        let lattice = shelter_lattice(base, |wx, wz| island.shelter(wx, wz));
+        lattice
+            .iter()
+            .flatten()
+            .any(|point| *point != EXPOSED)
+            .then_some(lattice)
     }
 
     /// One chunk's corner heights alone, quantised exactly as
@@ -1285,6 +1324,15 @@ mod tests {
     /// What one client's arrival costs a server: every chunk within a
     /// streaming radius of where a world is entered, made and measured.
     ///
+    /// What a chunk's lee costs on the wire, if it carries one — the part of
+    /// an arrival the ground/water split above cannot see, since open water
+    /// in a lee is answered with a lattice and nothing else.
+    fn world_shelter_bytes(world: &Archipelago, chunk: IVec2) -> usize {
+        world
+            .chunk_shelter(chunk)
+            .map_or(0, |_| protocol::ground::SHELTER_BYTES)
+    }
+
     /// The number that matters for the shape of the whole arrangement — a
     /// client asks for all of these at once, and the server has to make them
     /// and put them on a socket. The water is nearly free at both ends; the
@@ -1310,17 +1358,22 @@ mod tests {
             let (mut ground, mut water, mut lakes, mut bytes) = (0, 0, 0, 0usize);
             for dz in -reach..=reach {
                 for dx in -reach..=reach {
-                    match world.chunk_payload(middle + IVec2::new(dx, dz)) {
+                    let chunk = middle + IVec2::new(dx, dz);
+                    match world.chunk_payload(chunk) {
                         Some(payload) => {
                             ground += 1;
                             lakes += payload.water.is_some() as u32;
+                            bytes += world_shelter_bytes(&world, chunk);
                             bytes += protocol::ground::payload_bytes(
                                 payload.water.is_some(),
                                 payload.plants.len(),
                             );
                             std::hint::black_box(&payload);
                         }
-                        None => water += 1,
+                        None => {
+                            water += 1;
+                            bytes += world_shelter_bytes(&world, chunk);
+                        }
                     }
                 }
             }
@@ -1333,6 +1386,120 @@ mod tests {
                 "seed {seed:>9}  {ground:>4} ground ({lakes:>3} with lakes)  {water:>4} water  \
                  {:>6.1} MB  {elapsed:>8.0?}",
                 bytes as f32 / (1024.0 * 1024.0)
+            );
+        }
+    }
+
+    #[test]
+    fn the_lee_dies_inside_the_islands_own_box() {
+        // The seam the fade exists to remove, checked on real islands rather
+        // than a fixture wall: every lattice point on the boundary of what an
+        // island answers for reads open, so the chunk past it — open sea to
+        // every client, or a neighbour's skirt — meets it without a step. And
+        // one lattice row inside, the fade has already begun to let the lee
+        // through somewhere, or the fade band is wider than it says.
+        let world = world(20040112);
+        let mut specs = specs(&world);
+        specs.sort_by_key(|s| s.chunks.x * s.chunks.y);
+        for spec in [
+            specs[0],
+            specs[specs.len() / 2],
+            *specs.last().expect("an island"),
+        ] {
+            let island = world.island(spec);
+            let (lo, hi) = spec.covered();
+            let (lo, hi) = (lo.as_vec2() * CHUNK_METRES, hi.as_vec2() * CHUNK_METRES);
+            let step = protocol::ground::SHELTER_METRES;
+            let mut inside_the_ring = false;
+            let mut x = lo.x;
+            while x <= hi.x {
+                let mut z = lo.y;
+                while z <= hi.y {
+                    let on_edge = x == lo.x || x == hi.x || z == lo.y || z == hi.y;
+                    let read = island.shelter(x, z);
+                    if on_edge {
+                        assert_eq!(
+                            read,
+                            [EXPOSED; protocol::ground::BEARINGS],
+                            "island {:?} still shelters the edge of its box at ({x}, {z})",
+                            spec.chunks
+                        );
+                    } else if read != [EXPOSED; protocol::ground::BEARINGS] {
+                        inside_the_ring = true;
+                    }
+                    z += step;
+                }
+                x += step;
+            }
+            assert!(
+                inside_the_ring,
+                "island {:?} shelters nothing at all inside its box",
+                spec.chunks
+            );
+        }
+    }
+
+    #[test]
+    fn every_seed_raises_islands_with_water_in_their_lee() {
+        // What is under test is not a number but that the shelter *means*
+        // something on real terrain: an island the wake bake found nothing to
+        // hide behind would pass every test in `crate::shelter`, all of which
+        // are written against walls and ridges put there on purpose.
+        //
+        // Three seeds rather than the nine a generator change is judged on,
+        // because an island costs a sunlight bake to raise and nine of them
+        // doubles this crate's whole test run. Run across nine while this was
+        // written, the share below came out between 0.74 and 0.90 — so the
+        // bar is a long way under anything a seed has produced, and what it
+        // is really watching for is the shelter going missing rather than
+        // going slightly thinner.
+        //
+        // The measure is directional on purpose too. A point sheltered from
+        // every quarter alike would be a bug — that is a hole in the weather,
+        // not a bay — so what is counted is water with a *spread*: some
+        // quarter it is tucked from while another is open. That is what makes
+        // an anchorage a choice rather than a place.
+        for seed in [20040112, 512, 31_337] {
+            let world = world(seed);
+            let spec = *specs(&world)
+                .iter()
+                .max_by_key(|s| s.chunks.x * s.chunks.y)
+                .expect("a seed with an island in the window");
+            let island = world.island(spec);
+            let centre = spec.centre();
+            let reach = spec.extent().max_element() * 0.6;
+
+            let (mut water, mut tucked) = (0, 0);
+            let mut wz = -reach;
+            while wz < reach {
+                let mut wx = -reach;
+                while wx < reach {
+                    let at = centre + Vec2::new(wx, wz);
+                    // Water a boat could actually be in: off the beach, and
+                    // not out over the ocean floor.
+                    if (-9.0..-0.5).contains(&island.height(at.x, at.y)) {
+                        water += 1;
+                        let e = island.shelter(at.x, at.y);
+                        let lo = *e.iter().min().expect("eight bearings") as i32;
+                        let hi = *e.iter().max().expect("eight bearings") as i32;
+                        if hi - lo > EXPOSED as i32 / 3 {
+                            tucked += 1;
+                        }
+                    }
+                    wx += 32.0;
+                }
+                wz += 32.0;
+            }
+
+            assert!(water > 100, "seed {seed}'s biggest island has no coast");
+            let share = tucked as f32 / water as f32;
+            println!(
+                "seed {seed}: {tucked} of {water} coastal samples in a lee ({:.0}%)",
+                100.0 * share
+            );
+            assert!(
+                share > 0.25,
+                "seed {seed} shelters {share:.2} of its coastal water, so its islands cast no lee"
             );
         }
     }
@@ -1391,7 +1558,12 @@ mod tests {
         // there is no lake — which is what makes its absence part of what is
         // pinned: a chunk that gained or lost standing water changes this
         // digest by the whole length of a grid. The lit grid goes in
-        // unconditionally, which pins the sunlight bake with it.
+        // unconditionally, which pins the sunlight bake with it, and the
+        // chunk's shelter lattice does the same for the wake bake — a lee
+        // that came out a different size on another machine would mean a seed
+        // whose bays are somewhere else to sail into. It is fetched
+        // separately because a lee travels beside the ground rather than
+        // inside it; see `Archipelago::chunk_shelter`.
         let middle = chunk_at(centre);
         let payload = world
             .chunk_payload(middle)
@@ -1403,6 +1575,14 @@ mod tests {
                 .flat_map(|h| h.to_le_bytes())
                 .chain(payload.materials.iter().map(|tone| tone.to_byte()))
                 .chain(payload.lit.iter().flatten().copied())
+                .chain(
+                    world
+                        .chunk_shelter(middle)
+                        .iter()
+                        .flatten()
+                        .flatten()
+                        .copied(),
+                )
                 .chain(payload.water.iter().flatten().flat_map(|w| w.to_le_bytes())),
         );
 
@@ -1412,7 +1592,7 @@ mod tests {
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0x49FB_11E9_A669_3026, "the ground changed");
         assert_eq!(
-            sent, 0x8F79_73FD_997A_6EFE,
+            sent, 0x2E33_668B_BA31_FF9B,
             "what a client would be sent changed"
         );
     }
