@@ -130,14 +130,18 @@ pub fn enter_world(app: &mut App) {
 
 /// How long a test waits before calling something a failure rather than a
 /// slow machine. Only ever paid in full by a test that was going to fail
-/// anyway, so it can afford to be generous.
-const PATIENCE: Duration = Duration::from_secs(5);
+/// anyway, so it can afford to be generous — and the slow machine to be
+/// generous towards is a CI runner, an order of magnitude behind a laptop and
+/// running every test in the binary at once. Five seconds was enough here and
+/// not there: opening a world and joining it takes a fraction of a second on
+/// a laptop and lost a five-second bound on a loaded runner.
+pub const PATIENCE: Duration = Duration::from_secs(30);
 
 /// Runs frames until the condition holds.
 ///
 /// The waiting is legitimate and the deadline is what keeps it honest: what
 /// these tests are waiting on crosses a real socket and a thread, so a frame
-/// or two is ordinary and five seconds is a hang. `what` is the condition in
+/// or two is ordinary and [`PATIENCE`] is a hang. `what` is the condition in
 /// words, so a timeout says which one never came true rather than only that
 /// one didn't.
 pub fn run_until(app: &mut App, what: &str, mut done: impl FnMut(&mut App) -> bool) {
