@@ -715,7 +715,9 @@ impl SeaConditions {
     /// eased wind rather than the forecast, which is what anything *reading*
     /// the weather wants: an instrument settling on a new wind at a different
     /// rate from the water under it would be telling the player about a sea
-    /// they cannot see. The compass's arm is drawn off this.
+    /// they cannot see. The weather's wind over the whole world; anything at
+    /// a place reads [`SeaConditions::wind_at`], which is this with the lee
+    /// taken off.
     pub fn wind(&self) -> Vec2 {
         self.wind
     }
@@ -811,14 +813,12 @@ impl SeaConditions {
     ///
     /// This rather than [`SeaConditions::wind`] is what anything *at a place*
     /// wants — a hull's drive, its trim, the pennant at its masthead, the
-    /// sound of the water round it. The compass card alone stays on the bare
-    /// wind, and that is a choice rather than an oversight: the card is the
-    /// *weather's* instrument and the pennant is the *place's*, and a player
-    /// tucked into a bay reads the pair together — a gale on the card and a
-    /// flag hanging slack is how the screen says "you are sheltered, and it
-    /// is still blowing out there". A card that fell with the pennant would
-    /// keep the two agreeing and lose the only thing that told the player
-    /// what leaving the bay would cost.
+    /// sound of the water round it, the compass card. Everything the player
+    /// reads agrees about one wind, the one they are in; what a lee costs to
+    /// leave is learned by leaving it, the pennant lifting as the point comes
+    /// abeam. The bare wind is left for the things that are about the sky
+    /// rather than a spot under it: the open sea's trains, and the bearing
+    /// the shelter itself is looked up by.
     pub fn wind_at(&self, ground: Option<&Ground>, at: Vec2) -> Vec2 {
         protocol::sheltered(self.wind, self.exposure(ground, at))
     }
