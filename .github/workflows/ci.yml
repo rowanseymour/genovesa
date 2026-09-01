@@ -57,10 +57,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # A test that fails only on the one platform nobody here can run is a test
-  # whose backtrace is the only evidence there is, and it costs a green run
-  # nothing.
-  RUST_BACKTRACE: 1
 
 jobs:
   # Formatting, linting and the tests in one job, which is one restore of a
@@ -136,6 +132,12 @@ jobs:
       # — cost and shape numbers to read, not thresholds to fail on — so they
       # stay ignored. Nothing here passes `--ignored`.
       - name: Tests
+        # A test that fails only on a runner has no evidence but its backtrace,
+        # and a green run pays nothing for it. On the step and not the job:
+        # rust-cache folds every RUST* variable it can see into its key, so a
+        # job-level one would key every branch away from the cache main saved.
+        env:
+          RUST_BACKTRACE: 1
         run: cargo test --workspace --locked
 
       # A doc link is how a comment stays true about code in another module —
@@ -164,8 +166,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # Held to the same rule as the Linux job: only main writes a cache.
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Engine-free tests
+        env:
+          RUST_BACKTRACE: 1
         run: cargo test --locked -p world -p protocol -p server
