@@ -103,15 +103,20 @@ pub fn chunk_at(point: Vec2) -> IVec2 {
 /// client to pick.
 pub const NORTH: Vec2 = Vec2::NEG_Y;
 
-/// How deep the open ocean's floor lies, in metres below sea level.
+/// How deep the sea is as far as a client can tell, in metres below sea
+/// level: the deepest ground that ever crosses the wire, and what an answer
+/// of *no ground* means.
 ///
-/// This is what an answer of *no ground* means. A chunk with no payload is
-/// not "unknown" and not "nothing" — it is flat floor at exactly this depth,
-/// which a client draws as a plane rather than as a mesh of thirty-odd
-/// thousand identical triangles. Every island's own sea bed is clamped to the same
-/// level, so the plane and the meshes meet along every coast with nothing to
-/// show for it; a client drawing its backdrop at some other depth would print
-/// a step around every island in the world.
+/// A chunk with no payload is not "unknown" and not "nothing" — it is open
+/// sea, at least this deep, which a client draws as a flat plane at exactly
+/// this depth rather than as a mesh of thirty-odd thousand identical
+/// triangles. Every island's own sea bed is let down to the same level, so
+/// the plane and the meshes meet along every coast with nothing to show for
+/// it; a backdrop at any other depth would print a step around every island.
+///
+/// The sea itself goes on down, hundreds of metres between islands, and that
+/// floor is the server's alone: water is blind well above this depth, so no
+/// client could draw it, and nothing a client is allowed to decide turns on it.
 pub const OCEAN_DEPTH: f32 = 10.0;
 
 /// The deepest water a boat's anchor holds in, in metres.

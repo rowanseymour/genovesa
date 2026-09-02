@@ -35,6 +35,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use glam::{IVec2, UVec2, Vec2, Vec3};
 use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH};
 
+use crate::deeps::{Deeps, Roughness, REACH};
 use crate::noise::smoothstep;
 use crate::raster::{hands, Raster};
 use crate::shelter::Shelter;
@@ -46,9 +47,10 @@ use crate::terrain::{
 
 pub use protocol::ground::{chunk_at, Exposure, CELL_METRES, CHUNK_METRES, EXPOSED};
 
-/// Depth of the open ocean floor between islands, in metres. The same floor
-/// every island's own sea bed is clamped to, so an island's rim and the ocean
-/// around it meet at one level.
+/// Where the open sea begins, in metres of depth: what every island's sea bed
+/// is let down to by the edge of its skirt, and what the floor between
+/// islands starts from before [`crate::deeps`] takes it on down — so an
+/// island's rim and the sea around it meet at one level.
 pub const OCEAN_DEPTH: f32 = MAX_DEPTH;
 
 // --- The layout --------------------------------------------------------------
@@ -113,6 +115,10 @@ const LAYERS: [Layer; 2] = [
         margin: 1,
     },
 ];
+
+/// The longest side any island can have, in metres — what bounds how far an
+/// island's shelf can reach, see [`crate::deeps::REACH`].
+pub(crate) const LARGEST_ISLAND: f32 = LAYERS[0].size.1 * CHUNK_METRES;
 
 /// Chunks of sea guaranteed between a small island's frame and a big one's,
 /// on top of each frame's own sea margin. Close enough that the small fry
@@ -237,7 +243,7 @@ fn skewed_small(u: f32) -> f32 {
 const SQUEEZE: f32 = 0.55;
 
 /// Chunks of ocean around an island's frame that still belong to it — where
-/// its sea bed is let down onto the flat ocean floor.
+/// its sea bed is let down to the top of the open sea's floor.
 ///
 /// The handover deliberately happens *outside* the frame, not in a band
 /// inside it. Inside the frame the island is its map, untouched to the last
@@ -350,6 +356,19 @@ impl IslandSpec {
     fn beyond_frame(&self, world: Vec2) -> f32 {
         let out = (world - self.centre()).abs() - self.extent() * 0.5;
         out.max(Vec2::ZERO).max_element()
+    }
+
+    /// How far past everything the island answers for — frame and skirt — a
+    /// world point stands, in metres; zero anywhere inside. Where the open
+    /// sea's shelf is measured from, see [`crate::deeps`]. Straight-line
+    /// distance to the cover's rectangle rather than the Chebyshev the skirt
+    /// is read across: zero along the whole cover edge either way, but past
+    /// the corners this rounds off, and a shelf drawn Chebyshev-fashion is a
+    /// square with the islet a dot in the middle of it.
+    pub fn beyond_cover(&self, world: Vec2) -> f32 {
+        let min = self.origin.as_vec2() * CHUNK_METRES - SKIRT_METRES;
+        let max = min + self.extent() + 2.0 * SKIRT_METRES;
+        world.distance(world.clamp(min, max))
     }
 }
 
@@ -524,6 +543,8 @@ fn ground_height(spec: &IslandSpec, generator: &TerrainGenerator, wx: f32, wz: f
 /// generates it, in whatever order its islands happen to be visited.
 pub struct Archipelago {
     seed: u32,
+    /// What roughens the floor of the sea between islands.
+    roughness: Roughness,
     /// Islands generated so far. The [`OnceLock`] is what makes concurrent
     /// demand cheap: the map is locked only long enough to find or add an
     /// island's slot, generation happens outside the lock, and two threads
@@ -536,6 +557,7 @@ impl Archipelago {
     pub fn new(config: &WorldConfig) -> Self {
         Self {
             seed: config.seed,
+            roughness: Roughness::new(config.seed),
             islands: RwLock::new(HashMap::new()),
         }
     }
@@ -816,12 +838,13 @@ impl Archipelago {
     }
 
     /// Terrain height at a world point, in metres, generating whatever island
-    /// owns the point. Sea level is 0 everywhere in the world; open ocean is
-    /// flat floor at -[`OCEAN_DEPTH`].
+    /// owns the point. Sea level is 0 everywhere in the world; between
+    /// islands it is the floor [`crate::deeps`] sounds — -[`OCEAN_DEPTH`] at
+    /// the edge of every island's cover, and deeper away from it.
     pub fn height(&self, wx: f32, wz: f32) -> f32 {
         match self.island_at(wx, wz) {
             Some(spec) => self.island(spec).height(wx, wz),
-            None => -OCEAN_DEPTH,
+            None => self.floor(Vec2::new(wx, wz)),
         }
     }
 
@@ -832,8 +855,29 @@ impl Archipelago {
     pub fn ready_height(&self, wx: f32, wz: f32) -> Option<f32> {
         match self.island_at(wx, wz) {
             Some(spec) => Some(self.ready_island(spec)?.height(wx, wz)),
-            None => Some(-OCEAN_DEPTH),
+            None => Some(self.floor(Vec2::new(wx, wz))),
         }
+    }
+
+    /// The floor of the open sea at one point — layout only, generating
+    /// nothing. Only meaningful where no island answers for the point, which
+    /// is the one place [`Archipelago::height`] asks it.
+    fn floor(&self, at: Vec2) -> f32 {
+        self.deeps(at, at).floor(at)
+    }
+
+    /// The floor of the sea across a region, prepared once to be sounded many
+    /// times — the islands whose shelves can reach into it are found here,
+    /// and nothing is generated. For a renderer walking a region pixel by
+    /// pixel; a single point is [`Archipelago::height`]'s to answer.
+    pub fn deeps(&self, min: Vec2, max: Vec2) -> Deeps<'_> {
+        let reach = Vec2::splat(REACH);
+        Deeps::new(
+            &self.roughness,
+            self.islands_within(min - reach, max + reach),
+            min,
+            max,
+        )
     }
 
     /// Surface normal at a world point, from central differences one tile out
@@ -1240,7 +1284,10 @@ mod tests {
     }
 
     #[test]
-    fn open_ocean_is_flat_floor_and_sends_nothing() {
+    fn open_ocean_sends_nothing_and_still_has_a_floor() {
+        // Nothing between islands crosses the wire — a client draws the
+        // floor's top there and sees no deeper — but the world still answers
+        // for the floor itself, without generating anything to do it.
         let world = world(1);
         // Find a chunk of open ocean: walk until one has no island.
         let chunk = (0..)
@@ -1250,8 +1297,12 @@ mod tests {
         assert!(world.chunk_payload(chunk).is_none());
 
         let w = chunk.as_vec2() * CHUNK_METRES + CHUNK_METRES * 0.5;
-        assert_eq!(world.height(w.x, w.y), -OCEAN_DEPTH);
-        assert_eq!(world.ready_height(w.x, w.y), Some(-OCEAN_DEPTH));
+        let floor = world.height(w.x, w.y);
+        assert!(
+            floor <= -OCEAN_DEPTH,
+            "open sea stands {floor} m, above the floor's top"
+        );
+        assert_eq!(world.ready_height(w.x, w.y), Some(floor));
     }
 
     #[test]
@@ -1542,6 +1593,22 @@ mod tests {
         }
         let ground = digest(floats(heights));
 
+        // The sea between the islands, across the whole window, on a lattice
+        // coarse enough to be cheap and wide enough to cross several basins.
+        // Never sent, and pinned anyway: what an anchor holds in and what a
+        // sounding reads are decided on it, and a seed re-hosted elsewhere
+        // must decide them the same way.
+        let mut soundings = Vec::new();
+        for iz in -40..=40 {
+            for ix in -40..=40 {
+                let w = WINDOW * Vec2::new(ix as f32, iz as f32) / 40.0;
+                if world.island_at(w.x, w.y).is_none() {
+                    soundings.push(world.height(w.x, w.y));
+                }
+            }
+        }
+        let deeps = digest(floats(soundings));
+
         // And one chunk of that island exactly as it would be sent. The
         // heights above pin the *generator*; this pins the wire — the order
         // the grid is sampled in, the rounding, the facet walk and what each
@@ -1587,10 +1654,14 @@ mod tests {
         );
 
         println!(
-            "layout digests to {layout:#018X}, ground to {ground:#018X}, sent to {sent:#018X}"
+            "layout digests to {layout:#018X}, ground to {ground:#018X}, deeps to {deeps:#018X}, sent to {sent:#018X}"
         );
         assert_eq!(layout, 0xF310_7FA9_D557_237C, "the layout changed");
         assert_eq!(ground, 0x49FB_11E9_A669_3026, "the ground changed");
+        assert_eq!(
+            deeps, 0x94D5_E2E7_88CB_1157,
+            "the sea between the islands changed"
+        );
         assert_eq!(
             sent, 0x2E33_668B_BA31_FF9B,
             "what a client would be sent changed"

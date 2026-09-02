@@ -202,10 +202,10 @@ const SHADING_TILT: f32 = 4.0;
 
 /// The depths across which the open sea hands over to the shore wave, in
 /// metres: the crossfade starts as the water shallows through the first and
-/// is complete by the second. The whole ocean floor is only [`OCEAN_DEPTH`]
-/// down, so "deep" here is a few metres — what matters is that the handover
-/// spans the islands' skirts, where the criss-cross of the open sea starts
-/// to look wrong marching over a beach.
+/// is complete by the second. The deepest ground a client is ever sent is
+/// [`OCEAN_DEPTH`] down, so "deep" here is a few metres — what matters is
+/// that the handover spans the islands' skirts, where the criss-cross of the
+/// open sea starts to look wrong marching over a beach.
 ///
 /// [`OCEAN_DEPTH`]: protocol::ground::OCEAN_DEPTH
 const SHOAL: (f32, f32) = (6.5, 2.5);
