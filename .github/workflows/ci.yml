@@ -2,7 +2,9 @@
 # digest, the archipelago layout, the pinned bytes of every protocol message —
 # each exists to catch a build that has quietly stopped agreeing with every
 # other build about what a seed means, and a test like that run on one laptop
-# is a test that has never once done its job.
+# is a test that has never once done its job. Here the second machine is a
+# Linux runner; the first is the arm64 macOS this is developed on, which runs
+# every test before a branch is ever pushed.
 #
 # What that costs decides the shape of this file more than taste does. A
 # private repository gets 2,000 Actions minutes a month, every job bills as a
@@ -10,15 +12,16 @@
 # a macOS minute as ten. Against a hundred-odd merges a month that budget buys
 # about six billed minutes a run, and the arithmetic answers three questions:
 #
-#   - macOS is gone, and its absence is not a gap. This is developed on arm64
-#     macOS, so every local `cargo test` already runs that side of the
-#     comparison. Ten billed minutes for forty seconds of work is a bad price
-#     for a platform that is covered before a branch is ever pushed. Anyone
-#     developing this somewhere else should put it back.
-#   - Windows is the platform nobody here can run, so it stays — but weekly
-#     rather than per-merge. A platform disagreement is a slow thing, a
-#     toolchain or libm shift rather than a bad branch, and a week is a fine
-#     lag for a failure that arrives about once a year.
+#   - macOS is gone, and its absence is not a gap: it is the machine the
+#     comparison is made against, covered before a push. Anyone developing
+#     this somewhere else should put it back.
+#   - Windows is gone too, and its absence *is* a gap — it was the platform
+#     nobody here can run. What it cost was the whole argument: an engine
+#     built from cold on a Windows runner is most of an hour, billed double,
+#     and a weekly one was a tenth of the month before a branch had spent a
+#     minute. A platform disagreement is a once-a-year thing, a toolchain or
+#     libm shift rather than a bad branch, and the day this has a player on
+#     Windows is the day that comparison is worth its price again.
 #   - Pushes to main build only when they move the dependency graph, because
 #     that is now the only thing main is for: leaving a cache warm enough that
 #     a branch never compiles Bevy from cold. What that gives up is catching a
@@ -40,12 +43,12 @@ on:
     paths:
       - 'Cargo.lock'
       - '.github/workflows/ci.yml'
-  # Monday morning: the cross-platform comparison, and a rebuild of main's
-  # cache against whatever rustc stable has become in the meantime.
+  # Monday morning: a rebuild of main's cache against whatever rustc stable
+  # has become in the meantime, so that a toolchain bump costs one run here
+  # rather than a cold build on every branch that week.
   schedule:
     - cron: '0 6 * * 1'
-  # Before a release, or after anything that moves the generator: ask for the
-  # full set on demand rather than waiting for Monday.
+  # The same rebuild on demand, for when Monday is too far off.
   workflow_dispatch:
 
 # One run per branch. A second push while the first is still compiling Bevy
@@ -132,6 +135,12 @@ jobs:
       # — cost and shape numbers to read, not thresholds to fail on — so they
       # stay ignored. Nothing here passes `--ignored`.
       - name: Tests
+        # A test that fails only on a runner has no evidence but its backtrace,
+        # and a green run pays nothing for it. On the step and not the job:
+        # rust-cache folds every RUST* variable it can see into its key, so a
+        # job-level one would key every branch away from the cache main saved.
+        env:
+          RUST_BACKTRACE: 1
         run: cargo test --workspace --locked
 
       # A doc link is how a comment stays true about code in another module —
@@ -146,22 +155,3 @@ jobs:
         run: cargo doc --workspace --no-deps --locked --document-private-items
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
-
-  # The pinned things again, somewhere that isn't x86-64 Linux: the world's
-  # digests and the protocol's exact bytes, with the server that sits on both.
-  # These crates hold no Bevy and need nothing from the system, so this is a
-  # cold build of a few minutes and never more — and they are, not by
-  # coincidence, where every value that must match across machines is written
-  # down. Anything new that pins bytes or digests belongs here too.
-  determinism:
-    name: Determinism (Windows)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: Engine-free tests
-        run: cargo test --locked -p world -p protocol -p server

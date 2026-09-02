@@ -1311,7 +1311,7 @@ mod tests {
     use bevy::time::TimePlugin;
 
     use super::*;
-    use crate::testing::run_until;
+    use crate::testing::{run_until, PATIENCE};
     use crate::Helm;
 
     /// A headless app with the net systems running in a match, and no
@@ -1389,14 +1389,14 @@ mod tests {
     }
 
     /// Waits for a dial to land. It crosses real sockets and a thread, so a
-    /// moment of patience is legitimate — five seconds of it is a failure.
+    /// moment of patience is legitimate — [`PATIENCE`] of it is a failure.
     ///
     /// The quarantining is the caller's, done before the dial is started: a
     /// dial's handshake reads the data directory for its papers, and by the
     /// time there is a dial to wait on, the thread that will read it is
     /// already running.
     fn settle(dialing: &Dialing) -> Result<Session, String> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PATIENCE;
         while Instant::now() < deadline {
             if let Some(outcome) = dialing.outcome() {
                 return outcome;
@@ -1537,7 +1537,7 @@ mod tests {
         // So that a connection which is not really closed fails this test
         // instead of hanging it.
         server
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(PATIENCE))
             .expect("set timeout");
 
         drop(connection);
@@ -2345,7 +2345,7 @@ mod tests {
             .connection
             .command("spawn shark".to_string());
         server
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(PATIENCE))
             .expect("set timeout");
         // Read past the walker's own position reports — entry stands a
         // player up now, and a player reports — to the line itself.

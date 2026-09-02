@@ -1090,6 +1090,17 @@ mod tests {
         // as the animal being deleted, which is the whole thing this exists
         // to avoid.
         told(false);
+        // Landed before it is judged: the telling crosses a real socket and a
+        // thread, and a headless frame takes no real time, so six of them can
+        // pass with the word still in flight — as they did on a loaded
+        // runner, where a shark still riding awash was judged for not diving.
+        run_until(&mut app, "the beast is told it has sounded", |app| {
+            !app.world_mut()
+                .query::<&Swimming>()
+                .single(app.world())
+                .expect("one beast")
+                .surfaced
+        });
         run_frames(&mut app, 6);
         let starting = riding(&mut app);
         assert!(
@@ -1107,6 +1118,13 @@ mod tests {
         // And it comes back up when it is told it has: a dive is a state the
         // server holds, not a one-way trip this side remembers.
         told(true);
+        run_until(&mut app, "the beast is told it has surfaced", |app| {
+            app.world_mut()
+                .query::<&Swimming>()
+                .single(app.world())
+                .expect("one beast")
+                .surfaced
+        });
         run_frames(&mut app, 500);
         let up = riding(&mut app);
         assert!(

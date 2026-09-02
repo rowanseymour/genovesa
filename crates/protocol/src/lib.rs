@@ -1557,10 +1557,7 @@ impl<'a> Payload<'a> {
     /// so nothing precedes it but the flag saying it is there at all.
     fn shelter_lattice(&mut self) -> io::Result<Vec<ground::Exposure>> {
         let bytes = self.take(ground::SHELTER_BYTES)?;
-        Ok(bytes
-            .chunks_exact(ground::BEARINGS)
-            .map(|point| point.try_into().expect("a bearing's worth of bytes"))
-            .collect())
+        Ok(bytes.as_chunks::<{ ground::BEARINGS }>().0.to_vec())
     }
 
     fn finish(self) -> io::Result<()> {

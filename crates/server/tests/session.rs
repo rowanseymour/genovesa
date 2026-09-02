@@ -19,11 +19,20 @@ use world::archipelago::{Archipelago, IslandSpec};
 /// test. Long enough that a loaded machine is not mistaken for a session that
 /// has stopped talking, short enough that a wait which will never end still
 /// ends.
-const PATIENCE: Duration = Duration::from_secs(10);
+///
+/// The loaded machine to size it for is a CI runner, and the gap is wider
+/// than a slow core: raising an island fans out across every core the machine
+/// has, so a step that takes the server most of a second on a laptop — a
+/// full survey sweep worked on the session's own thread — has a dozen cores
+/// behind it there and, on a four-vCPU runner running this whole file at
+/// once, about one. Ten seconds lost that step; so did thirty. Only a test
+/// that was going to fail pays the whole of this, so it can afford to be
+/// generous.
+const PATIENCE: Duration = Duration::from_secs(120);
 
 /// The same, for the survey, which is worked out as somebody walks rather
 /// than sent in one burst.
-const SURVEY_PATIENCE: Duration = Duration::from_secs(20);
+const SURVEY_PATIENCE: Duration = Duration::from_secs(240);
 
 /// What a seed's world is, to a test that is allowed to know. A client never
 /// gets one of these — that is the whole point of the arrangement — so these

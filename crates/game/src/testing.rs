@@ -130,14 +130,18 @@ pub fn enter_world(app: &mut App) {
 
 /// How long a test waits before calling something a failure rather than a
 /// slow machine. Only ever paid in full by a test that was going to fail
-/// anyway, so it can afford to be generous.
-const PATIENCE: Duration = Duration::from_secs(5);
+/// anyway, so it can afford to be generous — and the slow machine to be
+/// generous towards is a CI runner, an order of magnitude behind a laptop and
+/// running every test in the binary at once. Five seconds was enough here and
+/// not there: opening a world and joining it takes a fraction of a second on
+/// a laptop and lost a five-second bound on a loaded runner.
+pub const PATIENCE: Duration = Duration::from_secs(30);
 
 /// Runs frames until the condition holds.
 ///
 /// The waiting is legitimate and the deadline is what keeps it honest: what
 /// these tests are waiting on crosses a real socket and a thread, so a frame
-/// or two is ordinary and five seconds is a hang. `what` is the condition in
+/// or two is ordinary and [`PATIENCE`] is a hang. `what` is the condition in
 /// words, so a timeout says which one never came true rather than only that
 /// one didn't.
 pub fn run_until(app: &mut App, what: &str, mut done: impl FnMut(&mut App) -> bool) {
@@ -467,7 +471,9 @@ pub fn triangles(name: &str, index: usize, attribute: &str) -> Vec<[Vec3; 3]> {
     // reaches for on meshes this small.
     assert_eq!(indices["componentType"], 5123, "indices are not u16");
     read(indices, 2)
-        .chunks_exact(6)
+        .as_chunks::<6>()
+        .0
+        .iter()
         .map(|t| {
             let at = |b: &[u8]| values[u16::from_le_bytes(b.try_into().unwrap()) as usize];
             [at(&t[0..2]), at(&t[2..4]), at(&t[4..6])]
@@ -499,7 +505,9 @@ pub fn skin_weights(name: &str, index: usize) -> Vec<[f32; 4]> {
         + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
     let count = accessor["count"].as_u64().unwrap() as usize;
     buffer[start..start + count * 16]
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|v| {
             let at = |i: usize| f32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap());
             [at(0), at(1), at(2), at(3)]
