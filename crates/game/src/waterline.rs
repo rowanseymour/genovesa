@@ -35,12 +35,12 @@
 //! # What is a body and what is not
 //!
 //! Only hulls. The ground is not a collider — it is a height field, and
-//! [`crate::boat::hold_the_ground`] keeps the keel out of it by the same
-//! probe that always did, run as a correction after the solver rather than
-//! as a gate before it. Contouring every chunk into a polyline as it
-//! streamed in would be a second answer to a question the height field
-//! already answers, and the two would disagree at the shoreline, which is
-//! the one place a player is looking.
+//! `boat::hold_the_ground` keeps the keel out of it by the same probe that
+//! always did, run as a correction after the solver rather than as a gate
+//! before it. Contouring every chunk into a polyline as it streamed in
+//! would be a second answer to a question the height field already answers,
+//! and the two would disagree at the shoreline, which is the one place a
+//! player is looking.
 //!
 //! A hull nobody here is steering is [`avian2d::prelude::RigidBody::Kinematic`]:
 //! it is moved to wherever the wire last said, and it shoves without being
@@ -88,8 +88,8 @@ pub fn on_the_plane(at: Vec3) -> Vec2 {
 /// Which is also its heading in the world's x and z, and not by
 /// coincidence: the mapping drops an axis and renames another, so it leaves
 /// *vectors* alone and touches only the angle that spins them. That is why
-/// this can be handed straight to [`crate::boat::sail_drive`], which was
-/// written against a transform's forward and has not had to change.
+/// this can be handed straight to the sail and oar polars in `boat`, which
+/// were written against a transform's forward and have not had to change.
 pub fn bow(rotation: &Rotation) -> Vec2 {
     let (sin, cos) = rotation.as_radians().sin_cos();
     Vec2::new(sin, -cos)

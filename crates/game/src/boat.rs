@@ -9,20 +9,22 @@
 //! settled the moment it is spawned and never changes — the ship is entered
 //! at, and the rowboat is lowered from it to go ashore, which is
 //! `player::embark_or_land`'s story. Between landings the rowboat rides on
-//! the ship's painter — see [`Towed`] and [`tow`] — so what a client draws
-//! is two hulls on the water rather than one that swallows the other.
+//! the ship's painter — see [`Towed`] and [`make_fast`] — so what a client
+//! draws is two hulls on the water rather than one that swallows the other.
 //!
-//! There is no physics engine here, and two things the word usually covers
-//! are done by rules instead. A hull is stopped by ground and by other
-//! hulls the same way: the frame's advance is offered to a gate that reads
-//! how deep the keel would be in either — [`grounding`] and [`fouling`] —
-//! and lets it through only if it floats clear or gets no worse. Contact is
-//! a stop and never a shove, because a hull this client does not steer is
-//! not this client's to move; the one exception is its own tender, which
-//! [`tow`] keeps out of the ship's planking. A towed hull is a rope of fixed
-//! length and a glide: pulled onto the painter's circle when the rope is
-//! taut, carried on its own way when it is slack, and pointed along
-//! whichever of the two is moving it.
+//! Where a hull *is* is not decided here. It is solved on the water plane —
+//! see [`crate::waterline`] — and this module says what the water is asked
+//! for: [`steer`] turns the keys into a drive, a helm and a keel, and
+//! [`ride_the_plane`] reads the answer back onto the transforms for
+//! [`float`] to hang the swell and the tilt on.
+//!
+//! Two collisions, and only one of them is the solver's. Hull against hull
+//! is: the plankings meet, momentum passes between them, and a ship backing
+//! onto its own dinghy shoves it clear without a line written for it. Hull
+//! against *ground* is not, and deliberately — the ground is a height field
+//! probed along the keel by [`grounding`], and [`hold_the_ground`] holds a
+//! hull to water it is allowed to be in by putting it back when the solver
+//! has pushed it somewhere it is not.
 //!
 //! A hull is modelled rather than drawn here: [`MODEL`] is a glTF file built
 //! from a Blender master under `assets-src/`, and this module spawns its meshes
@@ -159,7 +161,7 @@ const TOW_SWING: f32 = 3.0;
 const PAINTER_GIVE: f32 = 5.0;
 
 /// The painter: metres of rope from the ship's transom to the stem of the
-/// boat it tows — see [`tow`].
+/// boat it tows — see [`make_fast`], which ties it.
 ///
 /// Bounded above by the wire: the server grants a lowering only within a
 /// dozen metres of the ship, and a towed boat is lowered wherever on its
@@ -912,7 +914,9 @@ struct Oared;
 
 /// A hull on another's painter: the ship's boat, left in the water astern
 /// when its crew stepped up onto the deck, and going where the ship goes
-/// until somebody steps down into it again — see [`tow`], which moves it.
+/// until somebody steps down into it again. [`make_fast`] ties the rope and
+/// [`trail`] gives the hull the water's hold on it; between them and the
+/// solver, nothing here has to say how a towed boat moves.
 ///
 /// Its place is this client's to invent, exactly as the hull it steers is,
 /// so it carries no [`Told`] — the server relays this client's own reports
@@ -2878,36 +2882,32 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
 /// wind has no part in: backing off a beach is how a grounding is undone,
 /// and an escape that waited on a favourable wind would be no escape.
 ///
-/// Easing the way rather than setting it is what makes tacking work — the
-/// target dies crossing the no-go zone, but the way carried into the turn
-/// brings the bow through the eye and out the other side still moving. The
-/// helm answers even with no way on and aground, a turn refused alongside an
-/// advance being a hull wedged bow-first with nothing left to free it.
+/// Nothing here moves the hull. Three things are asked of the water and the
+/// water answers: a drive along the keel towards the speed the sails or the
+/// oars are making good, a rudder bringing the hull round at the rate the
+/// helm asks for, and the keel itself, which turns the way the hull is
+/// making onto the way it is pointing. Every one of them is written against
+/// what the hull is *actually* doing rather than against a number
+/// remembered here, which is the whole of what a solver buys: a hull that
+/// has just been shoved by another arrives with way it was never given, and
+/// all three answer that exactly as they answer the keys.
 ///
-/// The frame's advance is offered to [`grounding`] before it is taken, and
-/// allowed if the pose it would reach floats, or failing that if it is
-/// aground no *deeper* than the one already held — the only rule that both
-/// frees a stranded hull and cannot be played, a floating hull only ever
-/// reaching a floating pose. The second clause is for the pose the boat did
-/// not sail into: a `goto` that came up dry, or ground arriving under a hull
-/// already sitting there. It carries no tolerance, a hair a frame being a
-/// metre a second up a hillside. Poses are judged every [`CELL_METRES`]
-/// along the advance, because the quarter second Bevy clamps a stalled frame
-/// to is two and a half metres, and in one leap that steps a keel clean over
-/// a facet.
+/// The keel is what makes tacking work. The drive dies crossing the no-go
+/// zone, but the way carried into the turn is *pointed* rather than taken
+/// off, so it brings the bow through the eye and out the other side still
+/// moving — see [`Hull::keel_grip`] for why damping it instead leaves a
+/// hull becalmed head to wind.
 ///
-/// Other hulls are judged by the same gate on the same terms, through
-/// [`fouling`]: a keel is kept out of another boat's planking exactly as it
-/// is kept out of a hillside, and the clause that frees a stranded hull
-/// frees one that finds itself overlapping through no fault of its own — a
-/// told hull eased onto a pose that crossed ours. Contact is a stop, never
-/// a shove: the hull we ran into is not ours to move. The one hull left out
-/// is our own tender on its painter, which [`tow`] keeps clear of the ship
-/// instead, a boat that cannot back down onto its own dinghy being a boat
-/// that cannot back down at all.
+/// The ground is not the solver's business and the helm is not stopped by
+/// it here: a hull driven onto a beach is put back by [`hold_the_ground`]
+/// afterwards. That is what lets the helm answer with no way on and
+/// aground, a turn refused alongside an advance being a hull wedged
+/// bow-first with nothing left to free it.
 ///
-/// Heel is wholly a thing the eye gets: the keel lies along the forward axis
-/// the hull rolls about, so it moves nothing [`grounding`] probes along.
+/// Heel is wholly a thing the eye gets. It is settled here against the way
+/// this frame is making and hung on the hull by [`float`], the keel lying
+/// along the axis the hull rolls about — so a lean moves nothing
+/// [`grounding`] is probed along.
 pub(crate) fn steer(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
