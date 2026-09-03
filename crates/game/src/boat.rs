@@ -2935,10 +2935,25 @@ fn make_fast(
 /// and of nothing else — [`steer`] closes that one, which is the only
 /// place that knows whether anybody is asking the boat to move.
 fn the_water_holds(
+    time: Res<Time>,
     players: Query<&ChildOf, With<Player>>,
     mut hulls: Query<(Entity, Forces, &Rigged), Without<Told>>,
 ) {
     let helmed = players.single().map(ChildOf::parent).ok();
+    // Nothing the water does may *reverse* what it is doing it to. A
+    // resistance is a brake, and a brake that overshoots inside one frame
+    // pushes the hull back the way it came harder than it was going —
+    // which is a boat that oscillates, and then, in about a second, a boat
+    // whose position is not a number.
+    //
+    // That is not a hypothetical. The keel is stiff on purpose — see
+    // [`LEEWAY_BITE`] — and stiff enough that a hull thrown well abeam
+    // asks for more than a frame can deliver. The first thing that found
+    // it was a boat sailed into a rocky corner, which crashed the run with
+    // a NaN a few frames later. So each of the three below is capped at
+    // exactly what would bring the motion it opposes to a stop this frame,
+    // which no real resistance ever beats either.
+    let dt = time.delta_secs().max(f32::EPSILON);
     for (entity, mut forces, rigged) in &mut hulls {
         let hull = hull_of(rigged.0);
         let bow = waterline::bow(forces.rotation());
@@ -2952,12 +2967,20 @@ fn the_water_holds(
         // across the keel *is* how a boat comes to travel the way it
         // points, and the leeway left over is the angle at which the two
         // balance.
-        forces.apply_force(-bow * hull.resistance(way));
+        let stopping = hull.displacement / dt;
+        forces.apply_force(
+            -bow * hull.resistance(way).abs().min(stopping * way.abs()) * way.signum(),
+        );
         let drifting = leeway.length();
         if drifting > 0.0 {
-            forces.apply_force(-leeway / drifting * hull.lateral_resistance(drifting));
+            let across = hull.lateral_resistance(drifting).min(stopping * drifting);
+            forces.apply_force(-leeway / drifting * across);
         }
-        forces.apply_torque(-hull.yaw_damping() * forces.angular_velocity());
+        let spin = forces.angular_velocity();
+        let swinging = hull.yaw_inertia() / dt;
+        forces.apply_torque(
+            -(hull.yaw_damping() * spin.abs()).min(swinging * spin.abs()) * spin.signum(),
+        );
 
         // And the tail of a glide, closed by hand: resistance takes the
         // last of a hull's way asymptotically and a solver never sleeps, so
@@ -5680,6 +5703,45 @@ mod tests {
         assert!(
             afloat > TEST_ISLAND_REACH,
             "the boat is still {afloat} m from the middle, inside the coast"
+        );
+    }
+
+    #[test]
+    fn a_hull_thrown_hard_abeam_settles_rather_than_exploding() {
+        // The keel is stiff, and a stiff resistance asked for more than a
+        // frame can deliver is one that overshoots, reverses, and grows —
+        // a boat that oscillates and, a second later, one whose position is
+        // not a number. This crashed a real run: a ship sailed into a rocky
+        // corner came back out of the solver with a NaN rotation, and the
+        // chunk arithmetic went with it.
+        //
+        // The cap in [`the_water_holds`] is what closes it, and this is the
+        // case that finds a hole in it: a hull thrown sideways at many
+        // times its own speed, which is what a collision at the edge of the
+        // world can do and nothing else on this water will.
+        let mut app = test_app();
+        let hull = helmed_hull(&mut app);
+        let abeam = boat(&mut app).right().xz() * SHIP.speed * 30.0;
+        app.world_mut()
+            .entity_mut(hull)
+            .get_mut::<LinearVelocity>()
+            .expect("a hull floats")
+            .0 = abeam;
+        run_frames(&mut app, SETTLED);
+
+        let at = boat(&mut app).translation;
+        assert!(
+            at.is_finite(),
+            "a hull thrown abeam ended up at {at}, which is not a place"
+        );
+        let left = app
+            .world()
+            .get::<LinearVelocity>(hull)
+            .expect("a hull floats")
+            .0;
+        assert!(
+            left.length() < SHIP.speed,
+            "a hull thrown abeam is still making {left} after settling"
         );
     }
 
