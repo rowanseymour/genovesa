@@ -158,40 +158,9 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archipelago::{Archipelago, WorldConfig};
     use crate::terrain::{AROUND, HOLLOW_REACH};
-    use crate::testing::{digest, floats};
+    use crate::testing::{digest, floats, sweep, SEEDS};
     use protocol::ground::chunk_at;
-
-    /// The same window the other three rules are judged over, for the same
-    /// reason: several islands of assorted sizes, and so arid collars of
-    /// assorted depths — the climate line swings per island, so a dry seed
-    /// wears a far deeper one than a wet seed does.
-    const WINDOW: i32 = 20;
-
-    fn world(seed: u32) -> Archipelago {
-        Archipelago::new(&WorldConfig { seed })
-    }
-
-    /// Every cactus in the window, with the chunk that carried it.
-    fn all_cacti(world: &Archipelago) -> Vec<(IVec2, Plant)> {
-        let mut found = Vec::new();
-        for cz in -WINDOW..WINDOW {
-            for cx in -WINDOW..WINDOW {
-                let chunk = IVec2::new(cx, cz);
-                if let Some(payload) = world.chunk_payload(chunk) {
-                    found.extend(
-                        payload
-                            .plants
-                            .into_iter()
-                            .filter(|plant| plant.kind == Kind::Cactus)
-                            .map(|cactus| (chunk, cactus)),
-                    );
-                }
-            }
-        }
-        found
-    }
 
     #[test]
     fn a_seed_grows_the_same_cacti_wherever_it_is_hosted() {
@@ -208,7 +177,7 @@ mod tests {
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()
             .map(|(seed, _)| {
-                let cacti = all_cacti(&world(*seed));
+                let cacti = sweep(*seed).plants(Kind::Cactus);
                 let d = digest(cacti.iter().flat_map(|(chunk, cactus)| {
                     floats([
                         chunk.x as f32,
@@ -294,10 +263,10 @@ mod tests {
         // re-measured by `closed_in` rather than read back off [`Lie`], whose
         // whole point is that it is a cached field, and holds over the
         // population — see [`TEST_CLOSED`].
-        let world = world(7);
+        let world = &sweep(7).world;
         let mut counted = 0;
         let mut closed = 0;
-        for (chunk, cactus) in all_cacti(&world) {
+        for (chunk, cactus) in sweep(7).plants(Kind::Cactus) {
             let at = chunk.as_vec2() * CHUNK_METRES + cactus.at;
             let island = world.island(
                 world
@@ -340,8 +309,8 @@ mod tests {
         // What makes a cactus drawn exactly once: one past the boundary would
         // be drawn by a client that never asked for that ground, and again by
         // the chunk it really stands on.
-        for seed in [20_040_112, 1, 7] {
-            for (chunk, cactus) in all_cacti(&world(seed)) {
+        for seed in SEEDS {
+            for (chunk, cactus) in sweep(seed).plants(Kind::Cactus) {
                 let world_at = chunk.as_vec2() * CHUNK_METRES + cactus.at;
                 assert_eq!(chunk_at(world_at), chunk, "a cactus strayed off its chunk");
             }
