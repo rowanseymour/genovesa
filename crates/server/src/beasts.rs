@@ -104,8 +104,8 @@ const RAISE_ATTEMPTS: u32 = 12;
 
 /// Seafloor at or below this counts as deep water, in metres: where beasts
 /// are born and where they go to be forgotten. Open ocean floor lies at minus
-/// [`OCEAN_DEPTH`], comfortably under it, so the answer to "where is there
-/// deep water" is never far from anywhere.
+/// [`OCEAN_DEPTH`] at its shallowest, comfortably under it, so the answer to
+/// "where is there deep water" is never far from anywhere.
 ///
 /// [`OCEAN_DEPTH`]: protocol::ground::OCEAN_DEPTH
 const DEEP: f32 = -7.0;

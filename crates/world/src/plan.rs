@@ -156,8 +156,16 @@ impl Layer {
             // every slope about which way is up.
             Layer::Altitude => {
                 let c = if height < 0.0 {
+                    // The shelf's blues over an island's own bed, then on
+                    // down towards black across the open sea's basins — see
+                    // [`crate::deeps`] — so a strait and a crossing read as
+                    // the different water they are.
                     let deep = (-height / crate::terrain::MAX_DEPTH).clamp(0.0, 1.0);
-                    Vec3::new(0.42, 0.62, 0.72).lerp(Vec3::new(0.04, 0.10, 0.24), deep)
+                    let shelf = Vec3::new(0.42, 0.62, 0.72).lerp(Vec3::new(0.04, 0.10, 0.24), deep);
+                    let abyss = ((-height - crate::terrain::MAX_DEPTH)
+                        / (crate::deeps::DEEPEST - crate::terrain::MAX_DEPTH))
+                        .clamp(0.0, 1.0);
+                    shelf.lerp(Vec3::new(0.0, 0.01, 0.05), abyss)
                 } else {
                     ramp((height / HEIGHT_SCALE).clamp(0.0, 1.0))
                 };
@@ -280,6 +288,9 @@ pub fn render_region(
     // this island's, or the slow path runs.
     let mut held: Option<(IslandSpec, Arc<Island>)> = None;
 
+    // The sea between the islands, prepared once for the whole page.
+    let deeps = world.deeps(origin, origin + extent);
+
     let mut pixels = Vec::with_capacity((width * height) as usize * 3);
     for iz in 0..height {
         for ix in 0..width {
@@ -287,9 +298,9 @@ pub fn render_region(
             let wz = origin.y + iz as f32 * step.y;
             let chunk = chunk_at(Vec2::new(wx, wz));
 
-            // Most of any region is open ocean, which is flat floor by
-            // construction — skipping the sampling there is most of the
-            // render's speed.
+            // Most of any region is open sea, whose floor is the layout's to
+            // sound rather than an island's — no generator is paid for there,
+            // which is most of the render's speed.
             let island = match &held {
                 Some((spec, island)) if spec.covers_chunk(chunk) => Some(island.clone()),
                 _ => world.island_at(wx, wz).map(|spec| {
@@ -302,7 +313,8 @@ pub fn render_region(
             let pixel = match island {
                 // Exactly the palette's deep sea bed, which is what an
                 // island's own skirt reaches: any difference between the two
-                // would print every island's frame onto the water.
+                // would print every island's frame onto the water. The height
+                // is the true floor, which only the altitude layer reads.
                 None => layer.paint(
                     Ground {
                         country: Country::Sea,
@@ -310,7 +322,7 @@ pub fn render_region(
                         material: Material::Seabed,
                         bared_by_salt: false,
                     },
-                    -crate::archipelago::OCEAN_DEPTH,
+                    deeps.floor(Vec2::new(wx, wz)),
                     None,
                     Vec3::Y,
                 ),
