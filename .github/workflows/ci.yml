@@ -202,7 +202,9 @@ jobs:
                 "$profile"/.fingerprint/"$member"-* "$profile"/build/"$member"-*
             done
           done
-          du -sh ~/.cargo/registry ~/.cargo/git target
+          # Only a report, and ~/.cargo/git exists only once something is
+          # fetched from git, so a missing directory must not fail the step.
+          du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
       - name: Save the dependency cache
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.tests.outcome == 'success' }}
         uses: actions/cache/save@v4
