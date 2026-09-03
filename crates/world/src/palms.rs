@@ -186,40 +186,9 @@ fn is_sand(island: &Island, at: Vec2, height: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archipelago::{Archipelago, WorldConfig};
     use crate::plants::{draw, mix};
-    use crate::testing::{digest, floats};
+    use crate::testing::{digest, floats, sweep, SEEDS};
     use protocol::ground::chunk_at;
-
-    /// A window of world wide enough to hold several islands of assorted
-    /// sizes, and so several coasts of assorted characters.
-    const WINDOW: i32 = 20;
-
-    fn world(seed: u32) -> Archipelago {
-        Archipelago::new(&WorldConfig { seed })
-    }
-
-    /// Every palm in the window, with the chunk that carried it. Palms only:
-    /// a chunk's list holds every kind now, and a digest of all of them would
-    /// move whenever any other rule did.
-    fn all_palms(world: &Archipelago) -> Vec<(IVec2, Plant)> {
-        let mut found = Vec::new();
-        for cz in -WINDOW..WINDOW {
-            for cx in -WINDOW..WINDOW {
-                let chunk = IVec2::new(cx, cz);
-                if let Some(payload) = world.chunk_payload(chunk) {
-                    found.extend(
-                        payload
-                            .plants
-                            .into_iter()
-                            .filter(|plant| plant.kind == Kind::Palm)
-                            .map(|palm| (chunk, palm)),
-                    );
-                }
-            }
-        }
-        found
-    }
 
     #[test]
     fn a_seed_grows_the_same_palms_wherever_it_is_hosted() {
@@ -239,7 +208,7 @@ mod tests {
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()
             .map(|(seed, _)| {
-                let palms = all_palms(&world(*seed));
+                let palms = sweep(*seed).plants(Kind::Palm);
                 let d = digest(palms.iter().flat_map(|(chunk, palm)| {
                     floats([
                         chunk.x as f32,
@@ -270,8 +239,8 @@ mod tests {
         // drawn exactly once: a tree past the boundary would be drawn by a
         // client that never asked for that ground, and again by the chunk it
         // really stands on.
-        for seed in [20_040_112, 1, 7] {
-            for (chunk, palm) in all_palms(&world(seed)) {
+        for seed in SEEDS {
+            for (chunk, palm) in sweep(seed).plants(Kind::Palm) {
                 assert!(
                     (0.0..CHUNK_METRES).contains(&palm.at.x)
                         && (0.0..CHUNK_METRES).contains(&palm.at.y),
@@ -286,18 +255,10 @@ mod tests {
 
     #[test]
     fn no_chunk_carries_more_plants_than_the_wire_will_take() {
-        for seed in [20_040_112, 1, 7] {
-            // The world once, outside the walk. Built inside it, this test
-            // regenerated every island for every chunk and took seven minutes.
-            let world = world(seed);
-            for cz in -WINDOW..WINDOW {
-                for cx in -WINDOW..WINDOW {
-                    let chunk = IVec2::new(cx, cz);
-                    if let Some(payload) = world.chunk_payload(chunk) {
-                        assert!(payload.plants.len() <= protocol::ground::MAX_PLANTS);
-                        assert!(payload.well_formed(), "seed {seed} chunk {chunk}");
-                    }
-                }
+        for seed in SEEDS {
+            for (chunk, payload) in &sweep(seed).chunks {
+                assert!(payload.plants.len() <= protocol::ground::MAX_PLANTS);
+                assert!(payload.well_formed(), "seed {seed} chunk {chunk}");
             }
         }
     }
@@ -308,9 +269,9 @@ mod tests {
         // than against the arithmetic that placed them — so a change to how
         // coasts are painted shows up here as palms standing in the wrong
         // place, which is what it would be.
-        let world = world(7);
+        let world = &sweep(7).world;
         let mut counted = 0;
-        for (chunk, palm) in all_palms(&world) {
+        for (chunk, palm) in sweep(7).plants(Kind::Palm) {
             let at = chunk.as_vec2() * CHUNK_METRES + palm.at;
             let island = world.island(
                 world

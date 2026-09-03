@@ -186,38 +186,9 @@ fn beside_water(island: &Island, at: Vec2, height: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archipelago::{Archipelago, WorldConfig};
     use crate::terrain::{AROUND, HOLLOW_REACH};
-    use crate::testing::{digest, floats};
+    use crate::testing::{digest, floats, sweep, SEEDS};
     use protocol::ground::chunk_at;
-
-    /// The same window the palms are judged over, for the same reason: several
-    /// islands of assorted sizes, and so valleys of assorted shapes.
-    const WINDOW: i32 = 20;
-
-    fn world(seed: u32) -> Archipelago {
-        Archipelago::new(&WorldConfig { seed })
-    }
-
-    /// Every banana clump in the window, with the chunk that carried it.
-    fn all_bananas(world: &Archipelago) -> Vec<(IVec2, Plant)> {
-        let mut found = Vec::new();
-        for cz in -WINDOW..WINDOW {
-            for cx in -WINDOW..WINDOW {
-                let chunk = IVec2::new(cx, cz);
-                if let Some(payload) = world.chunk_payload(chunk) {
-                    found.extend(
-                        payload
-                            .plants
-                            .into_iter()
-                            .filter(|plant| plant.kind == Kind::Banana)
-                            .map(|clump| (chunk, clump)),
-                    );
-                }
-            }
-        }
-        found
-    }
 
     #[test]
     fn a_seed_grows_the_same_bananas_wherever_it_is_hosted() {
@@ -234,7 +205,7 @@ mod tests {
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()
             .map(|(seed, _)| {
-                let bananas = all_bananas(&world(*seed));
+                let bananas = sweep(*seed).plants(Kind::Banana);
                 let d = digest(bananas.iter().flat_map(|(chunk, clump)| {
                     floats([
                         chunk.x as f32,
@@ -298,9 +269,9 @@ mod tests {
         // slope below are all read live; the shelter is re-derived by
         // `rising_around` rather than read back off [`Lie`], whose whole point
         // is that it is a cached field — see [`TEST_RISING`].
-        let world = world(7);
+        let world = &sweep(7).world;
         let mut counted = 0;
-        for (chunk, clump) in all_bananas(&world) {
+        for (chunk, clump) in sweep(7).plants(Kind::Banana) {
             let at = chunk.as_vec2() * CHUNK_METRES + clump.at;
             let island = world.island(
                 world
@@ -335,8 +306,8 @@ mod tests {
         // What makes a clump drawn exactly once: one past the boundary would be
         // drawn by a client that never asked for that ground, and again by the
         // chunk it really stands on.
-        for seed in [20_040_112, 1, 7] {
-            for (chunk, clump) in all_bananas(&world(seed)) {
+        for seed in SEEDS {
+            for (chunk, clump) in sweep(seed).plants(Kind::Banana) {
                 let world_at = chunk.as_vec2() * CHUNK_METRES + clump.at;
                 assert_eq!(chunk_at(world_at), chunk, "a clump strayed off its chunk");
             }
