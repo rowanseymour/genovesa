@@ -209,38 +209,8 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archipelago::{Archipelago, WorldConfig};
-    use crate::testing::{digest, floats};
+    use crate::testing::{digest, floats, sweep, SEEDS};
     use protocol::ground::chunk_at;
-
-    /// The same window the other two rules are judged over, for the same
-    /// reason: several islands of assorted sizes, and so lakes of assorted
-    /// shapes.
-    const WINDOW: i32 = 20;
-
-    fn world(seed: u32) -> Archipelago {
-        Archipelago::new(&WorldConfig { seed })
-    }
-
-    /// Every mangrove in the window, with the chunk that carried it.
-    fn all_mangroves(world: &Archipelago) -> Vec<(IVec2, Plant)> {
-        let mut found = Vec::new();
-        for cz in -WINDOW..WINDOW {
-            for cx in -WINDOW..WINDOW {
-                let chunk = IVec2::new(cx, cz);
-                if let Some(payload) = world.chunk_payload(chunk) {
-                    found.extend(
-                        payload
-                            .plants
-                            .into_iter()
-                            .filter(|plant| plant.kind == Kind::Mangrove)
-                            .map(|tree| (chunk, tree)),
-                    );
-                }
-            }
-        }
-        found
-    }
 
     #[test]
     fn a_seed_grows_the_same_mangroves_wherever_it_is_hosted() {
@@ -257,7 +227,7 @@ mod tests {
         let got: Vec<(u32, u64, usize)> = recorded
             .iter()
             .map(|(seed, _)| {
-                let trees = all_mangroves(&world(*seed));
+                let trees = sweep(*seed).plants(Kind::Mangrove);
                 let d = digest(trees.iter().flat_map(|(chunk, tree)| {
                     floats([
                         chunk.x as f32,
@@ -288,9 +258,9 @@ mod tests {
         // than against the arithmetic that placed them — so a change to how
         // lakes are shaped or painted shows up here as mangroves standing
         // somewhere silly, which is what it would be.
-        let world = world(7);
+        let world = &sweep(7).world;
         let mut counted = 0;
-        for (chunk, tree) in all_mangroves(&world) {
+        for (chunk, tree) in sweep(7).plants(Kind::Mangrove) {
             let at = chunk.as_vec2() * CHUNK_METRES + tree.at;
             let island = world.island(
                 world
@@ -328,8 +298,8 @@ mod tests {
         // What makes a tree drawn exactly once: one past the boundary would be
         // drawn by a client that never asked for that ground, and again by the
         // chunk it really stands on.
-        for seed in [20_040_112, 1, 7] {
-            for (chunk, tree) in all_mangroves(&world(seed)) {
+        for seed in SEEDS {
+            for (chunk, tree) in sweep(seed).plants(Kind::Mangrove) {
                 let world_at = chunk.as_vec2() * CHUNK_METRES + tree.at;
                 assert_eq!(
                     chunk_at(world_at),
