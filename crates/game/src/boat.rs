@@ -135,17 +135,55 @@ const STIRRING: f32 = 0.001;
 /// less than any jump worth the name.
 const TELEPORT: f32 = PULL / 2.0;
 
-/// Seconds a towed hull's way takes to run off in the water when nothing
-/// is pulling it — the drag of an open boat, and the only resistance
-/// modelled anywhere here.
+/// The share of a hull's resistance at its top speed that rises with the
+/// *square* of the way rather than with the way itself.
 ///
-/// The hull the player steers needs none: its drive is a controller that
-/// holds a speed, and drag under it would only mean the controller pulling
-/// harder to reach the same number. A boat on a painter has no controller
-/// and no oars, so without this it is a puck on ice — the rope snubs, flings
-/// it past the transom, and it comes back on the other side. Measured, it
-/// reached twice the ship's own speed doing that.
-const TOW_DRAG: f32 = 2.5;
+/// A hull pushes water two ways. Skin friction rises about linearly and is
+/// most of what a boat feels at a crawl; wave-making rises far faster and
+/// is what stops a displacement hull dead at its own hull speed. Seven
+/// parts in ten is the second, which is what gives the sailing its shape:
+/// brisk off the mark and then a wall it cannot be driven through.
+///
+/// The two together are also what ends a glide, and that is what fixes
+/// this number rather than any measurement of a real hull. A purely
+/// quadratic resistance goes to nothing as the way does and a boat under
+/// it drifts for ever; the linear part is what brings a hull to rest, and
+/// the hull's [`Hull::way_response`] is how long that takes. Raise this
+/// share and the same glide costs more thrust to overcome, which buys a
+/// boat that leaps off the mark; half and half is where the wall at hull
+/// speed is plainly there without the start being a launch.
+const WAVE_MAKING: f32 = 0.5;
+
+/// How much harder the keel bites when the water is coming at it broadside
+/// than when it is barely off the bow — the quadratic part of lateral
+/// resistance, as a multiple of the linear part at a full boat's speed of
+/// leeway.
+///
+/// This is the number that decides whether a boat can tack, and it took
+/// two wrong answers to find. Lateral resistance that rises only linearly
+/// is too soft to hold the water on the keel through a turn: the hull
+/// swings faster than the water can be brought round with it, the way
+/// ends up across the keel, and *that* is what the resistance then eats —
+/// leaving the boat becalmed head to wind. Bitten hard at big angles the
+/// leeway never gets big in the first place, so the way stays on the keel
+/// and comes round with the hull, and almost nothing is spent.
+///
+/// The physical reading is the honest one too: a keel at ten degrees of
+/// leeway is a foil, and at sixty it is a barn door.
+const LEEWAY_BITE: f32 = 6.0;
+
+/// The way through the water, in metres a second, at which the rudder has
+/// as much bite as it takes to answer the helm at all.
+///
+/// A real rudder is a blade in a stream and does nothing without one, and
+/// a hull lying still would be unsteerable. That is very nearly right and
+/// entirely unplayable: it is the pose a boat is in when it has run its
+/// bow onto a beach, and a helm that goes dead exactly there leaves a hull
+/// wedged with nothing left to free it. So the blade keeps a floor under
+/// it. Set against the ship's own speed, a hull lying still answers its
+/// helm at rather better than a third of full authority: plainly weaker
+/// than one under way, and enough to swing a stranded bow off a beach.
+const STEERAGE: f32 = 6.0;
 
 /// How fast a towed hull swings to point the way it is being dragged, in
 /// e-foldings per second — see [`eased`]. The rope holds a boat at a
@@ -259,29 +297,28 @@ struct Hull {
     /// times the dinghy here and not two: what a player should get from
     /// backing into their own tender is the tender shoved aside.
     displacement: f32,
-    /// Seconds the keel takes to bring the way a hull is making round onto
-    /// the way it is pointing — the keel, as the only thing about it that is
-    /// simulated. A boat is not a puck, and this is the whole of the
-    /// difference: a hull knocked abeam slides a little and then goes back
-    /// to travelling the way it points.
+    /// How hard the keel holds the water, as the seconds a hull drifting
+    /// gently sideways takes to lose that drift. The linear half of
+    /// lateral resistance; [`LEEWAY_BITE`] is the other half and is what
+    /// governs a hull thrown broadside.
     ///
-    /// It turns the way rather than taking it off, and the difference is
-    /// the whole of whether a boat can tack. Damping the sideways component
-    /// to nothing is the obvious reading and is wrong: a hull coming about
-    /// has almost all of its way across its own keel for a moment, and
-    /// killing that leaves it becalmed in the eye of the wind with nothing
-    /// to carry it out the other side. A keel does not destroy way, it
-    /// points it — so what is eased here is the *direction*, at constant
-    /// speed.
+    /// This is the only thing about a hull's shape that is simulated, and
+    /// it is what makes a boat a boat rather than a puck: it goes the way
+    /// it points, it makes a little leeway doing it, and a hull shoved
+    /// abeam by another slides and then comes back onto its heading.
     keel_grip: f32,
-    /// Seconds the rudder takes to bring the hull round to the rate the
-    /// helm is asking for — the turn as a controller rather than a number
-    /// written straight onto the hull, which is what leaves room for a
-    /// collision to knock the bow off and the helm to answer it. Short
-    /// enough that the helm still feels direct.
+    /// How much the water resists the hull swinging, as the seconds a hull
+    /// takes to settle at the rate the helm is asking for. Together with
+    /// the hull's own [`Hull::yaw_inertia`] it fixes the yaw damping, and
+    /// that damping against the rudder's moment is what settles the turn —
+    /// so a heavier hull takes longer to come round for its inertia rather
+    /// than because a number here said so.
     helm_response: f32,
-    /// Seconds of lag between the speed the keys ask for and the speed the
-    /// hull makes — the time constant of an exponential ease, so most of any
+    /// How long the hull carries its way with nothing driving it: the time
+    /// constant of a glide, and so of the water's *linear* hold on the
+    /// hull — see [`Hull::resistance`]. Read the other way about, it is
+    /// also what sizes the rig, a boat's thrust being whatever it takes to
+    /// hold a hull that glides like this at a speed like that — the time constant of an exponential ease, so most of any
     /// change arrives within this long and it is all but done in three times
     /// it. Named as a duration rather than as the rate [`eased`] takes, a
     /// hull having a weight that is easier to think about in seconds. The
@@ -371,6 +408,93 @@ impl Hull {
     fn stern(&self) -> Vec3 {
         Vec3::new(0.0, 0.0, self.length / 2.0)
     }
+
+    /// The water's hold on the hull along its own keel, in newtons, signed
+    /// against the way — see [`WAVE_MAKING`] for the two parts of it.
+    ///
+    /// The linear part is the hull's [`Hull::way_response`] read as a
+    /// coefficient, which is what makes a glide end. The quadratic part
+    /// then follows from the share the two are meant to hold in at the top
+    /// of the range.
+    fn resistance(&self, way: f32) -> f32 {
+        let (linear, square) = self.drag();
+        linear * way + square * way * way.abs()
+    }
+
+    /// The two resistance coefficients, in N·s/m and N·s²/m².
+    fn drag(&self) -> (f32, f32) {
+        let linear = self.displacement / self.way_response;
+        // At the top of the range the two hold in the share
+        // [`WAVE_MAKING`] names, which fixes the second from the first.
+        let square = linear * WAVE_MAKING / ((1.0 - WAVE_MAKING) * self.speed);
+        (linear, square)
+    }
+
+    /// What the rig pulls with at full drive, in newtons: whatever it takes
+    /// to hold the hull at its own [`Hull::speed`] against the water.
+    ///
+    /// Derived rather than named, which is the direction that keeps the
+    /// model honest — a boat's top speed is where its rig and its drag
+    /// meet, and naming two of the three leaves the third with nowhere to
+    /// disagree.
+    fn thrust(&self) -> f32 {
+        self.resistance(self.speed)
+    }
+
+    /// The speed a hull settles at under a given share of its full drive:
+    /// where [`Hull::resistance`] comes to meet it.
+    ///
+    /// Not the share times the speed, and that is the model showing
+    /// through rather than an error. Resistance rises faster than the way
+    /// does, so half the drive buys appreciably more than half the speed —
+    /// a boat is quick to get going and hard to push the last of the way
+    /// to its hull speed, which is the shape of the thing.
+    #[cfg(test)]
+    pub fn speed_at(&self, drive: f32) -> f32 {
+        let (linear, square) = self.drag();
+        let wanted = drive.abs() * self.thrust();
+        let at = (-linear + (linear * linear + 4.0 * square * wanted).sqrt()) / (2.0 * square);
+        if drive < 0.0 {
+            -at
+        } else {
+            at
+        }
+    }
+
+    /// What the hull has to be pushed with to hold it at its
+    /// [`Hull::astern_speed`] — the resistance there, since backing is a
+    /// balance like any other.
+    fn astern_thrust(&self) -> f32 {
+        self.resistance(self.astern_speed)
+    }
+
+    /// The water's hold on the hull across its keel, in newtons, for a
+    /// given speed of leeway — see [`Hull::keel_grip`] and
+    /// [`LEEWAY_BITE`].
+    fn lateral_resistance(&self, leeway: f32) -> f32 {
+        let linear = self.displacement / self.keel_grip;
+        let square = LEEWAY_BITE * self.displacement / (self.keel_grip * self.speed);
+        linear * leeway + square * leeway * leeway
+    }
+
+    /// How hard the hull is to swing, in kg·m² — a rectangle its own length
+    /// by its own beam, which is the shape the water plane collides it as.
+    fn yaw_inertia(&self) -> f32 {
+        self.displacement * (self.length * self.length + self.beam * self.beam) / 12.0
+    }
+
+    /// The water's hold on the hull swinging, in N·m per radian a second —
+    /// see [`Hull::helm_response`], which is this read as a duration.
+    fn yaw_damping(&self) -> f32 {
+        self.yaw_inertia() / self.helm_response
+    }
+
+    /// How much of its full bite the rudder has with this much water going
+    /// past it — see [`STEERAGE`] for the floor under it, and why there is
+    /// one.
+    fn steerage(&self, through_water: f32) -> f32 {
+        (STEERAGE + through_water.abs()) / (STEERAGE + self.speed)
+    }
 }
 
 /// The ship: the boat a world is entered aboard, and [`MODEL`]'s subject.
@@ -413,14 +537,14 @@ const SHIP: Hull = Hull {
     displacement: 1_500.0,
     // A keel a metre deep under seven metres of hull grips hard. Leeway
     // dies in a third of a second, which is what makes her track.
-    keel_grip: 0.35,
+    keel_grip: 0.06,
     // The rudder is quick — near enough the instant answer the helm used
     // to be, and slow enough that a hull knocked askew comes back round
     // rather than snapping.
     helm_response: 0.2,
     // The hull gathers way over a few seconds and carries it for a couple of
     // lengths' glide — seven metres of timber, felt.
-    way_response: 1.5,
+    way_response: 2.2,
     // With the speed above, a turning circle of about five metres — tight
     // enough to feel answerable from a camera forty metres up, wide enough
     // that coming about reads as a turn rather than a spin.
@@ -491,7 +615,7 @@ const ROWBOAT: Hull = Hull {
     displacement: 140.0,
     // Nothing under her but a rockered keel and a skeg, so she slides —
     // which is what a dinghy shoved abeam should visibly do.
-    keel_grip: 0.9,
+    keel_grip: 0.15,
     // Nimble, and nothing much to turn.
     helm_response: 0.15,
     // A few hundred kilos gathers way in a stroke or two and glides a
@@ -1492,6 +1616,7 @@ impl Plugin for BoatPlugin {
                     take_the_plane,
                     whose_water_is_it,
                     make_fast,
+                    the_water_holds,
                     trail,
                     steer.run_if(in_state(Helm::Sailing)),
                 )
@@ -2791,25 +2916,77 @@ fn make_fast(
     }
 }
 
-/// How a hull behaves at the end of a rope: it slows, and it points the way
-/// it is being pulled.
+/// The water's hold on every hull that is in it.
 ///
-/// Both are the water on its planking, and both are stated rather than
-/// simulated — the same choice, and for the same reason, as the keel in
-/// [`steer`]. A rope holds a boat at a distance and has no opinion about
-/// which way it faces; left at that the dinghy arrives at the transom
-/// broadside or stern first, having been swung there by the one snub that
-/// set it going and never turned back. See [`TOW_DRAG`] and [`TOW_SWING`].
+/// Resistance along the keel, resistance across it, and the drag on a hull
+/// swinging — see [`Hull::resistance`], [`Hull::lateral_resistance`] and
+/// [`Hull::yaw_damping`]. Nothing here is anybody's doing: it is what the
+/// sea does to a boat, and it is applied to the hull the player steers and
+/// to every hull they do not, which is the point of it being one system.
 ///
-/// On the towed hull and nothing else. The hull the player steers has a
-/// drive that holds a speed and a helm that holds a heading, and would only
-/// answer this by working harder to reach the same numbers.
+/// It has to be, and the two ways of getting that wrong both showed. A
+/// dinghy rowed up a beach and stepped out of kept whatever way it had and
+/// carried it for ever, there being nothing left to take it off. And a ship
+/// lying at anchor could be pushed clean through by a boat rowed at her,
+/// because the rowing boat had a rig behind it and the ship had nothing at
+/// all. A hull with no crew is not a hull the sea has stopped touching.
+///
+/// The hull under the player's own hand is left out of the snap at the end
+/// and of nothing else — [`steer`] closes that one, which is the only
+/// place that knows whether anybody is asking the boat to move.
+fn the_water_holds(
+    players: Query<&ChildOf, With<Player>>,
+    mut hulls: Query<(Entity, Forces, &Rigged), Without<Told>>,
+) {
+    let helmed = players.single().map(ChildOf::parent).ok();
+    for (entity, mut forces, rigged) in &mut hulls {
+        let hull = hull_of(rigged.0);
+        let bow = waterline::bow(forces.rotation());
+        let making = forces.linear_velocity();
+        let way = making.dot(bow);
+        let leeway = making - bow * way;
+
+        // Along the keel, and across it. The lateral half is the keel, and
+        // the only part of a hull's shape this water knows about: nothing
+        // turns the way onto the bow anywhere, because resisting what runs
+        // across the keel *is* how a boat comes to travel the way it
+        // points, and the leeway left over is the angle at which the two
+        // balance.
+        forces.apply_force(-bow * hull.resistance(way));
+        let drifting = leeway.length();
+        if drifting > 0.0 {
+            forces.apply_force(-leeway / drifting * hull.lateral_resistance(drifting));
+        }
+        forces.apply_torque(-hull.yaw_damping() * forces.angular_velocity());
+
+        // And the tail of a glide, closed by hand: resistance takes the
+        // last of a hull's way asymptotically and a solver never sleeps, so
+        // a boat left in the water would creep for ever. Not for the hull
+        // somebody is steering, whose own drive would be fighting this.
+        if Some(entity) != helmed && making.length() < WAY_STOPPED {
+            *forces.linear_velocity_mut() = Vec2::ZERO;
+        }
+    }
+}
+
+/// How a hull behaves at the end of a rope: it points the way it is being
+/// pulled.
+///
+/// A rope holds a boat at a distance and has no opinion about which way it
+/// faces. What turns a real one is the water on its own planking, and left
+/// without that the dinghy arrives at the transom broadside or stern first,
+/// having been swung there by the one snub that set it going and never
+/// turned back — so this is the hull weather-vaning onto its own wake. See
+/// [`TOW_SWING`].
+///
+/// Stated outright rather than asked of the water, unlike everything else
+/// about a towed hull: directional stability comes of a shape this plane
+/// does not model, a rectangle having no more grip at one end than the
+/// other. The *slowing* is not here — that is [`the_water_holds`]'s, along
+/// with every other hull's.
 fn trail(time: Res<Time>, mut towed: TowedHull) {
     let dt = time.delta_secs();
-    let held = 1.0 - eased(1.0 / TOW_DRAG, dt);
-    for (mut angle, mut way, mut spin) in &mut towed {
-        way.0 *= held;
-        spin.0 *= held;
+    for (mut angle, way, _spin) in &mut towed {
         if way.0.length() <= STIRRING {
             continue;
         }
@@ -2951,72 +3128,57 @@ pub(crate) fn steer(
     let bow = waterline::bow(forces.rotation());
     let wind = conditions.wind_at(ground.as_deref(), forces.position().0);
 
+    // What the rig is pulling with this frame, in newtons — the polar as a
+    // share of the hull's full [`Hull::thrust`]. It names a *drive* and not
+    // a speed: what speed comes of it is the water's answer, and is
+    // [`Hull::speed_at`].
     let astern = !boat.sails_set && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
-    let target = if boat.sails_set {
-        match hull.mast {
-            Some(_) => hull.speed * sail_drive(bow, wind),
-            // Rowed: the oars pull whatever the wind is doing, and what the
-            // wind does is help or hinder them — see [`row_drive`]. Even
-            // within a stroke still: the hull glides at one speed while the
-            // blades circle, and giving the surge to the stroke is the step
-            // not yet taken.
-            None => hull.speed * row_drive(bow, wind),
-        }
+    let drive = if boat.sails_set {
+        hull.thrust()
+            * match hull.mast {
+                Some(_) => sail_drive(bow, wind),
+                // Rowed: the oars pull whatever the wind is doing, and what
+                // the wind does is help or hinder them — see [`row_drive`].
+                // Even within a stroke still: the hull pulls at one force
+                // while the blades circle, and giving the surge to the
+                // stroke is the step not yet taken.
+                None => row_drive(bow, wind),
+            }
     } else if astern {
-        -hull.astern_speed
+        -hull.astern_thrust()
     } else {
         0.0
     };
 
-    // The way the hull is actually making, along its own keel, and what it
-    // is making sideways. Read off the body rather than remembered, which
-    // is the whole difference this makes: a hull shoved by another arrives
-    // here already going somewhere it was not sent, and the three
-    // controllers below answer that exactly as they answer the helm.
+    // The way the hull is actually making, split into what runs along its
+    // own keel and what runs across it. Read off the body rather than
+    // remembered, which is the whole difference the water plane makes: a
+    // hull shoved by another arrives here already going somewhere it was
+    // not sent, and every force below answers that exactly as it answers
+    // the helm.
     let making = forces.linear_velocity();
     let way = making.dot(bow);
 
-    // The keel, written as what it is: a statement that a hull travels the
-    // way it points. The way is turned onto the bow at the hull's own
-    // [`Hull::keel_grip`] and its *speed* is left exactly alone, which is
-    // what makes a tack carry — a hull crossing the eye has almost all of
-    // its way across its own keel for a moment, and anything that took
-    // speed off for that leaves it becalmed head to wind with nothing to
-    // bring it out the other side.
-    //
-    // Written onto the velocity rather than asked for as a force, and the
-    // difference is not tidiness: a force can only turn a vector by pulling
-    // it across, which cuts the corner and costs speed every step — a fifth
-    // of the way through a tack, measured. A collision still writes what it
-    // likes here, an eighth of a second before this does, so a bump knocks
-    // the hull sideways and the keel then points it again with whatever
-    // speed the bump left it. Which is the behaviour wanted, and is the
-    // only place in this module that writes a velocity outright.
-    let speed = making.length();
-    if speed > 0.0 {
-        let along = bow * if way < 0.0 { -speed } else { speed };
-        let onto = eased(1.0 / hull.keel_grip, time.delta_secs());
-        *forces.linear_velocity_mut() =
-            (making + (along - making) * onto).normalize_or_zero() * speed;
-    }
-    let making = forces.linear_velocity();
+    // What the rig pulls with, along the keel. What the water does about
+    // it is [`the_water_holds`]'s, which has already run over this hull
+    // along with every other — the drive is the only thing here that is
+    // this player's doing.
+    forces.apply_force(bow * drive);
 
-    // Both are *accelerations* rather than forces, which is deliberate and
-    // is what makes this comparable with the hand-written steering it
-    // replaces: an acceleration ignores mass, so the drive and the rudder
-    // reproduce the same eases to the same constants, and the hull's
-    // displacement shows up in one place only — what happens when two of
-    // them touch.
-    forces.apply_local_linear_acceleration(Vec2::NEG_Y * ((target - way) / hull.way_response));
-    forces.apply_angular_acceleration(
-        (waterline::across(helm * hull.turn_rate) - forces.angular_velocity()) / hull.helm_response,
-    );
+    // And the helm: the moment the blade makes, which the water's hold on
+    // a swinging hull then meets. The two balance at the rate the helm
+    // asked for, and how long the hull takes to get there is its own
+    // [`Hull::yaw_inertia`] against that damping — so the rudder is
+    // answered by the ship rather than by a number.
+    let asked = waterline::across(helm * hull.turn_rate * hull.steerage(way));
+    forces.apply_torque(hull.yaw_damping() * asked);
 
-    // The tail of a glide, closed by hand. An ease never quite arrives and
-    // a solver's never sleeps, so without this a boat at anchor creeps for
-    // ever — and [`Boat::at_rest`] means exactly zero, which every crossing
-    // and the night's offer are read against.
-    if target == 0.0 && making.length() < WAY_STOPPED {
+    // The tail of a glide, closed by hand. Resistance takes the last of a
+    // hull's way asymptotically and a solver never sleeps, so without this
+    // a boat at anchor creeps for ever — and [`Boat::at_rest`] means
+    // exactly zero, which every crossing and the night's offer are read
+    // against.
+    if drive == 0.0 && making.length() < WAY_STOPPED {
         *forces.linear_velocity_mut() = Vec2::ZERO;
     }
     // What the rest of the client reads a hull's way off — the wake, the
@@ -3181,17 +3343,20 @@ mod tests {
     /// rather than an angle — proportionality to how long the key was held is
     /// what makes a turn the same on any machine.
     /// The rate the bow comes round at with the helm hard over and the
-    /// rudder settled — see [`Hull::helm_response`] for why those are two
-    /// different moments now. The helm asks for a rate and the water takes a
-    /// fraction of a second to give it, which is what leaves room for a
-    /// collision to knock the bow off a course the helm then answers; an
-    /// average taken from the moment the key goes down measures that
-    /// fraction of a second as much as it measures the turn.
+    /// rudder settled, on a hull lying still.
+    ///
+    /// Two things make that a different reading from the one this used to
+    /// take. The rudder is a blade against the water's hold on a swinging
+    /// hull and the two take a moment to balance, so an average from the
+    /// instant the key goes down measures the settling as much as the turn.
+    /// And a blade in still water has only the floor [`STEERAGE`] leaves it,
+    /// so what a hull at anchor comes round at is a fraction of what one
+    /// under way does — see [`the_helm_answers_harder_with_way_on`].
     fn turn_rate(key: KeyCode) -> f32 {
         let mut app = test_app();
         hold(&mut app, key);
         // Five times the rudder's own response, so what is measured after
-        // it is the rate the helm asked for and not the tail of the hull
+        // it is the rate the helm settled at and not the tail of the hull
         // arriving at it.
         run_frames(&mut app, 60);
         let start_yaw = heading_yaw(&mut app);
@@ -4182,11 +4347,12 @@ mod tests {
         let before = pennant_bearing(&mut app);
         let bow = heading_yaw(&mut app);
 
-        // Long enough to swing the masthead through a right angle at the
-        // ship's turn rate, with the fraction of a second the rudder takes
-        // to answer allowed for — see [`Hull::helm_response`].
+        // Long enough to swing the masthead through a right angle, at the
+        // rate a hull lying still comes round at — which is the ship's own
+        // taken down by [`STEERAGE`]'s floor, the rudder having no way
+        // going past it here.
         hold(&mut app, KeyCode::ArrowLeft);
-        run_frames(&mut app, 60);
+        run_frames(&mut app, 140);
 
         let turned = (heading_yaw(&mut app) - bow).abs();
         assert!(turned > 1.0, "the bow only came round {turned} radians");
@@ -4435,7 +4601,7 @@ mod tests {
         let mut app = test_app();
         wind_astern(&mut app, 7.0);
         tap(&mut app, KeyCode::ArrowUp);
-        let expected = SHIP.speed * strength(7.0);
+        let expected = SHIP.speed_at(strength(7.0));
         let ahead = speed_settled(&mut app);
         assert!(
             (ahead - expected).abs() < expected * 0.01,
@@ -4474,7 +4640,7 @@ mod tests {
         let made = (boat(&mut app).translation - before).length() / seconds;
         assert!(made > 0.0, "the boat never began to move");
         assert!(
-            made < SHIP.speed * strength(7.0) * 0.5,
+            made < SHIP.speed_at(strength(7.0)) * 0.5,
             "{made} m/s inside the first half second is a leap, not gathered way"
         );
     }
@@ -4519,16 +4685,50 @@ mod tests {
         let port = turn_rate(KeyCode::ArrowLeft);
         let starboard = turn_rate(KeyCode::ArrowRight);
 
-        let tolerance = SHIP.turn_rate * 0.01;
+        // At rest, which is what these are measured at, the blade has only
+        // the floor under it — so the rate to expect is the ship's own,
+        // taken down by exactly the steerage it has lying still. Computed
+        // from the same function the helm reads, so this pins the wiring
+        // and not a number that would go stale with the constant.
+        let expected = SHIP.turn_rate * SHIP.steerage(0.0);
+        let tolerance = expected * 0.02;
         assert!(
-            (port - SHIP.turn_rate).abs() < tolerance,
-            "the bow came round at {port} rad/s to port, not {}",
-            SHIP.turn_rate
+            (port - expected).abs() < tolerance,
+            "the bow came round at {port} rad/s to port, not {expected}"
         );
         assert!(
-            (starboard + SHIP.turn_rate).abs() < tolerance,
-            "the bow came round at {starboard} rad/s to starboard, not -{}",
-            SHIP.turn_rate
+            (starboard + expected).abs() < tolerance,
+            "the bow came round at {starboard} rad/s to starboard, not -{expected}"
+        );
+    }
+
+    #[test]
+    fn the_helm_answers_harder_with_way_on() {
+        // The other half of the rudder: a blade works on the water going
+        // past it, so the same helm brings the bow round faster on a hull
+        // that is sailing than on one lying at anchor. What keeps the
+        // second from being nothing at all is [`STEERAGE`], and the reason
+        // it must not be is that a bow run onto a beach is exactly where a
+        // dead helm would strand a player.
+        let mut app = test_app();
+        wind_astern(&mut app, 7.0);
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, SETTLED);
+        let sailing = way_on(&mut app);
+        assert!(sailing > 0.0, "the boat never settled onto its run");
+
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, 20);
+        let start = heading_yaw(&mut app);
+        let at = elapsed(&app);
+        run_frames(&mut app, 20);
+        let under_way = (heading_yaw(&mut app) - start) / (elapsed(&app) - at);
+
+        let at_anchor = SHIP.turn_rate * SHIP.steerage(0.0);
+        assert!(
+            under_way > at_anchor * 1.4,
+            "under way the bow came round at {under_way} rad/s, no better than \
+             the {at_anchor} of a hull lying still"
         );
     }
 
@@ -4639,15 +4839,35 @@ mod tests {
         let entered = way_on(&mut app);
         assert!(entered > 0.0, "the boat never settled onto its reach");
 
-        // Helm hard over through the eye to the mirror course — half a turn
-        // at the ship's turn rate, watched frame by frame: an end position
+        // Helm hard over through the eye to the mirror course, and *held
+        // until the bow is round* rather than for a reckoned number of
+        // frames. A hull slows crossing the eye and a rudder is a blade in
+        // a stream, so the second half of a tack comes round slower than
+        // the first — see [`STEERAGE`]. Counting frames off the full turn
+        // rate takes the helm off amidships with the bow still to windward,
+        // which is a test that has stopped asking about the boat.
+        //
+        // Watched frame by frame all the way, because an end position
         // could not say whether the way died somewhere along the road.
         hold(&mut app, KeyCode::ArrowLeft);
-        let frames = (std::f32::consts::PI / SHIP.turn_rate / 0.016) as usize;
         let mut least = f32::MAX;
-        for _ in 0..frames {
+        let mut turned = 0.0;
+        let mut frames = 0;
+        let mut last = heading_yaw(&mut app);
+        // Summed frame by frame rather than read off the ends, a bearing
+        // being a wrapped thing: a hull that has come round half a turn
+        // reads the same as one that has not moved.
+        while turned < std::f32::consts::PI {
             run_frames(&mut app, 1);
+            let now = heading_yaw(&mut app);
+            let round = std::f32::consts::TAU;
+            turned += ((now - last + std::f32::consts::PI).rem_euclid(round)
+                - std::f32::consts::PI)
+                .abs();
+            last = now;
             least = least.min(way_on(&mut app));
+            frames += 1;
+            assert!(frames < SETTLED, "the bow never came round at all");
         }
         assert!(
             least > entered * 0.3,
@@ -4682,10 +4902,14 @@ mod tests {
         assert_eq!(way_on(&mut app), 0.0, "the eye of the wind drove the boat");
         assert_eq!(boat(&mut app).translation, before);
 
-        // A second of helm swings the bow out of the zone and the sails
-        // fill.
+        // Helm over until the bow is clear of the zone and the sails fill.
+        // Longer than it once took: a hull lying still has only the floor
+        // [`STEERAGE`] leaves its rudder, so swinging the bow out of a
+        // no-go zone this wide is a second and a half rather than a second.
+        // That it happens at all is the point — being in irons is a state,
+        // never a trap.
         hold(&mut app, KeyCode::ArrowLeft);
-        run_frames(&mut app, 60);
+        run_frames(&mut app, 120);
         assert!(
             way_on(&mut app) > 0.0,
             "the bow came round but the sails never filled"
@@ -5346,7 +5570,7 @@ mod tests {
         run_frames(&mut app, 60);
         let seconds = elapsed(&app) - start;
 
-        let expected = SHIP.speed * strength(7.0);
+        let expected = SHIP.speed_at(strength(7.0));
         let made = (boat(&mut app).translation - before).length() / seconds;
         assert!(
             (made - expected).abs() < expected * 0.01,
@@ -5392,8 +5616,14 @@ mod tests {
         // two other files' constants. How much of the weather a sail feels
         // is the band's business; the shelter's business is that it is the
         // weather *here*.
+        // As a ratio of the *speeds* the two drives settle at rather than
+        // of the drives themselves. Resistance rises faster than the way
+        // does, so a sail robbed of half its wind loses appreciably less
+        // than half its speed — see [`Hull::speed_at`]. Read off the drives
+        // alone this asks the shelter to slow the boat by more than the
+        // water will allow, whatever the wire sends.
         let floor = protocol::sheltered(Vec2::new(12.0, 0.0), protocol::ground::LEAST_EXPOSURE);
-        let least = strength(floor.length()) / strength(12.0);
+        let least = SHIP.speed_at(strength(floor.length())) / SHIP.speed_at(strength(12.0));
         assert!(
             lee < open * (least + 0.05),
             "the lee made {lee} m/s against {open} in the open, which is barely sheltered"

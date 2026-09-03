@@ -2158,9 +2158,15 @@ mod tests {
             "the tender lies {swung} rad across a rope pulling straight"
         );
 
-        // Sails in: the ship glides to a stop, and the tender — with more
-        // glide in it than the ship — closes on the transom instead of
-        // hanging back at the rope's end.
+        // Sails in: both come to rest, and the tender is still astern on
+        // its rope rather than having run up onto the transom.
+        //
+        // Which is the water deciding, not the rope. An open boat carries
+        // proportionally more drag than a ballasted hull of four times its
+        // length, so the dinghy loses its way *faster* than the ship loses
+        // hers and the painter never goes slack — it is being towed right
+        // down to the last of the glide. A dinghy that overran a stopping
+        // ship would need to be the one holding its way better.
         tap(&mut app, KeyCode::ArrowDown);
         // Counted in frames rather than waited for on the clock: what is
         // being waited on is entirely simulated, so [`run_until`]'s wall
@@ -2182,8 +2188,21 @@ mod tests {
             .xz();
         let rope = stem.distance(transom);
         assert!(
-            rope < crate::boat::PAINTER - 0.5,
-            "the ship stopped and the painter stayed taut at {rope} m"
+            rope <= crate::boat::PAINTER + 0.05,
+            "the painter ran out to {rope} m, past its own length"
+        );
+        // Read off the body rather than through [`way_of`]: a hull in tow
+        // carries no sailing state, its way being the water's and the
+        // rope's rather than anybody's.
+        let drifting = app
+            .world()
+            .get::<avian2d::prelude::LinearVelocity>(tender)
+            .expect("a hull floats")
+            .0;
+        assert_eq!(
+            drifting,
+            Vec2::ZERO,
+            "the ship came to rest and the boat behind her did not"
         );
         // And never inside the ship's own planking, for all the closing.
         let abeam = (tender_place.translation - ship_place.translation)
@@ -2244,6 +2263,12 @@ mod tests {
         // rowboat already.
         let ship = hull_rigged(&mut app, BoatKind::Sloop);
         let tender = hull_rigged(&mut app, BoatKind::Rowboat);
+        // Let the water take the last of the dinghy's way off first. It was
+        // rowed at a beach a moment ago and stepped out of moving, and the
+        // millimetre it settles through before [`the_water_holds`] brings
+        // it to a stop is the sea doing its job — not a key doing anything.
+        // What this test is about starts after that.
+        run_frames(&mut app, 60);
         let anchorage = transform_of(&mut app, ship).translation.xz();
         let beached = transform_of(&mut app, tender).translation.xz();
         hold(&mut app, KeyCode::ArrowUp);
