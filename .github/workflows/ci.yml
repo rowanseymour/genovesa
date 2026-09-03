@@ -80,6 +80,10 @@ jobs:
   lint-and-test:
     name: Lint and test
     runs-on: ubuntu-latest
+    # Deleting caches wants more than the default read-only token gives.
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -112,17 +116,35 @@ jobs:
       # can read only its own and the default branch's, so a pull request that
       # saved its own would be spending the repository's ten gigabytes on
       # something no other branch can ever restore — and evicting main's copy,
-      # the one every branch does restore, to do it. Restoring counts as use,
-      # so main's stays alive on daily reads between the rare pushes that
-      # rewrite it.
+      # the one every branch does restore, to do it.
       #
-      # `cache-on-failure` so that a main run which builds and then fails a
-      # test still leaves the engine underneath it cached; the dependencies are
-      # the same either way.
-      - uses: Swatinem/rust-cache@v2
+      # Restoring and saving are two steps rather than one action because the
+      # one action this used saved only when the restore had matched nothing
+      # under its exact key, and that is a rule with no way back from a bad
+      # copy. There was one: a main run failed at clippy, its save-on-failure
+      # kept the check-only target clippy had got as far as, and every run
+      # after that restored it, called it a full match and never wrote again.
+      # A check build holds metadata and no rlibs, so `cargo test` compiled
+      # the engine from cold on every branch for a day, and the only sign was
+      # the clock. So no key here is ever matched exactly — it ends in the run
+      # id — a restore takes the newest cache under the prefixes instead, and
+      # every main run that gets its tests green writes a fresh copy.
+      #
+      # The paths are the ones any Rust cache holds: the registry's index and
+      # crate archives, checked-out git dependencies, and the target directory.
+      - name: Restore the dependency cache
+        id: cache
+        uses: actions/cache/restore@v4
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            rust-${{ runner.os }}-
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -135,10 +157,9 @@ jobs:
       # — cost and shape numbers to read, not thresholds to fail on — so they
       # stay ignored. Nothing here passes `--ignored`.
       - name: Tests
+        id: tests
         # A test that fails only on a runner has no evidence but its backtrace,
-        # and a green run pays nothing for it. On the step and not the job:
-        # rust-cache folds every RUST* variable it can see into its key, so a
-        # job-level one would key every branch away from the cache main saved.
+        # and a green run pays nothing for it.
         env:
           RUST_BACKTRACE: 1
         run: cargo test --workspace --locked
@@ -155,3 +176,53 @@ jobs:
         run: cargo doc --workspace --no-deps --locked --document-private-items
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+
+      # The save waits for the tests and not for clippy, because a target
+      # clippy has finished with is the check-only copy described above. It
+      # does not wait for the doc links: those build nothing the tests have
+      # not, and a broken link is not a reason to make every branch compile
+      # the engine again. `!cancelled()` so that a red doc step still reaches
+      # this far.
+      #
+      # What is kept is the dependencies and nothing of ours. Every artifact
+      # of a workspace crate goes, along with the incremental state, the built
+      # binaries and the rendered docs, because a branch has changed those by
+      # definition and would only be restoring something to throw away.
+      - name: Prune the target directory down to the dependencies
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.tests.outcome == 'success' }}
+        run: |
+          rm -rf target/doc
+          members=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[].name | gsub("-"; "_")')
+          for profile in target/*/; do
+            rm -rf "$profile"/incremental
+            find "$profile" -maxdepth 1 -type f -delete
+            for member in $members; do
+              rm -rf "$profile"/deps/"$member"-* "$profile"/deps/lib"$member"-* \
+                "$profile"/.fingerprint/"$member"-* "$profile"/build/"$member"-*
+            done
+          done
+          du -sh ~/.cargo/registry ~/.cargo/git target
+      - name: Save the dependency cache
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.tests.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      # A key per run means a cache per run, and the one just written makes
+      # every older one dead weight: a restore takes the newest under its
+      # prefix, so nothing reads them again, and left to expire on their own
+      # they sit against the ten-gigabyte limit for a week first.
+      - name: Drop the caches this one replaces
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.tests.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --key rust-${{ runner.os }}- --limit 100 --json id,key \
+            --jq '.[] | select(.key != "${{ steps.cache.outputs.cache-primary-key }}") | .id' \
+            | xargs -rn1 gh cache delete
