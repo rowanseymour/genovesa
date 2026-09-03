@@ -35,6 +35,7 @@
 //! the waterline rather than at the keel or the deck, which is what lets
 //! [`float`] put it down by simply setting the height of the surface it is on.
 
+use avian2d::prelude::*;
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
 use bevy::animation::{AnimationClip, AnimationPlayer};
 use bevy::asset::RenderAssetUsages;
@@ -54,6 +55,7 @@ use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
 use crate::told::{eased_onto, Told};
+use crate::waterline;
 use crate::{eased, matte, model_mesh, AppState, Helm};
 
 /// The ship, as a file. Built from `assets-src/models/boat/boat.blend` by
@@ -131,6 +133,31 @@ const STIRRING: f32 = 0.001;
 /// less than any jump worth the name.
 const TELEPORT: f32 = PULL / 2.0;
 
+/// Seconds a towed hull's way takes to run off in the water when nothing
+/// is pulling it — the drag of an open boat, and the only resistance
+/// modelled anywhere here.
+///
+/// The hull the player steers needs none: its drive is a controller that
+/// holds a speed, and drag under it would only mean the controller pulling
+/// harder to reach the same number. A boat on a painter has no controller
+/// and no oars, so without this it is a puck on ice — the rope snubs, flings
+/// it past the transom, and it comes back on the other side. Measured, it
+/// reached twice the ship's own speed doing that.
+const TOW_DRAG: f32 = 2.5;
+
+/// How fast a towed hull swings to point the way it is being dragged, in
+/// e-foldings per second — see [`eased`]. The rope holds a boat at a
+/// distance and says nothing at all about which way it faces; what turns a
+/// real one is the water on its own planking, and a dinghy towed stern
+/// first is a dinghy nobody has modelled that for.
+const TOW_SWING: f32 = 3.0;
+
+/// How much of the snub a painter takes out rather than passing on, as the
+/// joint's own damping. Rope stretches and wet hemp is not springy; between
+/// them they turn a rope coming taut into a hull that is *led* rather than
+/// snatched.
+const PAINTER_GIVE: f32 = 5.0;
+
 /// The painter: metres of rope from the ship's transom to the stem of the
 /// boat it tows — see [`tow`].
 ///
@@ -142,21 +169,6 @@ const TELEPORT: f32 = PULL / 2.0;
 /// limit — a hair inside a limit is a lowering refused on a quantisation
 /// step.
 pub(crate) const PAINTER: f32 = 5.0;
-
-/// How fast a towed hull swings to point along whatever is moving it, in
-/// e-foldings per second — see [`eased`]. Quick: a light hull with no keel
-/// is turned by the rope rather than by any grip on the water, and a
-/// dinghy that lagged its painter would be drawn sliding sideways.
-const TOW_SWING: f32 = 3.0;
-
-/// Seconds a towed hull's drift takes to run off once the painter goes
-/// slack — the time constant of an exponential ease, like a hull's
-/// `way_response`, and a good deal longer than the ship's own: a light
-/// hull with no keel and nobody backing water carries its way further
-/// than a keel does. Longer than the ship's is also what makes a stop read
-/// as one — the tender closes on the transom and comes alongside, rather
-/// than hanging back at the rope's end as though the rope pushed.
-const TOW_GLIDE: f32 = 3.0;
 
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —
@@ -236,6 +248,36 @@ struct Hull {
     speed: f32,
     /// Metres per second going astern.
     astern_speed: f32,
+    /// What the hull weighs, in kilogrammes — displacement, the water it
+    /// puts aside. The one number on a `Hull` that does nothing at all
+    /// until two boats touch: the drive, the helm and the keel are all
+    /// written as accelerations (see [`steer`]), so how heavy a hull is
+    /// changes nothing about how it sails, and decides only how much of
+    /// its way it hands over in a collision. Which is why the ship is ten
+    /// times the dinghy here and not two: what a player should get from
+    /// backing into their own tender is the tender shoved aside.
+    displacement: f32,
+    /// Seconds the keel takes to bring the way a hull is making round onto
+    /// the way it is pointing — the keel, as the only thing about it that is
+    /// simulated. A boat is not a puck, and this is the whole of the
+    /// difference: a hull knocked abeam slides a little and then goes back
+    /// to travelling the way it points.
+    ///
+    /// It turns the way rather than taking it off, and the difference is
+    /// the whole of whether a boat can tack. Damping the sideways component
+    /// to nothing is the obvious reading and is wrong: a hull coming about
+    /// has almost all of its way across its own keel for a moment, and
+    /// killing that leaves it becalmed in the eye of the wind with nothing
+    /// to carry it out the other side. A keel does not destroy way, it
+    /// points it — so what is eased here is the *direction*, at constant
+    /// speed.
+    keel_grip: f32,
+    /// Seconds the rudder takes to bring the hull round to the rate the
+    /// helm is asking for — the turn as a controller rather than a number
+    /// written straight onto the hull, which is what leaves room for a
+    /// collision to knock the bow off and the helm to answer it. Short
+    /// enough that the helm still feels direct.
+    helm_response: f32,
     /// Seconds of lag between the speed the keys ask for and the speed the
     /// hull makes — the time constant of an exponential ease, so most of any
     /// change arrives within this long and it is all but done in three times
@@ -364,6 +406,16 @@ const SHIP: Hull = Hull {
     // Enough to back off a beach or out of a cove, and slow enough that
     // nobody crosses an ocean in reverse.
     astern_speed: 4.0,
+    // A seven-metre wooden hull with ballast in her: a couple of tonnes,
+    // and ten times the dinghy she tows.
+    displacement: 1_500.0,
+    // A keel a metre deep under seven metres of hull grips hard. Leeway
+    // dies in a third of a second, which is what makes her track.
+    keel_grip: 0.35,
+    // The rudder is quick — near enough the instant answer the helm used
+    // to be, and slow enough that a hull knocked askew comes back round
+    // rather than snapping.
+    helm_response: 0.2,
     // The hull gathers way over a few seconds and carries it for a couple of
     // lengths' glide — seven metres of timber, felt.
     way_response: 1.5,
@@ -431,6 +483,15 @@ const ROWBOAT: Hull = Hull {
     speed: 3.0,
     // Backing water is half a pull.
     astern_speed: 1.5,
+    // A few hundred kilos of open boat, and light enough beside the ship
+    // that being backed into sends her skating rather than stopping the
+    // ship dead.
+    displacement: 140.0,
+    // Nothing under her but a rockered keel and a skeg, so she slides —
+    // which is what a dinghy shoved abeam should visibly do.
+    keel_grip: 0.9,
+    // Nimble, and nothing much to turn.
+    helm_response: 0.15,
     // A few hundred kilos gathers way in a stroke or two and glides a
     // length; the ship's numbers, scaled by feel rather than by physics.
     way_response: 0.8,
@@ -808,6 +869,11 @@ impl Boat {
     /// How wide a stretch of water the hull pushes aside, in metres — its
     /// beam. What the wake is scaled off, a bigger hull leaving a broader
     /// one; see [`crate::wake`].
+    /// How long the hull is overall, in metres — see [`Hull::length`].
+    pub fn length(&self) -> f32 {
+        self.hull.length
+    }
+
     pub fn beam(&self) -> f32 {
         self.hull.beam
     }
@@ -856,26 +922,16 @@ struct Oared;
 #[derive(Component)]
 pub struct Towed {
     by: Entity,
-    /// Metres a second the hull is making over the ground: the ship's own
-    /// speed along the rope while the rope is taut, and run off on the
-    /// dinghy's own glide once it goes slack, which is what carries a
-    /// tender on past a ship that has stopped.
-    drift: Vec2,
-    /// Where the rope was made fast last frame, which is the only way to
-    /// learn how fast the ship is moving it — a towed hull asks nobody
-    /// what is moving the ship, as the oars ask nobody what is moving the
-    /// boat. `None` on the frame the tow begins.
-    cleat: Option<Vec2>,
 }
 
 impl Towed {
-    /// On a ship's painter, lying still: the state a boat is taken in tow in.
+    /// On a ship's painter: the state a boat is taken in tow in.
+    ///
+    /// Nothing else, now that the rope is a joint — where the tender is and
+    /// how fast it is going are the solver's, and this says only which ship
+    /// [`make_fast`] should run a painter to.
     pub fn behind(ship: Entity) -> Self {
-        Self {
-            by: ship,
-            drift: Vec2::ZERO,
-            cleat: None,
-        }
+        Self { by: ship }
     }
 }
 
@@ -974,12 +1030,6 @@ pub struct HullId(pub BoatId);
 /// a hull is coming and going with the helm.
 #[derive(Component)]
 pub struct Vessel;
-
-/// Every hull that is planking to keep a keel out of: all but the one on
-/// our own painter, which [`tow`] keeps clear of the ship instead. What
-/// [`steer`] reads other hulls through, and what [`tow`] finds the ship in.
-type Planking<'w, 's> =
-    Query<'w, 's, (Entity, &'static Transform, &'static Rigged), (With<Vessel>, Without<Towed>)>;
 
 /// The hull an oar belongs to, as [`row`] reads it: where it is, its
 /// sailing state where it has one, and whether it is on a painter.
@@ -1394,7 +1444,8 @@ impl Plugin for BoatPlugin {
         // The words this plugin listens for, declared here as its resources
         // are and for the same reason: registering one twice is free, and a
         // module's own tests run it without the session that writes them.
-        app.add_message::<crate::net::HullTold>()
+        app.add_plugins(crate::waterline::WaterlinePlugin)
+            .add_message::<crate::net::HullTold>()
             .add_message::<crate::net::HullGone>()
             .init_resource::<sea::SeaConditions>()
             .init_resource::<Fleet>()
@@ -1419,27 +1470,54 @@ impl Plugin for BoatPlugin {
                     .in_set(crate::net::Wire::Read)
                     .run_if(resource_exists::<crate::net::Online>),
             )
+            // Everything said to the water, before it is solved. The
+            // hulls the wire moves are eased onto their tellings and
+            // carried across to the plane; whose hull is whose is settled;
+            // the painter is made fast or cast off; and the helm asks for
+            // its drive last, so the keys are answered against the poses
+            // this frame actually starts from.
+            //
+            // Only the asking stops when the game is paused. The clock the
+            // solver runs on stops too — see [`crate::waterline`] — so a
+            // hull with way on holds station behind the chart rather than
+            // sailing on under it.
             .add_systems(
                 Update,
-                // Only the steering stops when the game is paused. Floating is
-                // not motion — it sets the hull to the height of the ground
-                // under it — so leaving it running means a chunk arriving
-                // under the pause menu is settled on before the player looks
-                // again. The pennant and the sail come after, and outside the
-                // pause for the same reason: both are drawn off what the
-                // hull's steering wrote, and reading it before this frame's
-                // steering wrote it leaves the cloth a frame behind its mast.
                 (
+                    moor,
+                    take_the_plane,
+                    whose_water_is_it,
+                    make_fast,
+                    trail,
                     steer.run_if(in_state(Helm::Sailing)),
-                    // The boat on the painter, after the ship that pulls
-                    // it and on the same terms: a rope is steering too.
-                    tow.run_if(in_state(Helm::Sailing)),
+                )
+                    .chain()
+                    .after(lose_the_hulls)
+                    .before(PhysicsSystems::Prepare)
+                    .run_if(in_state(AppState::InWorld)),
+            )
+            // And everything read back off it once it has been. The ground
+            // correction first, because a hull the solver put in a hillside
+            // must be out of it before anything draws it there; then the
+            // poses onto the transforms, and the look of a boat hung on
+            // those.
+            .add_systems(
+                Update,
+                (
+                    hold_the_ground,
+                    ride_the_plane,
+                    // Floating is not motion — it sets the hull to the
+                    // height of the surface under it and tilts it to the
+                    // swell — so it runs outside the pause: a chunk
+                    // arriving under the pause menu is settled on before
+                    // the player looks again.
                     float,
+                    // The pennant and the sail after, for the same reason
+                    // they always were: both are drawn off the pose this
+                    // frame arrived at, and reading it any earlier leaves
+                    // the cloth a frame behind its mast.
                     fly_the_pennant,
                     trim_the_sails,
-                    // The hulls nobody here is steering, ridden after the
-                    // one that is: same water, same frame.
-                    moor,
                     // The oars after every hull has been moved, ours and
                     // the moored alike, because they are turned by the water
                     // the hull *covered* — measured frame against frame
@@ -1458,9 +1536,13 @@ impl Plugin for BoatPlugin {
                     // And the hole in the sea last, once every hull — sailed
                     // or moored — is where this frame leaves it.
                     cut_the_water,
+                    // Truly last: what was drawn is remembered here so that
+                    // next frame can tell a hull somebody moved from a hull
+                    // the water moved.
+                    remember_the_drawing,
                 )
                     .chain()
-                    .after(lose_the_hulls)
+                    .after(PhysicsSystems::Writeback)
                     .run_if(in_state(AppState::InWorld)),
             );
     }
@@ -1526,12 +1608,31 @@ pub(crate) fn spawn_hull(
     pose: Transform,
     named: Option<BoatId>,
 ) -> Entity {
+    // Every hull is a body on the water plane from the moment it is
+    // spawned — see [`crate::waterline`]. Dynamic to begin with, whoever it
+    // turns out to belong to: a hull the wire moves is made kinematic by
+    // [`whose_water_is_it`] on the frame its telling lands, and one frame
+    // of a boat nobody has seen yet being solvable costs nothing.
+    let dimensions = hull_of(kind);
+    let laid = waterline::on_the_plane(pose.translation);
     let hull = commands
         .spawn((
             Name::new("Boat"),
             Vessel,
             DespawnOnExit(AppState::InWorld),
             pose,
+            waterline::afloat(dimensions.length, dimensions.beam, dimensions.displacement),
+            waterline::laid_at(laid, yaw_of(&pose)),
+            Drawn(pose),
+            Sounding {
+                at: laid,
+                angle: waterline::across(yaw_of(&pose)),
+                // Nothing is known about the ground yet, and a hull put
+                // down where there is none is in water it is allowed to be
+                // in until a chunk says otherwise — the same benefit of the
+                // doubt [`grounding`] gives a chunk that has not arrived.
+                aground: f32::NEG_INFINITY,
+            },
             // Carried by the parent because the children inherit it: without
             // one here there is nothing for their own visibility to be
             // computed against, and a boat whose meshes are on entities of
@@ -1733,12 +1834,19 @@ fn cut_the_water(
     }
 }
 
-/// Rides the moored hulls: eases each towards where the server last put it,
-/// turns it onto its told heading, and keeps it on the water meanwhile —
-/// level, the pitching and heeling being the sailing systems' and a boat at
-/// anchor or under somebody else's hand having no business doing either
-/// this side of the wire. The easing pace is the markers' own, tellings
-/// arriving on the same reporting beat.
+/// Rides the moored hulls: eases each towards where the server last put it
+/// and turns it onto its told heading. The easing pace is the markers' own,
+/// tellings arriving on the same reporting beat.
+///
+/// It writes a transform still, and [`take_the_plane`] carries that onto
+/// the water plane a step later — a told hull being kinematic there, moved
+/// rather than solved. Keeping the ease here rather than doing it on the
+/// plane is what leaves this the one description of how a stranger's boat
+/// is drawn between two tellings.
+///
+/// The height is no longer here: [`ride_the_plane`] puts every hull on the
+/// water, ours and a stranger's alike, which is one answer where there
+/// were two.
 /// The hulls this frame moors: every told one, and no other told thing.
 ///
 /// `Vessel` and not merely `Without<Boat>`, which is what this was while a
@@ -1748,19 +1856,11 @@ fn cut_the_water(
 type Moorings<'w, 's> =
     Query<'w, 's, (&'static Told, &'static mut Transform), (With<Vessel>, Without<Boat>)>;
 
-fn moor(
-    ground: Option<Res<Ground>>,
-    time: Res<Time>,
-    sea: Res<sea::SeaConditions>,
-    mut hulls: Moorings,
-) {
-    let (dt, elapsed) = (time.delta_secs(), time.elapsed_secs_wrapped());
+fn moor(time: Res<Time>, mut hulls: Moorings) {
+    let dt = time.delta_secs();
 
     for (told, mut transform) in &mut hulls {
-        let at = eased_onto(&mut transform, told, dt);
-        if let Some(surface) = sea.surface_over(ground.as_deref(), at, elapsed) {
-            transform.translation.y = surface;
-        }
+        eased_onto(&mut transform, told, dt);
     }
 }
 
@@ -2317,15 +2417,15 @@ pub(crate) fn float(
             target_roll,
             HEEL_SETTLED,
         );
-        if pitch == boat.pitch && roll == boat.roll {
-            // Nothing to change — which is every frame for a boat with no
-            // water under it, whose rotation must stay unwritten the way an
-            // idle boat's does in [`steer`].
-            continue;
-        }
+        // Hung on whole rather than patched frame against frame, which is
+        // what [`ride_the_plane`] running first buys: the rotation arriving
+        // here is the bearing alone, so the tilt is composed onto it
+        // outright instead of last frame's being unpicked from the right
+        // first. The order is the one the shape has always had — bearing,
+        // then the water's pitch, then a single roll factor the swell
+        // shares with the turn's heel.
         transform.rotation = (transform.rotation
-            * Quat::from_rotation_z(-(boat.roll + boat.heel))
-            * Quat::from_rotation_x(pitch - boat.pitch)
+            * Quat::from_rotation_x(pitch)
             * Quat::from_rotation_z(roll + boat.heel))
         .normalize();
         boat.pitch = pitch;
@@ -2384,198 +2484,356 @@ fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32
         .fold(f32::NEG_INFINITY, f32::max)
 }
 
-/// A hull's planking on the water, as another's keel is kept out of it: an
-/// upright rectangle the hull's length by its beam, at the pose it rides.
-/// The tilt is dropped — a heeling hull's planking is where it was.
-#[derive(Clone, Copy)]
-struct Footprint {
+/// Where a hull last stood in water it was allowed to be in, and how deep
+/// its keel was in the ground there — what [`hold_the_ground`] puts a hull
+/// back to when the solver has pushed it somewhere it may not be.
+///
+/// On the hull rather than worked out afresh because the rule is a
+/// comparison against the pose *before*: a hull already aground may be
+/// driven off but never further on, and that needs the pose it is being
+/// judged against to have survived the frame.
+#[derive(Component)]
+struct Sounding {
     at: Vec2,
-    forward: Vec2,
-    right: Vec2,
-    half_length: f32,
-    half_beam: f32,
+    angle: f32,
+    aground: f32,
 }
 
-impl Footprint {
-    fn of(place: &Transform, hull: &Hull) -> Self {
-        let forward = place.forward().xz().normalize_or(-Vec2::Y);
-        Self {
-            at: place.translation.xz(),
-            forward,
-            right: Vec2::new(-forward.y, forward.x),
-            half_length: hull.length / 2.0,
-            half_beam: hull.beam / 2.0,
-        }
-    }
-
-    /// The point's own offsets in the planking's frame — athwartships and
-    /// fore-and-aft — with `clearance` taken off the outside all round.
-    /// Both positive is inside.
-    fn inside(&self, point: Vec2, clearance: f32) -> (f32, f32) {
-        let offset = point - self.at;
-        (
-            self.half_beam + clearance - offset.dot(self.right).abs(),
-            self.half_length + clearance - offset.dot(self.forward).abs(),
-        )
-    }
-
-    /// How far inside the planking a point lies, in metres to the nearest
-    /// side, and zero outside. `clearance` widens the planking all round by
-    /// the half-beam of the hull asking, whose keel line is what is probed
-    /// and whose own planking stands that far out from it.
-    fn depth_of(&self, point: Vec2, clearance: f32) -> f32 {
-        let (athwart, along) = self.inside(point, clearance);
-        if athwart > 0.0 && along > 0.0 {
-            athwart.min(along)
-        } else {
-            0.0
-        }
-    }
-
-    /// The shortest move that puts a point outside the planking — nothing
-    /// for a point already outside. Sideways when that is nearer, which for
-    /// a hull lying along another it always is.
-    fn shove(&self, point: Vec2, clearance: f32) -> Vec2 {
-        let (athwart, along) = self.inside(point, clearance);
-        if athwart <= 0.0 || along <= 0.0 {
-            return Vec2::ZERO;
-        }
-        let offset = point - self.at;
-        if athwart <= along {
-            self.right * athwart.copysign(offset.dot(self.right))
-        } else {
-            self.forward * along.copysign(offset.dot(self.forward))
-        }
-    }
-}
-
-/// How deep the keel would be in another hull's planking at a pose: the
-/// deepest of the keel's stations in any of `others`, zero with clear water
-/// between every one of them. [`grounding`]'s twin, read by the same gate on
-/// the same terms — the hull at a berth is not fouled, and the hull that
-/// rows into the ship alongside is stopped where its planking meets it.
-fn fouling(hull: &Hull, others: &[Footprint], transform: &Transform) -> f32 {
-    let keel = hull.heel_station - hull.forefoot_station;
-    let probes = hull.keel_probes();
-    (0..probes)
-        .map(|i| {
-            let station = hull.forefoot_station + keel * i as f32 / (probes - 1) as f32;
-            let at = transform.transform_point(Vec3::new(0.0, 0.0, station)).xz();
-            others
-                .iter()
-                .map(|other| other.depth_of(at, hull.beam / 2.0))
-                .fold(0.0, f32::max)
-        })
-        .fold(0.0, f32::max)
-}
-
-/// Tows the boat on the painter: a rope of fixed length from the ship's
-/// transom to the tender's stem, and a glide.
+/// Says which hulls the solver may move and which are moved for it.
 ///
-/// Each frame the stem is carried on by the tender's own drift, and then —
-/// if that left it further from the transom than the rope is long — pulled
-/// straight back onto the rope's circle. That one constraint is most of
-/// what towing looks like. The tender follows the ship's turns on the inside
-/// because it is pulled towards where the transom *is*, lags a ship getting
-/// under way because the rope has to come taut first, and carries on past a
-/// ship that has stopped because the rope only ever pulls. The drift is
-/// measured off the pull while the rope is taut — along the rope, the way
-/// a dragged hull moves — and run off on the dinghy's own glide when it is
-/// slack, so what a stopped ship sees is its tender overrunning and coming
-/// alongside, which is what a real one does.
+/// A hull carrying a [`Told`] is somebody else's or nobody's, and is
+/// [`RigidBody::Kinematic`]: it goes where the wire says and shoves without
+/// being shoved. Everything else — the hull this player steers and the one
+/// on its painter — is [`RigidBody::Dynamic`] and is the solver's to move.
 ///
-/// The hull is pointed along the rope while the rope pulls and along its
-/// drift when it does not, eased on [`TOW_SWING`], and set down with its
-/// stem on the rope's end — a towed boat pivots about its bow, so the stern
-/// swings and the bow stays put. It rides the water level, as a moored hull
-/// does ([`moor`]), the pitching being the sailing systems' and a hull with
-/// no [`Boat`] having none.
-///
-/// A ship backing down onto its own dinghy shoves it aside rather than
-/// stopping against it — the one shove on the water, and allowed because
-/// the tender is this client's to move — see [`Footprint::shove`].
-///
-/// The ground is not asked: the tender only ever visits water the ship has
-/// just crossed or a rope's length inside its turn, and the rope is short.
-fn tow(
-    time: Res<Time>,
-    ground: Option<Res<Ground>>,
-    sea: Res<sea::SeaConditions>,
-    ships: Planking,
-    mut tenders: Query<(&mut Transform, &mut Towed, &Rigged)>,
+/// That is the authority split, spelled as physics: this client may decide
+/// where its own hull ends up and may be stopped by somebody else's, and
+/// may not decide where somebody else's ends up. It is written here as one
+/// rule over the components rather than at each of the several places a
+/// hull changes hands, because those places are already the subtlest in
+/// this module and a body kind left behind at one of them would be a boat
+/// that quietly stopped being solid.
+fn whose_water_is_it(
+    mut commands: Commands,
+    hulls: Query<(Entity, &RigidBody, Has<Told>), With<Vessel>>,
 ) {
-    let dt = time.delta_secs();
-    if dt <= 0.0 {
-        return;
+    for (hull, body, told) in &hulls {
+        let wanted = if told {
+            RigidBody::Kinematic
+        } else {
+            RigidBody::Dynamic
+        };
+        // Written only on a change: what kind of body a hull is is
+        // immutable to a query and reached through the commands, and a
+        // kind re-inserted every frame is a body the solver rebuilds every
+        // frame.
+        if *body != wanted {
+            commands.entity(hull).insert(wanted);
+        }
     }
-    let elapsed = time.elapsed_secs_wrapped();
+}
 
-    for (mut place, mut towed, rigged) in &mut tenders {
-        let Ok((_, ship, ship_rigged)) = ships.get(towed.by) else {
+/// Every hull, as [`take_the_plane`] reads one: what it is drawn at, what
+/// it was drawn at last frame, and everything the plane would have to be
+/// told if those two have parted company.
+type Placed<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Transform,
+        &'static Drawn,
+        &'static mut Position,
+        &'static mut Rotation,
+        &'static mut LinearVelocity,
+        &'static mut AngularVelocity,
+        &'static mut Sounding,
+    ),
+    With<Vessel>,
+>;
+
+/// The pose a hull was last *drawn* at, recorded by [`remember_the_drawing`]
+/// so that [`take_the_plane`] can tell a hull somebody has moved from one
+/// the solver moved.
+#[derive(Component)]
+struct Drawn(Transform);
+
+/// Carries a hull that something outside the solver has moved back onto the
+/// water plane.
+///
+/// Two things move a hull without solving for it. A told one is eased onto
+/// its last telling by [`moor`], every frame. And a hull is sometimes simply
+/// *put* somewhere — a console `goto`, the helm a telling grants, a boat
+/// lowered in a world with no server behind it, a test standing one off a
+/// beach — and all of those say so by writing a transform, which is the
+/// obvious thing to write and was the only thing to write until the plane
+/// existed.
+///
+/// Rather than making each of those places say it twice, this reads the
+/// transform back and adopts any that has changed since it was drawn. The
+/// comparison is exact, and can be: [`remember_the_drawing`] records the
+/// pose at the end of the frame that drew it and nothing writes a hull's
+/// transform in between, so a difference of a single bit is somebody's
+/// doing and never rounding.
+///
+/// A hull put somewhere arrives at rest, which is the wire's own rule for
+/// [`protocol::ToClient::PutDown`] and the right answer for the rest: a
+/// boat that kept its way across a teleport would sail off from wherever it
+/// was set down.
+fn take_the_plane(mut hulls: Placed) {
+    for (place, drawn, mut at, mut angle, mut way, mut spin, mut sounding) in &mut hulls {
+        if place.translation == drawn.0.translation && place.rotation == drawn.0.rotation {
             continue;
-        };
+        }
+        at.0 = waterline::on_the_plane(place.translation);
+        *angle = Rotation::radians(waterline::across(yaw_of(place)));
+        way.0 = Vec2::ZERO;
+        spin.0 = 0.0;
+        // And whatever the ground is doing where it was put is what it is
+        // allowed to be in. Being set down on a shoal is not a hull working
+        // its way onto one, so [`hold_the_ground`]'s comparison starts
+        // afresh here: an infinity accepts the next pose whatever it is,
+        // and the depth it records then is the truth of the new spot.
+        sounding.at = at.0;
+        sounding.angle = angle.as_radians();
+        sounding.aground = f32::INFINITY;
+    }
+}
+
+/// Remembers where every hull was drawn, once everything that draws one has
+/// had its say — see [`take_the_plane`], which is the only reader.
+///
+/// Last in the frame's chain, and that placement is the whole of what makes
+/// the comparison there exact rather than approximate: the tilt [`float`]
+/// hangs on a hull is part of what was drawn, so recording before it would
+/// leave every floating boat looking like one somebody had moved.
+fn remember_the_drawing(mut hulls: Query<(&Transform, &mut Drawn), With<Vessel>>) {
+    for (place, mut drawn) in &mut hulls {
+        drawn.0 = *place;
+    }
+}
+
+/// Keeps a keel out of the ground, which is the one collision on this water
+/// the solver knows nothing about — see [`crate::waterline`] on why the
+/// ground is a height field here and not a collider.
+///
+/// The rule is [`grounding`]'s and is unchanged: a pose is allowed if it
+/// floats, or failing that if it is aground no *deeper* than the one the
+/// hull already held. What has changed is when it is asked. It used to be a
+/// gate a frame's advance passed before it was taken; now the solver moves
+/// the hull first and this puts it back if it went somewhere it may not be,
+/// killing the way it was carrying as it does — which is what running onto
+/// a beach does to a boat.
+///
+/// Restoring rather than pushing out along the slope, because a push is a
+/// direction invented at the shoreline and the pose the hull came from is
+/// one it was actually allowed to be in. The second clause is what frees a
+/// hull that finds itself aground through no fault of its own: a `goto` on
+/// to a shoal, or ground streaming in underneath one already sitting there.
+fn hold_the_ground(
+    ground: Option<Res<Ground>>,
+    mut hulls: Query<
+        (
+            &Rigged,
+            &mut Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut Sounding,
+        ),
+        With<Vessel>,
+    >,
+) {
+    let ground = ground.as_deref();
+    for (rigged, mut at, mut angle, mut way, mut sounding) in &mut hulls {
         let hull = hull_of(rigged.0);
-        let ship_hull = hull_of(ship_rigged.0);
-        let cleat = ship.transform_point(ship_hull.stern()).xz();
-
-        let stem_was = place.transform_point(hull.stem()).xz();
-        let mut stem = stem_was + towed.drift * dt;
-        let to_cleat = cleat - stem;
-        let reach = to_cleat.length();
-        let taut = reach > PAINTER;
-        let hauled = towed.cleat.map(|was| (cleat - was) / dt);
-        towed.cleat = Some(cleat);
-        if taut {
-            let along = to_cleat / reach;
-            stem += along * (reach - PAINTER);
-            // A hull on a taut rope moves as the rope's end does, along the
-            // rope: the water kills any way it has across its keel long
-            // before the rope could, and the keel lies along the rope. Two
-            // wrong readings of this are worth writing down. Keeping the
-            // whole of the stem's measured motion let a tender carry on
-            // beside the ship on the momentum of its first pull, the rope
-            // only ever taking up the slack — hung off the quarter for good
-            // at sixty degrees to a ship going straight. And reading the
-            // speed off the pull itself made the first take-up of a slack
-            // rope — a metre in one frame — into forty metres a second,
-            // which shot the dinghy clean past the transom. The ship's own
-            // speed along the rope is what a dragged thing actually makes,
-            // and the stem then chases the transom down the line between
-            // them, the tractrix, falling in astern on its own.
-            towed.drift = hauled.map_or(Vec2::ZERO, |hauled| along * hauled.dot(along).max(0.0));
-        } else {
-            towed.drift *= 1.0 - eased(1.0 / TOW_GLIDE, dt);
+        let pose = Transform::from_xyz(at.x, 0.0, at.y)
+            .with_rotation(Quat::from_rotation_y(waterline::across(angle.as_radians())));
+        let aground = grounding(hull, ground, &pose);
+        if aground <= 0.0 || aground <= sounding.aground {
+            sounding.at = at.0;
+            sounding.angle = angle.as_radians();
+            sounding.aground = aground;
+            continue;
         }
+        // Put back, and stopped where it touched.
+        at.0 = sounding.at;
+        *angle = Rotation::radians(sounding.angle);
+        way.0 = Vec2::ZERO;
+    }
+}
 
-        let pointed = if taut {
-            Some(to_cleat)
-        } else if towed.drift.length() > STIRRING {
-            Some(towed.drift)
-        } else {
-            None
-        };
-        if let Some(pointed) = pointed {
-            // `angle_to` turns the other way from a yaw about +Y: a bearing
-            // swung through +θ about the vertical is -θ on the ground plane.
-            let swing = -place.forward().xz().angle_to(pointed);
-            place.rotate_y(swing * eased(TOW_SWING, dt));
-        }
-
-        let forward = place.forward().xz().normalize_or(-Vec2::Y);
-        let mut at = stem - forward * (hull.length / 2.0);
-        let planking = Footprint::of(ship, ship_hull);
-        for end in [hull.stem(), hull.stern()] {
-            let point = at + forward * -end.z;
-            at += planking.shove(point, hull.beam / 2.0);
-        }
+/// Draws every hull where the plane has settled it: the place, the bearing,
+/// and the water under it.
+///
+/// The *tilt* is deliberately not here. A hull under this player's hand
+/// leans to the swell and to its own turn, and that is [`float`]'s, run
+/// after this so that it hangs its pitch and roll on the bearing this frame
+/// arrived at. Splitting them is what lets the solver own two dimensions
+/// without owning the look of a boat at all — and it is why the rotation
+/// written here is the bare bearing, which `float` then composes onto.
+///
+/// The height is every hull's, because riding the water is: the one the
+/// player steers, the one on its painter, and a stranger's at anchor all
+/// sit on the same surface, and saying so once here is what let [`moor`]
+/// and the tow stop each keeping an answer of their own.
+fn ride_the_plane(
+    ground: Option<Res<Ground>>,
+    time: Res<Time>,
+    sea: Res<sea::SeaConditions>,
+    mut hulls: Query<(&Position, &Rotation, &mut Transform), With<Vessel>>,
+) {
+    let elapsed = time.elapsed_secs_wrapped();
+    for (at, angle, mut place) in &mut hulls {
         place.translation.x = at.x;
         place.translation.z = at.y;
-
-        if let Some(surface) = sea.surface_over(ground.as_deref(), at, elapsed) {
+        place.rotation = Quat::from_rotation_y(waterline::across(angle.as_radians()));
+        if let Some(surface) = sea.surface_over(ground.as_deref(), at.0, elapsed) {
             place.translation.y = surface;
         }
     }
 }
+
+/// Makes the painter fast between a ship and the boat it tows, and casts it
+/// off again when the tow ends.
+///
+/// The rope is a [`DistanceJoint`] from the ship's transom to the tender's
+/// stem with a minimum of nothing and a maximum of [`PAINTER`], which is
+/// what makes it a rope rather than a bar: it pulls when it comes taut and
+/// does nothing at all when it is slack, so the tender falls in astern
+/// under way, cuts inside a turn because it is drawn towards where the
+/// transom is now, and carries its way on past a ship that has stopped.
+///
+/// Everything the hand-written tow used to do by hand — the glide, the
+/// swing onto the rope, keeping the dinghy out of the ship's planking — is
+/// now the solver's, which is the whole of what this spike is for.
+#[allow(clippy::type_complexity)]
+fn make_fast(
+    mut commands: Commands,
+    // Disjoint from the hulls below, which is both true and required: a
+    // ship that tows is never itself towed, and the two halves of this
+    // system read and write the same components.
+    ships: Query<(&Rigged, &Position, &Rotation), Without<Towed>>,
+    made: Query<&Painter>,
+    mut towed: Query<
+        (
+            Entity,
+            &Towed,
+            &Rigged,
+            &mut Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
+        Without<Painter>,
+    >,
+    cast_off: Query<(Entity, &Painter), Without<Towed>>,
+) {
+    for (tender, towed, rigged, mut at, mut angle, mut way, mut spin) in &mut towed {
+        let Ok((ship, ship_at, ship_angle)) = ships.get(towed.by) else {
+            continue;
+        };
+        // Hauled round to the stern before the rope is made fast, and laid
+        // there at rest. A dinghy is boarded from wherever it happens to
+        // lie — usually alongside, which is further from the transom than
+        // the painter is long — and a rope tied at that moment comes taut
+        // in the same instant, which the solver answers by snatching both
+        // hulls into line. Five metres a second of it, measured, on a ship
+        // that was lying at anchor. A crew pulls the boat round by hand
+        // first; this is that, and it costs a frame nobody sees.
+        let dimensions = hull_of(rigged.0);
+        let ship_hull = hull_of(ship.0);
+        let bow = waterline::bow(ship_angle);
+        let transom = ship_at.0 - bow * (ship_hull.length / 2.0);
+        at.0 = transom - bow * (PAINTER + dimensions.length / 2.0);
+        *angle = *ship_angle;
+        way.0 = Vec2::ZERO;
+        spin.0 = 0.0;
+        let rope = commands
+            .spawn((
+                Name::new("Painter"),
+                DespawnOnExit(AppState::InWorld),
+                DistanceJoint {
+                    body1: towed.by,
+                    body2: tender,
+                    anchor1: JointAnchor::Local(waterline::on_the_plane(ship_hull.stern())),
+                    anchor2: JointAnchor::Local(waterline::on_the_plane(dimensions.stem())),
+                    limits: DistanceLimit {
+                        min: 0.0,
+                        max: PAINTER,
+                    },
+                    // Stiff: a painter is rope, and rope stretches far
+                    // less than anything a player would see at this
+                    // distance. What gives when the rope snubs is the
+                    // dinghy's way, not the rope's length.
+                    compliance: 0.0,
+                },
+                JointDamping {
+                    linear: PAINTER_GIVE,
+                    angular: PAINTER_GIVE,
+                },
+                // Two hulls on one rope are two hulls that touch: the
+                // tender lies against the transom whenever the ship stops,
+                // and a joint that also refused the contact would jitter
+                // there. The planking still holds them apart.
+                JointCollisionDisabled,
+            ))
+            .id();
+        commands.entity(tender).insert(Painter(rope));
+    }
+    for (tender, painter) in &cast_off {
+        if made.get(tender).is_ok() {
+            commands.entity(painter.0).despawn();
+        }
+        commands.entity(tender).remove::<Painter>();
+    }
+}
+
+/// How a hull behaves at the end of a rope: it slows, and it points the way
+/// it is being pulled.
+///
+/// Both are the water on its planking, and both are stated rather than
+/// simulated — the same choice, and for the same reason, as the keel in
+/// [`steer`]. A rope holds a boat at a distance and has no opinion about
+/// which way it faces; left at that the dinghy arrives at the transom
+/// broadside or stern first, having been swung there by the one snub that
+/// set it going and never turned back. See [`TOW_DRAG`] and [`TOW_SWING`].
+///
+/// On the towed hull and nothing else. The hull the player steers has a
+/// drive that holds a speed and a helm that holds a heading, and would only
+/// answer this by working harder to reach the same numbers.
+fn trail(time: Res<Time>, mut towed: TowedHull) {
+    let dt = time.delta_secs();
+    let held = 1.0 - eased(1.0 / TOW_DRAG, dt);
+    for (mut angle, mut way, mut spin) in &mut towed {
+        way.0 *= held;
+        spin.0 *= held;
+        if way.0.length() <= STIRRING {
+            continue;
+        }
+        let onto = waterline::pointing(way.0);
+        let round = std::f32::consts::TAU;
+        let swing = (onto - angle.as_radians() + std::f32::consts::PI).rem_euclid(round)
+            - std::f32::consts::PI;
+        *angle = Rotation::radians(angle.as_radians() + swing * eased(TOW_SWING, dt));
+    }
+}
+
+/// A hull on a painter, as [`trail`] moves it: which way it points and how
+/// it is going, both written outright.
+type TowedHull<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Rotation,
+        &'static mut LinearVelocity,
+        &'static mut AngularVelocity,
+    ),
+    With<Towed>,
+>;
+
+/// The rope itself, kept on the hull it tows so that casting off can find
+/// it — a joint is an entity of its own, and nothing else would say which.
+#[derive(Component)]
+struct Painter(Entity);
 
 /// The yaw a hull is pointed at, as the wire spells a heading — see
 /// [`protocol::ToClient::Boat`].
@@ -2657,7 +2915,11 @@ pub(crate) fn steer(
     ground: Option<Res<Ground>>,
     conditions: Res<sea::SeaConditions>,
     players: Query<&ChildOf, With<Player>>,
-    mut hulls: ParamSet<(Query<(&mut Transform, &mut Boat)>, Planking)>,
+    // Everything about the body reaches this through [`Forces`], which
+    // holds the pose and both velocities itself: asking for any of them
+    // beside it is the same component borrowed twice, which Bevy refuses at
+    // the first frame rather than at the first wrong answer.
+    mut boats: Query<(Forces, &mut Boat)>,
 ) {
     // A player ashore is in no boat's query, and that is the whole of how
     // the helm goes dead when they step off. It is also how a typed `w`
@@ -2666,17 +2928,7 @@ pub(crate) fn steer(
     let Ok(aboard) = players.single().map(ChildOf::parent) else {
         return;
     };
-    // Every other hull on the water, read before ours is taken mutably —
-    // the two queries overlap on the transform, which is what the set is
-    // for.
-    let others: Vec<Footprint> = hulls
-        .p1()
-        .iter()
-        .filter(|(hull, ..)| *hull != aboard)
-        .map(|(_, place, rigged)| Footprint::of(place, hull_of(rigged.0)))
-        .collect();
-    let mut boats = hulls.p0();
-    let Ok((mut transform, mut boat)) = boats.get_mut(aboard) else {
+    let Ok((mut forces, mut boat)) = boats.get_mut(aboard) else {
         return;
     };
 
@@ -2690,103 +2942,104 @@ pub(crate) fn steer(
     }
 
     let (_, helm) = bindings.driving(&keys);
-
-    let ground = ground.as_deref();
-
     let hull = boat.hull;
-    // A response named in seconds is a rate of its reciprocal.
-    let t = eased(1.0 / hull.way_response, time.delta_secs());
-
-    if helm != 0.0 {
-        transform.rotate_y(helm * hull.turn_rate * time.delta_secs());
-    }
 
     // The wind where the hull actually is, which behind a headland is not the
-    // wind out at sea — see [`sea::SeaConditions::wind_at`]. Read after the
-    // helm for the same reason the drive is, and read once: a sail's drive
-    // and the boom laid on it must not be answering different winds.
-    let wind = conditions.wind_at(ground, transform.translation.xz());
+    // wind out at sea — see [`sea::SeaConditions::wind_at`]. Read once: a
+    // sail's drive and the boom laid on it must not be answering different
+    // winds.
+    let bow = waterline::bow(forces.rotation());
+    let wind = conditions.wind_at(ground.as_deref(), forces.position().0);
 
-    // The target after the helm, so the drive is read off the heading this
-    // frame settled on — the same rule the grounding poses live by.
     let astern = !boat.sails_set && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
     let target = if boat.sails_set {
         match hull.mast {
-            Some(_) => hull.speed * sail_drive(transform.forward().xz(), wind),
+            Some(_) => hull.speed * sail_drive(bow, wind),
             // Rowed: the oars pull whatever the wind is doing, and what the
             // wind does is help or hinder them — see [`row_drive`]. Even
             // within a stroke still: the hull glides at one speed while the
             // blades circle, and giving the surge to the stroke is the step
             // not yet taken.
-            None => hull.speed * row_drive(transform.forward().xz(), wind),
+            None => hull.speed * row_drive(bow, wind),
         }
     } else if astern {
         -hull.astern_speed
     } else {
         0.0
     };
-    // Written only while something is happening, so an idle boat holds
-    // still without being marked changed every frame.
-    if target != 0.0 || boat.way != 0.0 {
-        let way = boat.way + (target - boat.way) * t;
-        let way = if target == 0.0 && way.abs() < WAY_STOPPED {
-            0.0
-        } else {
-            way
-        };
 
-        let advance = transform.forward() * way * time.delta_secs();
-        // Ordinary frames advance far less than a facet and take one step.
-        let steps = (advance.length() / CELL_METRES).ceil().max(1.0);
-        let step = advance / steps;
-        // Both depths are read as a pair and judged as a pair: an advance is
-        // let through only if each is clear or no worse than it was.
-        let depths = |place: &Transform| {
-            (
-                grounding(&hull, ground, place),
-                fouling(&hull, &others, place),
-            )
-        };
-        let no_worse = |there: f32, here: f32| there <= 0.0 || there <= here;
-        let mut here = depths(&transform);
-        let mut walked = 0.0;
-        let mut blocked = false;
-        while walked < steps {
-            let there = depths(&Transform {
-                translation: transform.translation + step,
-                ..*transform
-            });
-            if no_worse(there.0, here.0) && no_worse(there.1, here.1) {
-                transform.translation += step;
-                here = there;
-                walked += 1.0;
-            } else {
-                blocked = true;
-                break;
-            }
-        }
+    // The way the hull is actually making, along its own keel, and what it
+    // is making sideways. Read off the body rather than remembered, which
+    // is the whole difference this makes: a hull shoved by another arrives
+    // here already going somewhere it was not sent, and the three
+    // controllers below answer that exactly as they answer the helm.
+    let making = forces.linear_velocity();
+    let way = making.dot(bow);
 
-        if !blocked {
-            boat.way = way;
-        } else {
-            boat.way = 0.0;
-        }
+    // The keel, written as what it is: a statement that a hull travels the
+    // way it points. The way is turned onto the bow at the hull's own
+    // [`Hull::keel_grip`] and its *speed* is left exactly alone, which is
+    // what makes a tack carry — a hull crossing the eye has almost all of
+    // its way across its own keel for a moment, and anything that took
+    // speed off for that leaves it becalmed head to wind with nothing to
+    // bring it out the other side.
+    //
+    // Written onto the velocity rather than asked for as a force, and the
+    // difference is not tidiness: a force can only turn a vector by pulling
+    // it across, which cuts the corner and costs speed every step — a fifth
+    // of the way through a tack, measured. A collision still writes what it
+    // likes here, an eighth of a second before this does, so a bump knocks
+    // the hull sideways and the keel then points it again with whatever
+    // speed the bump left it. Which is the behaviour wanted, and is the
+    // only place in this module that writes a velocity outright.
+    let speed = making.length();
+    if speed > 0.0 {
+        let along = bow * if way < 0.0 { -speed } else { speed };
+        let onto = eased(1.0 / hull.keel_grip, time.delta_secs());
+        *forces.linear_velocity_mut() =
+            (making + (along - making) * onto).normalize_or_zero() * speed;
     }
+    let making = forces.linear_velocity();
 
-    // Heel last, against the way this frame settled on, so running aground
-    // starts the straightening the same frame it takes the way off. The helm
-    // above multiplies heading on from the left, so rolling on from the right
-    // reaches the roll factor alone — see [`float`].
+    // Both are *accelerations* rather than forces, which is deliberate and
+    // is what makes this comparable with the hand-written steering it
+    // replaces: an acceleration ignores mass, so the drive and the rudder
+    // reproduce the same eases to the same constants, and the hull's
+    // displacement shows up in one place only — what happens when two of
+    // them touch.
+    forces.apply_local_linear_acceleration(Vec2::NEG_Y * ((target - way) / hull.way_response));
+    forces.apply_angular_acceleration(
+        (waterline::across(helm * hull.turn_rate) - forces.angular_velocity()) / hull.helm_response,
+    );
+
+    // The tail of a glide, closed by hand. An ease never quite arrives and
+    // a solver's never sleeps, so without this a boat at anchor creeps for
+    // ever — and [`Boat::at_rest`] means exactly zero, which every crossing
+    // and the night's offer are read against.
+    if target == 0.0 && making.length() < WAY_STOPPED {
+        *forces.linear_velocity_mut() = Vec2::ZERO;
+    }
+    // What the rest of the client reads a hull's way off — the wake, the
+    // oars, the wash, the crossing gates. A reading now rather than the
+    // state it used to be, taken after the stop above so that a hull at
+    // rest reads as one.
+    boat.way = if forces.linear_velocity() == Vec2::ZERO {
+        0.0
+    } else {
+        way
+    };
+
+    // Heel is wholly a thing the eye gets, and is hung on in [`float`] with
+    // the rest of the tilt — the keel lies along the axis the hull rolls
+    // about, so a lean moves nothing the ground is probed along.
     let target_heel = heel_for(&hull, helm, boat.way);
     if boat.heel != target_heel {
         let heel_t = eased(1.0 / hull.heel_response, time.delta_secs());
-        let heel = settled(
+        boat.heel = settled(
             boat.heel + (target_heel - boat.heel) * heel_t,
             target_heel,
             HEEL_SETTLED,
         );
-        transform.rotation *= Quat::from_rotation_z(heel - boat.heel);
-        boat.heel = heel;
     }
 }
 
@@ -2927,11 +3180,22 @@ mod tests {
     /// Radians per second the bow comes round at while `key` is held. A rate
     /// rather than an angle — proportionality to how long the key was held is
     /// what makes a turn the same on any machine.
+    /// The rate the bow comes round at with the helm hard over and the
+    /// rudder settled — see [`Hull::helm_response`] for why those are two
+    /// different moments now. The helm asks for a rate and the water takes a
+    /// fraction of a second to give it, which is what leaves room for a
+    /// collision to knock the bow off a course the helm then answers; an
+    /// average taken from the moment the key goes down measures that
+    /// fraction of a second as much as it measures the turn.
     fn turn_rate(key: KeyCode) -> f32 {
         let mut app = test_app();
+        hold(&mut app, key);
+        // Five times the rudder's own response, so what is measured after
+        // it is the rate the helm asked for and not the tail of the hull
+        // arriving at it.
+        run_frames(&mut app, 60);
         let start_yaw = heading_yaw(&mut app);
         let before = elapsed(&app);
-        hold(&mut app, key);
         run_frames(&mut app, 20);
         let seconds = elapsed(&app) - before;
         assert!(seconds > 0.0, "no time passed while the key was held");
@@ -3918,8 +4182,11 @@ mod tests {
         let before = pennant_bearing(&mut app);
         let bow = heading_yaw(&mut app);
 
+        // Long enough to swing the masthead through a right angle at the
+        // ship's turn rate, with the fraction of a second the rudder takes
+        // to answer allowed for — see [`Hull::helm_response`].
         hold(&mut app, KeyCode::ArrowLeft);
-        run_frames(&mut app, 40);
+        run_frames(&mut app, 60);
 
         let turned = (heading_yaw(&mut app) - bow).abs();
         assert!(turned > 1.0, "the bow only came round {turned} radians");
@@ -4937,9 +5204,25 @@ mod tests {
     /// What [`grounding`] makes of the pose the boat is lying in: how far the
     /// bottom there stands above the depth the hull is held at, so positive is
     /// aground and more positive is further in.
+    /// How deep the keel is in the ground, asked exactly as
+    /// [`hold_the_ground`] asks it: off the pose the hull holds *on the
+    /// plane*, not off the transform it is drawn at.
+    ///
+    /// The two differ by the tilt, which is hung on for the eye after the
+    /// plane has spoken — and a pitching hull's probe line is a couple of
+    /// millimetres from a level one's, which is enough to read as a boat
+    /// creeping up a beach it is being held off.
     fn bite(app: &mut App) -> f32 {
-        let transform = boat(app);
-        grounding(&SHIP, Some(app.world().resource::<Ground>()), &transform)
+        let hull = helmed_hull(app);
+        let at = app.world().get::<Position>(hull).expect("a hull floats").0;
+        let angle = app
+            .world()
+            .get::<Rotation>(hull)
+            .expect("a hull floats")
+            .as_radians();
+        let pose = Transform::from_xyz(at.x, 0.0, at.y)
+            .with_rotation(Quat::from_rotation_y(waterline::across(angle)));
+        grounding(&SHIP, Some(app.world().resource::<Ground>()), &pose)
     }
 
     #[test]
@@ -5171,6 +5454,73 @@ mod tests {
     }
 
     #[test]
+    fn a_told_hull_stops_this_one_and_is_not_shoved_by_it() {
+        // The authority split, as the water enforces it — see
+        // [`crate::waterline`]. A hull the wire moves is somebody else's or
+        // nobody's: this client may be stopped by it and may not decide
+        // where it ends up. Sailed straight at one at full speed, the ship
+        // fetches up against its planking, and the hull it hit is exactly
+        // where the last telling left it.
+        let mut app = test_app();
+        place(&mut app, Vec2::ZERO, Vec2::new(1.0, 0.0));
+
+        // A second hull, moored where the wire says — twenty metres dead
+        // ahead, lying across the course so there is no threading past it.
+        let lying = Vec2::new(20.0, 0.0);
+        let mut spawning =
+            bevy::ecs::system::SystemState::<(Commands, HullKit)>::new(app.world_mut());
+        let moored = {
+            let (mut commands, mut kit) = spawning
+                .get_mut(app.world_mut())
+                .expect("a world can spawn a hull");
+            spawn_hull(
+                &mut commands,
+                &mut kit,
+                BoatKind::Sloop,
+                Transform::from_xyz(lying.x, 0.0, lying.y),
+                None,
+            )
+        };
+        spawning.apply(app.world_mut());
+        app.world_mut()
+            .entity_mut(moored)
+            .insert(moored_at(lying, 0.0));
+        run_frames(&mut app, 2);
+
+        set_wind(&mut app, Vec2::new(9.0, 0.0));
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 400);
+
+        // Stopped short: the two plankings meet and the ship goes no
+        // further. Half a beam apiece plus a little is where that leaves
+        // the origins, so anything under half the hull's length is a boat
+        // that sailed through another.
+        let closed = boat(&mut app).translation.xz().distance(lying);
+        assert!(
+            closed > SHIP.beam,
+            "the ship closed to {closed} m of a hull it should have fetched up against"
+        );
+        assert!(
+            closed < SHIP.length * 1.5,
+            "the ship stopped {closed} m short of a hull it was sailed straight at"
+        );
+
+        // And the hull it hit has not budged: a told hull is moved by its
+        // tellings and by nothing this machine does.
+        let shoved = app
+            .world()
+            .get::<Transform>(moored)
+            .expect("a hull has a transform")
+            .translation
+            .xz()
+            .distance(lying);
+        assert!(
+            shoved < 0.01,
+            "ramming a told hull shoved it {shoved} m off where the wire put it"
+        );
+    }
+
+    #[test]
     fn a_grounded_boat_is_never_driven_further_aground() {
         // The pose a rule of "aground already, let it through" would hand the
         // whole island to: bow over the beach, and then whatever the player
@@ -5205,14 +5555,34 @@ mod tests {
             "the boat worked its way {} m further into the ground",
             after - before
         );
-        // And the same thing said in the terms a player sees it in: bow at the
-        // island, key down for eight hundred frames, and not a metre of the
-        // island gained.
+        // And the same thing said in the terms a player sees it in: bow at
+        // the island, key down for eight hundred frames, and not a metre of
+        // the island gained.
+        //
+        // A millimetre of it *is* given, once. The hull is put down against
+        // the beach by hand and takes up the slack between where it was set
+        // and where the ground will hold it on the first frames it is
+        // pushed, which the gate this replaced never had to do because it
+        // refused the movement instead of undoing it. What matters is that
+        // it is a settling and not a rate — see below, which is the half of
+        // this test that would actually catch a hull walking up a hillside.
         let ended = from_the_island(&mut app);
+        let settled = out - ended;
         assert!(
-            ended >= out,
-            "the boat made {} m towards the middle of the island",
-            out - ended
+            settled < 0.01,
+            "the boat made {settled} m towards the middle of the island"
+        );
+
+        // Three times as long again on the key, and not a further
+        // micrometre: whatever was given was given at the beginning and the
+        // hull has been held exactly ever since. This is the assertion with
+        // the teeth in it. A hair a frame is a metre a second up a
+        // hillside, and a hair a frame would show here as three more hairs.
+        run_frames(&mut app, SETTLED * 3);
+        assert_eq!(
+            from_the_island(&mut app),
+            ended,
+            "the boat went on creeping up the beach after it had come to rest"
         );
     }
 
