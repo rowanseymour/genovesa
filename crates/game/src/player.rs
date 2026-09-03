@@ -38,7 +38,9 @@ use protocol::ground::{ANCHOR_DEPTH, CELL_METRES};
 use protocol::BoatKind;
 
 use crate::bindings::{Action, KeyBindings};
-use crate::boat::{spawn_hull, tender_berth, Boat, Fleet, HullId, HullKit, Rigged, Vessel};
+use crate::boat::{
+    spawn_hull, tender_berth, yaw_of, Boat, Fleet, HullId, HullKit, Rigged, Towed, Vessel,
+};
 use crate::cairn::{Cairn, BERTH};
 use crate::chart::Chart;
 use crate::figure::FigurePlugin;
@@ -602,12 +604,14 @@ type Vessels<'w, 's> = Query<
 /// At the *ship's* helm, at rest, it lowers the ship's boat and steps down
 /// into it — the shore is reached by rowing, never over the ship's own rail.
 /// The berth is [`crate::boat::tender_berth`]'s: alongside, on the shoreward
-/// side when the ground says which that is. Lowering also furls the sails,
-/// so the ship is never left riding at anchor under canvas.
+/// side when the ground says which that is — unless the ship already has
+/// its boat in tow, in which case that boat is stepped down into wherever
+/// on its painter it lies. Lowering also furls the sails, so the ship is
+/// never left riding at anchor under canvas.
 ///
 /// In the *rowboat*, at rest, a ship laid alongside outranks the shore: a
 /// boat pulled deliberately against a hull is asking aboard, and the tender
-/// goes back aboard with them (see [`crate::boat::Fleet::gone`]). Failing
+/// is taken in tow behind it (see [`crate::boat::Towed`]). Failing
 /// that the key steps ashore, and the spot must offer [`footing`] — the probe
 /// walks rings outward from just short of the bow to a few strides past it,
 /// bow direction first, nearest winning, so the player steps to the shore the
@@ -641,6 +645,7 @@ pub(crate) fn embark_or_land(
     mut fleet: ResMut<Fleet>,
     players: Query<(Entity, &Transform, Option<&ChildOf>), With<Player>>,
     mut vessels: Vessels,
+    towed: Query<(Entity, &Transform), With<Towed>>,
 ) {
     if !keys.just_pressed(bindings.key(Action::Board)) {
         return;
@@ -681,7 +686,14 @@ pub(crate) fn embark_or_land(
                     return;
                 }
 
-                let (berth, heading) = tender_berth(&hull_place, ground);
+                // The boat on the painter, if the ship tows one: stepped
+                // down into where it lies rather than lowered afresh
+                // alongside — the wire's `Lower` reads it the same way.
+                let in_tow = towed.single().ok();
+                let (berth, heading) = match in_tow {
+                    Some((_, place)) => (place.translation.xz(), yaw_of(place)),
+                    None => tender_berth(&hull_place, ground),
+                };
                 match &online {
                     // A served world's tender is asked for, never assumed:
                     // the player steps down when the telling grants it — see
@@ -701,14 +713,20 @@ pub(crate) fn embark_or_land(
                     None => {
                         hull.comes_to_rest();
                         hull.furl();
-                        let tender = spawn_hull(
-                            &mut commands,
-                            &mut kit,
-                            BoatKind::Rowboat,
-                            Transform::from_xyz(berth.x, 0.0, berth.y)
-                                .with_rotation(Quat::from_rotation_y(heading)),
-                            None,
-                        );
+                        let tender = match in_tow {
+                            Some((tender, _)) => {
+                                commands.entity(tender).remove::<Towed>();
+                                tender
+                            }
+                            None => spawn_hull(
+                                &mut commands,
+                                &mut kit,
+                                BoatKind::Rowboat,
+                                Transform::from_xyz(berth.x, 0.0, berth.y)
+                                    .with_rotation(Quat::from_rotation_y(heading)),
+                                None,
+                            ),
+                        };
                         let boat = Boat::of(BoatKind::Rowboat);
                         let helm = boat.helm();
                         commands.entity(tender).insert(boat);
@@ -740,8 +758,10 @@ pub(crate) fn embark_or_land(
             if let Some((ship, _, sailing, named, _)) = alongside {
                 match (&online, named) {
                     (Some(online), Some(named)) => online.connection.board(named.0),
-                    // Offline: cross the decks and hoist the tender in, the
-                    // local mirror of what the server does for a grant.
+                    // Offline: cross the decks and take the tender in tow,
+                    // the local mirror of what the server does for a grant.
+                    // Its sailing state comes off with its crew, as
+                    // [`Fleet::hand_back`] takes ours off a hull we leave.
                     _ => {
                         let Some(helm) = sailing.map(Boat::helm) else {
                             return;
@@ -749,7 +769,10 @@ pub(crate) fn embark_or_land(
                         commands
                             .entity(player)
                             .insert((ChildOf(ship), Transform::from_translation(helm)));
-                        commands.entity(hull_entity).despawn();
+                        commands
+                            .entity(hull_entity)
+                            .remove::<Boat>()
+                            .insert(Towed::behind(ship));
                     }
                 }
                 return;
@@ -788,7 +811,7 @@ pub(crate) fn embark_or_land(
         }
         None => {
             let at = place.translation.xz();
-            let Some((boat, _, sailing, named, _)) = vessels
+            let Some((boat, _, sailing, named, rigged)) = vessels
                 .iter()
                 .filter(|(_, transform, ..)| transform.translation.xz().distance(at) <= BOARD_REACH)
                 // A helm that is visibly somebody's is not offered — the
@@ -813,14 +836,25 @@ pub(crate) fn embark_or_land(
                 // at the helm, not at the hull's origin: that origin is the
                 // waterline, which is most of a metre down inside the boat.
                 _ => {
-                    let Some(hull) = sailing else {
-                        return;
+                    // A lone world keeps a hull's sailing state for whoever
+                    // boards it next — except on a painter, where it has
+                    // none: a hull boarded off one is cut free by the
+                    // boarding, as the server cuts a told one (see
+                    // [`Fleet::told`]), and sails from rest.
+                    let helm = match sailing {
+                        Some(hull) => hull.helm(),
+                        None => {
+                            let fresh = Boat::of(rigged.0);
+                            let helm = fresh.helm();
+                            commands.entity(boat).remove::<Towed>().insert(fresh);
+                            helm
+                        }
                     };
                     commands
                         .entity(player)
                         .remove::<DespawnOnExit<AppState>>()
                         .remove::<Swimming>()
-                        .insert((ChildOf(boat), Transform::from_translation(hull.helm())));
+                        .insert((ChildOf(boat), Transform::from_translation(helm)));
                 }
             }
         }
@@ -1160,6 +1194,36 @@ mod tests {
         row_in(app);
         press_board(app);
         assert_eq!(aboard(app), None, "the landing never happened");
+    }
+
+    /// Lays one hull a clear oar's width off another's beam, pointed the
+    /// same way — where a tender comes alongside to ask aboard.
+    fn lay_alongside(app: &mut App, hull: Entity, ship: Entity) {
+        let ship_place = transform_of(app, ship);
+        let berth = ship_place.translation + ship_place.right() * 2.5;
+        let mut entity = app.world_mut().entity_mut(hull);
+        let mut place = entity
+            .get_mut::<Transform>()
+            .expect("a hull has a transform");
+        place.translation = Vec3::new(berth.x, 0.0, berth.z);
+        place.rotation = Quat::from_rotation_y(yaw_of(&ship_place));
+        app.update();
+    }
+
+    /// Whether a hull is on a painter, with no sailing state of its own.
+    fn in_tow(app: &mut App, hull: Entity) -> bool {
+        let hull = app.world().entity(hull);
+        hull.contains::<Towed>() && !hull.contains::<Boat>()
+    }
+
+    /// Turns a hull to point along a bearing on the map, where it lies.
+    fn point(app: &mut App, hull: Entity, along: Vec2) {
+        app.world_mut()
+            .entity_mut(hull)
+            .get_mut::<Transform>()
+            .expect("a hull has a transform")
+            .rotation = Quat::from_rotation_y(f32::atan2(-along.x, -along.y));
+        app.update();
     }
 
     fn ground_height(app: &App, at: Vec2) -> f32 {
@@ -1964,6 +2028,173 @@ mod tests {
     }
 
     #[test]
+    fn a_rowboat_pulled_at_the_ship_is_stopped_by_its_planking() {
+        // No engine, and no passing through either: a keel is kept out of
+        // another hull's planking by the gate that keeps it out of a
+        // hillside. Ten metres off the ship's beam with the bow at her, the
+        // rowboat pulls in and stops where the two plankings meet — the
+        // forefoot's lead ahead of the origin and both half-beams away —
+        // and lying there is close enough to ask aboard.
+        let mut app = shore_app();
+        press_board(&mut app);
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        let tender = hull_rigged(&mut app, BoatKind::Rowboat);
+        let ship_place = transform_of(&mut app, ship);
+        let right = ship_place.right().xz().normalize();
+        let off = ship_place.translation.xz() + right * 10.0;
+        app.world_mut()
+            .entity_mut(tender)
+            .get_mut::<Transform>()
+            .expect("a hull has a transform")
+            .translation = Vec3::new(off.x, 0.0, off.y);
+        point(&mut app, tender, -right);
+
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 300);
+
+        let beams = (app.world().get::<Boat>(ship).expect("a boat").beam()
+            + app.world().get::<Boat>(tender).expect("a boat").beam())
+            / 2.0;
+        let abeam = (transform_of(&mut app, tender).translation.xz() - ship_place.translation.xz())
+            .dot(right);
+        assert!(
+            abeam > beams + 1.0,
+            "the rowboat is {abeam} m off the ship's axis, inside her planking"
+        );
+        assert!(
+            abeam < beams + 1.6,
+            "the rowboat stopped {abeam} m off the ship's axis, short of her planking"
+        );
+        assert_eq!(way_of(&mut app, BoatKind::Rowboat), 0.0, "still pulling");
+
+        // And that is alongside: the same key crosses the decks.
+        press_board(&mut app);
+        assert_eq!(
+            aboard(&mut app),
+            Some(ship),
+            "not laid close enough to board"
+        );
+        assert!(in_tow(&mut app, tender));
+    }
+
+    #[test]
+    fn a_boarded_tender_rides_the_ships_painter() {
+        // A rope and a glide, and nothing else: under sail the tender lies
+        // a painter's length astern, pointed the way the rope pulls; when
+        // the ship stops the rope goes slack and the tender carries on.
+        let mut app = shore_app();
+        press_board(&mut app);
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        let tender = hull_rigged(&mut app, BoatKind::Rowboat);
+        lay_alongside(&mut app, tender, ship);
+        press_board(&mut app);
+        assert_eq!(aboard(&mut app), Some(ship));
+        assert!(in_tow(&mut app, tender));
+
+        // Turned to seaward, away from the beach ahead, with the wind dead
+        // astern — and off.
+        let seaward = Vec2::new(1.0, 0.0);
+        point(&mut app, ship, seaward);
+        set_wind(&mut app, seaward * 7.0);
+        let from = transform_of(&mut app, ship).translation.xz();
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 300);
+
+        let ship_place = transform_of(&mut app, ship);
+        let tender_place = transform_of(&mut app, tender);
+        assert!(
+            ship_place.translation.xz().distance(from) > 20.0,
+            "the ship never got under way"
+        );
+        let ship_stem = app.world().get::<Boat>(ship).expect("a boat").stem();
+        let transom = ship_place.transform_point(-ship_stem).xz();
+        let stem = tender_place
+            .transform_point(Boat::of(BoatKind::Rowboat).stem())
+            .xz();
+        let rope = stem.distance(transom);
+        assert!(
+            (rope - crate::boat::PAINTER).abs() < 0.2,
+            "under way the painter runs {rope} m, not its own length"
+        );
+        let astern = (tender_place.translation - ship_place.translation)
+            .xz()
+            .dot(ship_place.forward().xz());
+        assert!(astern < 0.0, "the tender is being towed ahead of the ship");
+        let swung = tender_place
+            .forward()
+            .xz()
+            .angle_to(ship_place.forward().xz())
+            .abs();
+        assert!(
+            swung < 0.3,
+            "the tender lies {swung} rad across a rope pulling straight"
+        );
+
+        // Sails in: the ship glides to a stop, and the tender — with more
+        // glide in it than the ship — closes on the transom instead of
+        // hanging back at the rope's end.
+        tap(&mut app, KeyCode::ArrowDown);
+        run_until(&mut app, "the ship to stop", |app| {
+            way_of(app, BoatKind::Sloop) == 0.0
+        });
+        let ship_place = transform_of(&mut app, ship);
+        let tender_place = transform_of(&mut app, tender);
+        let transom = ship_place.transform_point(-ship_stem).xz();
+        let stem = tender_place
+            .transform_point(Boat::of(BoatKind::Rowboat).stem())
+            .xz();
+        let rope = stem.distance(transom);
+        assert!(
+            rope < crate::boat::PAINTER - 0.5,
+            "the ship stopped and the painter stayed taut at {rope} m"
+        );
+        // And never inside the ship's own planking, for all the closing.
+        let abeam = (tender_place.translation - ship_place.translation)
+            .xz()
+            .dot(ship_place.right().xz())
+            .abs();
+        let along = (tender_place.translation - ship_place.translation)
+            .xz()
+            .dot(ship_place.forward().xz())
+            .abs();
+        assert!(
+            abeam > 1.8 || along > 5.0,
+            "the tender lies {abeam} m abeam and {along} m along, inside the ship"
+        );
+    }
+
+    #[test]
+    fn lowering_from_a_towing_ship_steps_down_into_the_boat_on_the_painter() {
+        // The boat on the painter is the ship's boat: the key that lowers
+        // one steps down into it wherever it lies, and puts no second hull
+        // in the water.
+        let mut app = shore_app();
+        press_board(&mut app);
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        let tender = hull_rigged(&mut app, BoatKind::Rowboat);
+        lay_alongside(&mut app, tender, ship);
+        press_board(&mut app);
+        assert!(in_tow(&mut app, tender));
+
+        press_board(&mut app);
+        assert_eq!(
+            aboard(&mut app),
+            Some(tender),
+            "the key did not step down into the boat in tow"
+        );
+        assert_eq!(hulls_afloat(&mut app), 2, "a second tender was lowered");
+        assert!(
+            !app.world().entity(tender).contains::<Towed>(),
+            "seated in a boat still on the painter"
+        );
+        assert_eq!(
+            aboard_kind(&mut app),
+            Some(BoatKind::Rowboat),
+            "the boat stepped into has no sailing state"
+        );
+    }
+
+    #[test]
     fn ashore_the_keys_are_the_walkers_and_the_hulls_hold_station() {
         let mut app = shore_app();
         go_ashore(&mut app);
@@ -2027,14 +2258,8 @@ mod tests {
         );
 
         // Laid alongside the ship, the same key crosses the decks — and the
-        // rowboat goes back aboard with them, out of the world.
-        let alongside = anchorage + Vec2::new(2.0, 0.0);
-        app.world_mut()
-            .entity_mut(tender)
-            .get_mut::<Transform>()
-            .expect("a hull has a transform")
-            .translation = Vec3::new(alongside.x, 0.0, alongside.y);
-        app.update();
+        // rowboat stays in the water behind them, on the ship's painter.
+        lay_alongside(&mut app, tender, ship);
         press_board(&mut app);
         assert_eq!(
             aboard(&mut app),
@@ -2043,8 +2268,12 @@ mod tests {
         );
         assert_eq!(
             hulls_afloat(&mut app),
-            1,
-            "the rowboat was left in the water after being hoisted in"
+            2,
+            "the rowboat was hoisted out of the world"
+        );
+        assert!(
+            in_tow(&mut app, tender),
+            "the rowboat was left floating free rather than taken in tow"
         );
 
         // Back at the helm: making sail moves the ship again. The wind is

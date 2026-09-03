@@ -681,6 +681,7 @@ fn grant(asked: Asked) -> Result<String, String> {
                         heading: 0.0,
                         occupant: None,
                         keeper: Some(token),
+                        towed_by: None,
                     };
                     let telling = state.told(boat);
                     boats.insert(boat, state);

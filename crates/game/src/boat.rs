@@ -8,7 +8,21 @@
 //! new `Hull` and a new model rather than a new module. A hull's kind is
 //! settled the moment it is spawned and never changes — the ship is entered
 //! at, and the rowboat is lowered from it to go ashore, which is
-//! `player::embark_or_land`'s story.
+//! `player::embark_or_land`'s story. Between landings the rowboat rides on
+//! the ship's painter — see [`Towed`] and [`tow`] — so what a client draws
+//! is two hulls on the water rather than one that swallows the other.
+//!
+//! There is no physics engine here, and two things the word usually covers
+//! are done by rules instead. A hull is stopped by ground and by other
+//! hulls the same way: the frame's advance is offered to a gate that reads
+//! how deep the keel would be in either — [`grounding`] and [`fouling`] —
+//! and lets it through only if it floats clear or gets no worse. Contact is
+//! a stop and never a shove, because a hull this client does not steer is
+//! not this client's to move; the one exception is its own tender, which
+//! [`tow`] keeps out of the ship's planking. A towed hull is a rope of fixed
+//! length and a glide: pulled onto the painter's circle when the rope is
+//! taut, carried on its own way when it is slack, and pointed along
+//! whichever of the two is moving it.
 //!
 //! A hull is modelled rather than drawn here: [`MODEL`] is a glTF file built
 //! from a Blender master under `assets-src/`, and this module spawns its meshes
@@ -116,6 +130,33 @@ const STIRRING: f32 = 0.001;
 /// Half a pull is far more water than any frame of rowing covers and far
 /// less than any jump worth the name.
 const TELEPORT: f32 = PULL / 2.0;
+
+/// The painter: metres of rope from the ship's transom to the stem of the
+/// boat it tows — see [`tow`].
+///
+/// Bounded above by the wire: the server grants a lowering only within a
+/// dozen metres of the ship, and a towed boat is lowered wherever on its
+/// painter it lies, so the far end of the rope plus the boat's own length
+/// has to stay inside that. Five metres of rope puts the tender's origin
+/// ten metres from the ship's at the very most, a good stride short of the
+/// limit — a hair inside a limit is a lowering refused on a quantisation
+/// step.
+pub(crate) const PAINTER: f32 = 5.0;
+
+/// How fast a towed hull swings to point along whatever is moving it, in
+/// e-foldings per second — see [`eased`]. Quick: a light hull with no keel
+/// is turned by the rope rather than by any grip on the water, and a
+/// dinghy that lagged its painter would be drawn sliding sideways.
+const TOW_SWING: f32 = 3.0;
+
+/// Seconds a towed hull's drift takes to run off once the painter goes
+/// slack — the time constant of an exponential ease, like a hull's
+/// `way_response`, and a good deal longer than the ship's own: a light
+/// hull with no keel and nobody backing water carries its way further
+/// than a keel does. Longer than the ship's is also what makes a stop read
+/// as one — the tender closes on the transom and comes alongside, rather
+/// than hanging back at the rope's end as though the rope pushed.
+const TOW_GLIDE: f32 = 3.0;
 
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —
@@ -279,6 +320,12 @@ impl Hull {
     /// parted at the bow.
     fn stem(&self) -> Vec3 {
         Vec3::new(0.0, 0.0, -self.length / 2.0)
+    }
+
+    /// The transom, on the waterline, in the hull's own frame — where a
+    /// painter is made fast, the stem being the other end of it.
+    fn stern(&self) -> Vec3 {
+        Vec3::new(0.0, 0.0, self.length / 2.0)
     }
 }
 
@@ -797,6 +844,41 @@ struct Sail;
 #[derive(Component)]
 struct Oared;
 
+/// A hull on another's painter: the ship's boat, left in the water astern
+/// when its crew stepped up onto the deck, and going where the ship goes
+/// until somebody steps down into it again — see [`tow`], which moves it.
+///
+/// Its place is this client's to invent, exactly as the hull it steers is,
+/// so it carries no [`Told`] — the server relays this client's own reports
+/// of it to everyone else, see [`crate::net`] — and no [`Boat`] either: the
+/// sailing state is the steered hull's, and a towed one makes no way of its
+/// own. What it needs of a boat's manners it reads off its [`Rigged`] kind.
+#[derive(Component)]
+pub struct Towed {
+    by: Entity,
+    /// Metres a second the hull is making over the ground: the ship's own
+    /// speed along the rope while the rope is taut, and run off on the
+    /// dinghy's own glide once it goes slack, which is what carries a
+    /// tender on past a ship that has stopped.
+    drift: Vec2,
+    /// Where the rope was made fast last frame, which is the only way to
+    /// learn how fast the ship is moving it — a towed hull asks nobody
+    /// what is moving the ship, as the oars ask nobody what is moving the
+    /// boat. `None` on the frame the tow begins.
+    cleat: Option<Vec2>,
+}
+
+impl Towed {
+    /// On a ship's painter, lying still: the state a boat is taken in tow in.
+    pub fn behind(ship: Entity) -> Self {
+        Self {
+            by: ship,
+            drift: Vec2::ZERO,
+            cleat: None,
+        }
+    }
+}
+
 /// The rowboat's two clips, mixed and ready to play: the graph both hang in,
 /// the node each occupies, and the stroke's own handle, which [`row`] needs
 /// to ask how long one turn of the cycle lasts. One graph for every dinghy
@@ -893,6 +975,17 @@ pub struct HullId(pub BoatId);
 #[derive(Component)]
 pub struct Vessel;
 
+/// Every hull that is planking to keep a keel out of: all but the one on
+/// our own painter, which [`tow`] keeps clear of the ship instead. What
+/// [`steer`] reads other hulls through, and what [`tow`] finds the ship in.
+type Planking<'w, 's> =
+    Query<'w, 's, (Entity, &'static Transform, &'static Rigged), (With<Vessel>, Without<Towed>)>;
+
+/// The hull an oar belongs to, as [`row`] reads it: where it is, its
+/// sailing state where it has one, and whether it is on a painter.
+type Rowed<'w, 's> =
+    Query<'w, 's, (&'static Transform, Option<&'static Boat>, Has<Towed>), With<Vessel>>;
+
 /// Every hull in the world, as the fittings hung off one read it: the
 /// transform it rides at, and its sailing state where there is one — which
 /// is only ever this player's own, a told hull's way and canvas being no
@@ -939,6 +1032,9 @@ pub struct Fleet {
     /// What decides which hull the sailing systems steer, and whether the
     /// session reports [`protocol::ToServer::Helm`] or `Move`.
     pub helmed: Option<BoatId>,
+    /// The boat on our painter, by the server's telling — the one hull
+    /// besides our own whose place this client invents. See [`Towed`].
+    towed: Option<BoatId>,
 }
 
 impl Fleet {
@@ -1009,6 +1105,7 @@ impl Fleet {
         position: Vec2,
         heading: f32,
         occupant: Option<PlayerId>,
+        towed_by: Option<BoatId>,
     ) {
         let hull = *self.hulls.entry(id).or_insert_with(|| {
             spawn_hull(
@@ -1064,6 +1161,35 @@ impl Fleet {
             Some(player) => self.crews.insert(id, player),
             None => self.crews.remove(&id),
         };
+
+        if towed_by.is_some() && towed_by == self.helmed {
+            // On our painter, as of this telling — the boarding that took
+            // its crew onto our deck, confirmed. The hull comes off its
+            // moorings and under [`tow`], snapped to where the server says
+            // it lies, which is where we left it a moment ago. Any later
+            // word about it while it is ours to move is a re-telling —
+            // nothing this client said is echoed back to it — and is left
+            // alone the way our own hull's are below.
+            if self.towed != Some(id) {
+                if let Some(ship) = self.hull() {
+                    self.towed = Some(id);
+                    commands.entity(hull).remove::<Told>().insert((
+                        Towed::behind(ship),
+                        Transform::from_xyz(position.x, 0.0, position.y)
+                            .with_rotation(Quat::from_rotation_y(heading)),
+                    ));
+                }
+            }
+            return;
+        }
+        if self.towed.take_if(|towed| *towed == id).is_some() {
+            // Off our painter: somebody boarded it from the water and cut
+            // it free, or we are about to step down into it ourselves —
+            // either way its place stops being ours to invent, and the rest
+            // of this function moors it or seats us in it on the telling's
+            // own word.
+            commands.entity(hull).remove::<Towed>();
+        }
 
         if occupant == Some(me) {
             if self.helmed != Some(id) {
@@ -1152,6 +1278,7 @@ impl Fleet {
             return;
         };
         self.crews.remove(&id);
+        self.towed.take_if(|towed| *towed == id);
         if self.helmed.take_if(|held| *held == id).is_some() {
             // Where the hull stands, if the scene has it standing anywhere,
             // and the world origin if not. Unlike [`Fleet::told`] there is
@@ -1304,6 +1431,9 @@ impl Plugin for BoatPlugin {
                 // steering wrote it leaves the cloth a frame behind its mast.
                 (
                     steer.run_if(in_state(Helm::Sailing)),
+                    // The boat on the painter, after the ship that pulls
+                    // it and on the same terms: a rope is steering too.
+                    tow.run_if(in_state(Helm::Sailing)),
                     float,
                     fly_the_pennant,
                     trim_the_sails,
@@ -1660,6 +1790,7 @@ pub(crate) fn take_the_hulls(
             hull.position,
             hull.heading,
             hull.occupant,
+            hull.towed_by,
         );
     }
 }
@@ -2005,7 +2136,7 @@ fn row(
     time: Res<Time>,
     rowing: Res<Rowing>,
     clips: Res<Assets<AnimationClip>>,
-    hulls: Query<(&Transform, Option<&Boat>), With<Vessel>>,
+    hulls: Rowed,
     mut rowers: Query<(&mut Rower, &mut AnimationPlayer)>,
 ) {
     let Some(cycle) = clips.get(&rowing.cycle).map(AnimationClip::duration) else {
@@ -2014,7 +2145,7 @@ fn row(
     let dt = time.delta_secs();
 
     for (mut rower, mut player) in &mut rowers {
-        let Ok((place, boat)) = hulls.get(rower.hull) else {
+        let Ok((place, boat, towed)) = hulls.get(rower.hull) else {
             continue;
         };
         let step = place.translation.xz() - rower.last.xz();
@@ -2079,6 +2210,9 @@ fn row(
         // has nothing to ask, and falls back to the water it covered.
         let target = match boat {
             Some(boat) => f32::from(boat.sails_set || !boat.at_rest()),
+            // A hull on a painter covers water nobody is rowing it over:
+            // the oars lie shipped however fast the ship ahead is going.
+            None if towed => 0.0,
             None => f32::from(covered > STIRRING),
         };
         rower.out = settled(
@@ -2250,6 +2384,206 @@ fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32
         .fold(f32::NEG_INFINITY, f32::max)
 }
 
+/// A hull's planking on the water, as another's keel is kept out of it: an
+/// upright rectangle the hull's length by its beam, at the pose it rides.
+/// The tilt is dropped — a heeling hull's planking is where it was.
+#[derive(Clone, Copy)]
+struct Footprint {
+    at: Vec2,
+    forward: Vec2,
+    right: Vec2,
+    half_length: f32,
+    half_beam: f32,
+}
+
+impl Footprint {
+    fn of(place: &Transform, hull: &Hull) -> Self {
+        let forward = place.forward().xz().normalize_or(-Vec2::Y);
+        Self {
+            at: place.translation.xz(),
+            forward,
+            right: Vec2::new(-forward.y, forward.x),
+            half_length: hull.length / 2.0,
+            half_beam: hull.beam / 2.0,
+        }
+    }
+
+    /// The point's own offsets in the planking's frame — athwartships and
+    /// fore-and-aft — with `clearance` taken off the outside all round.
+    /// Both positive is inside.
+    fn inside(&self, point: Vec2, clearance: f32) -> (f32, f32) {
+        let offset = point - self.at;
+        (
+            self.half_beam + clearance - offset.dot(self.right).abs(),
+            self.half_length + clearance - offset.dot(self.forward).abs(),
+        )
+    }
+
+    /// How far inside the planking a point lies, in metres to the nearest
+    /// side, and zero outside. `clearance` widens the planking all round by
+    /// the half-beam of the hull asking, whose keel line is what is probed
+    /// and whose own planking stands that far out from it.
+    fn depth_of(&self, point: Vec2, clearance: f32) -> f32 {
+        let (athwart, along) = self.inside(point, clearance);
+        if athwart > 0.0 && along > 0.0 {
+            athwart.min(along)
+        } else {
+            0.0
+        }
+    }
+
+    /// The shortest move that puts a point outside the planking — nothing
+    /// for a point already outside. Sideways when that is nearer, which for
+    /// a hull lying along another it always is.
+    fn shove(&self, point: Vec2, clearance: f32) -> Vec2 {
+        let (athwart, along) = self.inside(point, clearance);
+        if athwart <= 0.0 || along <= 0.0 {
+            return Vec2::ZERO;
+        }
+        let offset = point - self.at;
+        if athwart <= along {
+            self.right * athwart.copysign(offset.dot(self.right))
+        } else {
+            self.forward * along.copysign(offset.dot(self.forward))
+        }
+    }
+}
+
+/// How deep the keel would be in another hull's planking at a pose: the
+/// deepest of the keel's stations in any of `others`, zero with clear water
+/// between every one of them. [`grounding`]'s twin, read by the same gate on
+/// the same terms — the hull at a berth is not fouled, and the hull that
+/// rows into the ship alongside is stopped where its planking meets it.
+fn fouling(hull: &Hull, others: &[Footprint], transform: &Transform) -> f32 {
+    let keel = hull.heel_station - hull.forefoot_station;
+    let probes = hull.keel_probes();
+    (0..probes)
+        .map(|i| {
+            let station = hull.forefoot_station + keel * i as f32 / (probes - 1) as f32;
+            let at = transform.transform_point(Vec3::new(0.0, 0.0, station)).xz();
+            others
+                .iter()
+                .map(|other| other.depth_of(at, hull.beam / 2.0))
+                .fold(0.0, f32::max)
+        })
+        .fold(0.0, f32::max)
+}
+
+/// Tows the boat on the painter: a rope of fixed length from the ship's
+/// transom to the tender's stem, and a glide.
+///
+/// Each frame the stem is carried on by the tender's own drift, and then —
+/// if that left it further from the transom than the rope is long — pulled
+/// straight back onto the rope's circle. That one constraint is most of
+/// what towing looks like. The tender follows the ship's turns on the inside
+/// because it is pulled towards where the transom *is*, lags a ship getting
+/// under way because the rope has to come taut first, and carries on past a
+/// ship that has stopped because the rope only ever pulls. The drift is
+/// measured off the pull while the rope is taut — along the rope, the way
+/// a dragged hull moves — and run off on the dinghy's own glide when it is
+/// slack, so what a stopped ship sees is its tender overrunning and coming
+/// alongside, which is what a real one does.
+///
+/// The hull is pointed along the rope while the rope pulls and along its
+/// drift when it does not, eased on [`TOW_SWING`], and set down with its
+/// stem on the rope's end — a towed boat pivots about its bow, so the stern
+/// swings and the bow stays put. It rides the water level, as a moored hull
+/// does ([`moor`]), the pitching being the sailing systems' and a hull with
+/// no [`Boat`] having none.
+///
+/// A ship backing down onto its own dinghy shoves it aside rather than
+/// stopping against it — the one shove on the water, and allowed because
+/// the tender is this client's to move — see [`Footprint::shove`].
+///
+/// The ground is not asked: the tender only ever visits water the ship has
+/// just crossed or a rope's length inside its turn, and the rope is short.
+fn tow(
+    time: Res<Time>,
+    ground: Option<Res<Ground>>,
+    sea: Res<sea::SeaConditions>,
+    ships: Planking,
+    mut tenders: Query<(&mut Transform, &mut Towed, &Rigged)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let elapsed = time.elapsed_secs_wrapped();
+
+    for (mut place, mut towed, rigged) in &mut tenders {
+        let Ok((_, ship, ship_rigged)) = ships.get(towed.by) else {
+            continue;
+        };
+        let hull = hull_of(rigged.0);
+        let ship_hull = hull_of(ship_rigged.0);
+        let cleat = ship.transform_point(ship_hull.stern()).xz();
+
+        let stem_was = place.transform_point(hull.stem()).xz();
+        let mut stem = stem_was + towed.drift * dt;
+        let to_cleat = cleat - stem;
+        let reach = to_cleat.length();
+        let taut = reach > PAINTER;
+        let hauled = towed.cleat.map(|was| (cleat - was) / dt);
+        towed.cleat = Some(cleat);
+        if taut {
+            let along = to_cleat / reach;
+            stem += along * (reach - PAINTER);
+            // A hull on a taut rope moves as the rope's end does, along the
+            // rope: the water kills any way it has across its keel long
+            // before the rope could, and the keel lies along the rope. Two
+            // wrong readings of this are worth writing down. Keeping the
+            // whole of the stem's measured motion let a tender carry on
+            // beside the ship on the momentum of its first pull, the rope
+            // only ever taking up the slack — hung off the quarter for good
+            // at sixty degrees to a ship going straight. And reading the
+            // speed off the pull itself made the first take-up of a slack
+            // rope — a metre in one frame — into forty metres a second,
+            // which shot the dinghy clean past the transom. The ship's own
+            // speed along the rope is what a dragged thing actually makes,
+            // and the stem then chases the transom down the line between
+            // them, the tractrix, falling in astern on its own.
+            towed.drift = hauled.map_or(Vec2::ZERO, |hauled| along * hauled.dot(along).max(0.0));
+        } else {
+            towed.drift *= 1.0 - eased(1.0 / TOW_GLIDE, dt);
+        }
+
+        let pointed = if taut {
+            Some(to_cleat)
+        } else if towed.drift.length() > STIRRING {
+            Some(towed.drift)
+        } else {
+            None
+        };
+        if let Some(pointed) = pointed {
+            // `angle_to` turns the other way from a yaw about +Y: a bearing
+            // swung through +θ about the vertical is -θ on the ground plane.
+            let swing = -place.forward().xz().angle_to(pointed);
+            place.rotate_y(swing * eased(TOW_SWING, dt));
+        }
+
+        let forward = place.forward().xz().normalize_or(-Vec2::Y);
+        let mut at = stem - forward * (hull.length / 2.0);
+        let planking = Footprint::of(ship, ship_hull);
+        for end in [hull.stem(), hull.stern()] {
+            let point = at + forward * -end.z;
+            at += planking.shove(point, hull.beam / 2.0);
+        }
+        place.translation.x = at.x;
+        place.translation.z = at.y;
+
+        if let Some(surface) = sea.surface_over(ground.as_deref(), at, elapsed) {
+            place.translation.y = surface;
+        }
+    }
+}
+
+/// The yaw a hull is pointed at, as the wire spells a heading — see
+/// [`protocol::ToClient::Boat`].
+pub(crate) fn yaw_of(place: &Transform) -> f32 {
+    let forward = place.forward();
+    f32::atan2(-forward.x, -forward.z)
+}
+
 /// Where the ship's boat goes in the water, and how it points: a berth a
 /// clear oar's width abeam — outside both hulls' planking — on the shoreward
 /// side when the ground within reach says which side that is, and to port
@@ -2304,6 +2638,16 @@ pub(crate) fn tender_berth(ship: &Transform, ground: Option<&Ground>) -> (Vec2, 
 /// to is two and a half metres, and in one leap that steps a keel clean over
 /// a facet.
 ///
+/// Other hulls are judged by the same gate on the same terms, through
+/// [`fouling`]: a keel is kept out of another boat's planking exactly as it
+/// is kept out of a hillside, and the clause that frees a stranded hull
+/// frees one that finds itself overlapping through no fault of its own — a
+/// told hull eased onto a pose that crossed ours. Contact is a stop, never
+/// a shove: the hull we ran into is not ours to move. The one hull left out
+/// is our own tender on its painter, which [`tow`] keeps clear of the ship
+/// instead, a boat that cannot back down onto its own dinghy being a boat
+/// that cannot back down at all.
+///
 /// Heel is wholly a thing the eye gets: the keel lies along the forward axis
 /// the hull rolls about, so it moves nothing [`grounding`] probes along.
 pub(crate) fn steer(
@@ -2313,17 +2657,26 @@ pub(crate) fn steer(
     ground: Option<Res<Ground>>,
     conditions: Res<sea::SeaConditions>,
     players: Query<&ChildOf, With<Player>>,
-    mut boats: Query<(&mut Transform, &mut Boat)>,
+    mut hulls: ParamSet<(Query<(&mut Transform, &mut Boat)>, Planking)>,
 ) {
     // A player ashore is in no boat's query, and that is the whole of how
     // the helm goes dead when they step off. It is also how a typed `w`
     // never hoists sail: this system runs only while the player has the
     // helm, so the console and the menus keep the keys to themselves.
-    let Some((mut transform, mut boat)) = players
-        .single()
-        .ok()
-        .and_then(|aboard| boats.get_mut(aboard.parent()).ok())
-    else {
+    let Ok(aboard) = players.single().map(ChildOf::parent) else {
+        return;
+    };
+    // Every other hull on the water, read before ours is taken mutably —
+    // the two queries overlap on the transform, which is what the set is
+    // for.
+    let others: Vec<Footprint> = hulls
+        .p1()
+        .iter()
+        .filter(|(hull, ..)| *hull != aboard)
+        .map(|(_, place, rigged)| Footprint::of(place, hull_of(rigged.0)))
+        .collect();
+    let mut boats = hulls.p0();
+    let Ok((mut transform, mut boat)) = boats.get_mut(aboard) else {
         return;
     };
 
@@ -2386,19 +2739,24 @@ pub(crate) fn steer(
         // Ordinary frames advance far less than a facet and take one step.
         let steps = (advance.length() / CELL_METRES).ceil().max(1.0);
         let step = advance / steps;
-        let mut here = grounding(&hull, ground, &transform);
+        // Both depths are read as a pair and judged as a pair: an advance is
+        // let through only if each is clear or no worse than it was.
+        let depths = |place: &Transform| {
+            (
+                grounding(&hull, ground, place),
+                fouling(&hull, &others, place),
+            )
+        };
+        let no_worse = |there: f32, here: f32| there <= 0.0 || there <= here;
+        let mut here = depths(&transform);
         let mut walked = 0.0;
         let mut blocked = false;
         while walked < steps {
-            let there = grounding(
-                &hull,
-                ground,
-                &Transform {
-                    translation: transform.translation + step,
-                    ..*transform
-                },
-            );
-            if there <= 0.0 || there <= here {
+            let there = depths(&Transform {
+                translation: transform.translation + step,
+                ..*transform
+            });
+            if no_worse(there.0, here.0) && no_worse(there.1, here.1) {
                 transform.translation += step;
                 here = there;
                 walked += 1.0;
@@ -2446,6 +2804,23 @@ mod tests {
     /// Frames enough for the ease to be indistinguishable from settled —
     /// over eight time constants, a remainder of a few parts in ten thousand.
     const SETTLED: usize = 800;
+
+    #[test]
+    fn a_swing_on_the_ground_plane_is_a_yaw_the_other_way() {
+        // The sign [`tow`] turns a bearing on the map into a yaw with, pinned
+        // where it is easy to get backwards: a hull pointed north swung onto
+        // a bearing a radian round must end up a radian round, not a radian
+        // back.
+        let mut place = Transform::IDENTITY;
+        let onto = Quat::from_rotation_y(1.0) * Vec3::NEG_Z;
+        let swing = -place.forward().xz().angle_to(onto.xz());
+        place.rotate_y(swing);
+        assert!(
+            (yaw_of(&place) - 1.0).abs() < 1e-5,
+            "swung to {}, not to 1.0",
+            yaw_of(&place)
+        );
+    }
 
     /// A headless app with the boat systems running, already in a match —
     /// the shared [`world_app`], under this module's older name.
