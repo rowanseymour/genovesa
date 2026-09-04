@@ -37,7 +37,7 @@ use bevy::prelude::*;
 use protocol::ground::ChunkPayload;
 use protocol::survey::Soundings;
 use protocol::{
-    BeastId, BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId,
+    BeastId, BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, WorldId,
     DEFAULT_PORT, PROTOCOL_VERSION,
 };
 use server::{Host, Server};
@@ -665,7 +665,7 @@ impl Plugin for NetPlugin {
             // a frame ago.
             .add_systems(
                 Update,
-                (ask_for_ground, report_position)
+                (ask_for_ground, report_position, report_the_shoved)
                     .after(Wire::Read)
                     .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Online>)),
             )
@@ -783,8 +783,7 @@ pub struct BeastGone {
 pub struct HullTold {
     pub id: BoatId,
     pub kind: BoatKind,
-    pub position: Vec2,
-    pub heading: f32,
+    pub hull: Underway,
     pub occupant: Option<PlayerId>,
     pub towed_by: Option<BoatId>,
 }
@@ -1004,17 +1003,22 @@ fn receive(
             ToClient::Boat {
                 id,
                 kind,
-                position,
-                heading,
+                hull,
                 occupant,
                 towed_by,
             } => {
-                if position.is_finite() && heading.is_finite() {
+                // The way as strictly as the place: an infinity in it would
+                // reach the solver through [`crate::boat::Telling`] and stay
+                // there, taking every hull it ever touches with it.
+                if hull.at.is_finite()
+                    && hull.heading.is_finite()
+                    && hull.way.is_finite()
+                    && hull.swinging.is_finite()
+                {
                     said.hull.write(HullTold {
                         id,
                         kind,
-                        position,
-                        heading,
+                        hull,
                         occupant,
                         towed_by,
                     });
@@ -1119,14 +1123,27 @@ fn swing(from: f32, to: f32) -> f32 {
     round.min(std::f32::consts::TAU - round)
 }
 
+/// How much a hull's way must change before it is worth a word of its own,
+/// in metres per second.
+///
+/// Without this a hull that slows to a stop simply stops reporting, once it
+/// is covering less than [`REPORT_THRESHOLD`] between words — and the last
+/// telling anybody holds still says it is making way. A listener carries
+/// that forward (see [`crate::boat::Telling`]) and settles a little past
+/// where the boat really lies, for ever. Half a metre a second
+/// is well inside what the eye can see and far outside the noise of a hull
+/// riding a swell.
+const REPORT_SLOWING: f32 = 0.5;
+
 /// The last report [`report_position`] made, against which the next is
-/// judged worth making: when, where, pointed which way, and where the
-/// boat on the painter was if there was one.
+/// judged worth making: when, where, pointed which way, how fast, and where
+/// the boat on the painter was if there was one.
 #[derive(Clone, Copy)]
 struct Reported {
     at: f32,
     position: Vec2,
     yaw: f32,
+    way: Vec2,
     tender: Option<Vec2>,
 }
 
@@ -1140,7 +1157,8 @@ fn report_position(
     online: Res<Online>,
     fleet: Res<crate::boat::Fleet>,
     player: PlayerPlace,
-    towed: Query<&Transform, With<crate::boat::Towed>>,
+    motions: crate::boat::Motions,
+    towed: Query<Entity, With<crate::boat::Towed>>,
     mut last: Local<Option<Reported>>,
 ) {
     let (Some(position), Some(heading)) = (player.on_the_map(), player.heading()) else {
@@ -1150,10 +1168,15 @@ fn report_position(
     // which the other clients draw and a capsule marker never needed.
     let yaw = f32::atan2(-heading.x, -heading.y);
     let now = time.elapsed_secs();
+    // Read off the water plane rather than off the transforms, because the
+    // way is only there — see [`crate::boat::Motions`], which is also where
+    // the one sign the plane costs is paid.
+    let carried = player.carrier().and_then(|hull| motions.underway_of(hull));
     let tender = towed
         .single()
         .ok()
-        .map(|place| (place.translation.xz(), crate::boat::yaw_of(place)));
+        .and_then(|hull| motions.underway_of(hull));
+    let way = carried.map_or(Vec2::ZERO, |hull| hull.way);
 
     if let Some(reported) = *last {
         // A hull turning in place is moving news even though it goes
@@ -1161,32 +1184,80 @@ fn report_position(
         // the position. So is a tender still gliding on its painter behind
         // a ship that has stopped.
         let turned = swing(reported.yaw, yaw) > REPORT_SWING;
+        // A hull fetching up is news even where it has stopped covering
+        // ground worth reporting — see [`REPORT_SLOWING`].
+        let slowed = reported.way.distance(way) >= REPORT_SLOWING;
         let towed_on = match (reported.tender, tender) {
-            (Some(was), Some((is, _))) => was.distance(is) >= REPORT_THRESHOLD,
+            (Some(was), Some(is)) => was.distance(is.at) >= REPORT_THRESHOLD,
             (was, is) => was.is_some() != is.is_some(),
         };
         if now - reported.at < REPORT_INTERVAL
-            || (reported.position.distance(position) < REPORT_THRESHOLD && !turned && !towed_on)
+            || (reported.position.distance(position) < REPORT_THRESHOLD
+                && !turned
+                && !slowed
+                && !towed_on)
         {
             return;
         }
     }
     // At a helm the report is the boat's — the server carries the rider
     // with the vehicle — and afoot it is the walker's own.
-    match fleet.helmed {
-        Some(_) => online.connection.say(ToServer::Helm {
-            position,
-            heading: yaw,
-            tender,
-        }),
+    match fleet.helmed.and(carried) {
+        Some(hull) => online.connection.say(ToServer::Helm { hull, tender }),
         None => online.connection.report(position),
     }
     *last = Some(Reported {
         at: now,
         position,
         yaw,
-        tender: tender.map(|(at, _)| at),
+        way,
+        tender: tender.map(|tender| tender.at),
     });
+}
+
+/// Tells the server where an empty hull this client has shoved has got to —
+/// see [`crate::boat::Shoving`] for what a claim is, and
+/// [`protocol::ToServer::Shove`] for the terms the server holds it to.
+///
+/// On [`REPORT_INTERVAL`] like the helm's own reports, and without the "has
+/// it moved far enough to be worth saying" test that one carries: a claim
+/// lasts a few seconds and covers a hull that is moving by definition, so
+/// there is nothing there for such a test to save.
+///
+/// The word that matters most is the last one, and it is sent from the
+/// claim being *given back* rather than from the interval — a hull comes to
+/// rest on whichever frame it does, and waiting for the next tick to say so
+/// would leave the world holding a boat still sliding. Sent for a claim
+/// dropped any other way too, a hull somebody has since boarded among them,
+/// which costs a word the server answers with the silence it answers every
+/// refusal with.
+fn report_the_shoved(
+    time: Res<Time>,
+    online: Res<Online>,
+    motions: crate::boat::Motions,
+    hulls: Query<&crate::boat::HullId>,
+    shoving: Query<Entity, With<crate::boat::Shoving>>,
+    mut given_back: RemovedComponents<crate::boat::Shoving>,
+    mut last: Local<f32>,
+) {
+    let now = time.elapsed_secs();
+    let due = now - *last >= REPORT_INTERVAL;
+    if due {
+        *last = now;
+    }
+    let letting_go: Vec<Entity> = given_back.read().collect();
+    for hull in letting_go
+        .into_iter()
+        .chain(due.then(|| shoving.iter()).into_iter().flatten())
+    {
+        let (Ok(named), Some(underway)) = (hulls.get(hull), motions.underway_of(hull)) else {
+            continue;
+        };
+        online.connection.say(ToServer::Shove {
+            boat: named.0,
+            hull: underway,
+        });
+    }
 }
 
 /// Enters the world on foot, for the player the welcome seated at no helm:
@@ -1623,8 +1694,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(4),
             kind: protocol::BoatKind::Sloop,
-            position: ashore,
-            heading: 0.0,
+            hull: Underway::lying(ashore, 0.0),
             occupant: Some(PlayerId(1)),
             towed_by: None,
         })
@@ -1695,8 +1765,7 @@ mod tests {
         let seated = |occupant| ToClient::Boat {
             id: BoatId(4),
             kind: protocol::BoatKind::Sloop,
-            position: ashore,
-            heading: 0.0,
+            hull: Underway::lying(ashore, 0.0),
             occupant,
             towed_by: None,
         };
@@ -1789,8 +1858,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(4),
             kind: protocol::BoatKind::Sloop,
-            position: Vec2::new(-20.0, 15.0),
-            heading: 0.0,
+            hull: Underway::lying(Vec2::new(-20.0, 15.0), 0.0),
             occupant: Some(PlayerId(1)),
             towed_by: None,
         })
@@ -1824,7 +1892,7 @@ mod tests {
                         PlayerId(1),
                         BoatId(7),
                         protocol::BoatKind::Sloop,
-                        afloat,
+                        Underway::lying(afloat, 0.0),
                         0.0,
                         occupant,
                         None,
@@ -1899,7 +1967,7 @@ mod tests {
                     PlayerId(1),
                     BoatId(4),
                     protocol::BoatKind::Sloop,
-                    Vec2::new(30.0, 30.0),
+                    Underway::lying(Vec2::new(30.0, 30.0), 0.0),
                     0.0,
                     Some(PlayerId(1)),
                     None,
@@ -1956,8 +2024,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(3),
             kind: protocol::BoatKind::Sloop,
-            position: Vec2::new(4.0, 5.0),
-            heading: 0.5,
+            hull: Underway::lying(Vec2::new(4.0, 5.0), 0.5),
             occupant: Some(PlayerId(9)),
             towed_by: None,
         })
@@ -1987,8 +2054,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(3),
             kind: protocol::BoatKind::Sloop,
-            position: Vec2::new(600.0, -200.0),
-            heading: 0.5,
+            hull: Underway::lying(Vec2::new(600.0, -200.0), 0.5),
             occupant: None,
             towed_by: None,
         })
@@ -2054,8 +2120,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(1),
             kind: protocol::BoatKind::Sloop,
-            position: Vec2::ZERO,
-            heading: 0.0,
+            hull: Underway::lying(Vec2::ZERO, 0.0),
             occupant: Some(me),
             towed_by: None,
         })
@@ -2068,8 +2133,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(2),
             kind: protocol::BoatKind::Rowboat,
-            position: Vec2::new(3.0, 0.0),
-            heading: 0.5,
+            hull: Underway::lying(Vec2::new(3.0, 0.0), 0.5),
             occupant: Some(me),
             towed_by: None,
         })
@@ -2078,8 +2142,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(1),
             kind: protocol::BoatKind::Sloop,
-            position: Vec2::ZERO,
-            heading: 0.0,
+            hull: Underway::lying(Vec2::ZERO, 0.0),
             occupant: None,
             towed_by: None,
         })
@@ -2108,8 +2171,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(1),
             kind: protocol::BoatKind::Sloop,
-            position: Vec2::ZERO,
-            heading: 0.0,
+            hull: Underway::lying(Vec2::ZERO, 0.0),
             occupant: Some(me),
             towed_by: None,
         })
@@ -2149,8 +2211,7 @@ mod tests {
         (ToClient::Boat {
             id: BoatId(2),
             kind: protocol::BoatKind::Rowboat,
-            position: afloat,
-            heading: 0.0,
+            hull: Underway::lying(afloat, 0.0),
             occupant: Some(me),
             towed_by: None,
         })

@@ -41,7 +41,7 @@
 
 use glam::Vec2;
 use protocol::ground::ANCHOR_DEPTH;
-use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient};
+use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Underway};
 use world::archipelago::{berth_off, Archipelago, SOUNDING, SPAWN_OFFSHORE};
 
 use crate::{
@@ -462,11 +462,17 @@ fn goto(asked: Asked) -> Result<String, String> {
             let mut boats = shared.boats.held();
             let at = berth.map_or(wanted, |(off, _)| off);
             let state = boats.get_mut(&boat).expect("a boat once boarded exists");
-            state.position = at;
-            if berth.is_some() {
-                state.heading = aimed(at, wanted);
-            }
-            (at, Some(state.heading), Some(state.told(boat)))
+            // At rest, which is [`ToClient::PutDown`]'s own rule and now the
+            // server's word rather than a thing each client does for itself:
+            // a hull that kept its way across a `goto` would sail on from
+            // wherever it was set down, and nobody was sailing it there.
+            let heading = if berth.is_some() {
+                aimed(at, wanted)
+            } else {
+                state.hull.heading
+            };
+            state.hull = Underway::lying(at, heading);
+            (at, Some(heading), Some(state.told(boat)))
         }
         // Afoot: the point itself, whatever is under it, and which way they
         // face is their own business — see [`ToClient::PutDown`], whose
@@ -664,7 +670,7 @@ fn grant(asked: Asked) -> Result<String, String> {
             match theirs {
                 Some(boat) => {
                     let state = boats.get_mut(&boat).expect("looked up a breath ago");
-                    state.position = at;
+                    state.hull = Underway::lying(at, state.hull.heading);
                     (false, state.told(boat))
                 }
                 None => {
@@ -677,8 +683,7 @@ fn grant(asked: Asked) -> Result<String, String> {
                     // `grant` bring it back rather than mint another.
                     let state = BoatState {
                         kind,
-                        position: at,
-                        heading: 0.0,
+                        hull: Underway::lying(at, 0.0),
                         occupant: None,
                         keeper: Some(token),
                         towed_by: None,
@@ -870,7 +875,7 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
         let mut kept: Vec<(BoatKind, Vec2)> = boats
             .values()
             .filter(|state| state.keeper == Some(token) && state.occupant != Some(from))
-            .map(|state| (state.kind, state.position))
+            .map(|state| (state.kind, state.hull.at))
             .collect();
         kept.sort_by(|a, b| {
             at.distance(a.1)

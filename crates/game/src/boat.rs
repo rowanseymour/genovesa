@@ -41,6 +41,8 @@ use avian2d::prelude::*;
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
 use bevy::animation::{AnimationClip, AnimationPlayer};
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::entity::EntityHashSet;
+use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfAssetLabel;
 use bevy::math::Vec3Swizzles;
 use bevy::mesh::PrimitiveTopology;
@@ -48,7 +50,7 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use protocol::ground::CELL_METRES;
-use protocol::{BoatId, BoatKind, PlayerId};
+use protocol::{BoatId, BoatKind, PlayerId, Underway};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::{MapCamera, View};
@@ -56,7 +58,6 @@ use crate::models::above;
 use crate::player::Player;
 use crate::sea;
 use crate::terrain::Ground;
-use crate::told::{eased_onto, Told};
 use crate::waterline;
 use crate::{eased, matte, model_mesh, AppState, Helm};
 
@@ -1043,8 +1044,9 @@ struct Oared;
 /// solver, nothing here has to say how a towed boat moves.
 ///
 /// Its place is this client's to invent, exactly as the hull it steers is,
-/// so it carries no [`Told`] — the server relays this client's own reports
-/// of it to everyone else, see [`crate::net`] — and no [`Boat`] either: the
+/// so it carries no [`Telling`] — the server relays this client's own
+/// reports of it to everyone else, see [`crate::net`] — and no [`Boat`]
+/// either: the
 /// sailing state is the steered hull's, and a towed one makes no way of its
 /// own. What it needs of a boat's manners it reads off its [`Rigged`] kind.
 #[derive(Component)]
@@ -1165,35 +1167,160 @@ type Rowed<'w, 's> =
     Query<'w, 's, (&'static Transform, Option<&'static Boat>, Has<Towed>), With<Vessel>>;
 
 /// Every hull in the world, as the fittings hung off one read it: the
-/// transform it rides at, and its sailing state where there is one — which
-/// is only ever this player's own, a told hull's way and canvas being no
-/// part of what crosses the wire. `F` keeps the query clear of whichever
-/// fitting is doing the reading, a child's transform being a transform.
-type Hulls<'w, 's, F> =
-    Query<'w, 's, (Option<&'static Boat>, &'static Transform), (With<Vessel>, F)>;
+/// transform it rides at, how fast it is going, and its sailing state where
+/// there is one — which is only ever this player's own, whether a hull has
+/// canvas set being no part of what crosses the wire. `F` keeps the query
+/// clear of whichever fitting is doing the reading, a child's transform
+/// being a transform.
+///
+/// The way comes off the plane rather than off [`Boat`] because every hull
+/// has one there, ours and a stranger's alike — see
+/// [`crate::waterline`]. It used to come off the sailing state, and so
+/// existed only for our own boat, which is why every other player's burgee
+/// used to fly on the true wind while ours flew on the apparent.
+type Hulls<'w, 's, F> = Query<
+    'w,
+    's,
+    (
+        Option<&'static Boat>,
+        &'static Transform,
+        &'static LinearVelocity,
+    ),
+    (With<Vessel>, F),
+>;
 
-/// How quickly a hull nobody here is steering closes on where the server last
-/// put it, in e-foldings per second — see [`crate::told`]. Tellings come as
-/// often as its helmsman's client reports, which is ten a second for a hull
-/// under way, and the easing is what turns those steps back into sailing.
+/// How hard a hull is pulled towards where its telling says it should be by
+/// now, in metres of correction per second per metre adrift.
 ///
 /// One number for the place and the bearing alike, unlike a beast's: a hull
 /// under way is pointed where it is going, so a swing that lagged the slide
 /// would draw every other player crabbing.
 const MOORED: f32 = 8.0;
 
-/// Where the server last put a hull nobody here is steering, as the one
-/// component every told thing on screen carries — see [`crate::told::Told`],
-/// and [`moor`], which does the easing and keeps the hull riding the swell
-/// meanwhile. Present on every hull but the one this player has the helm of,
-/// whose transform belongs to the sailing systems.
-fn moored_at(position: Vec2, heading: f32) -> Told {
-    Told {
-        at: position,
-        facing: Some(heading),
-        closing: MOORED,
-        swinging: MOORED,
+/// How quickly a hull's way is bent onto the one its telling asks for, in
+/// e-foldings per second — see [`follow_the_telling`].
+///
+/// Four times [`MOORED`], and not by taste: the two together are a spring on
+/// the place and a damper on the way, and a second-order system like that is
+/// critically damped at exactly `4 * MOORED`. Below it a hull rammed by
+/// somebody rings about its telling instead of settling on it, which reads as
+/// a boat wobbling in the sea rather than being pushed through it. Above it
+/// the wire simply wins sooner, at the cost of the shove being visible for
+/// fewer frames.
+const FOLLOWING: f32 = 4.0 * MOORED;
+
+/// How far past its last telling a hull may be reckoned, in seconds.
+///
+/// Reckoning forward is what cancels the lag between words, and it is only
+/// honest for about as long as the gap between them. Past that the telling
+/// has stopped arriving — a client hung up, or the wire went quiet — and
+/// carrying on would sail somebody's boat over the horizon on the strength
+/// of the last thing they said. Five tellings' worth: long enough that a
+/// missed word or two costs nothing, short enough that a silence stops the
+/// boat rather than launching it.
+const RECKONING: f32 = 0.5;
+
+/// The world's last word about a hull nobody here is steering, held whole.
+///
+/// Not [`crate::told::Told`], which the marker another player stands as and
+/// the beasts still carry. That eases a *transform* onto a point, which is
+/// the whole of what a thing with no keel needs. A hull is a body on a plane
+/// with a mass and a way, and is steered onto a motion — see
+/// [`follow_the_telling`]. The two look alike from far enough away, and the
+/// second is not a special case of the first.
+#[derive(Component, Clone, Copy)]
+pub struct Telling {
+    /// Where the hull is and how it is going, as the wire last had it.
+    hull: Underway,
+    /// When that was, on the client's own clock — what
+    /// [`follow_the_telling`] reckons the telling forward from. Without it
+    /// a hull is pulled towards a point that is up to a telling stale, and
+    /// the pull drags backwards against the very way it is carrying: with
+    /// the two fighting, a boat making six metres a second settled about a
+    /// third of a metre astern of itself and stayed there.
+    heard: f32,
+    /// Whether somebody else is answering for it — at its helm, or towing it
+    /// on their own painter. A hull nobody is answering for is one this
+    /// client may shove and then report; see [`Shoving`], and
+    /// [`protocol::ToServer::Shove`] for the rule the server holds it to.
+    spoken_for: bool,
+}
+
+/// A hull this client is shoving: an empty one our own has run into, ours to
+/// move and to report until it comes to rest — see [`claim_the_shoved`].
+///
+/// It goes on carrying its [`Telling`] all the while, unread. Cheaper than
+/// taking the word off and putting it back, and it means a claim can be
+/// given up at any moment by deleting this alone: the wire's last word is
+/// still there to fall back on, however stale.
+#[derive(Component)]
+pub struct Shoving;
+
+/// A hull's state on the plane, put back into the world's own axes.
+///
+/// The way home for what a [`Telling`] is on the way in, and written once
+/// because two callers need it — what [`crate::net`] reports of the hull
+/// under the player's hand, and what [`claim_the_shoved`] writes into the
+/// telling of a hull this client has taken up. Vectors cross untouched; only
+/// the two angles turn over, and both through [`waterline::across`].
+fn underway_at(
+    at: &Position,
+    angle: &Rotation,
+    way: &LinearVelocity,
+    spin: &AngularVelocity,
+) -> Underway {
+    Underway {
+        at: at.0,
+        heading: waterline::across(angle.as_radians()),
+        way: way.0,
+        swinging: waterline::across(spin.0),
     }
+}
+
+/// Every hull's state on the plane, for the one system outside this module
+/// that needs it — see [`underway_at`].
+#[derive(SystemParam)]
+pub struct Motions<'w, 's> {
+    hulls: Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Rotation,
+            &'static LinearVelocity,
+            &'static AngularVelocity,
+        ),
+        With<Vessel>,
+    >,
+}
+
+impl Motions<'_, '_> {
+    /// What a hull is doing, as the wire says it. `None` for anything that
+    /// is not a hull — the player's own feet, which carry them where no
+    /// boat does.
+    pub fn underway_of(&self, hull: Entity) -> Option<Underway> {
+        let (at, angle, way, spin) = self.hulls.get(hull).ok()?;
+        Some(underway_at(at, angle, way, spin))
+    }
+}
+
+/// The hulls this client answers for: the one under the player's hand, the
+/// one on its painter, and any empty hull we are shoving.
+///
+/// Written once because three systems ask it — the water's hold, the
+/// ground's, and what [`crate::net`] reports — and a fourth asking it in its
+/// own words would be a fourth chance to get it wrong. The whole authority
+/// split is this filter: a hull outside it is somebody else's word to keep,
+/// and this client's only business with it is putting it where that word
+/// says.
+type Ours = Or<(Without<Telling>, With<Shoving>)>;
+
+/// The shortest way round from one angle to another, in radians: what a
+/// bearing has to swing to become another bearing, rather than the difference
+/// between two numbers that may be a turn and a bit apart.
+fn swing_to(onto: f32, from: f32) -> f32 {
+    let round = std::f32::consts::TAU;
+    (onto - from + std::f32::consts::PI).rem_euclid(round) - std::f32::consts::PI
 }
 
 /// The boats of the world, as this client was told them: the wire's ids to
@@ -1250,10 +1377,21 @@ impl Fleet {
         hull.remove::<Boat>();
         if let Some(pose) = pose {
             let forward = pose.forward();
-            hull.insert(moored_at(
-                pose.translation.xz(),
-                f32::atan2(-forward.x, -forward.z),
-            ));
+            hull.insert(Telling {
+                // At rest, and corrected by the telling that follows: what
+                // this reads off the scene is a pose, and the way the hull
+                // still carries is about to stop being ours to have an
+                // opinion about.
+                hull: Underway::lying(pose.translation.xz(), f32::atan2(-forward.x, -forward.z)),
+                // Nothing, and it need not be anything: reckoning a telling
+                // forward multiplies its way, and this one has none.
+                heard: 0.0,
+                // Somebody has taken this helm, or the world has it free.
+                // Either way it is not ours to shove until a telling says
+                // so — see [`Telling::spoken_for`], and the bottom of
+                // [`Fleet::told`], which is where that is actually settled.
+                spoken_for: true,
+            });
         }
     }
 
@@ -1280,21 +1418,19 @@ impl Fleet {
         me: PlayerId,
         id: BoatId,
         kind: BoatKind,
-        position: Vec2,
-        heading: f32,
+        told: Underway,
+        heard: f32,
         occupant: Option<PlayerId>,
         towed_by: Option<BoatId>,
     ) {
-        let hull = *self.hulls.entry(id).or_insert_with(|| {
-            spawn_hull(
-                commands,
-                kit,
-                kind,
-                Transform::from_xyz(position.x, 0.0, position.y)
-                    .with_rotation(Quat::from_rotation_y(heading)),
-                Some(id),
-            )
-        });
+        let pose = || {
+            Transform::from_xyz(told.at.x, 0.0, told.at.y)
+                .with_rotation(Quat::from_rotation_y(told.heading))
+        };
+        let hull = *self
+            .hulls
+            .entry(id)
+            .or_insert_with(|| spawn_hull(commands, kit, kind, pose(), Some(id)));
         if self.helmed == Some(id) && occupant != Some(me) {
             // Ours until this telling said otherwise. Ordinarily our own
             // disembark or lowering already gave it back — see
@@ -1311,9 +1447,9 @@ impl Fleet {
             self.hand_back(commands, hull, None);
             // And the player off the deck with them. The hull is moored on
             // the telling's own word at the bottom of this function and
-            // eased there by [`moor`], so a player left parented to it would
-            // go along — drifting about aboard a boat that has stopped being
-            // theirs. Not folded into [`Fleet::hand_back`] itself, whose
+            // carried there by [`follow_the_telling`], so a player left
+            // parented to it would go along — drifting about aboard a boat
+            // that has stopped being theirs. Not folded into [`Fleet::hand_back`] itself, whose
             // other callers must leave the player where they stand: the
             // grant below hands one helm back in order to take another, and
             // the player is stepping straight onto the next deck; stepping
@@ -1328,10 +1464,7 @@ impl Fleet {
             // command — and then the telling's own word for where it lies is
             // exactly as good, being what that hull is about to be moored
             // on anyway.
-            let lying = poses.get(hull).copied().unwrap_or_else(|_| {
-                Transform::from_xyz(position.x, 0.0, position.y)
-                    .with_rotation(Quat::from_rotation_y(heading))
-            });
+            let lying = poses.get(hull).copied().unwrap_or_else(|_| pose());
             stand_off(commands, players, &lying);
         }
 
@@ -1351,11 +1484,11 @@ impl Fleet {
             if self.towed != Some(id) {
                 if let Some(ship) = self.hull() {
                     self.towed = Some(id);
-                    commands.entity(hull).remove::<Told>().insert((
-                        Towed::behind(ship),
-                        Transform::from_xyz(position.x, 0.0, position.y)
-                            .with_rotation(Quat::from_rotation_y(heading)),
-                    ));
+                    commands
+                        .entity(hull)
+                        .remove::<Telling>()
+                        .remove::<Shoving>()
+                        .insert((Towed::behind(ship), pose()));
                 }
             }
             return;
@@ -1386,11 +1519,11 @@ impl Fleet {
                 self.helmed = Some(id);
                 let boat = Boat::of(kind);
                 let helm = Transform::from_translation(boat.helm());
-                commands.entity(hull).remove::<Told>().insert((
-                    boat,
-                    Transform::from_xyz(position.x, 0.0, position.y)
-                        .with_rotation(Quat::from_rotation_y(heading)),
-                ));
+                commands
+                    .entity(hull)
+                    .remove::<Telling>()
+                    .remove::<Shoving>()
+                    .insert((boat, pose()));
                 if let Ok((player, _)) = players.single() {
                     commands
                         .entity(player)
@@ -1413,9 +1546,24 @@ impl Fleet {
             return;
         }
 
-        // Somebody else's, or nobody's: moored to wherever the server said,
-        // which [`moor`] eases it towards.
-        commands.entity(hull).insert(moored_at(position, heading));
+        // Somebody else's, or nobody's: the world's word about where it is
+        // and how it is going, which [`follow_the_telling`] carries it along.
+        //
+        // Written even for a hull this client is shoving, where nothing
+        // reads it until the claim ends — see [`Shoving`]. What the telling
+        // does settle for such a hull is whether the claim may stand at all:
+        // one the world has since seated somebody in, or put on a ship's
+        // painter, stops being ours to push on the word that says so.
+        let telling = Telling {
+            hull: told,
+            heard,
+            spoken_for: occupant.is_some() || towed_by.is_some(),
+        };
+        let mut hull = commands.entity(hull);
+        if telling.spoken_for {
+            hull.remove::<Shoving>();
+        }
+        hull.insert(telling);
     }
 
     /// The entity of the hull we hold the helm of, if any — see
@@ -1608,12 +1756,19 @@ impl Plugin for BoatPlugin {
                     .in_set(crate::net::Wire::Read)
                     .run_if(resource_exists::<crate::net::Online>),
             )
-            // Everything said to the water, before it is solved. The
-            // hulls the wire moves are eased onto their tellings and
-            // carried across to the plane; whose hull is whose is settled;
-            // the painter is made fast or cast off; and the helm asks for
-            // its drive last, so the keys are answered against the poses
-            // this frame actually starts from.
+            // Everything said to the water, before it is solved. Hulls
+            // something outside the solver moved are carried across to the
+            // plane; whose hull is whose is settled, claims and all; the
+            // hulls the wire moves are steered onto their tellings; the
+            // painter is made fast or cast off; and the helm asks for its
+            // drive last, so the keys are answered against the poses this
+            // frame actually starts from.
+            //
+            // The claim before the following, and not merely tidily: what
+            // [`claim_the_shoved`] decides is which hulls
+            // [`follow_the_telling`] must leave alone, and a frame of the
+            // wire dragging back a boat this client is pushing is a frame
+            // of the boat visibly refusing to be pushed.
             //
             // Only the asking stops when the game is paused. The clock the
             // solver runs on stops too — see [`crate::waterline`] — so a
@@ -1622,9 +1777,9 @@ impl Plugin for BoatPlugin {
             .add_systems(
                 Update,
                 (
-                    moor,
                     take_the_plane,
-                    whose_water_is_it,
+                    claim_the_shoved,
+                    follow_the_telling,
                     make_fast,
                     the_water_holds,
                     trail,
@@ -1731,7 +1886,7 @@ fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
 
 /// One hull, meshes and all, at a pose — everything a boat is *before*
 /// anyone is aboard: no [`Boat`], because the sailing systems belong to
-/// whoever holds the helm, and no [`Told`], because who moves it is the
+/// whoever holds the helm, and no [`Telling`], because who moves it is the
 /// caller's decision. `named` is its wire id, for the hulls a server told
 /// us about.
 ///
@@ -1748,10 +1903,9 @@ pub(crate) fn spawn_hull(
     named: Option<BoatId>,
 ) -> Entity {
     // Every hull is a body on the water plane from the moment it is
-    // spawned — see [`crate::waterline`]. Dynamic to begin with, whoever it
-    // turns out to belong to: a hull the wire moves is made kinematic by
-    // [`whose_water_is_it`] on the frame its telling lands, and one frame
-    // of a boat nobody has seen yet being solvable costs nothing.
+    // spawned — see [`crate::waterline`] — and every hull is the same kind
+    // of body, whoever it turns out to belong to. What differs is who
+    // decides its way: see [`Ours`].
     let dimensions = hull_of(kind);
     let laid = waterline::on_the_plane(pose.translation);
     let hull = commands
@@ -1972,33 +2126,54 @@ fn cut_the_water(
     }
 }
 
-/// Rides the moored hulls: eases each towards where the server last put it
-/// and turns it onto its told heading. The easing pace is the markers' own,
-/// tellings arriving on the same reporting beat.
+/// Carries a hull nobody here is steering along the world's last word about
+/// it.
 ///
-/// It writes a transform still, and [`take_the_plane`] carries that onto
-/// the water plane a step later — a told hull being kinematic there, moved
-/// rather than solved. Keeping the ease here rather than doing it on the
-/// plane is what leaves this the one description of how a stranger's boat
-/// is drawn between two tellings.
+/// Not a pose eased onto. The hull is a body with a mass and a way like any
+/// other, and what this writes is the way — the one the wire said, plus a
+/// bend towards wherever the telling says the hull should have got to by
+/// now. So the hull is *steered* onto its telling and never put there, and
+/// it goes on sailing between words instead of trailing a telling behind at
+/// ten a second: at sailing speeds that lag was about a metre, and it meant
+/// another player's boat met ours as something lying still.
 ///
-/// The height is no longer here: [`ride_the_plane`] puts every hull on the
-/// water, ours and a stranger's alike, which is one answer where there
-/// were two.
-/// The hulls this frame moors: every told one, and no other told thing.
-///
-/// `Vessel` and not merely `Without<Boat>`, which is what this was while a
-/// hull's telling was a component of its own: a [`Told`] is what everything
-/// on screen the wire moves now carries, so the marker another player stands
-/// as and the beasts in the water would both answer a query without it.
-type Moorings<'w, 's> =
-    Query<'w, 's, (&'static Told, &'static mut Transform), (With<Vessel>, Without<Boat>)>;
-
-fn moor(time: Res<Time>, mut hulls: Moorings) {
-    let dt = time.delta_secs();
-
-    for (told, mut transform) in &mut hulls {
-        eased_onto(&mut transform, told, dt);
+/// The bend and the way are one expression rather than a correction applied
+/// beside a movement, which is what keeps the whole of it inside the
+/// solver's own arithmetic. Nothing here writes a [`Position`], so a hull
+/// that has just been shoved keeps the shove: it decays into the wire's word
+/// over the few frames [`FOLLOWING`] takes, by which time the wire is
+/// usually saying the shove happened, because the client whose hull it is
+/// solved the same collision from the other side.
+fn follow_the_telling(
+    time: Res<Time>,
+    mut hulls: Query<
+        (
+            &Telling,
+            &Position,
+            &Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
+        Without<Shoving>,
+    >,
+) {
+    let now = time.elapsed_secs();
+    let closing = eased(FOLLOWING, time.delta_secs());
+    for (telling, at, angle, mut way, mut spin) in &mut hulls {
+        let told = telling.hull;
+        // Where the telling says the hull should have got to by now, which
+        // is the point to pull towards — see [`Telling::heard`]. The pull
+        // has nothing left to do while the reckoning is right, and takes up
+        // the difference whenever it is not.
+        let since = (now - telling.heard).clamp(0.0, RECKONING);
+        let expected = told.at + told.way * since;
+        way.0 = way.0.lerp(told.way + (expected - at.0) * MOORED, closing);
+        // The bearing the same way round, and through [`waterline::across`]
+        // like every other crossing: a yaw and a rate of yaw both spin the
+        // opposite way on this plane.
+        let onto = waterline::across(told.heading + told.swinging * since);
+        let asked = waterline::across(told.swinging) + swing_to(onto, angle.as_radians()) * MOORED;
+        spin.0 += (asked - spin.0) * closing;
     }
 }
 
@@ -2007,7 +2182,9 @@ fn moor(time: Res<Time>, mut hulls: Moorings) {
 /// One word is both the introduction and every change after — see
 /// [`Fleet::told`], which is where a first telling spawns a hull and a later
 /// one re-moors it or changes whose hands are on the helm.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn take_the_hulls(
+    time: Res<Time>,
     mut commands: Commands,
     mut kit: HullKit,
     mut fleet: ResMut<Fleet>,
@@ -2016,6 +2193,7 @@ pub(crate) fn take_the_hulls(
     poses: Query<&Transform, With<Vessel>>,
     mut told: MessageReader<crate::net::HullTold>,
 ) {
+    let heard = time.elapsed_secs();
     for hull in told.read() {
         fleet.told(
             &mut commands,
@@ -2025,8 +2203,8 @@ pub(crate) fn take_the_hulls(
             online.connection.id,
             hull.id,
             hull.kind,
-            hull.position,
-            hull.heading,
+            hull.hull,
+            heard,
             hull.occupant,
             hull.towed_by,
         );
@@ -2164,7 +2342,7 @@ fn trim_the_sails(
     mut sails: Query<(&ChildOf, &mut Transform, &mut Visibility), With<Sail>>,
 ) {
     for (of, mut transform, mut visibility) in &mut sails {
-        let Ok((boat, hull)) = boats.get(of.parent()) else {
+        let Ok((boat, hull, _)) = boats.get(of.parent()) else {
             continue;
         };
         let set = boat.is_some_and(Boat::sails_set);
@@ -2230,15 +2408,14 @@ fn fly_the_pennant(
     mut pennants: Query<(&mut Pennant, &ChildOf, &mut Transform)>,
 ) {
     for (mut pennant, of, mut transform) in &mut pennants {
-        let Ok((boat, hull)) = boats.get(of.parent()) else {
+        let Ok((boat, hull, making)) = boats.get(of.parent()) else {
             continue;
         };
         // Each flag flies on the wind where its own hull lies, which is how a
         // boat rounding a point sees its pennant fall before anything else
-        // tells it the wind has gone. Our own hull adds the wind of its way;
-        // a told hull's way is not on the wire, so its flag reads the true
-        // wind alone — moored hulls have no way anyway.
-        let way = boat.map_or(0.0, |boat| boat.way);
+        // tells it the wind has gone — and on the wind of its own way over
+        // that, every hull's way being on the wire now.
+        let way = making.0.dot(hull.forward().xz());
         // A pennant is only ever spawned on a masted rig — the rowboat flies
         // nothing — so a flag on a hull with no [`Boat`] is a moored ship's,
         // and the ship's own mast is the one to read it at.
@@ -2445,8 +2622,9 @@ fn row(
         // runs them straight back out, which is the same overlay animating a
         // boat that has not changed. [`Boat::at_rest`] can tell, [`steer`]
         // snapping the tail of every glide to exactly zero. Only a hull with
-        // no [`Boat`] at all — moored, walked across the water by [`moor`] —
-        // has nothing to ask, and falls back to the water it covered.
+        // no [`Boat`] at all — a stranger's, carried across the water by
+        // [`follow_the_telling`] — has nothing to ask, and falls back to the
+        // water it covered.
         let target = match boat {
             Some(boat) => f32::from(boat.sails_set || !boat.at_rest()),
             // A hull on a painter covers water nobody is rowing it over:
@@ -2637,36 +2815,74 @@ struct Sounding {
     aground: f32,
 }
 
-/// Says which hulls the solver may move and which are moved for it.
+/// Takes up an empty hull this client has run into, and gives it back when
+/// it has stopped.
 ///
-/// A hull carrying a [`Told`] is somebody else's or nobody's, and is
-/// [`RigidBody::Kinematic`]: it goes where the wire says and shoves without
-/// being shoved. Everything else — the hull this player steers and the one
-/// on its painter — is [`RigidBody::Dynamic`] and is the solver's to move.
+/// A boat answers a shove whether or not anybody is aboard, which leaves a
+/// hull moving that nobody is reporting — so whoever shoved it reports it,
+/// on exactly the terms the client towing a tender reports that. While the
+/// claim stands the hull is [`Ours`]: the water resists it, the ground stops
+/// it, [`follow_the_telling`] leaves it alone, and [`crate::net`] tells the
+/// world where it got to. See [`protocol::ToServer::Shove`], which is the
+/// same rule written from the server's side.
 ///
-/// That is the authority split, spelled as physics: this client may decide
-/// where its own hull ends up and may be stopped by somebody else's, and
-/// may not decide where somebody else's ends up. It is written here as one
-/// rule over the components rather than at each of the several places a
-/// hull changes hands, because those places are already the subtlest in
-/// this module and a body kind left behind at one of them would be a boat
-/// that quietly stopped being solid.
-fn whose_water_is_it(
+/// What is claimed is the *movement*, so the claim is held while the hull is
+/// moving and given back when it stops — not when the two hulls come apart.
+/// A boat knocked clear coasts for several seconds after the touch that
+/// started it, and handing it back mid-glide would leave the world holding a
+/// boat still sliding. By the same rule a dinghy resting against a stopped
+/// ship is claimed by nobody, which is what keeps a boat nudged up against a
+/// bow from being taken up and given back on alternate frames.
+///
+/// One hull may not claim another it is not touching, and a hull somebody is
+/// answering for may not be claimed at all — see [`Telling::spoken_for`],
+/// which is what stops a bump with another player's boat from making us the
+/// authority on where their boat is.
+///
+/// While the claim stands, this client's own word *is* the telling: the
+/// hull's own state is written back into it every frame. Which is what makes
+/// letting go free — there is no stale point left to be sprung back to, and
+/// the boat simply stays where it was pushed, exactly as the server has by
+/// then been told it does.
+/// Every hull, as [`claim_the_shoved`] weighs one: its telling, its state on
+/// the plane, and whether this client is already answering for it.
+type Weighed<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Telling,
+        &'static Position,
+        &'static Rotation,
+        &'static LinearVelocity,
+        &'static AngularVelocity,
+        Has<Shoving>,
+    ),
+    With<Vessel>,
+>;
+
+fn claim_the_shoved(
+    time: Res<Time>,
     mut commands: Commands,
-    hulls: Query<(Entity, &RigidBody, Has<Told>), With<Vessel>>,
+    ours: Query<&CollidingEntities, (With<Vessel>, Ours)>,
+    mut hulls: Weighed,
 ) {
-    for (hull, body, told) in &hulls {
-        let wanted = if told {
-            RigidBody::Kinematic
-        } else {
-            RigidBody::Dynamic
-        };
-        // Written only on a change: what kind of body a hull is is
-        // immutable to a query and reached through the commands, and a
-        // kind re-inserted every frame is a body the solver rebuilds every
-        // frame.
-        if *body != wanted {
-            commands.entity(hull).insert(wanted);
+    let now = time.elapsed_secs();
+    let touched: EntityHashSet = ours
+        .iter()
+        .flat_map(|touching| touching.iter().copied())
+        .collect();
+    for (hull, mut telling, at, angle, way, spin, shoving) in &mut hulls {
+        let moving = way.0.length() > WAY_STOPPED;
+        let wanted = !telling.spoken_for && moving && (shoving || touched.contains(&hull));
+        if wanted {
+            telling.heard = now;
+            telling.hull = underway_at(at, angle, way, spin);
+        }
+        if wanted && !shoving {
+            commands.entity(hull).insert(Shoving);
+        } else if !wanted && shoving {
+            commands.entity(hull).remove::<Shoving>();
         }
     }
 }
@@ -2698,13 +2914,17 @@ struct Drawn(Transform);
 /// Carries a hull that something outside the solver has moved back onto the
 /// water plane.
 ///
-/// Two things move a hull without solving for it. A told one is eased onto
-/// its last telling by [`moor`], every frame. And a hull is sometimes simply
-/// *put* somewhere — a console `goto`, the helm a telling grants, a boat
-/// lowered in a world with no server behind it, a test standing one off a
-/// beach — and all of those say so by writing a transform, which is the
-/// obvious thing to write and was the only thing to write until the plane
-/// existed.
+/// A hull is sometimes simply *put* somewhere — a console `goto`, the helm a
+/// telling grants, a boat lowered in a world with no server behind it, a
+/// test standing one off a beach — and all of those say so by writing a
+/// transform, which is the obvious thing to write and was the only thing to
+/// write until the plane existed.
+///
+/// A hull the *wire* moves is no longer one of them, and used to be: its
+/// telling was eased onto its transform and read back through here, which
+/// is why it arrived at rest every frame and could never be anything but a
+/// wall. [`follow_the_telling`] writes a way on the plane instead, and
+/// nothing about a told hull passes through here any more.
 ///
 /// Rather than making each of those places say it twice, this reads the
 /// transform back and adopts any that has changed since it was drawn. The
@@ -2780,22 +3000,40 @@ fn remember_the_drawing(mut hulls: Query<(&Transform, &mut Drawn), With<Vessel>>
 /// moved on, the keel is over different ground, and a baseline taken at
 /// some earlier bearing would hold the hull off water it could now float
 /// in.
-fn hold_the_ground(
-    ground: Option<Res<Ground>>,
-    mut hulls: Query<
-        (
-            &Rigged,
-            &mut Position,
-            &Rotation,
-            &mut LinearVelocity,
-            &mut Sounding,
-        ),
-        With<Vessel>,
-    >,
-) {
+/// Every hull, as [`hold_the_ground`] sounds one: what it takes to judge a
+/// pose, to undo it, and to know whether undoing it is this client's
+/// business at all.
+type Sounded<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Rigged,
+        &'static mut Position,
+        &'static Rotation,
+        &'static mut LinearVelocity,
+        &'static mut Sounding,
+        Has<Telling>,
+        Has<Shoving>,
+    ),
+    With<Vessel>,
+>;
+
+fn hold_the_ground(ground: Option<Res<Ground>>, mut hulls: Sounded) {
     let ground = ground.as_deref();
-    for (rigged, mut at, angle, mut way, mut sounding) in &mut hulls {
+    for (rigged, mut at, angle, mut way, mut sounding, told, shoving) in &mut hulls {
         let hull = hull_of(rigged.0);
+        // Every hull is *sounded*, and only the ones this client answers for
+        // are put back — which is [`Ours`] spelled out, this being the one
+        // reader that needs both halves rather than the filter.
+        //
+        // Sounding a hull the wire moves earns nothing on the frame it
+        // happens and is the whole point over a longer run: the rule below
+        // is a comparison against the pose the hull was last allowed in, so
+        // a hull that went untouched across the bay and was then taken up
+        // — a dinghy somebody shoves, see [`claim_the_shoved`] — would be
+        // judged against a baseline from wherever it was first seen, and
+        // put back *there* the first time it grazed a shoal.
+        let ours = !told || shoving;
         // Every reading is taken at the heading the hull is pointing now,
         // that never being this system's to alter.
         let facing = Quat::from_rotation_y(waterline::across(angle.as_radians()));
@@ -2807,7 +3045,7 @@ fn hold_the_ground(
             )
         };
         let aground = sounded(at.0);
-        if aground <= 0.0 || aground <= sounding.aground {
+        if !ours || aground <= 0.0 || aground <= sounding.aground {
             sounding.at = at.0;
             sounding.aground = aground;
             continue;
@@ -2831,8 +3069,8 @@ fn hold_the_ground(
 ///
 /// The height is every hull's, because riding the water is: the one the
 /// player steers, the one on its painter, and a stranger's at anchor all
-/// sit on the same surface, and saying so once here is what let [`moor`]
-/// and the tow stop each keeping an answer of their own.
+/// sit on the same surface, and saying so once here is what let the
+/// moorings and the tow stop each keeping an answer of their own.
 fn ride_the_plane(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
@@ -2963,7 +3201,7 @@ fn make_fast(
 fn the_water_holds(
     time: Res<Time>,
     players: Query<&ChildOf, With<Player>>,
-    mut hulls: Query<(Entity, Forces, &Rigged), Without<Told>>,
+    mut hulls: Query<(Entity, Forces, &Rigged), Ours>,
 ) {
     let helmed = players.single().map(ChildOf::parent).ok();
     // Nothing the water does may *reverse* what it is doing it to. A
@@ -3040,9 +3278,7 @@ fn trail(time: Res<Time>, mut towed: TowedHull) {
             continue;
         }
         let onto = waterline::pointing(way.0);
-        let round = std::f32::consts::TAU;
-        let swing = (onto - angle.as_radians() + std::f32::consts::PI).rem_euclid(round)
-            - std::f32::consts::PI;
+        let swing = swing_to(onto, angle.as_radians());
         *angle = Rotation::radians(angle.as_radians() + swing * eased(TOW_SWING, dt));
     }
 }
@@ -5771,43 +6007,69 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_told_hull_stops_this_one_and_is_not_shoved_by_it() {
-        // The authority split, as the water enforces it — see
-        // [`crate::waterline`]. A hull the wire moves is somebody else's or
-        // nobody's: this client may be stopped by it and may not decide
-        // where it ends up. Sailed straight at one at full speed, the ship
-        // fetches up against its planking, and the hull it hit is exactly
-        // where the last telling left it.
-        let mut app = test_app();
-        place(&mut app, Vec2::ZERO, Vec2::new(1.0, 0.0));
-
-        // A second hull, moored where the wire says — twenty metres dead
-        // ahead, lying across the course so there is no threading past it.
-        let lying = Vec2::new(20.0, 0.0);
+    /// Stands a second hull in the water at `lying`, as the wire would have
+    /// it: pointed north, going nowhere, and answered for by somebody else
+    /// unless `free` — which is what tells [`claim_the_shoved`] whether this
+    /// client may take it up when it is hit. Returns its entity.
+    fn a_told_hull(app: &mut App, kind: BoatKind, lying: Vec2, free: bool) -> Entity {
         let mut spawning =
             bevy::ecs::system::SystemState::<(Commands, HullKit)>::new(app.world_mut());
-        let moored = {
+        let hull = {
             let (mut commands, mut kit) = spawning
                 .get_mut(app.world_mut())
                 .expect("a world can spawn a hull");
             spawn_hull(
                 &mut commands,
                 &mut kit,
-                BoatKind::Sloop,
+                kind,
                 Transform::from_xyz(lying.x, 0.0, lying.y),
                 None,
             )
         };
         spawning.apply(app.world_mut());
-        app.world_mut()
-            .entity_mut(moored)
-            .insert(moored_at(lying, 0.0));
-        run_frames(&mut app, 2);
+        let heard = elapsed(app);
+        app.world_mut().entity_mut(hull).insert(Telling {
+            hull: Underway::lying(lying, 0.0),
+            heard,
+            spoken_for: !free,
+        });
+        run_frames(app, 2);
+        hull
+    }
+
+    #[test]
+    fn a_told_hull_stops_this_one_and_gives_to_it() {
+        // The authority split as the water enforces it, and the half of it
+        // that is not about authority at all. A hull the wire moves is
+        // somebody else's: this client may be stopped by it and may not
+        // decide where it ends up. But it is a boat and not a pillar — it
+        // gives when it is hit, because the client whose boat it is has just
+        // solved the same collision from the other side and is about to say
+        // so. What holds it to its telling is a spring, not a refusal.
+        let mut app = test_app();
+        place(&mut app, Vec2::ZERO, Vec2::new(1.0, 0.0));
+
+        // Twenty metres dead ahead, lying across the course so there is no
+        // threading past it, and spoken for so that this client may not
+        // claim it.
+        let lying = Vec2::new(20.0, 0.0);
+        let told = a_told_hull(&mut app, BoatKind::Sloop, lying, false);
 
         set_wind(&mut app, Vec2::new(9.0, 0.0));
         tap(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 400);
+        // Read at the moment of the blow rather than after it: what the
+        // spring does is take the give back, so a reading at rest would show
+        // the hull where the wire put it either way and prove nothing.
+        let mut given: f32 = 0.0;
+        for _ in 0..400 {
+            run_frames(&mut app, 1);
+            let at = app
+                .world()
+                .get::<Position>(told)
+                .expect("a hull is on the plane")
+                .0;
+            given = given.max(at.distance(lying));
+        }
 
         // Stopped short: the two plankings meet and the ship goes no
         // further. Half a beam apiece plus a little is where that leaves
@@ -5823,18 +6085,219 @@ mod tests {
             "the ship stopped {closed} m short of a hull it was sailed straight at"
         );
 
-        // And the hull it hit has not budged: a told hull is moved by its
-        // tellings and by nothing this machine does.
-        let shoved = app
+        // It gave, and then it came back: the telling is the last word, and
+        // the give is what a client draws while it waits for the wire to
+        // agree.
+        assert!(
+            given > 0.1,
+            "a told hull rammed at speed gave {given} m, which is a wall and not a boat"
+        );
+        let held = app
             .world()
-            .get::<Transform>(moored)
-            .expect("a hull has a transform")
-            .translation
-            .xz()
+            .get::<Position>(told)
+            .expect("a hull is on the plane")
+            .0
             .distance(lying);
         assert!(
-            shoved < 0.01,
-            "ramming a told hull shoved it {shoved} m off where the wire put it"
+            held < given,
+            "a told hull shoved {given} m was left {held} m off its telling"
+        );
+    }
+
+    #[test]
+    fn a_dinghy_moves_a_ship_far_less_than_a_ship_moves_a_dinghy() {
+        // What making every hull a body with its own displacement buys, and
+        // the one thing the old kinematic told hull could not do at any
+        // price: an infinite mass answers a rowing boat exactly as it
+        // answers a ship. Rowed at a sloop, a dinghy should barely register;
+        // sailed at a dinghy, a sloop should shoulder it aside.
+        let hit = |kind: BoatKind, at: Vec2| {
+            let mut app = test_app();
+            place(&mut app, Vec2::ZERO, Vec2::new(1.0, 0.0));
+            let told = a_told_hull(&mut app, kind, at, true);
+            set_wind(&mut app, Vec2::new(9.0, 0.0));
+            tap(&mut app, KeyCode::ArrowUp);
+            let mut given: f32 = 0.0;
+            for _ in 0..400 {
+                run_frames(&mut app, 1);
+                let now = app
+                    .world()
+                    .get::<Position>(told)
+                    .expect("a hull is on the plane")
+                    .0;
+                given = given.max(now.distance(at));
+            }
+            given
+        };
+        // One ship, sailed at each in turn. A claimed hull is not sprung
+        // back to anything, so what is measured is the shove itself.
+        let dinghy = hit(BoatKind::Rowboat, Vec2::new(20.0, 0.0));
+        let ship = hit(BoatKind::Sloop, Vec2::new(20.0, 0.0));
+        assert!(
+            dinghy > ship * 2.0,
+            "a sloop shoved a dinghy {dinghy} m and another sloop {ship} m, \
+             which is a water with no weight in it"
+        );
+    }
+
+    #[test]
+    fn a_hull_under_way_is_drawn_where_it_is_and_not_a_telling_astern() {
+        // Dead reckoning, which is the whole reason the wire carries a way.
+        // Tellings arrive about ten a second, so a hull that only knew where
+        // it had *been* was drawn wherever it was a tenth of a second ago —
+        // the better part of a metre at sailing speed, every frame, for ever.
+        // Carrying the told way forward cancels that exactly: the hull runs
+        // on at the speed the telling gave, and the pull towards the point
+        // has nothing left to correct.
+        let mut app = test_app();
+        place(&mut app, Vec2::ZERO, Vec2::new(1.0, 0.0));
+        let from = Vec2::new(60.0, 0.0);
+        let told = a_told_hull(&mut app, BoatKind::Sloop, from, false);
+        let making = Vec2::new(0.0, -6.0);
+
+        // The wire, as it actually behaves: a word every tenth of a second
+        // saying where the hull is *now* and how fast it is going.
+        let mut lag: f32 = 0.0;
+        for tick in 0..30 {
+            let truly = from + making * (tick as f32 * 0.1);
+            let heard = elapsed(&app);
+            app.world_mut().entity_mut(told).insert(Telling {
+                hull: Underway {
+                    at: truly,
+                    heading: 0.0,
+                    way: making,
+                    swinging: 0.0,
+                },
+                heard,
+                spoken_for: true,
+            });
+            run_frames(&mut app, 6);
+            // Measured only once it has had time to pick the speed up.
+            if tick > 5 {
+                let at = app
+                    .world()
+                    .get::<Position>(told)
+                    .expect("a hull is on the plane")
+                    .0;
+                lag = lag.max(at.distance(truly + making * 0.1));
+            }
+        }
+        assert!(
+            lag < 0.2,
+            "a hull making {making} m/s was drawn up to {lag} m from where it was"
+        );
+    }
+
+    #[test]
+    fn a_hull_settles_onto_a_telling_without_ringing() {
+        // [`FOLLOWING`] against [`MOORED`]: the two are a spring and a
+        // damper, and a damper too light leaves a hull wobbling about its
+        // telling instead of arriving at it. Written as a test because the
+        // failure is a number being wrong rather than a branch being wrong,
+        // and nothing else in this module would notice.
+        let mut app = test_app();
+        place(&mut app, Vec2::ZERO, Vec2::new(1.0, 0.0));
+        let lying = Vec2::new(60.0, 0.0);
+        let told = a_told_hull(&mut app, BoatKind::Sloop, lying, false);
+
+        // Told, from a standing start, that it is ten metres away.
+        let moved = lying + Vec2::new(0.0, -10.0);
+        let heard = elapsed(&app);
+        app.world_mut().entity_mut(told).insert(Telling {
+            hull: Underway::lying(moved, 0.0),
+            heard,
+            spoken_for: true,
+        });
+        let mut past: f32 = 0.0;
+        for _ in 0..180 {
+            run_frames(&mut app, 1);
+            let at = app
+                .world()
+                .get::<Position>(told)
+                .expect("a hull is on the plane")
+                .0;
+            // How far beyond the telling it has gone, if at all.
+            past = past.max((at - lying).dot((moved - lying).normalize()) - 10.0);
+        }
+        assert!(
+            past < 0.1,
+            "a hull closing on a telling ten metres off overshot it by {past} m"
+        );
+        let left = app
+            .world()
+            .get::<Position>(told)
+            .expect("a hull is on the plane")
+            .0
+            .distance(moved);
+        assert!(
+            left < 0.05,
+            "three seconds of closing left it {left} m short"
+        );
+    }
+
+    #[test]
+    fn an_empty_hull_shoved_is_claimed_and_given_back_where_it_stops() {
+        // A boat answers a shove whether or not anybody is aboard — and
+        // then somebody has to say where it went, or the world goes on
+        // believing it lies where it was. This client shoved it, so this
+        // client answers for it until it stops.
+        let mut app = test_app();
+        place(&mut app, Vec2::ZERO, Vec2::new(1.0, 0.0));
+        let lying = Vec2::new(20.0, 0.0);
+        let told = a_told_hull(&mut app, BoatKind::Rowboat, lying, true);
+
+        set_wind(&mut app, Vec2::new(9.0, 0.0));
+        tap(&mut app, KeyCode::ArrowUp);
+        // Bounded in frames rather than in seconds: what is being waited
+        // for is a number of steps of the solver, and a wall clock counts
+        // however many of those a loaded machine managed.
+        let mut claimed = false;
+        for _ in 0..400 {
+            run_frames(&mut app, 1);
+            claimed |= app.world().get::<Shoving>(told).is_some();
+        }
+        assert!(claimed, "a dinghy sailed into was never taken up");
+
+        // The wind out of it, and time to settle. A ship leaning on a boat
+        // is still shoving it, so the claim would rightly be held for as
+        // long as the sail is drawing — what is being watched here is what
+        // happens after the pushing stops.
+        set_wind(&mut app, Vec2::ZERO);
+        run_frames(&mut app, 1_200);
+
+        // Given back once it has stopped, and left where it stopped rather
+        // than sprung back to a telling nobody has re-sent.
+        assert!(
+            app.world().get::<Shoving>(told).is_none(),
+            "a dinghy long since at rest is still being answered for"
+        );
+        let moved = app
+            .world()
+            .get::<Position>(told)
+            .expect("a hull is on the plane")
+            .0
+            .distance(lying);
+        assert!(
+            moved > 1.0,
+            "a dinghy rammed by a sloop was left {moved} m from where it lay"
+        );
+    }
+
+    #[test]
+    fn a_hull_somebody_is_answering_for_is_never_claimed() {
+        // The other half of the claim rule, and the one that matters: a
+        // bump with another player's boat must not make this client the
+        // authority on where their boat is.
+        let mut app = test_app();
+        place(&mut app, Vec2::ZERO, Vec2::new(1.0, 0.0));
+        let told = a_told_hull(&mut app, BoatKind::Rowboat, Vec2::new(20.0, 0.0), false);
+
+        set_wind(&mut app, Vec2::new(9.0, 0.0));
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 400);
+        assert!(
+            app.world().get::<Shoving>(told).is_none(),
+            "ramming a hull somebody else is answering for took it over"
         );
     }
 
