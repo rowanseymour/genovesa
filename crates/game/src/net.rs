@@ -1129,8 +1129,8 @@ fn swing(from: f32, to: f32) -> f32 {
 /// Without this a hull that slows to a stop simply stops reporting, once it
 /// is covering less than [`REPORT_THRESHOLD`] between words — and the last
 /// telling anybody holds still says it is making way. A listener carries
-/// that forward (see [`crate::boat::follow_the_telling`]) and settles a
-/// little past where the boat really lies, for ever. Half a metre a second
+/// that forward (see [`crate::boat::Telling`]) and settles a little past
+/// where the boat really lies, for ever. Half a metre a second
 /// is well inside what the eye can see and far outside the noise of a hull
 /// riding a swell.
 const REPORT_SLOWING: f32 = 0.5;

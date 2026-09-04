@@ -52,13 +52,13 @@
 //! boat hitting a moored one.
 //!
 //! So every client solves every hull, and keeps only its own answer. What a
-//! client may not do is *decide* where somebody else's hull ends up:
-//! [`crate::boat::follow_the_telling`] steers a told hull onto the last word
-//! about it, so the give it took a moment ago decays into what the wire says
-//! — which is usually the same give, the client whose boat it is having
-//! solved the same collision from the other side. The one hull with no
-//! authority behind it is an empty one, and this client takes that up for as
-//! long as it is pushing it; see [`crate::boat::claim_the_shoved`].
+//! client may not do is *decide* where somebody else's hull ends up: a
+//! [`crate::boat::Telling`] is steered onto rather than snapped to, so the
+//! give a hull took a moment ago decays into what the wire says — which is
+//! usually the same give, the client whose boat it is having solved the same
+//! collision from the other side. The one hull with no authority behind it
+//! is an empty one, and this client takes that up for as long as it is
+//! pushing it; see [`crate::boat::Shoving`].
 
 use avian2d::physics_transform::PhysicsTransformConfig;
 use avian2d::prelude::*;
@@ -164,8 +164,7 @@ pub fn afloat(length: f32, beam: f32, displacement: f32) -> impl Bundle {
         Friction::new(PLANKING_DRAG),
         // Opt-in, and asked for on every hull because what reads it is a
         // question about pairs: which empty boat this client has run into
-        // and is therefore answering for — see
-        // [`crate::boat::claim_the_shoved`].
+        // and is therefore answering for — see [`crate::boat::Shoving`].
         CollidingEntities::default(),
         // A solver puts a body that has stopped moving to sleep, to spare
         // itself the arithmetic. There are a handful of hulls on this
