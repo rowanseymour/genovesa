@@ -3,7 +3,8 @@
 //! A kind knows where its own sort grows — [`crate::palms`] at the back of a
 //! beach, [`crate::bananas`] on a wet valley floor, [`crate::mangroves`] in the
 //! shallows of a lake, [`crate::cacti`] on the dry collar between the first
-//! two — and this is where their answers are put together. The
+//! two, [`crate::scalesia`] on the wet shoulders above the grass — and this is
+//! where their answers are put together. The
 //! gathering is here rather than in any of them because the wire carries one
 //! list under one ceiling: whoever spends the last of it has to be somewhere
 //! that can see every claim, not whichever module happened to be asked first.
@@ -27,11 +28,13 @@ pub fn plants(island: &Island, chunk: IVec2) -> Vec<Plant> {
     found.extend(crate::bananas::bananas(island, chunk));
     found.extend(crate::mangroves::mangroves(island, chunk));
     found.extend(crate::cacti::cacti(island, chunk));
+    found.extend(crate::scalesia::scalesia(island, chunk));
 
     // The ceiling is what a chunk's count byte can say, and nothing here comes
-    // anywhere near it: the fullest chunk yet measured is a mangrove thicket
-    // and carries a third of it, where a beach carries single figures. So
-    // this is a backstop against a rule gone wrong rather than a policy for
+    // near it: the fullest chunk yet measured is a wooded shoulder running
+    // down to a lake full of mangroves, at just over half of it, where a
+    // beach carries single figures — `scalesia`'s tests keep the measurement.
+    // So this is a backstop against a rule gone wrong rather than a policy for
     // sharing anything out — and if it ever does start biting, the answer is
     // not to keep truncating in the order the kinds are listed above, which
     // would let a beach eat a valley's allowance by being asked first, but to

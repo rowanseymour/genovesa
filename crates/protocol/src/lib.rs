@@ -2819,6 +2819,7 @@ mod tests {
             ground::Kind::Banana,
             ground::Kind::Mangrove,
             ground::Kind::Cactus,
+            ground::Kind::Scalesia,
         ]
         .into_iter()
         .map(|kind| ground::Plant {
@@ -2835,7 +2836,7 @@ mod tests {
             ground: Some(planted),
         });
         assert_eq!(stand.len(), ground.len() + grown * ground::PLANT_BYTES);
-        assert_eq!(stand[15], 4, "the count says four things grow on it");
+        assert_eq!(stand[15], 5, "the count says five things grow on it");
         let plant = 16 + ground::PAYLOAD_BYTES;
         assert_eq!(
             stand[plant..plant + ground::PLANT_BYTES],
@@ -2848,10 +2849,10 @@ mod tests {
             ],
             "one palm, on the end of the ground it stands on"
         );
-        // The three behind it differ in the kind byte alone, every other
+        // The four behind it differ in the kind byte alone, every other
         // number about them having been chosen the same — so this reads as
         // the numbering and nothing else.
-        for (nth, kind) in [1u8, 2, 3].into_iter().enumerate() {
+        for (nth, kind) in [1u8, 2, 3, 4].into_iter().enumerate() {
             let at = plant + (nth + 1) * ground::PLANT_BYTES;
             assert_eq!(
                 stand[at..at + ground::PLANT_BYTES],
