@@ -13,8 +13,8 @@ use bevy::input::keyboard::Key;
 use bevy::prelude::*;
 
 /// A control the player can put on a key of their choosing: working their
-/// boat — making sail, furling, backing off, helm over — stepping ashore and
-/// back aboard, or turning the view around them.
+/// boat — making sail, furling, backing off, helm over, the anchor down or
+/// up — stepping ashore and back aboard, or turning the view around them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     /// Ashore this walks; at the helm it makes sail — see `boat::steer`.
@@ -27,6 +27,11 @@ pub enum Action {
     /// One key for both directions of the same threshold: ashore it boards,
     /// aboard it goes ashore — see `player::embark_or_land`.
     Board,
+    /// One key for both directions once more: at a helm it drops the anchor
+    /// where the water will hold one, and at anchor it weighs — see
+    /// `boat::tend_the_anchor`. What keeps a hull put once it is stepped
+    /// off, the sea having every other one.
+    Anchor,
     /// Held at anchor through the night, to have it over with — see
     /// `sky::ask_for_dawn`.
     WaitOutNight,
@@ -42,12 +47,13 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the order the settings screen lists them.
-    pub const ALL: [Action; 10] = [
+    pub const ALL: [Action; 11] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::SteerLeft,
         Action::SteerRight,
         Action::Board,
+        Action::Anchor,
         Action::WaitOutNight,
         Action::TurnLeft,
         Action::TurnRight,
@@ -73,6 +79,7 @@ impl Action {
             Action::SteerLeft => "left",
             Action::SteerRight => "right",
             Action::Board => "board",
+            Action::Anchor => "anchor",
             Action::WaitOutNight => "wait",
             Action::TurnLeft => "view-left",
             Action::TurnRight => "view-right",
@@ -92,6 +99,7 @@ impl Action {
             Action::SteerLeft => "Steer left",
             Action::SteerRight => "Steer right",
             Action::Board => "Go ashore / board",
+            Action::Anchor => "Anchor / weigh",
             Action::WaitOutNight => "Wait for dawn",
             Action::TurnLeft => "Turn view left",
             Action::TurnRight => "Turn view right",
@@ -101,9 +109,9 @@ impl Action {
     }
 
     /// Where the action starts out: WASD to drive, F to step ashore or
-    /// aboard, R to wait a night out, M for the chart, C to claim, and Q/E to
-    /// turn the view — WASD and Q/E being what the game had before any of
-    /// this was configurable.
+    /// aboard, G beside it for the anchor, R to wait a night out, M for the
+    /// chart, C to claim, and Q/E to turn the view — WASD and Q/E being what
+    /// the game had before any of this was configurable.
     pub fn default_key(self) -> KeyCode {
         match self {
             Action::MoveForward => KeyCode::KeyW,
@@ -111,6 +119,7 @@ impl Action {
             Action::SteerLeft => KeyCode::KeyA,
             Action::SteerRight => KeyCode::KeyD,
             Action::Board => KeyCode::KeyF,
+            Action::Anchor => KeyCode::KeyG,
             Action::WaitOutNight => KeyCode::KeyR,
             Action::TurnLeft => KeyCode::KeyQ,
             Action::TurnRight => KeyCode::KeyE,

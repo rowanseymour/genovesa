@@ -45,7 +45,7 @@ use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Underway}
 use world::archipelago::{berth_off, Archipelago, SOUNDING, SPAWN_OFFSHORE};
 
 use crate::{
-    aimed, beasts, broadcast, broadcast_all, keeper, post, reachable, BoatState, Held, Shared,
+    aimed, beasts, broadcast, broadcast_all, keeper, post, reachable, sea, BoatState, Held, Shared,
 };
 
 /// One command, as the table has it: the word that reaches it, what `help`
@@ -591,8 +591,10 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
     (asked, asked)
 }
 
-/// `grant <kind>`: a hull of that kind put in the water for the asker, at
-/// anchor and with nobody aboard.
+/// `grant <kind>`: a hull of that kind put in the water for the asker, with
+/// nobody aboard — at anchor where the water lets an anchor hold, and
+/// otherwise adrift from the moment it is dealt, which is what any empty
+/// hull in that water is; see [`sea`].
 ///
 /// It deals a boat and stops there. Boarding is walking up to a free helm
 /// and taking it — the one way anybody gets aboard anything — and a command
@@ -636,6 +638,11 @@ fn grant(asked: Asked) -> Result<String, String> {
     let offing = (shared.world.height(asker.x, asker.y) >= 0.0)
         .then(|| standing_off(&shared.world, asker).0);
     let at = offing.unwrap_or(asker);
+    // Anchored on the terms an asker's own hull is — see `drop_anchor` —
+    // where the water allows it, so a dealt hull waits to be boarded rather
+    // than leaving on the wind.
+    let anchor = (shared.world.height(at.x, at.y) >= -ANCHOR_DEPTH)
+        .then(|| at - shared.wind().normalize_or_zero() * sea::SWING);
 
     {
         // The roster first and the boats under it — the nesting the two
@@ -653,6 +660,7 @@ fn grant(asked: Asked) -> Result<String, String> {
                 hull: Underway::lying(at, 0.0),
                 occupant: None,
                 towed_by: None,
+                anchor,
             };
             let telling = state.told(boat);
             boats.insert(boat, state);
@@ -663,7 +671,7 @@ fn grant(asked: Asked) -> Result<String, String> {
         broadcast_all(&players, telling);
     }
 
-    Ok(match offing {
+    let lies = match offing {
         // How far they have to go to reach it, which is the whole of what a
         // grant answered from dry land has to tell somebody.
         Some(off) => format!(
@@ -673,6 +681,10 @@ fn grant(asked: Asked) -> Result<String, String> {
             round(at.y)
         ),
         None => format!("a {named} is here, at {} {}", round(at.x), round(at.y)),
+    };
+    Ok(match anchor {
+        Some(_) => format!("{lies}, at anchor"),
+        None => format!("{lies}, adrift in water too deep to anchor"),
     })
 }
 
@@ -808,9 +820,10 @@ fn spawn(asked: Asked) -> Result<String, String> {
 /// A reading of the world rather than of the client, because the numbers a
 /// client could answer from are the ones it was *sent* — quantised, and only
 /// for chunks that have arrived. This side is where [`ANCHOR_DEPTH`] is
-/// actually weighed — in `ship_lets_go`, which is what refuses a ship's crew
-/// the boat on its painter — so a reading taken anywhere else could disagree
-/// with the refusal it is being used to explain.
+/// actually weighed — in `drop_anchor`, which is what refuses an anchor —
+/// so a reading taken anywhere else could disagree with the refusal it is
+/// being used to explain. Whether the hook is down is the world's word too,
+/// the same one the hull's telling carries.
 fn whereabouts(asked: Asked) -> Result<String, String> {
     let Asked { shared, from, .. } = asked;
 
@@ -826,7 +839,11 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
         };
         let (at, aboard) = (player.position, player.aboard);
         let boats = shared.boats.held();
-        let helm = aboard.and_then(|boat| boats.get(&boat).map(|state| state.kind));
+        let helm = aboard.and_then(|boat| {
+            boats
+                .get(&boat)
+                .map(|state| (state.kind, state.anchor.is_some()))
+        });
         let towing = aboard.and_then(|boat| {
             boats
                 .values()
@@ -838,7 +855,7 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
     let height = shared.world.height(at.x, at.y);
 
     let mut lines = vec![match helm {
-        Some(kind) => format!(
+        Some((kind, _)) => format!(
             "at the helm of a {} at {} {}",
             named(kind),
             round(at.x),
@@ -851,14 +868,15 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
     // both marks it can answer about — the waterline and [`ANCHOR_DEPTH`] —
     // sit close enough together on a shelving coast that a metre of rounding
     // would put the reading on the wrong side of one.
-    lines.push(match (helm.is_some(), height >= 0.0) {
-        (true, true) => format!("aground, with {height:.1} m of it out of the water"),
-        (true, false) if -height <= ANCHOR_DEPTH => {
+    lines.push(match (helm, height >= 0.0) {
+        (Some(_), true) => format!("aground, with {height:.1} m of it out of the water"),
+        (Some((_, true)), false) => format!("afloat in {:.1} m, riding at anchor", -height),
+        (Some((_, false)), false) if -height <= ANCHOR_DEPTH => {
             format!("afloat in {:.1} m, and an anchor holds here", -height)
         }
-        (true, false) => format!("afloat in {:.1} m, too deep to anchor", -height),
-        (false, true) => format!("ashore, {height:.1} m above the water"),
-        (false, false) => format!("in {:.1} m of water", -height),
+        (Some(_), false) => format!("afloat in {:.1} m, too deep to anchor", -height),
+        (None, true) => format!("ashore, {height:.1} m above the water"),
+        (None, false) => format!("in {:.1} m of water", -height),
     });
     if let Some((kind, lies)) = towing {
         lines.push(format!(

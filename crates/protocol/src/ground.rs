@@ -123,10 +123,11 @@ pub const OCEAN_DEPTH: f32 = 10.0;
 ///
 /// Set short of [`OCEAN_DEPTH`] on purpose: the open ocean's floor is out of
 /// the anchor's reach everywhere, so a ship can only be left riding at anchor
-/// over an island's own shelf — never abandoned in the middle of the sea.
-/// The server holds the line — it is what grants leaving a helm — and it is
-/// written here rather than there because a client wants the same number, to
-/// let a key that cannot be granted do nothing instead of asking.
+/// over an island's own shelf — one left in the middle of the sea is left
+/// adrift. The server holds the line — it is what grants an anchor, see
+/// [`crate::ToServer::Anchor`] — and it is written here rather than there
+/// because a client wants the same number, to let a key that cannot be
+/// granted do nothing instead of asking.
 pub const ANCHOR_DEPTH: f32 = 8.0;
 
 const _: () = assert!(ANCHOR_DEPTH < OCEAN_DEPTH);

@@ -126,7 +126,15 @@ pub(crate) struct PlayerRecord {
 /// stops, and where they step back in is the players' own records' business.
 /// The painter is kept, a tow being a fact about two hulls and not about
 /// anybody aboard either: `towed_by` names the ship this boat is on the
-/// painter of, in [`WorldRecord::boats`] too.
+/// painter of, in [`WorldRecord::boats`] too. And the anchor is kept, being
+/// the one thing that decides whether a hull is where the file says when
+/// the world reopens: `anchor` is where its hook lies, for a hull with one
+/// down — see [`protocol::ToServer::Anchor`].
+///
+/// On the line the five fields every hull has come first, and then what
+/// only some have, each behind its own word — `towed <ship>`, `anchored <x>
+/// <y>` — so that a hull with an anchor and no painter is not a hull with a
+/// painter in the wrong column.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BoatRecord {
     pub id: BoatId,
@@ -134,6 +142,7 @@ pub(crate) struct BoatRecord {
     pub position: Vec2,
     pub heading: f32,
     pub towed_by: Option<BoatId>,
+    pub anchor: Option<Vec2>,
 }
 
 /// One island claimed, as the file keeps it: which island, whose it is, where
@@ -656,7 +665,10 @@ fn compose(record: &WorldRecord) -> String {
             boat.heading
         );
         if let Some(ship) = boat.towed_by {
-            let _ = write!(out, " {:016x}", ship.0);
+            let _ = write!(out, " towed {:016x}", ship.0);
+        }
+        if let Some(hook) = boat.anchor {
+            let _ = write!(out, " anchored {} {}", hook.x, hook.y);
         }
         let _ = writeln!(out);
     }
@@ -879,9 +891,25 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     fields.next().ok_or("a boat with half a position")?,
                     fields.next().ok_or("a boat with no heading")?,
                 );
-                let towed_by = fields.next().map(hex).transpose()?.map(BoatId);
-                if fields.next().is_some() {
-                    return Err(format!("too much about one boat: `{line}`"));
+                // What only some hulls have, each behind its own word — see
+                // [`BoatRecord`]. Said once at most: a hull on two painters
+                // or with two hooks down is a line somebody edited.
+                let (mut towed_by, mut anchor) = (None, None);
+                while let Some(word) = fields.next() {
+                    match word {
+                        "towed" if towed_by.is_none() => {
+                            let ship = fields.next().ok_or("a painter to nothing")?;
+                            towed_by = Some(BoatId(hex(ship)?));
+                        }
+                        "anchored" if anchor.is_none() => {
+                            let (x, y) = (
+                                fields.next().ok_or("an anchor with no position")?,
+                                fields.next().ok_or("an anchor with half a position")?,
+                            );
+                            anchor = Some(spot(x, y, "no anchor ever lay")?);
+                        }
+                        _ => return Err(format!("too much about one boat: `{line}`")),
+                    }
                 }
                 let position = spot(x, y, "no boat ever lay")?;
                 boats.push(BoatRecord {
@@ -891,6 +919,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     position,
                     heading: finite(heading)?,
                     towed_by,
+                    anchor,
                 });
             }
             // Five fields and then the rest of the line, which is the name:
@@ -1133,12 +1162,15 @@ mod tests {
                 ),
             ]),
             boats: vec![
+                // One at anchor and one on a painter: each of the two things
+                // a hull may have, on a hull without the other.
                 BoatRecord {
                     id: BoatId(0xB0A7),
                     kind: BoatKind::Sloop,
                     position: Vec2::new(12.5, -340.25),
                     heading: 1.5,
                     towed_by: None,
+                    anchor: Some(Vec2::new(0.5, -352.75)),
                 },
                 BoatRecord {
                     id: BoatId(0xDEAD),
@@ -1146,6 +1178,7 @@ mod tests {
                     position: Vec2::new(64.0, 8.0),
                     heading: -2.25,
                     towed_by: Some(BoatId(0xB0A7)),
+                    anchor: None,
                 },
             ],
             claims: vec![
@@ -1319,6 +1352,7 @@ mod tests {
                 position: -far,
                 heading: f32::MAX,
                 towed_by: Some(BoatId(u64::MAX)),
+                anchor: Some(far),
             }],
             claims: vec![
                 ClaimRecord {
@@ -1551,8 +1585,28 @@ mod tests {
                 "a boat of a kind nothing sails",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 nothex\n",
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 towed nothex\n",
                 "a painter to something that is not a boat's name",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 towed\n",
+                "a painter to nothing",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 4\n",
+                "half an anchor",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 1e30 0\n",
+                "an anchor past where the world resolves",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 keel 4\n",
+                "a word no boat line has",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 4 5 anchored 6 7\n",
+                "two hooks down",
             ),
             (
                 "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1 2 nothex\n",

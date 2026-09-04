@@ -249,6 +249,18 @@ impl Connection {
         self.say(ToServer::Disembark { position });
     }
 
+    /// Drops the anchor of the hull we hold the helm of — [`crate::boat`]
+    /// owns the key and judges the depth; the answer comes back as the
+    /// hull's own telling, believed when it lands. Public on the same terms.
+    pub fn anchor(&self) {
+        self.say(ToServer::Anchor);
+    }
+
+    /// Weighs it. Public on the same terms.
+    pub fn weigh(&self) {
+        self.say(ToServer::Weigh);
+    }
+
     /// Claims the island the player is standing on, which the server reads
     /// from where they stand and grants against its own survey or refuses —
     /// see [`crate::player`], which owns the key. What comes back is a cairn,
@@ -777,6 +789,7 @@ pub struct HullTold {
     pub hull: Underway,
     pub occupant: Option<PlayerId>,
     pub towed_by: Option<BoatId>,
+    pub anchor: Option<Vec2>,
 }
 
 /// The world has moved this player, whatever they thought — see
@@ -991,6 +1004,7 @@ fn receive(
                 hull,
                 occupant,
                 towed_by,
+                anchor,
             } => {
                 // The way as strictly as the place: an infinity in it would
                 // reach the solver through [`crate::boat::Telling`] and stay
@@ -999,6 +1013,7 @@ fn receive(
                     && hull.heading.is_finite()
                     && hull.way.is_finite()
                     && hull.swinging.is_finite()
+                    && anchor.is_none_or(|hook| hook.is_finite())
                 {
                     said.hull.write(HullTold {
                         id,
@@ -1006,6 +1021,7 @@ fn receive(
                         hull,
                         occupant,
                         towed_by,
+                        anchor,
                     });
                 }
             }
@@ -1677,6 +1693,7 @@ mod tests {
             hull: Underway::lying(ashore, 0.0),
             occupant: Some(PlayerId(1)),
             towed_by: None,
+            anchor: None,
         })
         .write(&mut &server)
         .expect("boat");
@@ -1748,6 +1765,7 @@ mod tests {
             hull: Underway::lying(ashore, 0.0),
             occupant,
             towed_by: None,
+            anchor: None,
         };
         seated(Some(PlayerId(1)))
             .write(&mut &server)
@@ -1841,6 +1859,7 @@ mod tests {
             hull: Underway::lying(Vec2::new(-20.0, 15.0), 0.0),
             occupant: Some(PlayerId(1)),
             towed_by: None,
+            anchor: None,
         })
         .write(&mut &server)
         .expect("the seating");
@@ -1875,6 +1894,7 @@ mod tests {
                         Underway::lying(afloat, 0.0),
                         0.0,
                         occupant,
+                        None,
                         None,
                     );
                 }
@@ -1951,6 +1971,7 @@ mod tests {
                     0.0,
                     Some(PlayerId(1)),
                     None,
+                    None,
                 );
                 crate::player::put_down(&mut commands, &fleet, &players, afloat, Some(-0.75));
             },
@@ -1987,6 +2008,50 @@ mod tests {
     }
 
     #[test]
+    fn a_boat_telling_carries_the_hook_and_our_own_hull_rides_to_it() {
+        // The anchor is the one word about our own hull this client did not
+        // already know: a telling with the hook down anchors the hull — ours
+        // among them — and one with it up weighs.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+
+        let hook = Vec2::new(20.0, -5.0);
+        let told = |anchor| ToClient::Boat {
+            id: BoatId(4),
+            kind: protocol::BoatKind::Sloop,
+            hull: Underway::lying(Vec2::new(30.0, 0.0), 0.0),
+            occupant: Some(PlayerId(1)),
+            towed_by: None,
+            anchor,
+        };
+        told(Some(hook))
+            .write(&mut &server)
+            .expect("boat at anchor");
+        run_until(&mut app, "the hull is ours and anchored", |app| {
+            app.world_mut()
+                .query_filtered::<&crate::boat::Anchored, With<crate::boat::HullId>>()
+                .single(app.world())
+                .is_ok_and(|anchored| anchored.0 == hook)
+        });
+        assert_eq!(
+            app.world().resource::<crate::boat::Fleet>().helmed,
+            Some(BoatId(4)),
+            "the anchored hull is not ours"
+        );
+
+        told(None).write(&mut &server).expect("boat weighed");
+        run_until(&mut app, "the anchor is weighed", |app| {
+            app.world_mut()
+                .query_filtered::<(), (With<crate::boat::HullId>, With<crate::boat::Anchored>)>()
+                .iter(app.world())
+                .count()
+                == 0
+        });
+    }
+
+    #[test]
     fn a_boat_telling_raises_a_hull_and_hides_its_helmsman() {
         let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
         let connection = Connection::join(&addr).expect("join");
@@ -2007,6 +2072,7 @@ mod tests {
             hull: Underway::lying(Vec2::new(4.0, 5.0), 0.5),
             occupant: Some(PlayerId(9)),
             towed_by: None,
+            anchor: None,
         })
         .write(&mut &server)
         .expect("boat");
@@ -2037,6 +2103,7 @@ mod tests {
             hull: Underway::lying(Vec2::new(600.0, -200.0), 0.5),
             occupant: None,
             towed_by: None,
+            anchor: None,
         })
         .write(&mut &server)
         .expect("boat freed");
@@ -2104,6 +2171,7 @@ mod tests {
             hull: Underway::lying(Vec2::ZERO, 0.0),
             occupant: Some(me),
             towed_by: None,
+            anchor: None,
         })
         .write(&mut &server)
         .expect("ship granted");
@@ -2117,6 +2185,7 @@ mod tests {
             hull: Underway::lying(Vec2::new(3.0, 0.0), 0.5),
             occupant: Some(me),
             towed_by: None,
+            anchor: None,
         })
         .write(&mut &server)
         .expect("tender granted");
@@ -2126,6 +2195,7 @@ mod tests {
             hull: Underway::lying(Vec2::ZERO, 0.0),
             occupant: None,
             towed_by: None,
+            anchor: None,
         })
         .write(&mut &server)
         .expect("ship at anchor");
@@ -2155,6 +2225,7 @@ mod tests {
             hull: Underway::lying(Vec2::ZERO, 0.0),
             occupant: Some(me),
             towed_by: None,
+            anchor: None,
         })
         .write(&mut &server)
         .expect("ship granted back");
@@ -2164,6 +2235,7 @@ mod tests {
             hull: Underway::lying(Vec2::new(3.0, 0.0), 0.5),
             occupant: None,
             towed_by: Some(BoatId(1)),
+            anchor: None,
         })
         .write(&mut &server)
         .expect("tender in tow");
