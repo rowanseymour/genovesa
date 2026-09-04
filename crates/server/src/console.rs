@@ -636,6 +636,7 @@ fn grant(asked: Asked) -> Result<String, String> {
     let offing = (shared.world.height(asker.x, asker.y) >= 0.0)
         .then(|| standing_off(&shared.world, asker).0);
     let at = offing.unwrap_or(asker);
+    let now = shared.age();
 
     {
         // The roster first and the boats under it — the nesting the two
@@ -653,6 +654,7 @@ fn grant(asked: Asked) -> Result<String, String> {
                 hull: Underway::lying(at, 0.0),
                 occupant: None,
                 towed_by: None,
+                vacated: now,
             };
             let telling = state.told(boat);
             boats.insert(boat, state);
