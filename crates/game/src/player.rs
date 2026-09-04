@@ -78,8 +78,11 @@ const WALK_TURN_RATE: f32 = 3.0;
 const WADE_DEPTH: f32 = 1.0;
 
 /// Metres per second swimming — half the walking pace: enough to cross a bay
-/// or reach a ship at anchor, and slow enough that the rowboat is still worth
-/// lowering. Backing up in the water is halved again, like the walk's.
+/// or reach a ship at anchor, and slow enough that the boat astern is still
+/// worth rowing. Swimming is the ordinary way off a ship that tows none: the
+/// gunwale key puts its crew over the side, and whether that is a wade or a
+/// swim is the water's to say — see [`embark_or_land`]. Backing up in the
+/// water is halved again, like the walk's.
 const SWIM_SPEED: f32 = 1.5;
 
 /// The steepest ground a walker will cross, as a gradient: metres of height
@@ -276,8 +279,7 @@ impl PlayerPlace<'_, '_> {
 /// it is what every system resolving a carrier reads — and the fleet's book
 /// only where the scene graph has no answer yet: the telling that seated this
 /// player at a helm may have arrived in the same drain as this one, and the
-/// parentage it asked for is still a queued command, the same case
-/// [`Fleet::gone`] reads its own book for.
+/// parentage it asked for is still a queued command.
 ///
 /// One window is left open on purpose: a telling that takes our helm away
 /// takes the player off the deck in the same breath, but that is a queued
@@ -645,8 +647,7 @@ pub(crate) fn embark_or_land(
     mut fleet: ResMut<Fleet>,
     players: Query<(Entity, &Transform, Option<&ChildOf>), With<Player>>,
     mut vessels: Vessels,
-    towed: Query<(Entity, &Transform, &Towed)>,
-    hulls: Query<&HullId>,
+    towed: Query<(Entity, &Towed)>,
 ) {
     if !keys.just_pressed(bindings.key(Action::Board)) {
         return;
@@ -689,7 +690,7 @@ pub(crate) fn embark_or_land(
 
                 // The boat on the painter, if the ship tows one: stepped
                 // down into wherever it lies.
-                let in_tow = towed.iter().find(|(_, _, rope)| rope.by() == hull_entity);
+                let in_tow = towed.iter().find(|(_, rope)| rope.by() == hull_entity);
                 match (&online, in_tow) {
                     // A served world's crossing is asked for, never assumed:
                     // the player steps down when the telling grants it — see
@@ -701,8 +702,8 @@ pub(crate) fn embark_or_land(
                     // a refusal — the two machines can disagree about the
                     // depth by a quantisation step — arrives as silence, and
                     // a key refused must have done nothing at all.
-                    (Some(online), Some((tender, _, _))) => {
-                        if let Ok(named) = hulls.get(tender) {
+                    (Some(online), Some((tender, _))) => {
+                        if let Ok((.., Some(named), _)) = vessels.get(tender) {
                             online.connection.board(named.0);
                         }
                     }
@@ -710,7 +711,7 @@ pub(crate) fn embark_or_land(
                     // the skipper steps down, so the ship never lies at
                     // anchor under canvas, and the last of the glide is
                     // taken off so it lies where the gate read it as lying.
-                    (None, Some((tender, _, _))) => {
+                    (None, Some((tender, _))) => {
                         hull.comes_to_rest();
                         hull.furl();
                         let boat = Boat::of(BoatKind::Rowboat);
@@ -781,7 +782,7 @@ pub(crate) fn embark_or_land(
                             .insert((ChildOf(ship), Transform::from_translation(helm)));
                         let mut left = commands.entity(hull_entity);
                         left.remove::<Boat>();
-                        if !towed.iter().any(|(_, _, rope)| rope.by() == ship) {
+                        if !towed.iter().any(|(_, rope)| rope.by() == ship) {
                             left.insert(Towed::behind(ship));
                         }
                     }
@@ -1083,7 +1084,7 @@ mod tests {
             .world_mut()
             .query_filtered::<&mut Transform, With<Towed>>();
         for mut place in towed.iter_mut(app.world_mut()) {
-            place.translation = ship.translation - ship.forward() * 8.0;
+            place.translation = ship.translation - ship.forward() * protocol::TENDER_ASTERN;
             place.rotation = ship.rotation;
         }
         app.update();
@@ -1327,11 +1328,11 @@ mod tests {
     fn going_ashore_is_refused_over_deep_water() {
         // Rowed off across deep water, the key finds neither footing nor a
         // hull in reach, and does nothing. The ground goes in *after* the
-        // lowering: the crew will no longer put the boat down over water the
-        // anchor cannot hold — see [`ANCHOR_DEPTH`] — and what is under test
-        // here is the landing, not the anchorage. A rowboat this far out is
-        // still a state the game reaches — lowered over a shelf and rowed
-        // away from it.
+        // stepping down: a crew will no longer step off a ship over water
+        // the anchor cannot hold — see [`ANCHOR_DEPTH`] — and what is under
+        // test here is the landing, not the anchorage. A rowboat this far
+        // out is still a state the game reaches — stepped down into over a
+        // shelf and rowed away from it.
         let mut app = world_app();
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
 
@@ -1362,7 +1363,7 @@ mod tests {
         let mut app = world_app();
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH + 8.0, 0.0));
 
-        // The ground arrives after the lowering, for the reason
+        // The ground arrives after the stepping down, for the reason
         // `going_ashore_is_refused_over_deep_water` gives — and doubly here,
         // a cliff island's bed plunging too deep for the anchor everywhere.
         press_board(&mut app);
@@ -1506,7 +1507,7 @@ mod tests {
         let mut app = world_app();
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
 
-        // The ground arrives after the lowering, for the reason
+        // The ground arrives after the stepping down, for the reason
         // `going_ashore_is_refused_over_deep_water` gives.
         press_board(&mut app);
         app.insert_resource(test_shore());
@@ -2375,9 +2376,8 @@ mod tests {
 
     #[test]
     fn stepping_down_from_a_towing_ship_is_into_the_boat_on_the_painter() {
-        // The boat on the painter is the ship's boat: the key that lowers
-        // one steps down into it wherever it lies, and puts no second hull
-        // in the water.
+        // The boat on the painter is the ship's boat: the key steps down
+        // into it wherever it lies, and puts no second hull in the water.
         let mut app = shore_app();
         press_board(&mut app);
         let ship = hull_rigged(&mut app, BoatKind::Sloop);
@@ -2392,7 +2392,7 @@ mod tests {
             Some(tender),
             "the key did not step down into the boat in tow"
         );
-        assert_eq!(hulls_afloat(&mut app), 2, "a second tender was lowered");
+        assert_eq!(hulls_afloat(&mut app), 2, "a second tender was put over");
         assert!(
             !app.world().entity(tender).contains::<Towed>(),
             "seated in a boat still on the painter"
@@ -2485,7 +2485,7 @@ mod tests {
         assert_eq!(
             hulls_afloat(&mut app),
             2,
-            "the rowboat was hoisted out of the world"
+            "the rowboat was taken out of the world"
         );
         assert!(
             in_tow(&mut app, tender),
@@ -2494,8 +2494,8 @@ mod tests {
 
         // Back at the helm: making sail moves the ship again. The wind is
         // set onshore — dead astern of a bow still pointed at the island —
-        // because lowering the boat furled the sails and boarding left them
-        // so.
+        // because stepping down into the boat furled the sails and boarding
+        // left them so.
         set_wind(&mut app, Vec2::new(-7.0, 0.0));
         hold(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 30);

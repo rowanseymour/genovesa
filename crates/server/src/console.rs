@@ -808,8 +808,9 @@ fn spawn(asked: Asked) -> Result<String, String> {
 /// A reading of the world rather than of the client, because the numbers a
 /// client could answer from are the ones it was *sent* — quantised, and only
 /// for chunks that have arrived. This side is where [`ANCHOR_DEPTH`] is
-/// actually weighed, in `step_off`, so a reading taken anywhere else could
-/// disagree with the refusal it is being used to explain.
+/// actually weighed — in `ship_lets_go`, which is what refuses a ship's crew
+/// the boat on its painter — so a reading taken anywhere else could disagree
+/// with the refusal it is being used to explain.
 fn whereabouts(asked: Asked) -> Result<String, String> {
     let Asked { shared, from, .. } = asked;
 

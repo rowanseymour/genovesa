@@ -544,7 +544,7 @@ impl Client {
 
     /// Whether the session said nothing about any boat — which is what a
     /// refusal with no state to show sounds like on this half of the wire:
-    /// a lower that was not granted, or an ask after a hull that is not
+    /// a crossing that was not granted, or an ask after a hull that is not
     /// there to answer.
     ///
     /// Bracketed rather than waited for, exactly as
@@ -1439,7 +1439,7 @@ fn a_newcomer_enters_at_the_helm_of_a_minted_ship_with_its_boat_astern() {
         boat.at
     );
     assert!(
-        ((boat.at - spawn).length() - 8.0).abs() < 1e-3,
+        ((boat.at - spawn).length() - protocol::TENDER_ASTERN).abs() < 1e-3,
         "the boat lies {} m from its ship, not a painter's length",
         (boat.at - spawn).length()
     );
@@ -1827,7 +1827,7 @@ fn a_ships_helm_is_taken_from_a_tender_and_never_from_another_deck() {
     // it, and Bob's emptying out.
     let (told, _k, _at, _h, occupant) = alice.hear_a_boat_kinded();
     assert_eq!((told, occupant), (b_boat, Some(b)));
-    let (b_tender, _) = alice.hear_the_tender_of(b_boat);
+    let (_b_tender, _) = alice.hear_the_tender_of(b_boat);
     let (told, _k, _at, _h, occupant) = alice.hear_a_boat_kinded();
     assert_eq!((told, occupant), (b_boat, None));
 
@@ -1866,7 +1866,6 @@ fn a_ships_helm_is_taken_from_a_tender_and_never_from_another_deck() {
         (a_tender, None, None),
         "a second boat was taken in tow behind one already there"
     );
-    let _ = b_tender;
 }
 
 #[test]
@@ -1929,6 +1928,78 @@ fn hanging_up_in_the_boat_puts_you_back_in_it() {
         .count();
     assert_eq!(sloops, 3, "a handshake minted a ship: {fleet:?}");
     assert_eq!(dinghies, 3, "a handshake left a dinghy behind: {fleet:?}");
+}
+
+#[test]
+fn a_returner_seated_in_a_towed_boat_comes_off_the_painter() {
+    // A boat is whoever's is in it, painter or no painter. Alice hangs up in
+    // her tender; while she is away Bob ties it astern of a ship; and her
+    // rejoining seats her in it and cuts the rope. Left tied it would be a
+    // hull steered from two machines — her own reports of it, and Bob's of
+    // the boat he believes he is towing — so the towing helm hears the
+    // painter cut in the very telling that seats her.
+    let addr = host(7);
+    let (alice, a, _spawn, token, ship) = Client::join_aboard(addr, None);
+    let ship = ship.expect("a newcomer's story starts aboard");
+    let (tender, astern) = alice.hear_the_tender_of(ship);
+    let (bob, b, bobs_spawn, _t2, _b_ship) = Client::join_aboard(addr, None);
+
+    // Down into her boat, which cuts her own painter and leaves her ship
+    // free and towing nothing — and the line goes dead with her still in it.
+    alice.say(ToServer::Board { boat: tender });
+    alice.boat_changed_hands(tender, Some(a));
+    drop(alice);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while bob.hear() != (ToClient::Left { id: a }) {
+        assert!(
+            Instant::now() < deadline,
+            "five seconds and nobody left the world"
+        );
+    }
+
+    // Bob steps off his own deck, swims across to the boat she left, and
+    // takes the helm of her ship from its thwarts — which puts her boat on
+    // that ship's painter, the ship having nothing there.
+    bob.say(ToServer::Disembark {
+        position: bobs_spawn,
+    });
+    bob.say(ToServer::Move {
+        position: astern + Vec2::new(1.0, 0.0),
+    });
+    bob.say(ToServer::Board { boat: tender });
+    bob.boat_changed_hands(tender, Some(b));
+    bob.say(ToServer::Board { boat: ship });
+    bob.boat_changed_hands(ship, Some(b));
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let (told, occupant, towed_by) = bob.hear_a_painter();
+        if told == tender && occupant.is_none() {
+            assert_eq!(towed_by, Some(ship), "the boat was not taken in tow");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the tow was never tied");
+    }
+
+    // Back with her papers, Alice is seated in the boat where it lies —
+    // hers again the moment she is in it, and off the painter.
+    let (_alice, a, _spawn, _token, aboard) = Client::join_aboard(addr, Some(token));
+    assert_eq!(
+        aboard,
+        Some(tender),
+        "somebody who hung up in a boat was not put back in it"
+    );
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let (told, occupant, towed_by) = bob.hear_a_painter();
+        if told == tender && occupant == Some(a) {
+            assert_eq!(towed_by, None, "the returner was seated on a painter");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the towing helm never heard the painter cut"
+        );
+    }
 }
 
 #[test]

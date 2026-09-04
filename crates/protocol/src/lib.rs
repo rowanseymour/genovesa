@@ -432,6 +432,21 @@ pub enum BoatKind {
     Rowboat,
 }
 
+/// Where a boat on a ship's painter lies astern of it, origin to origin, in
+/// metres: the length of the rope plus the half of each hull between its
+/// origin and the rope's end.
+///
+/// Here rather than on either side because both ends put a hull at exactly
+/// this distance and would otherwise disagree about it. A server mints a
+/// sloop's boat here, and a client ties the painter by hauling the boat
+/// here — so a server that used a number of its own would have every minted
+/// tender snatched to this one the instant the rope was made fast, a
+/// teleport out of nothing but arithmetic. The client's own tie is what this
+/// number *is*: it is worked out there from the rope and the two hulls, and
+/// `the_wires_astern_is_where_the_painter_puts_the_boat` is what holds the
+/// two to each other.
+pub const TENDER_ASTERN: f32 = 10.1;
+
 impl BoatKind {
     fn from_byte(byte: u8) -> Option<Self> {
         match byte {

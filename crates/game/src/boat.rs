@@ -1807,7 +1807,7 @@ pub(crate) fn scuttle(mut fleet: ResMut<Fleet>) {
 /// ceremony whole: boat under the view, player at the helm. No boat astern,
 /// where a served world would mint one: most of what the tests sail is the
 /// ship alone, and the ones that want its boat put one on the painter
-/// themselves — see `testing::with_the_ships_boat`.
+/// themselves — see `with_the_ships_boat`.
 fn launch(mut commands: Commands, mut kit: HullKit, view: Res<View>) {
     // A rotation of `yaw` about the vertical takes -Z to the camera's own
     // forward, so the boat starts pointing away from the viewer.
@@ -1852,8 +1852,7 @@ pub(crate) fn with_the_ships_boat(app: &mut App) -> Entity {
         .world()
         .get::<Transform>(ship)
         .expect("a hull has a transform");
-    let astern =
-        pose.translation - pose.forward() * (SHIP.length / 2.0 + PAINTER + ROWBOAT.length / 2.0);
+    let astern = pose.translation - pose.forward() * protocol::TENDER_ASTERN;
     let tender = a_free_rowboat(app, pose.with_translation(astern));
     app.world_mut()
         .entity_mut(tender)
@@ -3108,6 +3107,11 @@ fn make_fast(
         // hulls into line. Five metres a second of it, measured, on a ship
         // that was lying at anchor. A crew pulls the boat round by hand
         // first; this is that, and it costs a frame nobody sees.
+        //
+        // Where a boat the world mints already lies, that being what
+        // [`protocol::TENDER_ASTERN`] names — so the haul is a haul only for
+        // a dinghy boarded alongside, and an arrival's own boat is not
+        // shifted a metre by the rope being tied behind it.
         let dimensions = hull_of(rigged.0);
         let ship_hull = hull_of(ship.0);
         let bow = waterline::bow(ship_angle);
@@ -3475,6 +3479,22 @@ mod tests {
     /// Frames enough for the ease to be indistinguishable from settled —
     /// over eight time constants, a remainder of a few parts in ten thousand.
     const SETTLED: usize = 800;
+
+    #[test]
+    fn the_wires_astern_is_where_the_painter_puts_the_boat() {
+        // [`protocol::TENDER_ASTERN`] is where a server mints a sloop's boat
+        // and this is where the rope actually holds one: the rope's own
+        // length and the half of each hull between its origin and the rope's
+        // end, exactly as [`make_fast`] hauls it. Two ends of one number, so
+        // a mint the client immediately snatches two metres is a thing that
+        // fails here rather than on the water.
+        let astern = protocol::TENDER_ASTERN;
+        let tied = SHIP.length / 2.0 + PAINTER + ROWBOAT.length / 2.0;
+        assert!(
+            (astern - tied).abs() < 1e-5,
+            "the wire mints a boat {astern} m astern and the painter holds it at {tied} m"
+        );
+    }
 
     #[test]
     fn a_swing_on_the_ground_plane_is_a_yaw_the_other_way() {

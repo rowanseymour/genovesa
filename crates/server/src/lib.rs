@@ -62,7 +62,7 @@ use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH, CHUNK_METRES};
 use protocol::survey::{in_sight_along, Landmass, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, WorldId,
-    PROTOCOL_VERSION, SURVEY_BATCH_BYTES,
+    PROTOCOL_VERSION, SURVEY_BATCH_BYTES, TENDER_ASTERN,
 };
 use world::archipelago::{Archipelago, IslandSpec, WorldConfig};
 
@@ -175,13 +175,6 @@ const BOARD_GRANT: f32 = 12.0;
 /// by somebody else in the meantime, and the returner enters in a fresh hull
 /// rather than being teleported to wherever their old one was abandoned.
 const KEPT_BERTH: f32 = 16.0;
-
-/// How far astern of a newly minted sloop its rowing boat is put in the
-/// water, in metres: the length of the painter the client will tie plus the
-/// half of each hull between its origin and the rope's end, so the boat
-/// arrives with the rope about taut rather than being snatched up to it or
-/// dragged into the transom on the first tick.
-const PAINTER_ASTERN: f32 = 8.0;
 
 /// How often a listening server looks up from its accept to see whether it
 /// has been asked to stop.
@@ -1905,7 +1898,7 @@ fn seat_the_arrival(
             BoatId(keeper::mint()),
             BoatState {
                 kind: BoatKind::Rowboat,
-                hull: Underway::lying(astern(at, heading, PAINTER_ASTERN), heading),
+                hull: Underway::lying(astern(at, heading, TENDER_ASTERN), heading),
                 occupant: None,
                 towed_by: Some(ship),
             },
@@ -1945,7 +1938,6 @@ fn seat_the_arrival(
             // an ungainly launch and not a second strand.
             None => {
                 let boat = fresh_hull(boats, record.position);
-                player.position = record.position;
                 bow = boats.get(&boat).map(|state| state.hull.heading);
                 Some(boat)
             }
@@ -1955,13 +1947,20 @@ fn seat_the_arrival(
                         && boat.hull.at.distance(record.position) <= KEPT_BERTH =>
                 {
                     boat.occupant = Some(id);
+                    // And the painter cut, on [`board`]'s rule: somebody has
+                    // tied this boat astern of their ship while its
+                    // helmsman was away, and a boat is whoever's is in it.
+                    // Left on the rope it would be steered from two
+                    // machines at once — the towing client reports it with
+                    // its own hull, see [`take_the_helm`] — which is the
+                    // one thing the wire cannot answer for.
+                    boat.towed_by = None;
                     player.position = boat.hull.at;
                     bow = Some(boat.hull.heading);
                     Some(kept)
                 }
                 _ => {
                     let boat = fresh_hull(boats, record.position);
-                    player.position = record.position;
                     bow = boats.get(&boat).map(|state| state.hull.heading);
                     Some(boat)
                 }
@@ -2156,9 +2155,17 @@ fn take_the_helm(shared: &Shared, id: PlayerId, hull: Underway, tender: Option<U
         state.hull = hull;
         let told = state.told(boat);
         let towed = tender.and_then(|tender| {
+            // The boat on this ship's painter, and empty: a hull with
+            // somebody in it is that player's to report and nobody else's,
+            // which is the rule [`shove`] is held to as well. Every
+            // crossing into a towed boat cuts the painter first — see
+            // [`board`] and [`seat_the_arrival`] — so the two conditions
+            // agree today, and it is the occupant that decides, a rope some
+            // later crossing forgot to cut being a hull steered from two
+            // machines at once.
             let (&behind, state) = boats
                 .iter_mut()
-                .find(|(_, state)| state.towed_by == Some(boat))?;
+                .find(|(_, state)| state.towed_by == Some(boat) && state.occupant.is_none())?;
             state.hull = tender;
             Some(state.told(behind))
         });
