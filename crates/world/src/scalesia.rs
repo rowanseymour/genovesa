@@ -2,11 +2,10 @@
 //!
 //! On the wet shoulders above the grassland — [`Country::Humid`], which is
 //! painted as closed forest and until now had nothing standing in it. It is
-//! about a sixth of every island: on the three test seeds the humid country
-//! is 14% to 18% of the land, and all but a few hundredths of that is open,
-//! level ground with no plant of any kind on it. The bananas reach it, but
-//! only into its hollows, which are a tenth of one percent of it. So this is
-//! the last country meant to have a tree that had none, and the tree is the
+//! about a sixth of every island, nearly all of it open, level ground with no
+//! plant of any kind on it: the bananas reach it, but only where a hollow or
+//! a lake bank lets them, which is a sliver of the country. So this is the
+//! last country meant to have a tree that had none, and the tree is the
 //! one the real islands grow there: *Scalesia pedunculata*, the giant daisy,
 //! whose stands are what the humid zone of the Galápagos is named for.
 //!
@@ -50,18 +49,14 @@ const JITTER: f32 = 3.0;
 
 /// The share of qualifying cells that carry a tree.
 ///
-/// The highest of the five rules, because this is the one country whose
-/// whole character is that it is *wooded*: the ground is painted jungle, and
-/// trees standing on it a crown apart are what makes that paint a forest
-/// rather than a dark green field. It stops short of a closed canopy because
-/// a closed canopy on ground drawn in facets a couple of metres across is a
-/// lid — the shoulders are where a player looks down from, and a slope
-/// that reads should show between the crowns.
-///
-/// This is also the first rule to want a real share of a chunk's plant
-/// budget — the most a chunk carries is ninety trees, and with a lake's
-/// mangroves under the same shoulder the chunk passes half the ceiling.
-/// `a_wooded_shoulder_leaves_room_under_the_ceiling` is what measures it.
+/// Below the palms' and the mangroves' shares and above the bananas', and
+/// set against the ground rather than against them: this is the one country
+/// whose whole character is that it is *wooded*, so the trees stand a crown
+/// apart and the paint under them reads as a forest rather than a dark green
+/// field. It stops short of a closed canopy because a lid over ground drawn
+/// in facets a couple of metres across hides the slope, and the shoulders are
+/// where a player looks down from. It is also the largest share of a chunk's
+/// plant budget any kind takes — see [`crate::plants`].
 const DENSITY: f32 = 0.45;
 
 /// How level the ground has to be — the cacti's number, and for their reason:
@@ -141,7 +136,7 @@ fn in_cell(island: &Island, cell: IVec2, base: Vec2) -> Option<Plant> {
 mod tests {
     use super::*;
     use crate::testing::{digest, floats, sweep, SEEDS};
-    use protocol::ground::{chunk_at, MAX_PLANTS};
+    use protocol::ground::chunk_at;
 
     #[test]
     fn a_seed_grows_the_same_scalesia_wherever_it_is_hosted() {
@@ -221,39 +216,6 @@ mod tests {
             counted > 200,
             "only {counted} scalesia — the rule has stopped finding humid country"
         );
-    }
-
-    #[test]
-    fn a_wooded_shoulder_leaves_room_under_the_ceiling() {
-        // The one rule that takes a real share of a chunk's plant budget, so
-        // the one whose fullest chunk is worth knowing. Held to three quarters
-        // of the ceiling rather than to the ceiling itself, because the
-        // ceiling is meant to be a backstop and this is what says it still
-        // is one: [`crate::plants::plants`] truncates in kind order, so a
-        // rule that got within reach of the byte would be one where the next
-        // kind added could tip a chunk into dropping plants silently.
-        for seed in SEEDS {
-            let (fullest, trees) = sweep(seed)
-                .chunks
-                .iter()
-                .map(|(_, payload)| {
-                    let trees = payload
-                        .plants
-                        .iter()
-                        .filter(|plant| plant.kind == Kind::Scalesia)
-                        .count();
-                    (payload.plants.len(), trees)
-                })
-                .max()
-                .unwrap_or((0, 0));
-            println!(
-                "seed {seed}: the fullest chunk carries {fullest} plants, {trees} of them scalesia"
-            );
-            assert!(
-                fullest <= MAX_PLANTS * 3 / 4,
-                "seed {seed}: a chunk carries {fullest} plants, and the budget is {MAX_PLANTS}"
-            );
-        }
     }
 
     #[test]

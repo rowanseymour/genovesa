@@ -24,22 +24,31 @@ use crate::archipelago::Island;
 /// order — because it is the order a truncated chunk would keep, and a
 /// truncation that differed between machines would be two beaches.
 pub fn plants(island: &Island, chunk: IVec2) -> Vec<Plant> {
+    let mut found = grown(island, chunk);
+
+    // The ceiling is what a chunk's count byte can say, and it is a backstop
+    // against a rule gone wrong rather than a policy for sharing anything
+    // out: the fullest chunk yet grown — a wooded shoulder running down to a
+    // lake full of mangroves — is just over half of it, where a beach
+    // carries single figures, and `no_chunk_comes_near_the_ceiling` below is
+    // what holds that. The cut falls on the tail, which is the scalesia, the
+    // kind that takes the largest share. If it ever does start biting, the
+    // answer is not to keep truncating in the order the kinds are listed,
+    // which lets whichever kind is asked first eat the others' allowance,
+    // but to deal the budget between the kinds that want it.
+    found.truncate(MAX_PLANTS);
+    found
+}
+
+/// Every kind's answer for one chunk, gathered and not yet cut to the
+/// ceiling — kept apart from [`plants`] so that the test measuring the cut
+/// can see past it, since a list already cut cannot say how far over it went.
+fn grown(island: &Island, chunk: IVec2) -> Vec<Plant> {
     let mut found = crate::palms::palms(island, chunk);
     found.extend(crate::bananas::bananas(island, chunk));
     found.extend(crate::mangroves::mangroves(island, chunk));
     found.extend(crate::cacti::cacti(island, chunk));
     found.extend(crate::scalesia::scalesia(island, chunk));
-
-    // The ceiling is what a chunk's count byte can say, and nothing here comes
-    // near it: the fullest chunk yet measured is a wooded shoulder running
-    // down to a lake full of mangroves, at just over half of it, where a
-    // beach carries single figures — `scalesia`'s tests keep the measurement.
-    // So this is a backstop against a rule gone wrong rather than a policy for
-    // sharing anything out — and if it ever does start biting, the answer is
-    // not to keep truncating in the order the kinds are listed above, which
-    // would let a beach eat a valley's allowance by being asked first, but to
-    // deal the budget between the kinds that want it.
-    found.truncate(MAX_PLANTS);
     found
 }
 
@@ -74,4 +83,70 @@ pub(crate) fn draw(seed: u64, nth: u32) -> f32 {
     // The top 24 bits over 2^24: every value is exactly representable, so the
     // same word gives the same float on any machine.
     (z >> 40) as f32 / (1u32 << 24) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{sweep, SEEDS};
+    use protocol::ground::Kind;
+
+    #[test]
+    fn no_chunk_comes_near_the_ceiling() {
+        // Measured on what the rules grow rather than on what is served,
+        // because a served list has already been cut to the ceiling and
+        // cannot say how far over it a chunk went. Held to three quarters
+        // rather than to the ceiling itself: the ceiling is meant to be a
+        // backstop, and this is what says it still is one — a rule that got
+        // within reach of the byte would be one where the next kind added
+        // could tip a chunk into dropping plants silently. The per-kind
+        // figures are printed so that a density being retuned can be read
+        // against the budget it is spending.
+        let kinds: Vec<Kind> = (0u8..).map_while(Kind::from_byte).collect();
+        for seed in SEEDS {
+            let world = &sweep(seed).world;
+            let mut fullest = (0, IVec2::ZERO, vec![0; kinds.len()]);
+            let mut peak = vec![0; kinds.len()];
+            for (chunk, _) in &sweep(seed).chunks {
+                let island = world.island(
+                    world
+                        .island_at_chunk(*chunk)
+                        .expect("a served chunk is an island's"),
+                );
+                let all = grown(&island, *chunk);
+                let mut of_kind = vec![0; kinds.len()];
+                for plant in &all {
+                    of_kind[kinds.iter().position(|k| *k == plant.kind).unwrap()] += 1;
+                }
+                for (most, count) in peak.iter_mut().zip(&of_kind) {
+                    *most = (*most).max(*count);
+                }
+                if all.len() > fullest.0 {
+                    fullest = (all.len(), *chunk, of_kind);
+                }
+            }
+            let breakdown = |counts: &[usize]| {
+                kinds
+                    .iter()
+                    .zip(counts)
+                    .map(|(kind, n)| format!("{kind:?} {n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            println!(
+                "seed {seed}: the fullest chunk {} grows {} plants ({}); the most of a kind on \
+                 one chunk: {}",
+                fullest.1,
+                fullest.0,
+                breakdown(&fullest.2),
+                breakdown(&peak)
+            );
+            assert!(
+                fullest.0 <= MAX_PLANTS * 3 / 4,
+                "seed {seed}: chunk {} grows {} plants against a ceiling of {MAX_PLANTS}",
+                fullest.1,
+                fullest.0
+            );
+        }
+    }
 }

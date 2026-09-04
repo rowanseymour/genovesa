@@ -2830,6 +2830,14 @@ mod tests {
         })
         .collect();
         let grown = planted.plants.len();
+        // And nothing past the end of that list: a kind added without being
+        // planted here would travel unpinned, which is the gap the cactus
+        // found.
+        assert_eq!(
+            ground::Kind::from_byte(grown as u8),
+            None,
+            "a kind this test does not plant"
+        );
         let stand = bytes_of_server(&ToClient::Chunk {
             chunk: IVec2::new(5, -3),
             shelter: None,

@@ -744,9 +744,8 @@ impl Kind {
 /// raising it further is a change to the frame rather than to a number here.
 /// It is a ceiling and nowhere near a target — plants of a kind stand where
 /// that kind grows, which is a band or a margin rather than a whole chunk.
-/// The fullest chunk yet measured is a wooded shoulder running down to a lake
-/// with a mangrove thicket in it, at just over half of this; a beach of palms
-/// carries single figures.
+/// How near a chunk actually comes is the generator's business, and its own
+/// tests hold it well clear.
 ///
 /// It exists so that "how much can one answer cost" keeps having an answer:
 /// it is what [`crate::ToClient`]'s frame ceiling is derived against, and a
@@ -1283,12 +1282,14 @@ mod tests {
         }
     }
 
-    /// Plants enough to tell one from another, spread across the chunk so that
-    /// a position written to the wrong axis would land outside it.
+    /// Plants enough to tell one from another, of every kind in turn so that
+    /// each kind's decoding is exercised, spread across the chunk so that a
+    /// position written to the wrong axis would land outside it.
     fn some_plants(count: usize) -> Vec<Plant> {
+        let kinds: Vec<Kind> = (0u8..).map_while(Kind::from_byte).collect();
         (0..count)
             .map(|i| {
-                let kind = Kind::Palm;
+                let kind = kinds[i % kinds.len()];
                 let (small, large) = kind.scale();
                 Plant {
                     kind,

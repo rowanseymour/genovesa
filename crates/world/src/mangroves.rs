@@ -27,7 +27,7 @@ use crate::terrain::{Country, LakeZone};
 /// Metres between the cells a mangrove may stand in — half the palms' spacing
 /// and a quarter of the bananas'.
 ///
-/// The tightest lattice of the three, because a mangrove thicket is the one
+/// The tightest lattice of the five, because a mangrove thicket is the one
 /// stand in this world that is *meant* to close up. A canopy is very nearly
 /// this wide, so trees in a full patch touch and — with the jitter either way
 /// — mostly overlap, and the fringe reads as one mass with arches under it. At
@@ -103,7 +103,7 @@ const LEVEL: f32 = 0.88;
 
 /// Every mangrove on one chunk of an island.
 ///
-/// The same walk the other two use — a lattice in world coordinates, so the
+/// The same walk the other four use — a lattice in world coordinates, so the
 /// answer for a shoreline does not depend on where the chunk boundaries fell,
 /// and a fixed order so that anything downstream truncating the list truncates
 /// it the same way everywhere.
