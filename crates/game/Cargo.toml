@@ -46,6 +46,28 @@ bevy = { workspace = true, features = [
 # needs the encoder underneath. Already in the tree behind Bevy, which reaches
 # it through `image`, so it costs a line here and nothing to build.
 png = "0.18"
+# The two-dimensional solver the hulls are moved by — see `waterline`. Its
+# default features carry a picking backend and scene support this has no use
+# for, so they are named rather than taken. `parallel` is left off
+# deliberately as well: a handful of hulls is not work worth splitting, and
+# a solver that splits it answers a little differently depending on how many
+# threads it got, which showed up here as a towing test that passed alone
+# and failed in a full run. `bevy_diagnostic` is not
+# optional in practice: the engine's own systems ask for their diagnostics
+# resources whether or not the feature that inserts them is on, and a build
+# without it panics on the first step.
+avian2d = { version = "0.7.0", default-features = false, features = [
+    "2d",
+    "f32",
+    "parry-f32",
+    "default-collider",
+    # The painter between a ship and the boat it tows is a distance joint,
+    # and the joint *solver* is a feature of its own: without this the
+    # joint is built and registered and simply never enforced, which reads
+    # as a rope that is not there at all.
+    "xpbd_joints",
+    "bevy_diagnostic",
+] }
 
 [dev-dependencies]
 # Reads assets/models/boat.glb in the tests that hold the model to what the collision

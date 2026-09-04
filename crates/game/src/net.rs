@@ -786,6 +786,7 @@ pub struct HullTold {
     pub position: Vec2,
     pub heading: f32,
     pub occupant: Option<PlayerId>,
+    pub towed_by: Option<BoatId>,
 }
 
 /// A boat is out of the world. Read by [`crate::boat`].
@@ -1006,6 +1007,7 @@ fn receive(
                 position,
                 heading,
                 occupant,
+                towed_by,
             } => {
                 if position.is_finite() && heading.is_finite() {
                     said.hull.write(HullTold {
@@ -1014,6 +1016,7 @@ fn receive(
                         position,
                         heading,
                         occupant,
+                        towed_by,
                     });
                 }
             }
@@ -1116,15 +1119,29 @@ fn swing(from: f32, to: f32) -> f32 {
     round.min(std::f32::consts::TAU - round)
 }
 
+/// The last report [`report_position`] made, against which the next is
+/// judged worth making: when, where, pointed which way, and where the
+/// boat on the painter was if there was one.
+#[derive(Clone, Copy)]
+struct Reported {
+    at: f32,
+    position: Vec2,
+    yaw: f32,
+    tender: Option<Vec2>,
+}
+
 /// Tells the server where the player is: where whatever carries them is —
 /// the boat they are aboard, or one day their own feet — resolved through
-/// [`PlayerPlace`] so this system never learns which.
+/// [`PlayerPlace`] so this system never learns which. And, at a helm, where
+/// the boat on the painter is, that being the other hull this client
+/// invents the place of — see [`crate::boat::Towed`].
 fn report_position(
     time: Res<Time>,
     online: Res<Online>,
     fleet: Res<crate::boat::Fleet>,
     player: PlayerPlace,
-    mut last: Local<Option<(f32, Vec2, f32)>>,
+    towed: Query<&Transform, With<crate::boat::Towed>>,
+    mut last: Local<Option<Reported>>,
 ) {
     let (Some(position), Some(heading)) = (player.on_the_map(), player.heading()) else {
         return;
@@ -1133,14 +1150,23 @@ fn report_position(
     // which the other clients draw and a capsule marker never needed.
     let yaw = f32::atan2(-heading.x, -heading.y);
     let now = time.elapsed_secs();
+    let tender = towed
+        .single()
+        .ok()
+        .map(|place| (place.translation.xz(), crate::boat::yaw_of(place)));
 
-    if let Some((reported_at, reported, reported_yaw)) = *last {
+    if let Some(reported) = *last {
         // A hull turning in place is moving news even though it goes
         // nowhere: the heading is drawn, so it reports on the same terms as
-        // the position.
-        let turned = swing(reported_yaw, yaw) > REPORT_SWING;
-        if now - reported_at < REPORT_INTERVAL
-            || (reported.distance(position) < REPORT_THRESHOLD && !turned)
+        // the position. So is a tender still gliding on its painter behind
+        // a ship that has stopped.
+        let turned = swing(reported.yaw, yaw) > REPORT_SWING;
+        let towed_on = match (reported.tender, tender) {
+            (Some(was), Some((is, _))) => was.distance(is) >= REPORT_THRESHOLD,
+            (was, is) => was.is_some() != is.is_some(),
+        };
+        if now - reported.at < REPORT_INTERVAL
+            || (reported.position.distance(position) < REPORT_THRESHOLD && !turned && !towed_on)
         {
             return;
         }
@@ -1151,10 +1177,16 @@ fn report_position(
         Some(_) => online.connection.say(ToServer::Helm {
             position,
             heading: yaw,
+            tender,
         }),
         None => online.connection.report(position),
     }
-    *last = Some((now, position, yaw));
+    *last = Some(Reported {
+        at: now,
+        position,
+        yaw,
+        tender: tender.map(|(at, _)| at),
+    });
 }
 
 /// Enters the world on foot, for the player the welcome seated at no helm:
@@ -1594,6 +1626,7 @@ mod tests {
             position: ashore,
             heading: 0.0,
             occupant: Some(PlayerId(1)),
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("boat");
@@ -1665,6 +1698,7 @@ mod tests {
             position: ashore,
             heading: 0.0,
             occupant,
+            towed_by: None,
         };
         seated(Some(PlayerId(1)))
             .write(&mut &server)
@@ -1758,6 +1792,7 @@ mod tests {
             position: Vec2::new(-20.0, 15.0),
             heading: 0.0,
             occupant: Some(PlayerId(1)),
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("the seating");
@@ -1792,6 +1827,7 @@ mod tests {
                         afloat,
                         0.0,
                         occupant,
+                        None,
                     );
                 }
             },
@@ -1866,6 +1902,7 @@ mod tests {
                     Vec2::new(30.0, 30.0),
                     0.0,
                     Some(PlayerId(1)),
+                    None,
                 );
                 crate::player::put_down(&mut commands, &fleet, &players, afloat, Some(-0.75));
             },
@@ -1922,6 +1959,7 @@ mod tests {
             position: Vec2::new(4.0, 5.0),
             heading: 0.5,
             occupant: Some(PlayerId(9)),
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("boat");
@@ -1952,6 +1990,7 @@ mod tests {
             position: Vec2::new(600.0, -200.0),
             heading: 0.5,
             occupant: None,
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("boat freed");
@@ -2018,6 +2057,7 @@ mod tests {
             position: Vec2::ZERO,
             heading: 0.0,
             occupant: Some(me),
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("ship granted");
@@ -2031,6 +2071,7 @@ mod tests {
             position: Vec2::new(3.0, 0.0),
             heading: 0.5,
             occupant: Some(me),
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("tender granted");
@@ -2040,6 +2081,7 @@ mod tests {
             position: Vec2::ZERO,
             heading: 0.0,
             occupant: None,
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("ship at anchor");
@@ -2069,6 +2111,7 @@ mod tests {
             position: Vec2::ZERO,
             heading: 0.0,
             occupant: Some(me),
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("ship granted back");
@@ -2109,6 +2152,7 @@ mod tests {
             position: afloat,
             heading: 0.0,
             occupant: Some(me),
+            towed_by: None,
         })
         .write(&mut &server)
         .expect("tender granted");

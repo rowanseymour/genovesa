@@ -94,6 +94,11 @@ pub fn world_app_ashore_of_entry() -> App {
         TaskPoolPlugin::default(),
         AssetPlugin::default(),
         TimePlugin,
+        // The boats are solved on a plane now — see [`crate::waterline`] —
+        // and the solver propagates transforms itself as it prepares a
+        // step, which wants the plugin that owns them. `DefaultPlugins`
+        // carries it in a real run.
+        TransformPlugin,
         StatesPlugin,
         bevy::animation::AnimationPlugin,
         BoatPlugin,
@@ -116,6 +121,13 @@ pub fn world_app_ashore_of_entry() -> App {
     // it has never heard of panics rather than declining.
     .init_asset::<bevy::world_serialization::WorldAsset>()
     .init_resource::<Assets<StandardMaterial>>();
+    // What `App::run` would do before the first frame, and what a test that
+    // only ever calls `update` has to do for itself. The solver registers
+    // some of its own state in `Plugin::finish` rather than in `build` —
+    // see `crate::waterline` — so without this every physics frame here
+    // panics looking for a resource nobody created.
+    app.finish();
+    app.cleanup();
     app.update();
     app
 }

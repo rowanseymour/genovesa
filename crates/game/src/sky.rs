@@ -789,6 +789,7 @@ mod tests {
     /// is a clock, a direction and a colour, none of which needs a GPU.
     fn sky_app() -> App {
         let mut app = sky_app_ashore_of_entry();
+        ready(&mut app);
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
             .set(AppState::InWorld);
@@ -806,6 +807,9 @@ mod tests {
             TaskPoolPlugin::default(),
             AssetPlugin::default(),
             TimePlugin,
+            // The boats are solved on a plane — see [`crate::waterline`] —
+            // and the solver propagates transforms as it prepares a step.
+            TransformPlugin,
             StatesPlugin,
             // The boat's plugin readies the rowboat's clips, and clips and
             // the graph they hang in are assets of this plugin's.
@@ -823,8 +827,21 @@ mod tests {
         // What the clouds' mask is put into, the sky bringing them with it.
         .init_asset::<Image>()
         .init_resource::<Assets<StandardMaterial>>();
-        app.update();
         app
+    }
+
+    /// What `App::run` would do before the first frame, and what a test
+    /// driving `update` by hand has to do for itself: the solver the hulls
+    /// are moved by registers some of its own state in `Plugin::finish`
+    /// rather than in `build` — see [`crate::waterline`].
+    ///
+    /// Its own step rather than the end of the harness above, because a
+    /// caller may have a plugin of its own to add first and nothing may be
+    /// added after this.
+    fn ready(app: &mut App) {
+        app.finish();
+        app.cleanup();
+        app.update();
     }
 
     fn phase(app: &App) -> f32 {
@@ -1134,7 +1151,11 @@ mod tests {
         // test with the offer wrongly still up.
         set_wind(&mut app, Vec2::new(-5.0, -5.0));
         hold(&mut app, KeyCode::ArrowUp);
-        run_frames(&mut app, 6);
+        // Long enough for the hull to be plainly moving rather than a
+        // frame past the gate's own forgiveness — see
+        // [`crate::boat::Boat::reads_as_stopped`], which is what the offer
+        // is read against.
+        run_frames(&mut app, 20);
         assert_eq!(offer(&mut app), None, "a boat making way was offered a bed");
     }
 
@@ -1152,6 +1173,7 @@ mod tests {
         // the offline entry would have launched beside it.
         let mut app = sky_app_ashore_of_entry();
         app.add_plugins(crate::net::NetPlugin);
+        ready(&mut app);
         app.insert_resource(Online::new(session.connection));
         let _hosting = session.hosting;
         app.world_mut()

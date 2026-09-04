@@ -39,6 +39,7 @@ pub mod terrain;
 pub mod told;
 pub mod trees;
 pub mod wake;
+pub mod waterline;
 pub mod wildlife;
 
 #[cfg(test)]
