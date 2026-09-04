@@ -1,6 +1,7 @@
 //! The plants standing on the ground: palms along the back of a beach,
 //! bananas on the valley floors behind them, cacti on the dry collar between
-//! the two, mangroves in the shallows of the lakes.
+//! the two, mangroves in the shallows of the lakes, scalesia on the wet
+//! shoulders above the grassland.
 //!
 //! The server says where they stand; this decides what one looks like. That
 //! split is the same one the ground is drawn on — a chunk arrives as heights
@@ -36,6 +37,7 @@ const PALM: &str = "models/palm.glb";
 const BANANA: &str = "models/banana.glb";
 const MANGROVE: &str = "models/mangrove.glb";
 const CACTUS: &str = "models/cactus.glb";
+const SCALESIA: &str = "models/scalesia.glb";
 
 /// Which mesh in each of them the plant is. A plant is one mesh, so there is
 /// only ever the one — pinned, with the name, by
@@ -54,6 +56,7 @@ struct PlantModels {
     banana: Handle<Mesh>,
     mangrove: Handle<Mesh>,
     cactus: Handle<Mesh>,
+    scalesia: Handle<Mesh>,
     /// White, matte, and shared by every kind — see [`matte`].
     painted: Handle<StandardMaterial>,
 }
@@ -77,6 +80,7 @@ fn load_the_model(
         banana: assets.load(model_mesh(BANANA, THE_PLANT)),
         mangrove: assets.load(model_mesh(MANGROVE, THE_PLANT)),
         cactus: assets.load(model_mesh(CACTUS, THE_PLANT)),
+        scalesia: assets.load(model_mesh(SCALESIA, THE_PLANT)),
         painted: materials.add(matte(Color::WHITE)),
     });
 }
@@ -111,6 +115,7 @@ fn plant(
                 Kind::Banana => ("Banana", &model.banana),
                 Kind::Mangrove => ("Mangrove", &model.mangrove),
                 Kind::Cactus => ("Cactus", &model.cactus),
+                Kind::Scalesia => ("Scalesia", &model.scalesia),
             };
             let at = stands_at(origin, plant);
             let Some(surface) = ground.surface(at.x, at.y) else {
@@ -160,7 +165,7 @@ mod tests {
         // one mesh, and it carries its own colours — the material it is drawn
         // with is white, so an unpainted mesh would arrive as a white tree
         // rather than as an obviously broken one.
-        for file in [PALM, BANANA, MANGROVE, CACTUS] {
+        for file in [PALM, BANANA, MANGROVE, CACTUS, SCALESIA] {
             let named = creature_named_by(file);
             assert_model_draws(file, &[(THE_PLANT, named)]);
             assert_eq!(mesh_names(file), [named], "a plant is one mesh");
@@ -174,7 +179,7 @@ mod tests {
         // model's own foot is at its origin, so a trunk whose geometry started
         // a metre up would hover, and one that started below would be driven
         // into the ground.
-        for file in [PALM, BANANA, MANGROVE, CACTUS] {
+        for file in [PALM, BANANA, MANGROVE, CACTUS, SCALESIA] {
             let (json, _) = model(file);
             let tree = &json["meshes"][THE_PLANT]["primitives"][0];
             let positions =

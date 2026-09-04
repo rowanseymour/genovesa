@@ -8,14 +8,14 @@
 //! lake. So this is the gap in the picture rather than a fourth scatter for
 //! its own sake.
 //!
-//! And it is the country, not a height, that decides. The other three rules
-//! each carry a band in metres because each is placed relative to a *water*
-//! line — the sand, the bank, the surface — which is not a country. This one
-//! is a country outright, so it asks for one and nothing else: the arid collar
-//! already begins where the shore gives out and ends where the grass starts,
-//! and both of those lines wander with the ground and swing with an island's
-//! climate. A height band written here would be a worse copy of them that
-//! nothing held in step.
+//! And it is the country, not a height, that decides. The palms, the bananas
+//! and the mangroves each carry a band in metres because each is placed
+//! relative to a *water* line — the sand, the bank, the surface — which is not
+//! a country. This one is a country outright, so it asks for one and nothing
+//! else: the arid collar already begins where the shore gives out and ends
+//! where the grass starts, and both of those lines wander with the ground and
+//! swing with an island's climate. A height band written here would be a worse
+//! copy of them that nothing held in step.
 //!
 //! The rule also reads [`Lie::Open`], which is the bananas' test the other
 //! way about — a banana wants the hollow the water and the still air collect
@@ -59,7 +59,7 @@ const JITTER: f32 = 3.0;
 
 /// The share of qualifying cells that carry one.
 ///
-/// The lowest of the four rules by some way, and the qualifying ground is why:
+/// The lowest of the five rules by some way, and the qualifying ground is why:
 /// the arid collar is an *area* tens of metres deep round a whole coastline,
 /// where the back of a beach is a line and a lake's fringe is a few metres of
 /// it. At the palms' share, that area carries a plant every ten metres in
@@ -80,7 +80,7 @@ const LEVEL: f32 = 0.82;
 
 /// Every cactus on one chunk of an island.
 ///
-/// The same walk the other three use — a lattice in world coordinates, so the
+/// The same walk the other four use — a lattice in world coordinates, so the
 /// answer for a stretch of dry country does not depend on where the chunk
 /// boundaries fell, and a fixed order so that anything downstream truncating
 /// the list truncates it the same way everywhere.
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn a_seed_grows_the_same_cacti_wherever_it_is_hosted() {
-        // Pinned exactly as the other three are: a seed has to mean the same
+        // Pinned exactly as the other four are: a seed has to mean the same
         // dry collar with the same columns standing in it on any machine that
         // serves it. If you meant to change the rule, re-record these — run
         // with --nocapture and the new values are printed. If you did not, a

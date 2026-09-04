@@ -673,6 +673,7 @@ pub enum Kind {
     Banana = 1,
     Mangrove = 2,
     Cactus = 3,
+    Scalesia = 4,
 }
 
 impl Kind {
@@ -684,6 +685,7 @@ impl Kind {
             1 => Some(Self::Banana),
             2 => Some(Self::Mangrove),
             3 => Some(Self::Cactus),
+            4 => Some(Self::Scalesia),
             _ => None,
         }
     }
@@ -716,7 +718,7 @@ impl Kind {
             // variety. They also all raced the same water in, so a stand of
             // them really is much of an age.
             Self::Mangrove => (0.82, 1.14),
-            // The widest of the four, and the arid ground is what earns it.
+            // The widest of the five, and the arid ground is what earns it.
             // A mangrove is judged against its neighbours and a palm against a
             // beach full of palms; a cactus stands alone on open dust with
             // nothing beside it to be wrong against, so a spread that would
@@ -724,6 +726,13 @@ impl Kind {
             // is: nothing in this world grows slower or lives longer, so the
             // young and the old genuinely are two sizes of the same plant.
             Self::Cactus => (0.62, 1.42),
+            // As narrow as the mangrove's, and the real tree is why. A
+            // Scalesia forest is even-aged: a stand dies off together in a
+            // wet year and germinates together after it, so the trees on one
+            // shoulder genuinely are much of a size — and they are seen crown
+            // beside crown, where a spread that reads as age on open dust
+            // reads as one of them being wrong.
+            Self::Scalesia => (0.84, 1.16),
         }
     }
 }
@@ -735,8 +744,8 @@ impl Kind {
 /// raising it further is a change to the frame rather than to a number here.
 /// It is a ceiling and nowhere near a target — plants of a kind stand where
 /// that kind grows, which is a band or a margin rather than a whole chunk.
-/// The fullest chunk yet measured is a lake with a mangrove thicket standing
-/// in it, at a third of this; a beach of palms carries single figures.
+/// How near a chunk actually comes is the generator's business, and its own
+/// tests hold it well clear.
 ///
 /// It exists so that "how much can one answer cost" keeps having an answer:
 /// it is what [`crate::ToClient`]'s frame ceiling is derived against, and a
@@ -1273,12 +1282,14 @@ mod tests {
         }
     }
 
-    /// Plants enough to tell one from another, spread across the chunk so that
-    /// a position written to the wrong axis would land outside it.
+    /// Plants enough to tell one from another, of every kind in turn so that
+    /// each kind's decoding is exercised, spread across the chunk so that a
+    /// position written to the wrong axis would land outside it.
     fn some_plants(count: usize) -> Vec<Plant> {
+        let kinds: Vec<Kind> = (0u8..).map_while(Kind::from_byte).collect();
         (0..count)
             .map(|i| {
-                let kind = Kind::Palm;
+                let kind = kinds[i % kinds.len()];
                 let (small, large) = kind.scale();
                 Plant {
                     kind,

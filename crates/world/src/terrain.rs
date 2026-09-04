@@ -1,5 +1,5 @@
 //! Procedural terrain: the height field, and what each point of it turns out
-//! to be. What *grows* there is [`crate::plants`] and the four rules under it,
+//! to be. What *grows* there is [`crate::plants`] and the five rules under it,
 //! which read this and change nothing; sampling into chunks a client can be
 //! sent is the `archipelago` module; turning what arrives into meshes is the
 //! game's business and happens nowhere near here.

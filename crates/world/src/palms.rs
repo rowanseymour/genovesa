@@ -254,10 +254,12 @@ mod tests {
     }
 
     #[test]
-    fn no_chunk_carries_more_plants_than_the_wire_will_take() {
+    fn every_served_chunk_is_well_formed() {
+        // The count against the ceiling is [`crate::plants`]'s own test to
+        // hold, on what the rules grow; what is served has already been cut
+        // to it, so the shape is all there is left to check here.
         for seed in SEEDS {
             for (chunk, payload) in &sweep(seed).chunks {
-                assert!(payload.plants.len() <= protocol::ground::MAX_PLANTS);
                 assert!(payload.well_formed(), "seed {seed} chunk {chunk}");
             }
         }
