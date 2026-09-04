@@ -1,8 +1,7 @@
 # Genovesa
 
-An experiment in procedural 3D terrain, built with [Bevy](https://bevy.org):
-an endless ocean scattered with generated islands, sailed between in a boat.
-Where it goes is undecided — it is not a game, and may never be one.
+An experiment in procedural 3D terrain, Rust, [Bevy](https://bevy.org) and [Avian](https://github.com/avianphysics/avian).
+Where it goes is undecided. Like the wind.
 
 ![Sixteen generated islands](docs/maps.png)
 
