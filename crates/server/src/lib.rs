@@ -61,8 +61,8 @@ use glam::{IVec2, Vec2};
 use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH, CHUNK_METRES};
 use protocol::survey::{in_sight_along, Landmass, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
-    BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, WorldId, PROTOCOL_VERSION,
-    SURVEY_BATCH_BYTES,
+    BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, WorldId,
+    PROTOCOL_VERSION, SURVEY_BATCH_BYTES,
 };
 use world::archipelago::{Archipelago, IslandSpec, WorldConfig};
 
@@ -625,8 +625,12 @@ pub(crate) enum Knowing {
 /// and whose hull it is.
 pub(crate) struct BoatState {
     pub(crate) kind: BoatKind,
-    pub(crate) position: Vec2,
-    pub(crate) heading: f32,
+    /// Where this hull is and how it is going, as its last telling had it —
+    /// see [`Underway`]. The server keeps it and relays it and has no
+    /// opinion of its own about any of the four numbers: a hull is moved by
+    /// whichever client is moving it, and this is where that word is held
+    /// between hearing it and passing it on.
+    pub(crate) hull: Underway,
     pub(crate) occupant: Option<PlayerId>,
     /// Whose hull this is: the last hands to hold its helm, or `None` for one
     /// nobody has been aboard this session. Set wherever a helm is taken up —
@@ -684,8 +688,7 @@ impl BoatState {
         ToClient::Boat {
             id,
             kind: self.kind,
-            position: self.position,
-            heading: self.heading,
+            hull: self.hull,
             occupant: self.occupant,
             towed_by: self.towed_by,
         }
@@ -789,8 +792,10 @@ impl Server {
                                 boat.id,
                                 BoatState {
                                     kind: boat.kind,
-                                    position: boat.position,
-                                    heading: boat.heading,
+                                    // At rest: the file keeps a pose, and a
+                                    // world reopened is a world where
+                                    // nothing has been sailed yet.
+                                    hull: Underway::lying(boat.position, boat.heading),
                                     // Occupancy is session state: everyone
                                     // stepped out of the record when the
                                     // world stopped, and steps back in at
@@ -1292,8 +1297,8 @@ impl Shared {
                 .map(|(id, boat)| keeper::BoatRecord {
                     id: *id,
                     kind: boat.kind,
-                    position: boat.position,
-                    heading: boat.heading,
+                    position: boat.hull.at,
+                    heading: boat.hull.heading,
                 })
                 .collect()
         };
@@ -1583,16 +1588,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>, wanted: mpsc::SyncSender<ChunkR
     loop {
         let went = match ToServer::read(&mut reader) {
             Ok(ToServer::Move { position }) if reachable(position) => walk(&shared, id, position),
-            Ok(ToServer::Helm {
-                position,
-                heading,
-                tender,
-            }) if reachable(position)
-                && heading.is_finite()
-                && tender.is_none_or(|(at, heading)| reachable(at) && heading.is_finite()) =>
-            {
-                take_the_helm(&shared, id, position, heading, tender)
+            Ok(ToServer::Helm { hull, tender }) if sound(hull) && tender.is_none_or(sound) => {
+                take_the_helm(&shared, id, hull, tender)
             }
+            Ok(ToServer::Shove { boat, hull }) if sound(hull) => shove(&shared, id, boat, hull),
             Ok(ToServer::Board { boat }) => board(&shared, id, boat),
             Ok(ToServer::Disembark { position }) if reachable(position) => {
                 step_ashore(&shared, id, position)
@@ -1929,21 +1928,20 @@ fn seat_the_arrival(
         let handed_down = boats.iter_mut().find(|(_, boat)| {
             boat.kind == BoatKind::Sloop
                 && boat.occupant.is_none()
-                && boat.position.distance(at) <= SPARE_BERTH
+                && boat.hull.at.distance(at) <= SPARE_BERTH
                 && boat.keeper.is_none_or(|keeper| !here.contains(&keeper))
         });
         if let Some((&boat, state)) = handed_down {
             state.occupant = Some(id);
             state.keeper = Some(token);
-            return (boat, state.position);
+            return (boat, state.hull.at);
         }
         let boat = BoatId(keeper::mint());
         boats.insert(
             boat,
             BoatState {
                 kind: BoatKind::Sloop,
-                position: at,
-                heading: aimed(at, shared.facing),
+                hull: Underway::lying(at, aimed(at, shared.facing)),
                 occupant: Some(id),
                 keeper: Some(token),
                 towed_by: None,
@@ -1961,7 +1959,7 @@ fn seat_the_arrival(
             // Left afoot, with something free lying where they stood:
             // they walk to it, and the world adds nothing.
             None if boats.values().any(|boat| {
-                boat.occupant.is_none() && boat.position.distance(record.position) <= KEPT_BERTH
+                boat.occupant.is_none() && boat.hull.at.distance(record.position) <= KEPT_BERTH
             }) =>
             {
                 None
@@ -1996,13 +1994,13 @@ fn seat_the_arrival(
             None => {
                 let (boat, at) = fresh_hull(boats, record.position);
                 player.position = at;
-                bow = boats.get(&boat).map(|state| state.heading);
+                bow = boats.get(&boat).map(|state| state.hull.heading);
                 Some(boat)
             }
             Some(kept) => match boats.get_mut(&kept) {
                 Some(boat)
                     if boat.occupant.is_none()
-                        && boat.position.distance(record.position) <= KEPT_BERTH
+                        && boat.hull.at.distance(record.position) <= KEPT_BERTH
                         && boat.keeper.is_none_or(|keeper| !here.contains(&keeper)) =>
                 {
                     boat.occupant = Some(id);
@@ -2011,14 +2009,14 @@ fn seat_the_arrival(
                     // whichever door it happens through. See
                     // [`BoatState::keeper`].
                     boat.keeper = Some(token);
-                    player.position = boat.position;
-                    bow = Some(boat.heading);
+                    player.position = boat.hull.at;
+                    bow = Some(boat.hull.heading);
                     Some(kept)
                 }
                 _ => {
                     let (boat, at) = fresh_hull(boats, record.position);
                     player.position = at;
-                    bow = boats.get(&boat).map(|state| state.heading);
+                    bow = boats.get(&boat).map(|state| state.hull.heading);
                     Some(boat)
                 }
             },
@@ -2242,40 +2240,25 @@ fn walk(shared: &Shared, id: PlayerId, position: Vec2) -> Went {
 ///
 /// This is the report the way between two of them exists for, a hull under
 /// sail covering ground a walker cannot.
-fn take_the_helm(
-    shared: &Shared,
-    id: PlayerId,
-    position: Vec2,
-    heading: f32,
-    tender: Option<(Vec2, f32)>,
-) -> Went {
+fn take_the_helm(shared: &Shared, id: PlayerId, hull: Underway, tender: Option<Underway>) -> Went {
     let mut players = shared.players.held();
     let Some(player) = players.get_mut(&id) else {
         return Went::Over;
     };
-    // The rider goes with the vehicle: one report moves both. Quietly ignored
-    // from a player occupying nothing — see the wire's own doc for how that
-    // happens honestly.
     let Some(boat) = player.aboard else {
         return Went::Nowhere;
     };
-    player.position = position;
+    player.position = hull.at;
     let (told, towed) = {
         let mut boats = shared.boats.held();
         let state = boats.get_mut(&boat).expect("a boat once boarded exists");
-        state.position = position;
-        state.heading = heading;
+        state.hull = hull;
         let told = state.told(boat);
-        // And the boat on the painter, where the report says one is and the
-        // world agrees — a painter cut by somebody boarding the tender can
-        // cross a report still on the wire, and that report then says
-        // nothing about a hull that has stopped being this ship's to move.
-        let towed = tender.and_then(|(at, heading)| {
+        let towed = tender.and_then(|tender| {
             let (&behind, state) = boats
                 .iter_mut()
                 .find(|(_, state)| state.towed_by == Some(boat))?;
-            state.position = at;
-            state.heading = heading;
+            state.hull = tender;
             Some(state.told(behind))
         });
         (told, towed)
@@ -2284,7 +2267,43 @@ fn take_the_helm(
     if let Some(towed) = towed {
         broadcast(&players, id, towed);
     }
-    Went::To(position)
+    Went::To(hull.at)
+}
+
+/// Takes a client's word for where it has shoved an empty hull to — see
+/// [`ToServer::Shove`], which is where the rule this enforces is written
+/// down.
+///
+/// The reach is [`BOARD_GRANT`], and deliberately the same one a boarding is
+/// granted at rather than a number of its own: both ask whether the asker is
+/// close enough to be touching the boat, and two answers to that would drift
+/// apart. Measured against the hull's *last telling* rather than against
+/// where the report says it now is, so that the reach cannot be walked out
+/// by a client reporting a hull further away each time.
+fn shove(shared: &Shared, id: PlayerId, boat: BoatId, hull: Underway) -> Went {
+    let players = shared.players.held();
+    let Some(player) = players.get(&id) else {
+        return Went::Over;
+    };
+    let told = {
+        let mut boats = shared.boats.held();
+        let Some(state) = boats.get_mut(&boat) else {
+            return Went::Nowhere;
+        };
+        // A hull with somebody aboard is that player's to report, and one on
+        // a painter is its ship's — see [`ToServer::Helm`], which carries
+        // both. Neither is anybody else's to push.
+        if state.occupant.is_some()
+            || state.towed_by.is_some()
+            || state.hull.at.distance(player.position) > BOARD_GRANT
+        {
+            return Went::Nowhere;
+        }
+        state.hull = hull;
+        state.told(boat)
+    };
+    broadcast(&players, id, told);
+    Went::Nowhere
 }
 
 /// A boat's helm, asked for.
@@ -2326,7 +2345,7 @@ fn board(shared: &Shared, id: PlayerId, boat: BoatId) -> Went {
         // it was, and the state is the whole of the answer either way.
         let granted = stepping_from.is_some()
             && state.occupant.is_none()
-            && state.position.distance(player.position) <= BOARD_GRANT;
+            && state.hull.at.distance(player.position) <= BOARD_GRANT;
         let mut towed = None;
         if granted {
             let state = boats.get_mut(&boat).expect("looked up a breath ago");
@@ -2342,7 +2361,7 @@ fn board(shared: &Shared, id: PlayerId, boat: BoatId) -> Went {
             // was behind hears so from this very telling.
             state.towed_by = None;
             player.aboard = Some(boat);
-            player.position = state.position;
+            player.position = state.hull.at;
             // The rowing boat stays in the water, on the ship's painter: it
             // goes where the ship goes from here — see [`take_the_helm`] —
             // and is the boat the ship lowers next. The keeper stays theirs,
@@ -2441,7 +2460,7 @@ fn lower_a_boat(shared: &Shared, id: PlayerId, position: Vec2, heading: f32) -> 
             .get(&id)
             .and_then(|player| player.aboard)
             .and_then(|aboard| boats.get(&aboard))
-            .map(|state| state.position)
+            .map(|state| state.hull.at)
     };
     let holds = ship_at.is_some_and(|at| shared.world.height(at.x, at.y) >= -ANCHOR_DEPTH);
 
@@ -2466,7 +2485,7 @@ fn lower_a_boat(shared: &Shared, id: PlayerId, position: Vec2, heading: f32) -> 
         let ship = player.aboard.filter(|aboard| {
             boats.get(aboard).is_some_and(|state| {
                 state.kind == BoatKind::Sloop
-                    && state.position.distance(position) <= BOARD_GRANT
+                    && state.hull.at.distance(position) <= BOARD_GRANT
                     && holds
             })
         });
@@ -2505,7 +2524,7 @@ fn lower_a_boat(shared: &Shared, id: PlayerId, position: Vec2, heading: f32) -> 
                         .find(|(_, boat)| {
                             boat.kind == BoatKind::Rowboat
                                 && boat.occupant.is_none()
-                                && boat.position.distance(position) <= BOARD_GRANT
+                                && boat.hull.at.distance(position) <= BOARD_GRANT
                         })
                         .map(|(&found, _)| found)
                 });
@@ -2519,8 +2538,9 @@ fn lower_a_boat(shared: &Shared, id: PlayerId, position: Vec2, heading: f32) -> 
                 // looking for.
                 let state = BoatState {
                     kind: BoatKind::Rowboat,
-                    position,
-                    heading,
+                    // Lowered over the side and let go of: a tender enters
+                    // the water at rest, whatever the ship was doing.
+                    hull: Underway::lying(position, heading),
                     occupant: Some(id),
                     keeper: Some(token),
                     towed_by: None,
@@ -3396,6 +3416,17 @@ fn wait_out(since: Option<Instant>, pace: Duration) {
 /// through.
 pub(crate) fn reachable(position: Vec2) -> bool {
     position.is_finite() && position.abs().max_element() <= MAX_RANGE
+}
+
+/// Whether a hull's telling is one the world can hold: somewhere in it, and
+/// no number that arithmetic would spread to every other. A velocity is
+/// checked as strictly as a place, an infinity in it being the one thing
+/// that would reach a listening client's solver and stay there.
+pub(crate) fn sound(hull: Underway) -> bool {
+    reachable(hull.at)
+        && hull.heading.is_finite()
+        && hull.way.is_finite()
+        && hull.swinging.is_finite()
 }
 
 /// Whether a chunk coordinate names ground anybody could stand on — the same

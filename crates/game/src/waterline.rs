@@ -42,12 +42,23 @@
 //! and the two would disagree at the shoreline, which is the one place a
 //! player is looking.
 //!
-//! A hull nobody here is steering is [`avian2d::prelude::RigidBody::Kinematic`]:
-//! it is moved to wherever the wire last said, and it shoves without being
-//! shoved. That is the authority split as physics — see
-//! [`crate::boat::Fleet`] — and not a simplification. A client may decide
-//! where its own hull is and may be stopped by somebody else's; it may not
-//! decide where somebody else's hull ends up.
+//! Every hull is the same kind of body — [`avian2d::prelude::RigidBody::Dynamic`],
+//! carrying its own displacement — including the ones nobody here is
+//! steering. That is not a hole in the authority split; it is what makes the
+//! split cost nothing. A collision is decided by two masses and two
+//! velocities, and a hull the wire moved used to have neither: it was an
+//! infinite mass lying still, so a dinghy checked a ship exactly as hard as
+//! a ship checked a dinghy, and two boats closing at twenty knots met as one
+//! boat hitting a moored one.
+//!
+//! So every client solves every hull, and keeps only its own answer. What a
+//! client may not do is *decide* where somebody else's hull ends up:
+//! [`crate::boat::follow_the_telling`] steers a told hull onto the last word
+//! about it, so the give it took a moment ago decays into what the wire says
+//! — which is usually the same give, the client whose boat it is having
+//! solved the same collision from the other side. The one hull with no
+//! authority behind it is an empty one, and this client takes that up for as
+//! long as it is pushing it; see [`crate::boat::claim_the_shoved`].
 
 use avian2d::physics_transform::PhysicsTransformConfig;
 use avian2d::prelude::*;
@@ -151,6 +162,11 @@ pub fn afloat(length: f32, beam: f32, displacement: f32) -> impl Bundle {
         Mass(displacement),
         Restitution::new(PLANKING_BOUNCE),
         Friction::new(PLANKING_DRAG),
+        // Opt-in, and asked for on every hull because what reads it is a
+        // question about pairs: which empty boat this client has run into
+        // and is therefore answering for — see
+        // [`crate::boat::claim_the_shoved`].
+        CollidingEntities::default(),
         // A solver puts a body that has stopped moving to sleep, to spare
         // itself the arithmetic. There are a handful of hulls on this
         // water and the arithmetic is nothing, while a boat asleep is a

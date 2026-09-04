@@ -9,7 +9,7 @@ use glam::{IVec2, Vec2};
 use protocol::ground::{dequantize, CHUNK_METRES};
 use protocol::survey::{in_sight, in_sight_along, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
-    BeastId, BeastKind, BoatKind, PlayerId, ToClient, ToServer, Token, PROTOCOL_VERSION,
+    BeastId, BeastKind, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, PROTOCOL_VERSION,
 };
 use server::{Host, Server};
 use world::archipelago::WorldConfig;
@@ -212,14 +212,10 @@ impl Client {
         let deadline = Instant::now() + PATIENCE;
         loop {
             if let ToClient::Boat {
-                id,
-                position,
-                heading,
-                occupant,
-                ..
+                id, hull, occupant, ..
             } = self.hear_by(deadline, "word of any boat")
             {
-                return (id, position, heading, occupant);
+                return (id, hull.at, hull.heading, occupant);
             }
         }
     }
@@ -246,13 +242,12 @@ impl Client {
             if let ToClient::Boat {
                 id,
                 kind,
-                position,
-                heading,
+                hull,
                 occupant,
                 ..
             } = self.hear_by(deadline, awaited)
             {
-                return (id, kind, position, heading, occupant);
+                return (id, kind, hull.at, hull.heading, occupant);
             }
         }
     }
@@ -300,13 +295,10 @@ impl Client {
         let deadline = Instant::now() + PATIENCE;
         loop {
             if let ToClient::Boat {
-                id,
-                position,
-                towed_by,
-                ..
+                id, hull, towed_by, ..
             } = self.hear_by(deadline, "that hull arriving")
             {
-                if id == boat && position == at {
+                if id == boat && hull.at == at {
                     return towed_by;
                 }
             }
@@ -1316,8 +1308,7 @@ fn leaving_and_rejoining_with_papers_resumes_in_place() {
     // still unread would throw it away, see [`Client::caught_up`].
     let out = Vec2::new(640.0, -320.0);
     bob.say(ToServer::Helm {
-        position: out,
-        heading: 0.0,
+        hull: Underway::lying(out, 0.0),
         tender: None,
     });
     bob.caught_up();
@@ -1361,8 +1352,7 @@ fn a_kept_world_reopens_where_it_left_off() {
     let (client, _id, _spawn, _facing, token) = Client::join_presenting(addr, None);
     let out = Vec2::new(2_048.0, -512.0);
     client.say(ToServer::Helm {
-        position: out,
-        heading: 0.0,
+        hull: Underway::lying(out, 0.0),
         tender: None,
     });
     // An answered chunk is proof the sailing was processed: one connection,
@@ -1433,8 +1423,7 @@ fn a_boat_left_at_anchor_is_anyones_within_reach() {
     // test wants to find it and prove nothing at all.
     let far = alices_spawn + Vec2::new(600.0, 0.0);
     alice.say(ToServer::Helm {
-        position: far,
-        heading: 1.0,
+        hull: Underway::lying(far, 1.0),
         tender: None,
     });
     alice.say(ToServer::Disembark {
@@ -1565,8 +1554,7 @@ fn a_copy_of_somebodys_papers_lowers_a_boat_without_hoisting_theirs() {
     assert_ne!(tender, ship);
     let far = spawn + Vec2::new(400.0, 0.0);
     alice.say(ToServer::Helm {
-        position: far,
-        heading: 0.0,
+        hull: Underway::lying(far, 0.0),
         tender: None,
     });
     alice.say(ToServer::Disembark { position: far });
@@ -1687,8 +1675,7 @@ fn a_boat_is_not_lowered_where_the_anchor_cannot_hold() {
         .find(|at| world.height(at.x, at.y) < -protocol::ground::ANCHOR_DEPTH)
         .expect("an ocean has open water in it");
     client.say(ToServer::Helm {
-        position: deep,
-        heading: 0.0,
+        hull: Underway::lying(deep, 0.0),
         tender: None,
     });
     client.say(ToServer::Lower {
@@ -1701,8 +1688,7 @@ fn a_boat_is_not_lowered_where_the_anchor_cannot_hold() {
     );
 
     client.say(ToServer::Helm {
-        position: spawn,
-        heading: 0.0,
+        hull: Underway::lying(spawn, 0.0),
         tender: None,
     });
     client.say(ToServer::Lower {
@@ -1785,8 +1771,7 @@ fn a_boat_left_behind_is_hoisted_when_its_keeper_lowers_another() {
     // and still water a `Lower` is granted in.
     let far = another_anchorage(&behind_the_curtain(7), spawn, 40.0);
     client.say(ToServer::Helm {
-        position: far,
-        heading: 0.0,
+        hull: Underway::lying(far, 0.0),
         tender: None,
     });
 
@@ -1891,8 +1876,7 @@ fn a_beached_tender_is_still_there_when_its_keeper_walked_out_of_the_world() {
 
     let ashore = spawn + Vec2::new(40.0, 0.0);
     alice.say(ToServer::Helm {
-        position: ashore,
-        heading: 0.0,
+        hull: Underway::lying(ashore, 0.0),
         tender: None,
     });
     alice.say(ToServer::Disembark { position: ashore });
@@ -2036,8 +2020,7 @@ fn a_dinghy_somebody_else_took_up_is_not_hoisted_from_under_them() {
     // Bob sails up and lowers where it lies, which takes that hull rather
     // than minting another — and it is his from then on.
     bob.say(ToServer::Helm {
-        position: afloat + Vec2::new(2.0, 0.0),
-        heading: 0.0,
+        hull: Underway::lying(afloat + Vec2::new(2.0, 0.0), 0.0),
         tender: None,
     });
     bob.say(ToServer::Lower {
@@ -2050,8 +2033,7 @@ fn a_dinghy_somebody_else_took_up_is_not_hoisted_from_under_them() {
     // has to still be when he next wants it.
     let beach = afloat + Vec2::new(60.0, 0.0);
     bob.say(ToServer::Helm {
-        position: beach,
-        heading: 0.0,
+        hull: Underway::lying(beach, 0.0),
         tender: None,
     });
     bob.say(ToServer::Disembark { position: beach });
@@ -2101,13 +2083,11 @@ fn boarding_the_ship_from_the_tender_takes_it_in_tow() {
 
     // Rowed off and back — the tender is a boat like any other under way.
     client.say(ToServer::Helm {
-        position: spawn + Vec2::new(40.0, 0.0),
-        heading: 0.5,
+        hull: Underway::lying(spawn + Vec2::new(40.0, 0.0), 0.5),
         tender: None,
     });
     client.say(ToServer::Helm {
-        position: alongside,
-        heading: 0.5,
+        hull: Underway::lying(alongside, 0.5),
         tender: None,
     });
 
@@ -2128,9 +2108,8 @@ fn boarding_the_ship_from_the_tender_takes_it_in_tow() {
     let away = spawn + Vec2::new(40.0, 0.0);
     let astern = away + Vec2::new(-8.0, 0.0);
     client.say(ToServer::Helm {
-        position: away,
-        heading: 0.5,
-        tender: Some((astern, 0.5)),
+        hull: Underway::lying(away, 0.5),
+        tender: Some(Underway::lying(astern, 0.5)),
     });
     assert_eq!(
         bob.boat_came_to(tender, astern),
@@ -2222,9 +2201,8 @@ fn boarding_a_tender_off_a_painter_cuts_it_free() {
     // moves nothing by it: Bob, sitting in the hull, hears only her ship.
     let away = spawn + Vec2::new(40.0, 0.0);
     alice.say(ToServer::Helm {
-        position: away,
-        heading: 0.0,
-        tender: Some((away + Vec2::new(-8.0, 0.0), 0.0)),
+        hull: Underway::lying(away, 0.0),
+        tender: Some(Underway::lying(away + Vec2::new(-8.0, 0.0), 0.0)),
     });
     bob.say(ToServer::Command {
         line: "help".to_string(),
@@ -2268,8 +2246,7 @@ fn a_ships_helm_is_taken_from_a_tender_and_never_from_another_deck() {
     // boat's state, unchanged.
     let alongside = bobs_spawn + Vec2::new(3.0, 0.0);
     alice.say(ToServer::Helm {
-        position: alongside,
-        heading: 0.0,
+        hull: Underway::lying(alongside, 0.0),
         tender: None,
     });
     alice.say(ToServer::Board { boat: b_boat });
@@ -2311,8 +2288,7 @@ fn a_returning_keeper_is_seated_back_at_their_helm() {
     let boat = aboard.expect("aboard");
     let out = spawn + Vec2::new(900.0, -250.0);
     client.say(ToServer::Helm {
-        position: out,
-        heading: 2.0,
+        hull: Underway::lying(out, 2.0),
         tender: None,
     });
     // An answered chunk proves the helm report was processed.
@@ -2338,8 +2314,7 @@ fn a_taken_boat_is_not_resumed_into() {
     let a_boat = a_boat.expect("aboard");
     let far = alices_spawn + Vec2::new(600.0, 0.0);
     alice.say(ToServer::Helm {
-        position: far,
-        heading: 1.0,
+        hull: Underway::lying(far, 1.0),
         tender: None,
     });
     let _ = alice.ask_for(IVec2::new(5_000, 5_000));
@@ -2383,8 +2358,7 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     // what says the helm is free before he asks for it.
     let far = alices_spawn + Vec2::new(600.0, 0.0);
     alice.say(ToServer::Helm {
-        position: far,
-        heading: 1.0,
+        hull: Underway::lying(far, 1.0),
         tender: None,
     });
     // Where the boat ends up is the whole of this test, so the sailing is
@@ -2408,8 +2382,7 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     bob.say(ToServer::Board { boat: a_boat });
     let moored = far + Vec2::new(0.0, 400.0);
     bob.say(ToServer::Helm {
-        position: moored,
-        heading: 2.0,
+        hull: Underway::lying(moored, 2.0),
         tender: None,
     });
     bob.say(ToServer::Disembark {
@@ -2822,8 +2795,7 @@ fn sailing_past_a_coast_earns_the_ground_it_passes() {
     // the entry island's own coast, some new shore.
     let out = spawn + Vec2::new(512.0, 0.0);
     client.say(ToServer::Helm {
-        position: out,
-        heading: 0.0,
+        hull: Underway::lying(out, 0.0),
         tender: None,
     });
 
@@ -2862,8 +2834,7 @@ fn a_crossing_between_two_reports_leaves_no_hole() {
         "the test's midpoint is visible from an end, and proves nothing"
     );
     client.say(ToServer::Helm {
-        position: out,
-        heading: 0.0,
+        hull: Underway::lying(out, 0.0),
         tender: None,
     });
 
@@ -2889,8 +2860,7 @@ fn a_returning_player_is_told_back_the_survey_they_left_with() {
     let (client, _id, spawn, _facing, token) = Client::join_presenting(addr, None);
     let out = spawn + Vec2::new(768.0, 0.0);
     client.say(ToServer::Helm {
-        position: out,
-        heading: 0.0,
+        hull: Underway::lying(out, 0.0),
         tender: None,
     });
     let wanted = in_sight_of(out);
@@ -2939,8 +2909,7 @@ fn a_jump_no_hull_could_make_is_followed_only_so_far() {
     let claimed = spawn + Vec2::new(2.0 * server::SURVEY_SWEEP, 0.0);
     let believed = spawn + Vec2::new(server::SURVEY_SWEEP, 0.0);
     client.say(ToServer::Helm {
-        position: claimed,
-        heading: 0.0,
+        hull: Underway::lying(claimed, 0.0),
         tender: None,
     });
 
@@ -2984,8 +2953,7 @@ fn a_world_sailed_to_its_own_edge_opens_again() {
     let brink = Vec2::new(1_279_999.0, 0.0);
     let (client, _id, _spawn, _facing, token) = Client::join_presenting(addr, None);
     client.say(ToServer::Helm {
-        position: brink,
-        heading: 0.0,
+        hull: Underway::lying(brink, 0.0),
         tender: None,
     });
     // Asked and answered before hanging up, which is what says the helm word
@@ -3040,8 +3008,7 @@ fn a_player_may_hang_up_while_their_survey_is_still_being_told_back() {
     let (client, _id, spawn, _facing, token) = Client::join_presenting(addr, None);
     let out = spawn + Vec2::new(1_536.0, 0.0);
     client.say(ToServer::Helm {
-        position: out,
-        heading: 0.0,
+        hull: Underway::lying(out, 0.0),
         tender: None,
     });
     let sailed = client.hear_the_survey(HashMap::new(), |charted| {
@@ -3190,8 +3157,7 @@ fn sail_around(
             sailed.distance(at) / server::PLAUSIBLE_SPEED,
         ));
         client.say(ToServer::Helm {
-            position: at,
-            heading: 0.0,
+            hull: Underway::lying(at, 0.0),
             tender: None,
         });
         charted = client.hear_the_survey(charted, |charted| {
@@ -3216,8 +3182,7 @@ fn sail_to(client: &Client, from: Vec2, to: Vec2) {
         from.distance(to) / server::PLAUSIBLE_SPEED,
     ));
     client.say(ToServer::Helm {
-        position: to,
-        heading: 0.0,
+        hull: Underway::lying(to, 0.0),
         tender: None,
     });
 }
@@ -3808,8 +3773,7 @@ fn a_shark_is_raised_out_in_the_deep_water_and_swims_in() {
     let shallows =
         shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
     client.say(ToServer::Helm {
-        position: shallows,
-        heading: 0.0,
+        hull: Underway::lying(shallows, 0.0),
         tender: None,
     });
 
@@ -3844,8 +3808,7 @@ fn a_shark_is_forgotten_when_everyone_leaves_its_waters() {
     let shallows =
         shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
     client.say(ToServer::Helm {
-        position: shallows,
-        heading: 0.0,
+        hull: Underway::lying(shallows, 0.0),
         tender: None,
     });
     let (shark, _, _) = client.hear_a_beast(BeastKind::Shark);
@@ -3854,8 +3817,7 @@ fn a_shark_is_forgotten_when_everyone_leaves_its_waters() {
     // shark is minded.
     let away = (spawn - facing).normalize_or(Vec2::X);
     client.say(ToServer::Helm {
-        position: shallows + away * 2_000.0,
-        heading: 0.0,
+        hull: Underway::lying(shallows + away * 2_000.0, 0.0),
         tender: None,
     });
 
@@ -3914,8 +3876,7 @@ fn console_lines_are_answered_and_a_time_command_reaches_everyone() {
     let shallows =
         shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
     asker.say(ToServer::Helm {
-        position: shallows,
-        heading: 0.0,
+        hull: Underway::lying(shallows, 0.0),
         tender: None,
     });
     asker.say(ToServer::Command {
@@ -3963,8 +3924,7 @@ fn pods_and_whales_share_the_open_water() {
     let shallows =
         shallows_between(&world, spawn, facing).expect("the entry island should have a coast");
     client.say(ToServer::Helm {
-        position: shallows,
-        heading: 0.0,
+        hull: Underway::lying(shallows, 0.0),
         tender: None,
     });
 
@@ -4205,8 +4165,7 @@ fn where_reads_the_helm_the_water_and_the_hulls_that_are_yours() {
     // itself can, the helm being the one thing it is the authority on. That
     // is the state the reading exists to name.
     client.say(ToServer::Helm {
-        position: ashore,
-        heading: 0.0,
+        hull: Underway::lying(ashore, 0.0),
         tender: None,
     });
     client.caught_up();
@@ -4361,4 +4320,100 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
         client.nothing_was_said_about_a_boat(),
         "a hull followed a walker up the beach"
     );
+}
+
+#[test]
+fn an_empty_hull_is_shoved_where_the_client_that_pushed_it_says() {
+    // Nobody reports a boat nobody is aboard, so a boat shoved by somebody's
+    // bow would go on lying wherever the world last heard of it. Whoever
+    // shoved it answers for it instead — see `ToServer::Shove` — and the
+    // rest of the world hears where it went, way and all.
+    let addr = host(7);
+    let (alice, _, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let ship = aboard.expect("a newcomer's story starts aboard");
+    let (told, ..) = alice.hear_a_boat_kinded();
+    assert_eq!(told, ship);
+
+    // A dinghy in the water beside her, stepped out of onto the shore: the
+    // one hull in this world nobody is answering for.
+    let alongside = spawn + Vec2::new(3.0, 0.0);
+    alice.say(ToServer::Lower {
+        position: alongside,
+        heading: 0.0,
+    });
+    let (tender, kind, ..) = alice.hear_a_boat_kinded();
+    assert_eq!(kind, BoatKind::Rowboat);
+    let (_ship_at_anchor, ..) = alice.hear_a_boat_kinded();
+    alice.say(ToServer::Disembark { position: spawn });
+    let (_, _, _, _, empty) = alice.hear_a_boat_kinded();
+    assert_eq!(empty, None, "she is still aboard the dinghy");
+
+    // Somebody else, to hear about it: a shove reaches everyone but the
+    // client that reported it, exactly as a helm report does.
+    let (bob, ..) = Client::join_aboard(addr, None);
+    bob.caught_up();
+
+    let shoved = alongside + Vec2::new(2.0, -1.0);
+    alice.say(ToServer::Shove {
+        boat: tender,
+        hull: Underway {
+            at: shoved,
+            heading: 0.25,
+            // Still making way, as a boat knocked clear is — and the half of
+            // this the wire used to leave out entirely.
+            way: Vec2::new(1.0, -0.5),
+            swinging: 0.0,
+        },
+    });
+
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let ToClient::Boat { id, hull, .. } = bob.hear_by(deadline, "the shoved hull") {
+            if id == tender && hull.at == shoved {
+                assert_eq!(hull.way, Vec2::new(1.0, -0.5), "it arrived lying still");
+                assert_eq!(hull.heading, 0.25);
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_hull_somebody_is_aboard_is_not_shoved_by_anybody_elses_word() {
+    // The rule that keeps a shove from being a way to move somebody else's
+    // boat about: a hull with a player at its helm is that player's to
+    // report, and a word about it from anyone else changes nothing at all.
+    let addr = host(7);
+    let (alice, ..) = Client::join_aboard(addr, None);
+    let (bob, _, bob_spawn, _token, bobs) = Client::join_aboard(addr, None);
+    let bobs_ship = bobs.expect("a newcomer's story starts aboard");
+    alice.caught_up();
+
+    // Alice claims to have pushed Bob's ship across the bay.
+    let away = bob_spawn + Vec2::new(400.0, 0.0);
+    alice.say(ToServer::Shove {
+        boat: bobs_ship,
+        hull: Underway::lying(away, 0.0),
+    });
+    alice.caught_up();
+
+    // Nothing was relayed, and the world still has his ship where he left
+    // it: he says where it is, and nobody else does. Bob's own word for it
+    // is what Alice hears, and it is the one that took.
+    bob.say(ToServer::Helm {
+        hull: Underway::lying(bob_spawn, 0.0),
+        tender: None,
+    });
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let ToClient::Boat { id, hull, .. } = alice.hear_by(deadline, "word of Bob's ship") {
+            if id == bobs_ship {
+                assert_eq!(
+                    hull.at, bob_spawn,
+                    "somebody else's word moved a hull its own helmsman was holding"
+                );
+                break;
+            }
+        }
+    }
 }
