@@ -1450,6 +1450,7 @@ impl Fleet {
         commands: &mut Commands,
         players: &crate::player::Players,
         poses: &Query<&Transform, With<Vessel>>,
+        ropes: &Query<&Painter>,
         id: BoatId,
     ) {
         let Some(hull) = self.hulls.remove(&id) else {
@@ -1457,6 +1458,15 @@ impl Fleet {
         };
         self.crews.remove(&id);
         self.towed.take_if(|towed| *towed == id);
+        // A rope made fast to a hull that is going has to go with it. The
+        // joint is an entity of its own and nothing owns it but the hull it
+        // holds, so [`make_fast`]'s casting off cannot reach one whose
+        // tender has already been despawned — it can only iterate hulls
+        // that still exist. Left alone it stands there for the rest of the
+        // world, made fast to nothing.
+        if let Ok(painter) = ropes.get(hull) {
+            commands.entity(painter.0).despawn();
+        }
         if self.helmed.take_if(|held| *held == id).is_some() {
             // Where the hull stands, if the scene has it standing anywhere,
             // and the world origin if not. Unlike [`Fleet::told`] there is
@@ -1755,7 +1765,6 @@ pub(crate) fn spawn_hull(
             Drawn(pose),
             Sounding {
                 at: laid,
-                angle: waterline::across(yaw_of(&pose)),
                 // Nothing is known about the ground yet, and a hull put
                 // down where there is none is in water it is allowed to be
                 // in until a chunk says otherwise — the same benefit of the
@@ -2036,10 +2045,11 @@ pub(crate) fn lose_the_hulls(
     mut fleet: ResMut<Fleet>,
     players: crate::player::Players,
     poses: Query<&Transform, With<Vessel>>,
+    ropes: Query<&Painter>,
     mut gone: MessageReader<crate::net::HullGone>,
 ) {
     for hull in gone.read() {
-        fleet.gone(&mut commands, &players, &poses, hull.id);
+        fleet.gone(&mut commands, &players, &poses, &ropes, hull.id);
     }
 }
 
@@ -2624,7 +2634,6 @@ fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32
 #[derive(Component)]
 struct Sounding {
     at: Vec2,
-    angle: f32,
     aground: f32,
 }
 
@@ -2723,7 +2732,6 @@ fn take_the_plane(mut hulls: Placed) {
         // afresh here: an infinity accepts the next pose whatever it is,
         // and the depth it records then is the truth of the new spot.
         sounding.at = at.0;
-        sounding.angle = angle.as_radians();
         sounding.aground = f32::INFINITY;
     }
 }
@@ -2758,13 +2766,27 @@ fn remember_the_drawing(mut hulls: Query<(&Transform, &mut Drawn), With<Vessel>>
 /// one it was actually allowed to be in. The second clause is what frees a
 /// hull that finds itself aground through no fault of its own: a `goto` on
 /// to a shoal, or ground streaming in underneath one already sitting there.
+///
+/// What is held is the hull's *place*, and never the way it is pointing. A
+/// bow comes round whatever is under it — see [`steer`], whose promise that
+/// is — and putting the heading back along with the place breaks it
+/// completely: a yaw sweeps the keel over different ground, so almost any
+/// turn reads as deeper aground and is undone, and a hull driven onto a
+/// beach cannot be turned at all. Measured, on a hull run up the test
+/// island: five seconds of helm either way came round exactly nothing.
+///
+/// Which is why the depth is read afresh at the pose the hull is left in
+/// rather than remembered from the one it was refused. The heading has
+/// moved on, the keel is over different ground, and a baseline taken at
+/// some earlier bearing would hold the hull off water it could now float
+/// in.
 fn hold_the_ground(
     ground: Option<Res<Ground>>,
     mut hulls: Query<
         (
             &Rigged,
             &mut Position,
-            &mut Rotation,
+            &Rotation,
             &mut LinearVelocity,
             &mut Sounding,
         ),
@@ -2772,21 +2794,28 @@ fn hold_the_ground(
     >,
 ) {
     let ground = ground.as_deref();
-    for (rigged, mut at, mut angle, mut way, mut sounding) in &mut hulls {
+    for (rigged, mut at, angle, mut way, mut sounding) in &mut hulls {
         let hull = hull_of(rigged.0);
-        let pose = Transform::from_xyz(at.x, 0.0, at.y)
-            .with_rotation(Quat::from_rotation_y(waterline::across(angle.as_radians())));
-        let aground = grounding(hull, ground, &pose);
+        // Every reading is taken at the heading the hull is pointing now,
+        // that never being this system's to alter.
+        let facing = Quat::from_rotation_y(waterline::across(angle.as_radians()));
+        let sounded = |where_: Vec2| {
+            grounding(
+                hull,
+                ground,
+                &Transform::from_xyz(where_.x, 0.0, where_.y).with_rotation(facing),
+            )
+        };
+        let aground = sounded(at.0);
         if aground <= 0.0 || aground <= sounding.aground {
             sounding.at = at.0;
-            sounding.angle = angle.as_radians();
             sounding.aground = aground;
             continue;
         }
         // Put back, and stopped where it touched.
         at.0 = sounding.at;
-        *angle = Rotation::radians(sounding.angle);
         way.0 = Vec2::ZERO;
+        sounding.aground = sounded(sounding.at);
     }
 }
 
@@ -2841,7 +2870,6 @@ fn make_fast(
     // ship that tows is never itself towed, and the two halves of this
     // system read and write the same components.
     ships: Query<(&Rigged, &Position, &Rotation), Without<Towed>>,
-    made: Query<&Painter>,
     mut towed: Query<
         (
             Entity,
@@ -2909,9 +2937,7 @@ fn make_fast(
         commands.entity(tender).insert(Painter(rope));
     }
     for (tender, painter) in &cast_off {
-        if made.get(tender).is_ok() {
-            commands.entity(painter.0).despawn();
-        }
+        commands.entity(painter.0).despawn();
         commands.entity(tender).remove::<Painter>();
     }
 }
@@ -3037,7 +3063,7 @@ type TowedHull<'w, 's> = Query<
 /// The rope itself, kept on the hull it tows so that casting off can find
 /// it — a joint is an entity of its own, and nothing else would say which.
 #[derive(Component)]
-struct Painter(Entity);
+pub struct Painter(Entity);
 
 /// The yaw a hull is pointed at, as the wire spells a heading — see
 /// [`protocol::ToClient::Boat`].
@@ -5882,23 +5908,42 @@ mod tests {
     fn the_helm_answers_while_aground() {
         // A refused turn on top of a refused advance is a hull wedged against
         // a shore for good, so the bow comes round whatever is under it.
+        //
+        // Driven properly aground first and then given the helm for five
+        // seconds, because the interesting case is not the frame the keel
+        // touches on — it is a hull that has been sitting in the hillside
+        // for a while, which is where a rule that reads the ground under a
+        // *pose* can pin one. This asked for a bare `rotation != before`
+        // once, and a version of [`hold_the_ground`] that put the heading
+        // back along with the place passed it on the one frame of swing it
+        // got before pinning, then held the bow at exactly nothing for as
+        // long as anybody cared to hold the key.
         let mut app = island_app();
         place(
             &mut app,
             Vec2::new(TEST_ISLAND_REACH - 1.0, 0.0),
             Vec2::new(-1.0, 0.0),
         );
-        let before = boat(&mut app).rotation;
-
         wind_astern(&mut app, 7.0);
         tap(&mut app, KeyCode::ArrowUp);
-        hold(&mut app, KeyCode::ArrowLeft);
-        run_frames(&mut app, 20);
+        run_frames(&mut app, 200);
+        assert!(bite(&mut app) > 0.0, "the boat was meant to be aground");
 
-        assert_ne!(
-            boat(&mut app).rotation,
-            before,
-            "a boat the ground has stopped cannot come round"
-        );
+        for (key, way) in [
+            (KeyCode::ArrowLeft, "port"),
+            (KeyCode::ArrowRight, "starboard"),
+        ] {
+            let before = heading_yaw(&mut app);
+            hold(&mut app, key);
+            run_frames(&mut app, 300);
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release_all();
+            let round = (heading_yaw(&mut app) - before).abs();
+            assert!(
+                round > std::f32::consts::FRAC_PI_2,
+                "five seconds of {way} helm brought an aground bow round {round} rad"
+            );
+        }
     }
 }
