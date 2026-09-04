@@ -583,8 +583,8 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
             }
             // Water: the hull is put down at a berth off it — the same
             // walk [`Archipelago::spawn`] uses, see [`berth_off`], so a
-            // driven ship is left in water its boat can be lowered from
-            // wherever the coast allows one.
+            // driven ship is left in water its crew can step off it in
+            // wherever the coast allows.
             return (berth_off(shore, *out, |x, z| world.height(x, z)), shore);
         }
     }
@@ -605,15 +605,9 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
 /// onto a hillside is the one thing the game itself never does, so a grant
 /// asked for from a summit is answered with a walk and a swim.
 ///
-/// Their own hull of that kind comes to them if one is lying free, and one
-/// is minted only if none is — the door's own preference for a spare over a
-/// mint, see [`crate::BoatState::keeper`] and `fresh_hull` in the join path.
-/// That bounds the *asking* and not the fleet: a hull somebody is aboard is
-/// nobody's spare, so boarding what you were dealt and asking again is a
-/// second hull, filed in the world and posted to every future joiner.
-/// Deliberately, that being the only way to come by two — and there is
-/// nothing to hoist in its place the way `Lower` retires a tender, a mint
-/// happening precisely when no free hull of the kind is left to take back.
+/// Minted every time, a hull being nobody's to bring back: what `grant`
+/// adds to the world stays in it, filed and posted to every future joiner,
+/// which is the rate the join itself runs at.
 fn grant(asked: Asked) -> Result<String, String> {
     let Asked {
         shared, from, args, ..
@@ -632,15 +626,7 @@ fn grant(asked: Asked) -> Result<String, String> {
     // so a player who sails on in the moment between is dealt a hull where
     // they asked from rather than where they now are, which the answer's own
     // coordinates own up to.
-    let who = {
-        let players = shared.players.held();
-        players
-            .get(&from)
-            .map(|player| (player.token, player.position))
-    };
-    let Some((token, asker)) = who else {
-        // Nobody by that id — see [`stands_at`], which is the same miss
-        // read without the token this one also wants.
+    let Some(asker) = stands_at(shared, from) else {
         return Err("you are nowhere a boat could reach you".to_string());
     };
 
@@ -651,7 +637,7 @@ fn grant(asked: Asked) -> Result<String, String> {
         .then(|| standing_off(&shared.world, asker).0);
     let at = offing.unwrap_or(asker);
 
-    let minted = {
+    {
         // The roster first and the boats under it — the nesting the two
         // locks allow — so that the hull's new state and the telling of it
         // leave together. A telling let go of first is one another
@@ -659,62 +645,34 @@ fn grant(asked: Asked) -> Result<String, String> {
         // one steering the hull holds a helm the world has already given
         // away.
         let players = shared.players.held();
-        let (minted, telling) = {
+        let telling = {
             let mut boats = shared.boats.held();
-            let theirs = boats
-                .iter()
-                .find(|(_, boat)| {
-                    boat.kind == kind && boat.occupant.is_none() && boat.keeper == Some(token)
-                })
-                .map(|(&boat, _)| boat);
-            match theirs {
-                Some(boat) => {
-                    let state = boats.get_mut(&boat).expect("looked up a breath ago");
-                    state.hull = Underway::lying(at, state.hull.heading);
-                    (false, state.told(boat))
-                }
-                None => {
-                    let boat = BoatId(keeper::mint());
-                    // Written whole, on the same reasoning `Lower` gives for
-                    // writing its tender that way: a hull's fields are
-                    // settled in one place or they drift apart. The keeper
-                    // above all — this one is theirs from the moment it
-                    // touches the water, which is what makes the next
-                    // `grant` bring it back rather than mint another.
-                    let state = BoatState {
-                        kind,
-                        hull: Underway::lying(at, 0.0),
-                        occupant: None,
-                        keeper: Some(token),
-                        towed_by: None,
-                    };
-                    let telling = state.told(boat);
-                    boats.insert(boat, state);
-                    (true, telling)
-                }
-            }
+            let boat = BoatId(keeper::mint());
+            let state = BoatState {
+                kind,
+                hull: Underway::lying(at, 0.0),
+                occupant: None,
+                towed_by: None,
+            };
+            let telling = state.told(boat);
+            boats.insert(boat, state);
+            telling
         };
         // Everyone, the asker included: no client is steering this hull, so
         // nobody here is the authority on it that a helmsman would be.
         broadcast_all(&players, telling);
-        minted
-    };
+    }
 
-    let whose = if minted {
-        format!("a {named} is")
-    } else {
-        format!("your {named} is")
-    };
     Ok(match offing {
         // How far they have to go to reach it, which is the whole of what a
         // grant answered from dry land has to tell somebody.
         Some(off) => format!(
-            "{whose} in the water {} m off, at {} {}",
+            "a {named} is in the water {} m off, at {} {}",
             round(asker.distance(off)),
             round(at.x),
             round(at.y)
         ),
-        None => format!("{whose} here, at {} {}", round(at.x), round(at.y)),
+        None => format!("a {named} is here, at {} {}", round(at.x), round(at.y)),
     })
 }
 
@@ -837,21 +795,21 @@ fn spawn(asked: Asked) -> Result<String, String> {
 }
 
 /// `where`: the asker's own situation — where they stand, the hull they are
-/// at the helm of and any others they keep, and what the water is doing under
+/// at the helm of and what it has in tow, and what the water is doing under
 /// them.
 ///
 /// One reading and not three because they are one question. What it gets
 /// asked in the middle of is *why will this hull not do what I asked* — a
-/// lower refused, a helm that cannot be left — and every one of those turns
-/// on the three together: whose hull, where, and how much water. Three
-/// commands would be three round trips and three chances for the world to
-/// move between them.
+/// helm that cannot be left, a boat that will not come in tow — and every
+/// one of those turns on the three together: which hull, where, and how much
+/// water. Three commands would be three round trips and three chances for
+/// the world to move between them.
 ///
 /// A reading of the world rather than of the client, because the numbers a
 /// client could answer from are the ones it was *sent* — quantised, and only
 /// for chunks that have arrived. This side is where [`ANCHOR_DEPTH`] is
-/// actually weighed, in `lower_a_boat`, so a reading taken anywhere else
-/// could disagree with the refusal it is being used to explain.
+/// actually weighed, in `step_off`, so a reading taken anywhere else could
+/// disagree with the refusal it is being used to explain.
 fn whereabouts(asked: Asked) -> Result<String, String> {
     let Asked { shared, from, .. } = asked;
 
@@ -859,33 +817,23 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
     // crate keeps them, and let go before the world is asked: sounding may
     // mean generating an island, which is the wait `goto` explains and which
     // no lock may be held across.
-    let standing = {
+    let (at, helm, towing) = {
         let players = shared.players.held();
         let Some(player) = players.get(&from) else {
             // Unreachable from a served connection — see [`stands_at`].
             return Err("you are nowhere the world could find you".to_string());
         };
-        let (at, aboard, token) = (player.position, player.aboard, player.token);
+        let (at, aboard) = (player.position, player.aboard);
         let boats = shared.boats.held();
         let helm = aboard.and_then(|boat| boats.get(&boat).map(|state| state.kind));
-        // Hulls that are theirs but not under them. Keeping is not one
-        // apiece — see [`BoatState::keeper`] — so this is a list, and it is
-        // sorted by distance rather than left in the map's order so that two
-        // readings of one anchorage read the same way round.
-        let mut kept: Vec<(BoatKind, Vec2)> = boats
-            .values()
-            .filter(|state| state.keeper == Some(token) && state.occupant != Some(from))
-            .map(|state| (state.kind, state.hull.at))
-            .collect();
-        kept.sort_by(|a, b| {
-            at.distance(a.1)
-                .total_cmp(&at.distance(b.1))
-                .then(a.1.x.total_cmp(&b.1.x))
-                .then(a.1.y.total_cmp(&b.1.y))
+        let towing = aboard.and_then(|boat| {
+            boats
+                .values()
+                .find(|state| state.towed_by == Some(boat))
+                .map(|state| (state.kind, state.hull.at))
         });
-        (at, helm, kept)
+        (at, helm, towing)
     };
-    let (at, helm, kept) = standing;
     let height = shared.world.height(at.x, at.y);
 
     let mut lines = vec![match helm {
@@ -911,25 +859,15 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
         (false, true) => format!("ashore, {height:.1} m above the water"),
         (false, false) => format!("in {:.1} m of water", -height),
     });
-    lines.extend(kept.iter().map(|(kind, lies)| {
-        // Worded as `grant` words the same two cases, so that a hull under
-        // the asker's feet and a hull across the bay do not read as two
-        // different kinds of thing depending on which command asked.
-        match round(at.distance(*lies)) {
-            0 => format!(
-                "your {} is here, at {} {}",
-                named(*kind),
-                round(lies.x),
-                round(lies.y)
-            ),
-            off => format!(
-                "your {} lies {off} m off, at {} {}",
-                named(*kind),
-                round(lies.x),
-                round(lies.y)
-            ),
-        }
-    }));
+    if let Some((kind, lies)) = towing {
+        lines.push(format!(
+            "towing a {} {} m astern, at {} {}",
+            named(kind),
+            round(at.distance(lies)),
+            round(lies.x),
+            round(lies.y)
+        ));
+    }
     Ok(lines.join("\n"))
 }
 
