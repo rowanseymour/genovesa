@@ -402,11 +402,12 @@ impl BeastKind {
 /// player's record says which boat they were last aboard and has to still
 /// mean it next session.
 ///
-/// A boat is a vehicle, not a part of any player. It outlives visits, lies
-/// at anchor wherever its last helmsman left it — visible to everyone,
-/// including while that player is offline — and its helm belongs to whoever
-/// reaches it first. See [`ToClient::Boat`] for how one is told, and
-/// [`ToServer::Board`] for how one changes hands.
+/// A boat is a vehicle, not a part of any player, and it is nobody's but
+/// whoever is aboard: it outlives visits, lies at anchor wherever its last
+/// helmsman left it — visible to everyone, including while that player is
+/// offline — and its helm belongs to whoever reaches it next. See
+/// [`ToClient::Boat`] for how one is told, and [`ToServer::Board`] for how
+/// one changes hands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BoatId(pub u64);
 
@@ -424,11 +425,27 @@ impl std::fmt::Display for BoatId {
 pub enum BoatKind {
     /// A small Bermuda sloop: the boat every player's story starts aboard.
     Sloop,
-    /// The ship's boat: the open rowing boat a sloop lowers to put somebody
-    /// ashore — see [`ToServer::Lower`], which is where one enters the
-    /// world, and [`ToClient::BoatGone`], which is how it leaves.
+    /// The ship's boat: the open rowing boat a sloop tows to put somebody
+    /// ashore. One enters the world on a new sloop's painter — see
+    /// [`ToClient::Boat`]'s `towed_by` — and the sloop's crew steps down into
+    /// it by [`ToServer::Board`].
     Rowboat,
 }
+
+/// Where a boat on a ship's painter lies astern of it, origin to origin, in
+/// metres: the length of the rope plus the half of each hull between its
+/// origin and the rope's end.
+///
+/// Here rather than on either side because both ends put a hull at exactly
+/// this distance and would otherwise disagree about it. A server mints a
+/// sloop's boat here, and a client ties the painter by hauling the boat
+/// here — so a server that used a number of its own would have every minted
+/// tender snatched to this one the instant the rope was made fast, a
+/// teleport out of nothing but arithmetic. The client's own tie is what this
+/// number *is*: it is worked out there from the rope and the two hulls, and
+/// `the_wires_astern_is_where_the_painter_puts_the_boat` is what holds the
+/// two to each other.
+pub const TENDER_ASTERN: f32 = 10.1;
 
 impl BoatKind {
     fn from_byte(byte: u8) -> Option<Self> {
@@ -543,50 +560,30 @@ pub enum ToServer {
     /// player is near it, and answered either way by a [`ToClient::Boat`]
     /// telling whose `occupant` says how it came out — there is no separate
     /// refusal, the boat's state being the whole of the answer. Whoever
-    /// asks first is aboard: boats have keepers, not owners.
+    /// asks first is aboard: a boat is held by being sat in and by nothing
+    /// else.
     ///
     /// Asked from the thwarts of a rowing boat laid alongside, a ship's helm
-    /// is granted the same way — and the rowing boat is taken in tow, told
-    /// to everyone as its own [`ToClient::Boat`] with `towed_by` naming the
-    /// ship, after the telling that seats its crew. Asked of a rowing boat
-    /// under tow, a grant cuts the painter: the hull is the boarder's, and
-    /// the ship it was behind hears so from the same telling.
+    /// is granted the same way — and the rowing boat is taken in tow if the
+    /// ship tows nothing yet, told to everyone as its own [`ToClient::Boat`]
+    /// with `towed_by` naming the ship, after the telling that seats its
+    /// crew; a ship with a boat on its painter already leaves the second
+    /// lying where it was stepped out of. Asked of a rowing boat under tow,
+    /// whether from the water or from the deck of the very ship towing it, a
+    /// grant cuts the painter: the hull is the boarder's, and the ship it was
+    /// behind hears so from the same telling. Ships do not board ships.
     Board { boat: BoatId },
     /// Steps off the occupied boat, landing at `position` — the walker's
-    /// own spot, chosen by the client that judged the footing. The boat
-    /// stays where it lies, at anchor for anyone.
+    /// own spot, chosen by the client. Off a rowing boat that is the shore
+    /// the client judged to offer footing; off a ship it is the water
+    /// alongside, and whether there is a beach under it or a swim ahead is
+    /// the walker's to find out. The boat stays where it lies, at anchor
+    /// for anyone.
+    ///
+    /// Granted wherever it is asked, the client having judged the spot;
+    /// stepping down into a ship's boat by [`ToServer::Board`] is the one
+    /// way off a deck the server holds to the anchor.
     Disembark { position: Vec2 },
-    /// Puts the ship's boat in the water and steps down into it: `position`
-    /// is where it is lowered, alongside and so chosen by the client that
-    /// knows which side the shore is, and `heading` how it points.
-    ///
-    /// Granted to a player occupying a boat that carries one — a
-    /// [`BoatKind::Sloop`] — and only near that boat: a tender is lowered
-    /// over the side, not sent across the bay. The answer is a pair of
-    /// [`ToClient::Boat`] tellings, the rowing boat first with the asker
-    /// aboard and then their ship left at anchor for anyone, exactly as a
-    /// disembark leaves it. A refusal is the usual silence, the world being
-    /// as the asker last heard it.
-    ///
-    /// The hull that is lowered need not be a new one, and a grant may take
-    /// one away: the boat the ship has in tow, if it has one, is the boat
-    /// stepped down into, wherever on its painter it lies — the position
-    /// asked for is then the tender's own, which the asker is the authority
-    /// on. Failing that a rowing boat already lying free where this one is
-    /// asked for is the boat that goes over the side, and whatever boat the asker
-    /// last had in the water is hoisted out of the world if it still lies
-    /// free — [`ToClient::BoatGone`], after the two tellings above. Last
-    /// *had*, rather than last lowered: a rowing boat belongs to whoever
-    /// took it up most recently, by lowering it or by boarding it, so the
-    /// boat a grant retires may be one the asker found afloat and rowed
-    /// rather than one they ever put over a side. A player has one boat in
-    /// the water at a time; a client that draws its own tender before the
-    /// answer comes must be ready for either.
-    ///
-    /// The way back aboard is [`ToServer::Board`] from the rowing boat's
-    /// thwarts: the grant seats the asker at the ship's helm and the tender
-    /// is hoisted back in — see [`ToClient::BoatGone`].
-    Lower { position: Vec2, heading: f32 },
     /// Where this player's hull has pushed an empty one to.
     ///
     /// A boat answers a shove whether or not anybody is aboard, which leaves
@@ -889,20 +886,6 @@ pub enum ToClient {
         position: Vec2,
         heading: Option<f32>,
     },
-    /// A boat is out of the world: a rowing boat hoisted back aboard its
-    /// keeper's ship when they leave the world, or the one they left
-    /// floating somewhere when they lowered another, see
-    /// [`ToServer::Lower`]. The id is retired with it; a client drops the
-    /// hull. Unlike a beast's going this is not a matter of who is near
-    /// enough to care: a boat was told to everyone, so everyone hears when
-    /// it stops being there to see.
-    ///
-    /// A name so retired is answered with silence if anything asks after it,
-    /// never with a hang-up: a client may honestly still have this message
-    /// in flight when it sends a [`ToServer::Board`] naming the hull.
-    BoatGone {
-        id: BoatId,
-    },
     /// The server's answer to a [`ToServer::Command`], sent to the player
     /// who typed it and nobody else: plain text for the console the line
     /// was typed into, whether the command was served or not understood.
@@ -1078,11 +1061,6 @@ impl ToServer {
                 put_ivec2(&mut payload, *island);
                 put_str(&mut payload, name);
             }
-            Self::Lower { position, heading } => {
-                payload.push(11);
-                put_vec2(&mut payload, *position);
-                put_f32(&mut payload, *heading);
-            }
             Self::Shove { boat, hull } => {
                 payload.push(12);
                 put_u64(&mut payload, boat.0);
@@ -1139,10 +1117,6 @@ impl ToServer {
                 // [`island_name`] — where this layer's business is only that
                 // it arrived as text at all.
                 name: payload.str()?,
-            },
-            11 => Self::Lower {
-                position: payload.vec2()?,
-                heading: payload.f32()?,
             },
             12 => Self::Shove {
                 boat: BoatId(payload.u64()?),
@@ -1253,10 +1227,6 @@ impl ToClient {
                         put_u64(&mut payload, ship.0);
                     }
                 }
-            }
-            Self::BoatGone { id } => {
-                payload.push(16);
-                put_u64(&mut payload, id.0);
             }
             Self::PutDown { position, heading } => {
                 payload.push(17);
@@ -1466,9 +1436,6 @@ impl ToClient {
                 covers: (payload.vec2()?, payload.vec2()?),
                 yours: payload.u8()? != 0,
                 name: payload.str()?,
-            },
-            16 => Self::BoatGone {
-                id: BoatId(payload.u64()?),
             },
             17 => Self::PutDown {
                 position: payload.vec2()?,
@@ -1867,10 +1834,6 @@ mod tests {
                 boat: BoatId(0x0102_0304_0506_0708),
             },
             ToServer::Disembark { position: at },
-            ToServer::Lower {
-                position: at,
-                heading: -2.5,
-            },
             ToServer::Claim,
             ToServer::Name {
                 island: IVec2::new(-1_234, 5_678),
@@ -1935,7 +1898,6 @@ mod tests {
                 occupant: None,
                 towed_by: Some(BoatId(12)),
             },
-            ToClient::BoatGone { id: BoatId(14) },
             ToClient::PutDown {
                 position: at,
                 heading: Some(-0.5),
@@ -2256,19 +2218,6 @@ mod tests {
                 0x68, 0x69, // "hi"
             ],
         );
-        assert_eq!(
-            bytes_of_client(&ToServer::Lower {
-                position: Vec2::new(1.5, -2.0),
-                heading: 0.75,
-            }),
-            [
-                13, 0, 0, 0,  // length
-                11, // tag
-                0, 0, 0xC0, 0x3F, // x = 1.5
-                0, 0, 0, 0xC0, // y = -2.0
-                0, 0, 0x40, 0x3F, // heading = 0.75
-            ],
-        );
 
         assert_eq!(
             bytes_of_server(&ToClient::Welcome {
@@ -2399,16 +2348,6 @@ mod tests {
         assert_eq!(towed[38], 0, "a towed boat has nobody aboard");
         assert_eq!(towed[39], 1, "a painter is flag 1");
         assert_eq!(towed[40..], [8, 7, 6, 5, 4, 3, 2, 1], "the ship, LE");
-        assert_eq!(
-            bytes_of_server(&ToClient::BoatGone {
-                id: BoatId(0x0102_0304_0506_0708),
-            }),
-            [
-                9, 0, 0, 0,  // length
-                16, // tag
-                8, 7, 6, 5, 4, 3, 2, 1, // the boat retired, LE
-            ],
-        );
         assert_eq!(
             bytes_of_server(&ToClient::PutDown {
                 position: Vec2::new(1.5, -2.0),

@@ -92,9 +92,9 @@ pub(crate) struct WorldRecord {
 /// ground they have surveyed.
 ///
 /// `aboard` names a boat in [`WorldRecord::boats`], and it is a memory
-/// rather than a hold: boats have keepers, not owners, so on return the
-/// player is seated back only if the boat still lies free where they left
-/// it — see the join in `lib.rs` for what happens when it does not.
+/// rather than a hold: a boat is anyone's the moment nobody is in it, so on
+/// return the player is seated back only if the boat still lies free where
+/// they left it — see the join in `lib.rs` for what happens when it does not.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct PlayerRecord {
     pub position: Vec2,
@@ -124,12 +124,16 @@ pub(crate) struct PlayerRecord {
 /// One boat, as the file keeps it. No occupant: who is aboard is session
 /// state — everyone aboard anything steps out of the record when the world
 /// stops, and where they step back in is the players' own records' business.
+/// The painter is kept, a tow being a fact about two hulls and not about
+/// anybody aboard either: `towed_by` names the ship this boat is on the
+/// painter of, in [`WorldRecord::boats`] too.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BoatRecord {
     pub id: BoatId,
     pub kind: BoatKind,
     pub position: Vec2,
     pub heading: f32,
+    pub towed_by: Option<BoatId>,
 }
 
 /// One island claimed, as the file keeps it: which island, whose it is, where
@@ -642,7 +646,7 @@ fn compose(record: &WorldRecord) -> String {
     let mut boats = record.boats.clone();
     boats.sort_by_key(|boat| boat.id.0);
     for boat in boats {
-        let _ = writeln!(
+        let _ = write!(
             out,
             "boat {:016x} {} {} {} {}",
             boat.id.0,
@@ -651,6 +655,10 @@ fn compose(record: &WorldRecord) -> String {
             boat.position.y,
             boat.heading
         );
+        if let Some(ship) = boat.towed_by {
+            let _ = write!(out, " {:016x}", ship.0);
+        }
+        let _ = writeln!(out);
     }
     // Sorted by the island claimed, which is the one field of a claim that
     // cannot repeat: an island is claimed once or not at all.
@@ -871,6 +879,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     fields.next().ok_or("a boat with half a position")?,
                     fields.next().ok_or("a boat with no heading")?,
                 );
+                let towed_by = fields.next().map(hex).transpose()?.map(BoatId);
                 if fields.next().is_some() {
                     return Err(format!("too much about one boat: `{line}`"));
                 }
@@ -881,6 +890,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                         .ok_or_else(|| format!("no such boat as a {kind}"))?,
                     position,
                     heading: finite(heading)?,
+                    towed_by,
                 });
             }
             // Five fields and then the rest of the line, which is the name:
@@ -1128,12 +1138,14 @@ mod tests {
                     kind: BoatKind::Sloop,
                     position: Vec2::new(12.5, -340.25),
                     heading: 1.5,
+                    towed_by: None,
                 },
                 BoatRecord {
                     id: BoatId(0xDEAD),
                     kind: BoatKind::Rowboat,
                     position: Vec2::new(64.0, 8.0),
                     heading: -2.25,
+                    towed_by: Some(BoatId(0xB0A7)),
                 },
             ],
             claims: vec![
@@ -1306,6 +1318,7 @@ mod tests {
                 kind: BoatKind::Sloop,
                 position: -far,
                 heading: f32::MAX,
+                towed_by: Some(BoatId(u64::MAX)),
             }],
             claims: vec![
                 ClaimRecord {
@@ -1536,6 +1549,10 @@ mod tests {
             (
                 "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 canoe 1 2 3\n",
                 "a boat of a kind nothing sails",
+            ),
+            (
+                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 nothex\n",
+                "a painter to something that is not a boat's name",
             ),
             (
                 "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1 2 nothex\n",

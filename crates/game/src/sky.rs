@@ -826,6 +826,9 @@ mod tests {
         .init_asset::<Mesh>()
         // What the clouds' mask is put into, the sky bringing them with it.
         .init_asset::<Image>()
+        // What the rowing boat's scene arrives as, the world dealing every
+        // arrival one on the ship's painter — see `testing::world_app`.
+        .init_asset::<bevy::world_serialization::WorldAsset>()
         .init_resource::<Assets<StandardMaterial>>();
         app
     }
