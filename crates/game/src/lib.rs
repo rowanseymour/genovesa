@@ -35,6 +35,7 @@ pub mod settings;
 pub mod shots;
 pub mod sky;
 pub mod stopping;
+pub mod tackle;
 pub mod terrain;
 pub mod told;
 pub mod trees;

@@ -266,6 +266,11 @@ struct Hull {
     /// `the_model_is_the_hull_the_keel_is_probed_along`.
     helm_deck: f32,
     helm_station: f32,
+    /// The stemhead: how high the bow stands above the waterline, in
+    /// metres, at the stem itself. Where the anchor cable leaves the hull —
+    /// see [`crate::tackle`] — and the model's number, like the deck's, held
+    /// to the file by the same tests.
+    stemhead: f32,
     /// Where the keel begins and ends, in metres from amidships — negative
     /// forward, the same axis the hull is modelled on. [`grounding`] probes
     /// along these, so what runs aground is the line that is drawn.
@@ -514,6 +519,7 @@ const SHIP: Hull = Hull {
     // step.
     helm_deck: 1.2,
     helm_station: 2.6,
+    stemhead: 1.15,
     // The forefoot stops short of the bow, which is what gives the stem its
     // rake; the heel runs right aft to the transom.
     forefoot_station: -7.0 * 0.5 * 0.7,
@@ -581,6 +587,7 @@ const ROWBOAT: Hull = Hull {
     // the sea's hole buys.
     helm_deck: -0.1,
     helm_station: 0.65,
+    stemhead: 0.42,
     // The keel is rockered: deepest a little abaft amidships, rising to the
     // forefoot forward and carried aft to the transom's skeg. The probes
     // read the full draft along all of it, which errs a few centimetres
@@ -1117,6 +1124,20 @@ struct Rower {
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub struct Rigged(pub BoatKind);
 
+impl Rigged {
+    /// Length overall, in metres — what the ground tackle is sized off, a
+    /// bigger hull carrying a bigger anchor on a heavier cable.
+    pub(crate) fn length(self) -> f32 {
+        hull_of(self.0).length
+    }
+
+    /// The stemhead in the hull's own frame — see [`Hull::stemhead`].
+    pub(crate) fn stemhead(self) -> Vec3 {
+        let hull = hull_of(self.0);
+        Vec3::new(0.0, hull.stemhead, -hull.length / 2.0)
+    }
+}
+
 /// A hull the sea is cut away inside — the shape of the hole, which is the
 /// hull's waterline outline in its own frame: two superellipse halves sharing
 /// their beam at the widest station, cut square at the transom. Two halves
@@ -1257,8 +1278,8 @@ pub struct Telling {
 /// wire's word, see [`protocol::ToClient::Boat`]; in a world with no server
 /// behind it, this client's own. On any hull, ours included: for ours it is
 /// what [`ride_at_anchor`] furls and holds for, and what [`tend_the_anchor`]
-/// reads to know which way the key goes. The hook itself is not drawn yet;
-/// it is kept because it is the fact, and the flag would be a summary of it.
+/// reads to know which way the key goes. Drawn — the anchor on the bottom
+/// and the cable up to the bow — by [`crate::tackle`].
 #[derive(Component, Clone, Copy)]
 pub struct Anchored(pub Vec2);
 
@@ -3695,6 +3716,17 @@ mod tests {
         world_app()
     }
 
+    /// How high a model's bow stands: its highest corner on the stem, the
+    /// stem being the corners furthest forward, `half` a length ahead of
+    /// amidships.
+    fn stemhead_of(corners: &[Vec3], half: f32) -> f32 {
+        corners
+            .iter()
+            .filter(|c| (c.z + half).abs() < 1e-3)
+            .map(|c| c.y)
+            .fold(f32::MIN, f32::max)
+    }
+
     /// The hull the player is aboard — which is the only hull at all in most
     /// of these tests, and the one they mean in the rest: once the ship's
     /// boat is in the water there are two, and every helper below is asking
@@ -3896,6 +3928,16 @@ mod tests {
             SHIP.helm_station
         );
 
+        // The stemhead, where the cable leaves: the highest corner standing
+        // on the stem itself. A bow re-cut taller would have the cable
+        // leaving from inside the planking.
+        let stemhead = stemhead_of(&corners, half);
+        assert!(
+            (stemhead - SHIP.stemhead).abs() < 1e-4,
+            "the model's stemhead stands {stemhead} above the waterline, not {}",
+            SHIP.stemhead
+        );
+
         // And the boom's sweep: the sail's foot turns about the mast at the
         // tack's height, out to the clew, so whatever the hull raises inside
         // that circle has to stay under it or the canvas drags through the
@@ -4008,6 +4050,12 @@ mod tests {
             "no sole at {} under the helm at {}",
             ROWBOAT.helm_deck,
             ROWBOAT.helm_station
+        );
+        let stemhead = stemhead_of(&corners, half);
+        assert!(
+            (stemhead - ROWBOAT.stemhead).abs() < 1e-3,
+            "the model's stemhead stands {stemhead} above the waterline, not {}",
+            ROWBOAT.stemhead
         );
         // And that plane is under water, which is the whole of what the
         // sea's hole buys: a master re-lofted with its floor standing above
