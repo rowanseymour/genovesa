@@ -176,11 +176,16 @@ const ABANDONED_AFTER: f32 = protocol::DAY_SECONDS;
 /// Beyond what any client draws — a client streams a kilometre or so around
 /// its camera — so nobody watches a boat vanish; and wider than any island,
 /// so a player walking the far end of theirs keeps the ship they anchored
-/// off the near one, however long the walk. A player who steps ashore and
-/// hangs up is not near anything: what keeps a hull for them is the helm
-/// their record names, and nothing about where they stood — see
-/// [`retire_the_abandoned`].
+/// off the near one, however long the walk. Presence only: what an absent
+/// player keeps is [`retire_the_abandoned`]'s to say.
 const ABANDONED_RANGE: f32 = 2_048.0;
+
+/// How far from a rowing boat somebody hung up in a ship may lie and still
+/// be the one they rowed ashore from, in metres — see
+/// [`retire_the_abandoned`]. A ship is anchored off the beach its boat is
+/// rowed to, not across the water from it, and the nearest islands are
+/// further apart than this.
+const ROWED_FROM: f32 = 1_024.0;
 
 /// How far from the world's spawn point an arriving player may be put down,
 /// in metres. A few boat-lengths: enough that two markers are plainly two
@@ -665,20 +670,26 @@ pub(crate) struct BoatState {
     /// it may not do is shove it: a hull on a painter is its ship's.
     pub(crate) towed_by: Option<BoatId>,
     /// The world's age — see [`Shared::age`] — when this hull was last left
-    /// with nobody aboard: minted empty, stepped out of, hung up at, or
-    /// loaded from the file, everyone having stepped out of the record when
-    /// the world stopped. Meaningless while somebody is aboard, and what
+    /// with nobody aboard: minted, loaded from the file, or emptied by
+    /// [`BoatState::vacate`]. Meaningless while somebody is aboard, and what
     /// [`retire_the_abandoned`] measures [`ABANDONED_AFTER`] from once they
     /// are not.
-    ///
-    /// Written only by threads that read the clock *before* taking the
-    /// roster: the day's lock is never nested under it — see
-    /// [`welcome_aboard`] — so every writer here reads its `now` first and
-    /// carries it in.
     pub(crate) vacated: f32,
 }
 
 impl BoatState {
+    /// Empties the helm, as of `now` on the world's clock — the one writer of
+    /// both halves of that fact, so that no crossing can leave a hull with
+    /// its previous emptying still on it and be taken back a day early.
+    ///
+    /// `now` is handed in rather than asked for because every caller holds
+    /// the roster, and the day's lock is never nested under it — see
+    /// [`welcome_aboard`] — so the clock is read first and carried in.
+    fn vacate(&mut self, now: f32) {
+        self.occupant = None;
+        self.vacated = now;
+    }
+
     /// This hull as a client hears of it.
     ///
     /// Every telling of a boat goes through here, because what a client is
@@ -2076,10 +2087,10 @@ fn shake_hands(
 /// Split from [`serve`] because it is the one part of a session that runs
 /// after the reading has stopped, and because the order of it is the whole
 /// content — the memory written before the roster is left, the freed helm
-/// told before the hull that goes with it.
+/// told after the leaving, with the boat on its painter left where it is.
 fn depart(shared: &Shared, id: PlayerId) {
     // The hour the helm falls empty at, read before any lock on the terms
-    // [`BoatState::vacated`] sets.
+    // [`BoatState::vacate`] sets.
     let now = shared.age();
     // Where the world last saw them, filed under their token *before* they
     // leave the roster — a save can land between the two steps, and a player
@@ -2132,8 +2143,7 @@ fn depart(shared: &Shared, id: PlayerId) {
             let mut boats = shared.boats.held();
             helm.and_then(|boat| {
                 let state = boats.get_mut(&boat)?;
-                state.occupant = None;
-                state.vacated = now;
+                state.vacate(now);
                 Some(state.told(boat))
             })
         };
@@ -2346,8 +2356,7 @@ fn board(shared: &Shared, id: PlayerId, boat: BoatId) -> Went {
                 Some(Crossing::UpFromTheTender(tender)) => {
                     let towing = boats.values().any(|other| other.towed_by == Some(boat));
                     let state = boats.get_mut(&tender).expect("stepped off a breath ago");
-                    state.occupant = None;
-                    state.vacated = now;
+                    state.vacate(now);
                     state.towed_by = (!towing).then_some(boat);
                     left = Some(state.told(tender));
                 }
@@ -2355,8 +2364,7 @@ fn board(shared: &Shared, id: PlayerId, boat: BoatId) -> Went {
                 // ashore leaves a rowing boat.
                 Some(Crossing::DownIntoTheTender(ship)) => {
                     let state = boats.get_mut(&ship).expect("stepped off a breath ago");
-                    state.occupant = None;
-                    state.vacated = now;
+                    state.vacate(now);
                     left = Some(state.told(ship));
                 }
             }
@@ -2458,8 +2466,7 @@ fn step_off(shared: &Shared, id: PlayerId, position: Vec2) -> Went {
     let told = {
         let mut boats = shared.boats.held();
         let state = boats.get_mut(&boat).expect("a boat once boarded exists");
-        state.occupant = None;
-        state.vacated = now;
+        state.vacate(now);
         state.told(boat)
     };
     broadcast_all(&players, told);
@@ -2474,40 +2481,33 @@ fn step_off(shared: &Shared, id: PlayerId, position: Vec2) -> Went {
 ///
 /// A hull is *in use* while somebody is aboard it, while it has lain empty
 /// for less than [`ABANDONED_AFTER`], while any present player is within
-/// [`ABANDONED_RANGE`] of it, or while a remembered player's record names
-/// it as the helm they hung up at — that last being a promise
-/// [`seat_the_arrival`] makes, and the one thing about an absent player that
-/// pins a hull. Where they *stood* pins nothing: every player who ever
-/// joined and hung up on the spawn has a record standing there, and a hull
-/// kept for each of them would be the fleet growing without bound, which is
-/// what this exists to stop. A ship and the boat on its painter are one
-/// thing here — the tow stays while either end is in use — so no hull is
-/// ever left tied to a ship that has gone.
-///
-/// Decided for every hull off one snapshot — the clock, the records, the
-/// roster — and applied under the roster's lock with the boats' nested, so
-/// a boarding or a departure lands wholly before or wholly after it. A
-/// record can be filed between the snapshot and the lock, by a player
-/// hanging up at a helm this cannot yet see named: harmless, because the
-/// helm they left is empty only as of that instant, and a day short of
-/// going. The retirees go out in id order, a `HashMap`'s not being an
-/// order two runs would share.
+/// [`ABANDONED_RANGE`] of it, or while it is a helm an absent player will be
+/// seated back at — [`seat_the_arrival`]'s promise, held to on its own
+/// terms. Where an absent player *stood* keeps nothing: every player who
+/// ever joined and hung up on the spawn has a record standing there. A ship
+/// and the boat on its painter are one thing here, and a rowing boat kept
+/// for its helmsman keeps the ship they rowed ashore from.
 fn retire_the_abandoned(shared: &Shared) {
+    // The clock and the records before the roster — the day's lock is never
+    // nested under it, and the records' never needs to be. A record filed
+    // between here and the lock below, by a player hanging up at a helm,
+    // names a helm emptied only as of that instant: a day short of going.
     let now = shared.age();
-    let remembered: HashSet<BoatId> = shared
+    let remembered: Vec<(Token, BoatId, Vec2)> = shared
         .remembered
         .held()
-        .values()
-        .filter_map(|record| record.aboard)
+        .iter()
+        .filter_map(|(token, record)| record.aboard.map(|boat| (*token, boat, record.position)))
         .collect();
+    // Decided under the roster's lock with the boats' nested, so a boarding
+    // or a departure lands wholly before or wholly after it.
     let players = shared.players.held();
     let retired: Vec<BoatId> = {
         let mut boats = shared.boats.held();
-        let in_use: HashSet<BoatId> = boats
+        let mut in_use: HashSet<BoatId> = boats
             .iter()
-            .filter(|(id, state)| {
-                remembered.contains(id)
-                    || state.occupant.is_some()
+            .filter(|(_, state)| {
+                state.occupant.is_some()
                     || now - state.vacated < ABANDONED_AFTER
                     || players
                         .values()
@@ -2515,22 +2515,62 @@ fn retire_the_abandoned(shared: &Shared) {
             })
             .map(|(id, _)| *id)
             .collect();
-        let held = |id: BoatId, state: &BoatState| {
-            in_use.contains(&id)
-                || state.towed_by.is_some_and(|ship| in_use.contains(&ship))
-                || boats
-                    .iter()
-                    .any(|(other, tow)| tow.towed_by == Some(id) && in_use.contains(other))
-        };
-        let mut retired: Vec<BoatId> = boats
+        // A helm kept for its helmsman on exactly the terms they are seated
+        // back at it — see [`seat_the_arrival`]: they are not here, and the
+        // hull lies within [`KEPT_BERTH`] of where they left it. A record
+        // whose holder is present is stale — the roster says where they are
+        // — and a hull sailed off by somebody else is one the record will
+        // not be resumed at, however long it is kept.
+        let kept: Vec<BoatId> = remembered
             .iter()
-            .filter(|(id, state)| !held(**id, state))
-            .map(|(id, _)| *id)
+            .filter(|(token, _, _)| !players.values().any(|player| player.token == *token))
+            .filter_map(|(_, boat, left_at)| {
+                let state = boats.get(boat)?;
+                (state.hull.at.distance(*left_at) <= KEPT_BERTH).then_some(*boat)
+            })
+            .collect();
+        // Somebody hung up in a rowing boat rowed ashore from a ship at
+        // anchor, and would come back to a beach with no way off it if the
+        // ship went. The record does not say which ship, so every free one
+        // within [`ROWED_FROM`] stays — one of them is theirs, and boats
+        // have no owners for the others to be anybody else's.
+        let rowed_from: Vec<BoatId> = kept
+            .iter()
+            .filter_map(|boat| {
+                boats
+                    .get(boat)
+                    .filter(|state| state.kind == BoatKind::Rowboat)
+            })
+            .flat_map(|tender| {
+                boats.iter().filter_map(move |(id, ship)| {
+                    (ship.kind == BoatKind::Sloop
+                        && ship.occupant.is_none()
+                        && ship.hull.at.distance(tender.hull.at) <= ROWED_FROM)
+                        .then_some(*id)
+                })
+            })
+            .collect();
+        in_use.extend(kept);
+        in_use.extend(rowed_from);
+        // A tow is one thing: both ends stay while either is in use, so no
+        // hull is ever left tied to a ship that has gone. One pass, a
+        // painter running from a rowing boat to a ship and no further.
+        for (id, state) in boats.iter() {
+            if let Some(ship) = state.towed_by {
+                if in_use.contains(id) || in_use.contains(&ship) {
+                    in_use.insert(*id);
+                    in_use.insert(ship);
+                }
+            }
+        }
+        // In id order, a `HashMap`'s not being an order two runs would share.
+        let mut retired: Vec<BoatId> = boats
+            .keys()
+            .filter(|id| !in_use.contains(id))
+            .copied()
             .collect();
         retired.sort_unstable_by_key(|id| id.0);
-        for id in &retired {
-            boats.remove(id);
-        }
+        boats.retain(|id, _| in_use.contains(id));
         retired
     };
     for id in &retired {
@@ -3489,6 +3529,18 @@ mod tests {
         // A hull beside the listener, and one somebody hung up at.
         let near = BoatId(300);
         let hung_up_at = BoatId(400);
+        // A rowing boat somebody hung up in on a beach, the ship they rowed
+        // ashore from at anchor off it, and another ship too far to be that.
+        let beach = Vec2::new(0.0, 50_000.0);
+        let beached = BoatId(500);
+        let rowed_from = BoatId(501);
+        let another_ship = BoatId(502);
+        // A helm a record names that somebody else has since sailed away
+        // from where it was left, and one named by the listener's own
+        // record from their last visit.
+        let elsewhere = Vec2::new(-50_000.0, 50_000.0);
+        let sailed_off_in = BoatId(600);
+        let stale = BoatId(700);
         {
             let mut boats = shared.boats.held();
             for id in &loose {
@@ -3508,12 +3560,42 @@ mod tests {
                 lying(BoatKind::Sloop, Vec2::new(ABANDONED_RANGE, 0.0), None),
             );
             boats.insert(hung_up_at, lying(BoatKind::Sloop, far, None));
+            boats.insert(beached, lying(BoatKind::Rowboat, beach, None));
+            boats.insert(
+                rowed_from,
+                lying(BoatKind::Sloop, beach + Vec2::new(ROWED_FROM, 0.0), None),
+            );
+            boats.insert(
+                another_ship,
+                lying(
+                    BoatKind::Sloop,
+                    beach + Vec2::new(ROWED_FROM + 1.0, 0.0),
+                    None,
+                ),
+            );
+            boats.insert(
+                sailed_off_in,
+                lying(
+                    BoatKind::Sloop,
+                    elsewhere + Vec2::new(KEPT_BERTH + 1.0, 0.0),
+                    None,
+                ),
+            );
+            boats.insert(stale, lying(BoatKind::Sloop, -far, None));
         }
-        for (token, boat) in [(Token(7), named_boat), (Token(8), hung_up_at)] {
+        for (token, boat, left_at) in [
+            (Token(7), named_boat, far),
+            (Token(8), hung_up_at, far),
+            (Token(9), beached, beach),
+            (Token(10), sailed_off_in, elsewhere),
+            // The listener's own token — see `standing`.
+            (Token(1), stale, -far),
+        ] {
             shared.remembered.held().insert(
                 token,
                 keeper::PlayerRecord {
                     aboard: Some(boat),
+                    position: left_at,
                     ..keeper::PlayerRecord::default()
                 },
             );
@@ -3526,14 +3608,15 @@ mod tests {
             heard.push(id);
         }
         let mut expected = loose.clone();
+        expected.extend([another_ship, sailed_off_in, stale]);
         expected.sort_unstable_by_key(|id| id.0);
         assert_eq!(heard, expected, "the loose hulls, and in id order");
         let mut left: Vec<BoatId> = shared.boats.held().keys().copied().collect();
         left.sort_unstable_by_key(|id| id.0);
         assert_eq!(
             left,
-            [sailed, sailed_boat, named_boat, named_boats_ship, near, hung_up_at],
-            "what stays: both ends of every tow in use, the hull beside somebody, and the helm a record names"
+            [sailed, sailed_boat, named_boat, named_boats_ship, near, hung_up_at, beached, rowed_from],
+            "what stays: both ends of every tow in use, the hull beside somebody, the helms records will be resumed at, and the ship a remembered rowing boat came from"
         );
 
         // Told once: a second sweep finds nothing to say.

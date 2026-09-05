@@ -646,7 +646,7 @@ impl Plugin for NetPlugin {
                 // frame eases and stands it on the ground there.
                 (shade_markers, place_markers)
                     .chain()
-                    .after(crate::boat::take_the_hulls)
+                    .after(crate::boat::lose_the_hulls)
                     .in_set(Wire::Read)
                     .run_if(resource_exists::<Online>),
             )

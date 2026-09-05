@@ -1573,15 +1573,13 @@ impl Fleet {
         hull.insert(telling);
     }
 
-    /// A boat is out of the world — nobody was using it and the world took
-    /// it back. The hull despawns; a player the fleet still believed aboard
-    /// it — a seating telling lost or out of order — is [`stand_off`]'s to
-    /// put somewhere coherent, their pose having been the hull's to hold.
-    /// Ordinarily nobody is: the world retires only empty hulls.
+    /// A boat is out of the world — see [`protocol::ToClient::BoatGone`].
+    /// The hull despawns, and a rope made fast to it goes with it.
     ///
-    /// Judged by the fleet's own book rather than the scene graph, whose
-    /// parentage from a grant earlier this same frame is still a queued
-    /// command.
+    /// The wire never says this of a hull anybody is aboard, so the rest is
+    /// a defence against a server that broke that word: a player the book
+    /// still has at this helm is stood off where it lay rather than left
+    /// parented to nothing, and a tender on its painter is cut loose.
     pub fn gone(
         &mut self,
         commands: &mut Commands,
@@ -1605,22 +1603,20 @@ impl Fleet {
             commands.entity(painter.0).despawn();
         }
         if self.helmed.take_if(|held| *held == id).is_some() {
-            // Where the hull stands, if the scene has it standing anywhere,
-            // and the world origin if not. Unlike [`Fleet::told`] there is
-            // no second-best worth the name: `BoatGone` carries an id and
-            // nothing else, so the last place the wire spoke of this hull is
-            // not in hand here, and the one case where the scene comes up
-            // empty is a hull spawned in this same drain — one nobody has
-            // ever seen, whose last told pose would be a guess at a boat the
-            // player never boarded. The origin is a poor place to leave
-            // somebody and is chosen anyway, because what goes with it is
-            // [`crate::player::Unsettled`]: the ground claims them as soon
-            // as a chunk arrives and they walk on from wherever that leaves
-            // them, where standing them nowhere at all would strand them
-            // with a deck-local offset and nothing to lift them out of it.
-            // Recoverably wrong beats quietly stuck.
+            // Where the hull stands. It always stands somewhere: this runs
+            // after the tellings' commands have been applied, so even a hull
+            // raised this frame has its pose — the origin is the type's
+            // fallback and not a case. `BoatGone` carries no pose of its own
+            // to prefer, and [`crate::player::Unsettled`] makes wherever
+            // this is recoverable.
             let lying = poses.get(hull).copied().unwrap_or_default();
             stand_off(commands, players, &lying);
+            // And the boat on our painter, if any, is nobody's to tow now:
+            // its own telling will moor it, and until then it must not hang
+            // off a ship that has gone.
+            if let Some(tender) = self.towed.take().and_then(|towed| self.hulls.get(&towed)) {
+                commands.entity(*tender).remove::<Towed>();
+            }
         }
         commands.entity(hull).despawn();
     }
