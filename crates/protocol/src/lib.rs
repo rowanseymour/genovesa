@@ -507,6 +507,19 @@ impl Underway {
     }
 }
 
+/// The shortest way round from one yaw to another, in radians: what a
+/// heading has to turn through to become `onto`, never more than half a
+/// turn either way.
+///
+/// Both ends turn hulls onto bearings — the server an empty hull to the
+/// wind, a client a told hull onto its telling — and a yaw crosses the wire
+/// in whatever range its sender kept it in, so the one piece of arithmetic
+/// that reads two yaws against each other lives where both can call it.
+pub fn swing_to(onto: f32, from: f32) -> f32 {
+    let half = std::f32::consts::PI;
+    (onto - from + half).rem_euclid(std::f32::consts::TAU) - half
+}
+
 /// What a client may say.
 ///
 /// Positions are metres on the world's ground plane, as everywhere else in
@@ -592,9 +605,10 @@ pub enum ToServer {
     /// deeper than [`ground::ANCHOR_DEPTH`], which is an island's own shelf
     /// and never the open sea — and answered either way by the boat's own
     /// [`ToClient::Boat`] telling, whose `anchor` says how it came out.
-    /// The hook goes down a cable's length to windward of the hull, so a
-    /// hull granted its anchor lies where it asked, and what a shift of
-    /// wind then swings it round is the hook rather than the spot.
+    /// The hook goes down where the hull lies, the spot that was sounded;
+    /// once nobody is aboard the hull falls back on its cable to lie
+    /// [`ground::ANCHOR_SWING`] downwind of it, and a shift of wind swings
+    /// it round the hook rather than the spot.
     ///
     /// An act of its own, and the only thing that keeps an empty hull put:
     /// a hull nobody is aboard drifts unless it is anchored — see
@@ -2058,6 +2072,18 @@ mod tests {
             let bytes = bytes_of_server(&message);
             assert_eq!(ToClient::read(&mut bytes.as_slice()).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn the_shortest_way_round_is_taken_whatever_range_the_yaws_are_in() {
+        let round = std::f32::consts::TAU;
+        assert!((swing_to(0.1, round - 0.1) - 0.2).abs() < 1e-5);
+        assert!((swing_to(round - 0.1, 0.1) + 0.2).abs() < 1e-5);
+        assert!(
+            (swing_to(-0.5, 5.7) - 0.083_185).abs() < 1e-4,
+            "a negative yaw against a wrapped one"
+        );
+        assert!(swing_to(1.0, 1.0).abs() < 1e-6);
     }
 
     #[test]

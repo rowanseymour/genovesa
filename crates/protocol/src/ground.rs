@@ -132,6 +132,18 @@ pub const ANCHOR_DEPTH: f32 = 8.0;
 
 const _: () = assert!(ANCHOR_DEPTH < OCEAN_DEPTH);
 
+/// How far downwind of its hook an anchored hull lies, in metres: the cable
+/// on the surface, which is the radius of the circle the hull swings on.
+///
+/// The server swings an empty hull by it — the hook itself crosses the wire
+/// in [`crate::ToClient::Boat`] — and a client drawing the cable, or the
+/// swing, wants the same number rather than one of its own. Longer than
+/// [`crate::TENDER_ASTERN`], so a ship swinging to a new wind and the boat
+/// astern of it never have the hook between them.
+pub const ANCHOR_SWING: f32 = 15.0;
+
+const _: () = assert!(ANCHOR_SWING > crate::TENDER_ASTERN);
+
 /// Metres between the corners the ground is drawn from.
 ///
 /// The height field behind it is continuous, so this is only how finely it

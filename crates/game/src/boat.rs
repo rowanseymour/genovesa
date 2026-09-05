@@ -51,7 +51,7 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use protocol::ground::{ANCHOR_DEPTH, CELL_METRES};
-use protocol::{BoatId, BoatKind, PlayerId, Underway};
+use protocol::{swing_to, BoatId, BoatKind, PlayerId, Underway};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::{MapCamera, View};
@@ -1331,14 +1331,6 @@ impl Motions<'_, '_> {
 /// says.
 type Ours = Or<(Without<Telling>, With<Shoving>)>;
 
-/// The shortest way round from one angle to another, in radians: what a
-/// bearing has to swing to become another bearing, rather than the difference
-/// between two numbers that may be a turn and a bit apart.
-fn swing_to(onto: f32, from: f32) -> f32 {
-    let round = std::f32::consts::TAU;
-    (onto - from + std::f32::consts::PI).rem_euclid(round) - std::f32::consts::PI
-}
-
 /// The boats of the world, as this client was told them: the wire's ids to
 /// this side's entities, who is at each helm, and — the fact everything
 /// else hangs off — which hull is *ours*.
@@ -1585,10 +1577,13 @@ impl Fleet {
         // does settle for such a hull is whether the claim may stand at all:
         // one the world has since seated somebody in, or put on a ship's
         // painter, stops being ours to push on the word that says so.
+        // A hull on its hook is spoken for by its cable: the server refuses
+        // a shove of one, so claiming it would be a claim the world never
+        // hears, and the spring its telling is holds it instead.
         let telling = Telling {
             hull: told,
             heard,
-            spoken_for: occupant.is_some() || towed_by.is_some(),
+            spoken_for: occupant.is_some() || towed_by.is_some() || anchor.is_some(),
         };
         let mut hull = commands.entity(hull);
         if telling.spoken_for {
@@ -3339,6 +3334,84 @@ pub(crate) fn over_the_side(ship: &Transform, ground: Option<&Ground>) -> Vec2 {
     }
 }
 
+/// Drops the anchor, or weighs it: one key, read either way by whether the
+/// hull under the player has its hook down — see [`Anchored`].
+///
+/// Dropping is asked from a hull at rest, the sails coming down as the hook
+/// goes over, and only where the water would hold it — [`ANCHOR_DEPTH`]'s
+/// own doc says why the client asks the question the server asks again. It
+/// is believed when the telling comes back; a refusal arrives as the hull's
+/// own state with no hook in it, and a key refused must have done nothing.
+/// Weighing is believed at once, the server granting it to anyone aboard.
+/// Canvas weighs: a hoist, or sails found set under a hook that has just
+/// come down — the grant crossing a hoist already made — so a hull is never
+/// under canvas with its hook down, and the astern drive is refused at
+/// anchor by [`steer`] itself. Offline the whole exchange is local.
+pub(crate) fn tend_the_anchor(
+    keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
+    mut commands: Commands,
+    ground: Option<Res<Ground>>,
+    online: Option<Res<crate::net::Online>>,
+    players: Query<&ChildOf, With<Player>>,
+    mut hulls: Query<(&Transform, &mut Boat, Has<Anchored>)>,
+) {
+    let Ok(aboard) = players.single().map(ChildOf::parent) else {
+        return;
+    };
+    let Ok((place, mut boat, anchored)) = hulls.get_mut(aboard) else {
+        return;
+    };
+    let anchor_key = keys.just_pressed(bindings.key(Action::Anchor));
+    let hoisting = bindings.tapped(&keys, Action::MoveForward, KeyCode::ArrowUp);
+    if anchored {
+        if anchor_key || hoisting || boat.sails_set() {
+            commands.entity(aboard).remove::<Anchored>();
+            if let Some(online) = online {
+                online.connection.weigh();
+            }
+        }
+        return;
+    }
+    if !anchor_key || !boat.reads_as_stopped() {
+        return;
+    }
+    // A chunk that has not arrived refuses too — water the client knows
+    // nothing about is treated as deep, exactly as the sea draws it — but
+    // no ground *resource* at all is a world with no terrain in it (the
+    // boat tests'), where there is no depth for the rule to be about.
+    let under = place.translation.xz();
+    let holds = ground.as_deref().is_none_or(|g| {
+        g.height(under.x, under.y)
+            .is_some_and(|h| h >= -ANCHOR_DEPTH)
+    });
+    if !holds {
+        return;
+    }
+    boat.furl();
+    boat.comes_to_rest();
+    match online {
+        Some(online) => online.connection.anchor(),
+        None => {
+            commands.entity(aboard).insert(Anchored(under));
+        }
+    }
+}
+
+/// Holds a hull to its anchor: sails furled and the way run off, every frame
+/// the hook is down. The whole of what an anchor does at this end — the
+/// swing to lie downwind of the hook is the server's, for a hull nobody is
+/// aboard, and a hull with somebody aboard sits where the hook was let go.
+/// Any hull with sailing state rather than ours alone, so that a world with
+/// no server behind it holds the hulls its player anchored and left exactly
+/// as a served one would.
+pub(crate) fn ride_at_anchor(mut hulls: Query<&mut Boat, With<Anchored>>) {
+    for mut boat in &mut hulls {
+        boat.furl();
+        boat.comes_to_rest();
+    }
+}
+
 /// Sails the boat the player is at the helm of, in its own frame. The view
 /// plays no part — turning the camera changes what the keys look like on
 /// screen, never what they do — so a long sail is a held course rather than
@@ -3371,79 +3444,6 @@ pub(crate) fn over_the_side(ship: &Transform, ground: Option<&Ground>) -> Vec2 {
 /// aground, a turn refused alongside an advance being a hull wedged
 /// bow-first with nothing left to free it.
 ///
-/// Drops the anchor, or weighs it: one key, read either way by whether the
-/// hull under the player has its hook down — see [`Anchored`].
-///
-/// Dropping is asked for only where the water would hold the hook —
-/// [`ANCHOR_DEPTH`]'s own doc says why the client asks the question the
-/// server asks again — and believed when the telling comes back: nothing
-/// about the hull changes until then, a refusal arriving as the hull's own
-/// state with no hook in it, and a key refused must have done nothing at all.
-/// Weighing is believed at once: the server grants it to anyone aboard, and a
-/// sail going up in the same frame must not be furled again by a hook that is
-/// already coming up. Making sail weighs on the same terms — this runs before
-/// [`steer`]'s hoist — so a hull is never under canvas with its hook down. A
-/// world with no server behind it keeps the whole exchange local, the depth
-/// gate included.
-pub(crate) fn tend_the_anchor(
-    keys: Res<ButtonInput<KeyCode>>,
-    bindings: Res<KeyBindings>,
-    mut commands: Commands,
-    ground: Option<Res<Ground>>,
-    online: Option<Res<crate::net::Online>>,
-    players: Query<&ChildOf, With<Player>>,
-    hulls: Query<(&Transform, Has<Anchored>), With<Boat>>,
-) {
-    let Ok(aboard) = players.single().map(ChildOf::parent) else {
-        return;
-    };
-    let Ok((place, anchored)) = hulls.get(aboard) else {
-        return;
-    };
-    let anchor_key = keys.just_pressed(bindings.key(Action::Anchor));
-    let hoisting = bindings.tapped(&keys, Action::MoveForward, KeyCode::ArrowUp);
-    if anchored && (anchor_key || hoisting) {
-        commands.entity(aboard).remove::<Anchored>();
-        if let Some(online) = online {
-            online.connection.weigh();
-        }
-    } else if anchor_key && !anchored {
-        // A chunk that has not arrived refuses too — water the client knows
-        // nothing about is treated as deep, exactly as the sea draws it —
-        // but no ground *resource* at all is a world with no terrain in it
-        // (the boat tests'), where there is no depth for the rule to be
-        // about.
-        let under = place.translation.xz();
-        let holds = ground.as_deref().is_none_or(|g| {
-            g.height(under.x, under.y)
-                .is_some_and(|h| h >= -ANCHOR_DEPTH)
-        });
-        if !holds {
-            return;
-        }
-        match online {
-            Some(online) => online.connection.anchor(),
-            None => {
-                commands.entity(aboard).insert(Anchored(under));
-            }
-        }
-    }
-}
-
-/// Holds a hull to its anchor: sails furled and the way run off, every frame
-/// the hook is down. The whole of what an anchor does at this end — the
-/// swing to lie downwind of the hook is the server's, for a hull nobody is
-/// aboard, and a hull with somebody aboard sits where the hook was let go.
-/// Any hull with sailing state rather than ours alone, so that a world with
-/// no server behind it holds the hulls its player anchored and left exactly
-/// as a served one would.
-pub(crate) fn ride_at_anchor(mut hulls: Query<&mut Boat, With<Anchored>>) {
-    for mut boat in &mut hulls {
-        boat.furl();
-        boat.comes_to_rest();
-    }
-}
-
 /// Heel is wholly a thing the eye gets. It is settled here against the way
 /// this frame is making and hung on the hull by [`float`], the keel lying
 /// along the axis the hull rolls about — so a lean moves nothing
@@ -3459,7 +3459,7 @@ pub(crate) fn steer(
     // holds the pose and both velocities itself: asking for any of them
     // beside it is the same component borrowed twice, which Bevy refuses at
     // the first frame rather than at the first wrong answer.
-    mut boats: Query<(Forces, &mut Boat)>,
+    mut boats: Query<(Forces, &mut Boat, Has<Anchored>)>,
 ) {
     // A player ashore is in no boat's query, and that is the whole of how
     // the helm goes dead when they step off. It is also how a typed `w`
@@ -3468,7 +3468,7 @@ pub(crate) fn steer(
     let Ok(aboard) = players.single().map(ChildOf::parent) else {
         return;
     };
-    let Ok((mut forces, mut boat)) = boats.get_mut(aboard) else {
+    let Ok((mut forces, mut boat, anchored)) = boats.get_mut(aboard) else {
         return;
     };
 
@@ -3495,7 +3495,10 @@ pub(crate) fn steer(
     // share of the hull's full [`Hull::thrust`]. It names a *drive* and not
     // a speed: what speed comes of it is the water's answer, and is
     // [`Hull::speed_at`].
-    let astern = !boat.sails_set && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
+    // Backing is refused at anchor: the cable holds the hull, and the key
+    // that frees it is the anchor's — see [`tend_the_anchor`].
+    let astern =
+        !boat.sails_set && !anchored && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
     let drive = if boat.sails_set {
         hull.thrust()
             * match hull.mast {

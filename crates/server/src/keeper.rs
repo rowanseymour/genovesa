@@ -44,7 +44,7 @@ use protocol::{BeastKind, BoatId, BoatKind, Token, WorldId};
 /// The format this build writes, named in the file's first line. A file
 /// carrying a different number is refused whole rather than guessed at —
 /// see the module doc for why.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// The extension a kept world's file carries, so a directory of them can be
 /// told from whatever else ends up alongside. Public through
@@ -1539,131 +1539,131 @@ mod tests {
         for (text, what) in [
             ("", "an empty file"),
             ("genovesa world 999\n", "a format from some other year"),
-            ("genovesa world 1\nseed 7\nopening 0.35\nage 0\n", "no id"),
+            ("genovesa world 2\nseed 7\nopening 0.35\nage 0\n", "no id"),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nfuture stuff\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nfuture stuff\n",
                 "a key this build has never heard of",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 2.5\nage 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 2.5\nage 0\n",
                 "an opening past the day",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage -4\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage -4\n",
                 "a negative age",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage NaN\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage NaN\n",
                 "an age that is not a number",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1e30 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1e30 0\n",
                 "a player past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2\n",
                 "half a beast",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast kraken 1 2 3\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nbeast kraken 1 2 3\n",
                 "a beast of a kind nothing keeps",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2 3 4\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2 3 4\n",
                 "half a goal",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast whale 1e30 0 5\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nbeast whale 1e30 0 5\n",
                 "a beast past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2\n",
                 "a boat with no heading",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 canoe 1 2 3\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 canoe 1 2 3\n",
                 "a boat of a kind nothing sails",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 towed nothex\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 towed nothex\n",
                 "a painter to something that is not a boat's name",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 towed\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 towed\n",
                 "a painter to nothing",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 4\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 4\n",
                 "half an anchor",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 1e30 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 1e30 0\n",
                 "an anchor past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 keel 4\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 keel 4\n",
                 "a word no boat line has",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 4 5 anchored 6 7\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 4 5 anchored 6 7\n",
                 "two hooks down",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1 2 nothex\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1 2 nothex\n",
                 "an aboard that is not a boat's name",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1\n",
                 "a survey of nowhere",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3 4\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3 4\n",
                 "surveyed chunks that name no column",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 99999999:0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 99999999:0\n",
                 "a chunk past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0,0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0,0\n",
                 "a survey stepping nowhere, which is one chunk twice",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:4,-1\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:4,-1\n",
                 "a survey stepping back the way it came",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 5:0 3:0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 5:0 3:0\n",
                 "survey columns out of order",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0 3:9\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0 3:9\n",
                 "one column named twice",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\n\
                  player 1 0 0\nsurveyed 1 0:0\nsurveyed 1 4:4\n",
                 "one player's survey told twice",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\n\
                  player 1 0 0\nplayer 1 8 8\n",
                 "one player told twice",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 3\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 3\n",
                 "a cairn with half a position",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 1e30 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 1e30 0\n",
                 "a cairn past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 99999999 0 7 0 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 99999999 0 7 0 0\n",
                 "an island past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\n\
                  claim 1 2 7 0 0 Here\nclaim 1 2 9 4 4 There\n",
                 "one island claimed twice",
             ),

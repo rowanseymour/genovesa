@@ -115,6 +115,14 @@ impl Client {
 
     /// The next message of any kind, or the test failing at `deadline` saying
     /// it never heard `awaited`.
+    fn hear_by(&self, deadline: Instant, awaited: &str) -> ToClient {
+        self.heard_by(deadline)
+            .unwrap_or_else(|why| panic!("waited out {awaited}: {why}"))
+    }
+
+    /// The next message of any kind, or the error once `deadline` has passed
+    /// with nothing said — for the tests that listen to what the sea says of
+    /// a hull for a while, where silence is an answer rather than a failure.
     ///
     /// The socket's timeout is set to what is left of the wait, one read at a
     /// time, rather than the socket keeping a short one of its own. That is
@@ -122,29 +130,22 @@ impl Client {
     /// [`ToClient::read`] takes a length and then a body, and a timeout
     /// between them has already eaten bytes, so a second attempt resyncs
     /// inside a frame. One read given the whole remaining wait puts the
-    /// failure on the deadline, where `awaited` can say what never came.
+    /// failure on the deadline, where a caller can say what never came.
     ///
     /// It used to be a fixed five seconds on the socket, which is why the
     /// deadlines the readers below carry could never fire while a session was
     /// quiet: the socket always gave up first, with a `WouldBlock` naming
     /// neither the message nor the bound.
-    fn hear_by(&self, deadline: Instant, awaited: &str) -> ToClient {
-        let left = deadline.saturating_duration_since(Instant::now());
-        assert!(!left.is_zero(), "waited out {awaited}");
-        self.0.set_read_timeout(Some(left)).expect("set timeout");
-        ToClient::read(&mut &self.0).unwrap_or_else(|why| panic!("waited out {awaited}: {why}"))
-    }
-
-    /// The next message of any kind, or `None` once `deadline` has passed
-    /// with nothing said — for the tests that listen to what the sea says of
-    /// a hull for a while, where silence is an answer rather than a failure.
-    fn heard_by(&self, deadline: Instant) -> Option<ToClient> {
+    fn heard_by(&self, deadline: Instant) -> std::io::Result<ToClient> {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return None;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the deadline passed",
+            ));
         }
         self.0.set_read_timeout(Some(left)).expect("set timeout");
-        ToClient::read(&mut &self.0).ok()
+        ToClient::read(&mut &self.0)
     }
 
     fn join(addr: SocketAddr) -> (Self, PlayerId, Vec2, Vec2) {
@@ -611,17 +612,35 @@ impl Client {
     /// [`Client::nothing_was_said_about_a_cairn`] is, and for the same
     /// reason: silence has no arrival to wait for, so a reply to a line
     /// typed *after* the ask is the proof that whatever the ask had to say
-    /// has been said already.
-    fn nothing_was_said_about_a_boat(&self) -> bool {
+    /// has been said already. Word of a hull in `known` is not a hull
+    /// dealt: the sea says its piece about the empty ones whenever it moves
+    /// them, a jump being as good a moment as any.
+    fn no_hull_was_dealt(&self, known: &[protocol::BoatId]) -> bool {
         self.say(ToServer::Command {
             line: "help".to_string(),
         });
         let deadline = Instant::now() + PATIENCE;
         loop {
             match self.hear_by(deadline, "the reply that brackets the ask") {
-                ToClient::Boat { .. } => return false,
+                ToClient::Boat { id, .. } if !known.contains(&id) => return false,
                 ToClient::Reply { .. } => return true,
                 _ => {}
+            }
+        }
+    }
+
+    /// The next word about a hull not in `known` — the one a `grant` deals,
+    /// read past the sea's word about the hulls this client already knows,
+    /// which it turns bow to wind and tells as they turn.
+    fn hear_a_hull_dealt(
+        &self,
+        known: &[protocol::BoatId],
+    ) -> (protocol::BoatId, BoatKind, Vec2, f32, Option<PlayerId>) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let heard = self.hear_a_boat_kinded_by(deadline, "a hull dealt");
+            if !known.contains(&heard.0) {
+                return heard;
             }
         }
     }
@@ -631,7 +650,7 @@ impl Client {
     /// fresh arrival finds already floating in the world.
     ///
     /// Bracketed rather than counted out one by one, on the same reasoning as
-    /// [`Client::nothing_was_said_about_a_boat`]: a `help` typed after the
+    /// [`Client::no_hull_was_dealt`]: a `help` typed after the
     /// welcome is answered after everything the joining itself had to say, so
     /// the reply is the end of the burst. Each hull once, as it was first
     /// told: the sea may say more about an empty one before the reply lands.
@@ -1640,8 +1659,7 @@ fn a_ships_crew_steps_down_into_the_boat_on_its_painter_and_into_nothing_else() 
     // And from the thwarts nobody steps into another rowing boat, however
     // close it lies.
     client.say(ToServer::Board { boat: loose });
-    let (told, _, _, occupant, _) = client.hear_a_hull();
-    assert_eq!(told, loose);
+    let (_, occupant, _, _) = client.hear_of(loose, Instant::now() + PATIENCE, "the refusal");
     assert_eq!(occupant, None, "a rowing boat's crew crossed into another");
 }
 
@@ -3710,7 +3728,7 @@ fn grant_deals_a_hull_and_leaves_the_boarding_to_whoever_asked() {
     client.say(ToServer::Command {
         line: "grant rowboat".to_string(),
     });
-    let (tender, kind, at, _heading, occupant) = client.hear_a_boat_kinded();
+    let (tender, kind, at, _heading, occupant) = client.hear_a_hull_dealt(&[ship]);
     assert_eq!(kind, BoatKind::Rowboat, "some other hull was dealt");
     assert_ne!(tender, ship, "the ship they were steering answered a grant");
     assert_eq!(occupant, None, "the grant seated its asker");
@@ -3723,7 +3741,7 @@ fn grant_deals_a_hull_and_leaves_the_boarding_to_whoever_asked() {
     client.say(ToServer::Command {
         line: "grant rowboat".to_string(),
     });
-    let (again, ..) = client.hear_a_boat_kinded();
+    let (again, ..) = client.hear_a_hull_dealt(&[ship, tender]);
     assert_ne!(
         again, tender,
         "a grant brought a hull back rather than dealing one"
@@ -3736,7 +3754,7 @@ fn grant_deals_a_hull_and_leaves_the_boarding_to_whoever_asked() {
     client.say(ToServer::Command {
         line: "grant sloop".to_string(),
     });
-    let (other, kind, _at, _heading, occupant) = client.hear_a_boat_kinded();
+    let (other, kind, _at, _heading, occupant) = client.hear_a_hull_dealt(&[ship, tender, again]);
     assert_eq!(kind, BoatKind::Sloop, "some other hull was dealt");
     assert_ne!(other, ship, "the hull under them was dealt back to them");
     assert_eq!(occupant, None, "the grant seated its asker");
@@ -3761,7 +3779,8 @@ fn grant_deals_a_hull_and_leaves_the_boarding_to_whoever_asked() {
     client.say(ToServer::Command {
         line: "grant rowboat".to_string(),
     });
-    let (_ashore, _kind, off, _heading, _occupant) = client.hear_a_boat_kinded();
+    let (_ashore, _kind, off, _heading, _occupant) =
+        client.hear_a_hull_dealt(&[ship, tender, again, other]);
     assert!(
         world.height(off.x, off.y) < 0.0,
         "a hull was dealt onto dry land at {off}"
@@ -3900,6 +3919,7 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
     let addr = host(7);
     let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a world is entered at a helm");
+    let (tender, _) = client.hear_the_tender_of(ship);
     let world = behind_the_curtain(7);
     let inland = world.spawn().expect("a world has islands").island.centre();
     assert!(
@@ -3957,7 +3977,7 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
     let reply = client.hear_reply();
     assert!(reply.starts_with("you are at"), "answered: {reply}");
     assert!(
-        client.nothing_was_said_about_a_boat(),
+        client.no_hull_was_dealt(&[ship, tender]),
         "a swimmer was dealt a hull"
     );
 
@@ -3965,15 +3985,19 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
     // helm to take back: the swim was out to it, and boarding is how anybody
     // gets aboard anything now.
     client.say(ToServer::Board { boat: ship });
-    let (told, at, _heading, occupant) = client.hear_a_boat();
-    assert_eq!(told, ship, "some other hull answered the boarding");
+    let deadline = Instant::now() + PATIENCE;
+    let at = loop {
+        let (hull, occupant, _, _) = client.hear_of(ship, deadline, "the boarding granted");
+        if occupant == Some(id) {
+            break hull.at;
+        }
+    };
     // Give or take the sea's hand on a hull nobody anchored — see
     // [`ADRIFT`].
     assert!(
         at.distance(anchorage) < ADRIFT,
         "the ship had drifted off its anchorage: {at} for {anchorage}"
     );
-    assert_eq!(occupant, Some(id), "the boarding was refused");
 
     // At a helm again, and asked for open water: the plainest of the cases,
     // the hull simply going where it was sent with its crew aboard. Somewhere
@@ -4036,7 +4060,7 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
         "the world had an opinion about a walker's bearing"
     );
     assert!(
-        client.nothing_was_said_about_a_boat(),
+        client.no_hull_was_dealt(&[ship, tender]),
         "a hull followed a walker up the beach"
     );
 }
@@ -4140,11 +4164,11 @@ fn open_sea_near(world: &Archipelago, spawn: Vec2) -> Vec2 {
         .expect("an ocean has open water in it")
 }
 
-/// The console's `breeze` and `gale`, as the sea tests order them: two
-/// bearings a right angle apart, so ordering one after the other is a wind
-/// that has veered. The vectors are the console's own — see `server::console`
-/// — and are held to here by the assertions that read them off the water.
-const BREEZE: Vec2 = Vec2::new(-4.95, -4.95);
+/// The console's `gale`, as the sea tests order it after its `breeze`: a
+/// bearing a right angle from the breeze's, so ordering one after the other
+/// is a wind that has veered. The vector is the console's own — see
+/// `server::console` — and is held to here by the assertions that read it
+/// off the water.
 const GALE: Vec2 = Vec2::new(11.31, -11.31);
 
 #[test]
@@ -4152,10 +4176,10 @@ fn an_anchor_holds_over_the_shelf_and_not_over_the_open_sea() {
     // The ocean's floor lies past [`protocol::ground::ANCHOR_DEPTH`] by
     // construction, so a ship out there is refused its anchor — and the
     // refusal is the ship's own state, to the asker alone, with no hook
-    // down. Back over the shelf the same ask serves, the hook going a
-    // cable's length to windward so the hull lies where it asked; `where`
-    // reads the same fact; a deck stepped off at anchor stays put; and the
-    // crew back aboard weighs it.
+    // down. Back over the shelf the same ask serves, the hook going down
+    // where the hull lies; `where` reads the same fact; a deck stepped off
+    // at anchor stays within a cable of its hook; and the crew back aboard
+    // weighs it.
     let addr = host(7);
     let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
@@ -4182,10 +4206,9 @@ fn an_anchor_holds_over_the_shelf_and_not_over_the_open_sea() {
     let (hull, _, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the anchor");
     assert_eq!(hull.at, spawn, "dropping the hook moved the ship");
     let hook = anchor.expect("an anchor refused over the shelf");
-    let laid = (spawn - hook).normalize();
-    assert!(
-        laid.dot(BREEZE.normalize()) > 0.999,
-        "the hook lies at {hook} off a hull at {spawn}, not to windward of it in a {BREEZE} wind"
+    assert_eq!(
+        hook, spawn,
+        "the hook went down somewhere other than under the hull"
     );
     let reply = client.order("where");
     assert!(
@@ -4194,25 +4217,26 @@ fn an_anchor_holds_over_the_shelf_and_not_over_the_open_sea() {
     );
 
     // Stepped down into the boat, the ship is left at anchor: whatever the
-    // sea says of it over the next while, it lies where it was left — the
-    // most the sea does to a hull on its hook in a steady wind is turn it
-    // to ride bow to the wind.
+    // sea says of it over the next while, it stays within a cable of its
+    // hook — falling back downwind on it and turning to ride bow to the
+    // wind is the most the sea does to a hull on its hook.
     client.say(ToServer::Board { boat: tender });
     client.boat_changed_hands(tender, Some(id));
     let (_, occupant, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the ship left");
     assert_eq!(occupant, None, "the ship was not left");
     assert_eq!(anchor, Some(hook), "stepping off weighed the anchor");
     let listened = Instant::now() + Duration::from_secs(3);
-    while let Some(word) = client.heard_by(listened) {
+    while let Ok(word) = client.heard_by(listened) {
         if let ToClient::Boat {
             id, hull, anchor, ..
         } = word
         {
             if id == ship {
                 assert!(
-                    hull.at.distance(spawn) < 0.1,
-                    "a ship at anchor was carried to {}",
-                    hull.at
+                    hull.at.distance(hook) <= protocol::ground::ANCHOR_SWING + 0.05,
+                    "a ship at anchor was carried to {}, {} m from its hook",
+                    hull.at,
+                    hull.at.distance(hook)
                 );
                 assert_eq!(anchor, Some(hook), "the sea weighed the anchor");
             }
@@ -4306,7 +4330,7 @@ fn an_anchored_hull_swings_to_lie_downwind_of_its_hook() {
     client.say(ToServer::Anchor);
     let (_, _, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the anchor");
     let hook = anchor.expect("an anchor refused over the shelf");
-    let cable = hook.distance(spawn);
+    let cable = protocol::ground::ANCHOR_SWING;
     client.say(ToServer::Disembark {
         position: spawn + Vec2::new(3.0, 0.0),
     });

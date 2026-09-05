@@ -45,14 +45,16 @@
 //! Nothing here is under the cross-machine promise the generator keeps: there
 //! is one server, and the tellings are the agreement.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use glam::Vec2;
-use protocol::{BoatId, Underway, TENDER_ASTERN};
+use protocol::ground::{ANCHOR_DEPTH, ANCHOR_SWING};
+use protocol::{swing_to, BoatId, Underway, TENDER_ASTERN};
 
-use crate::{aimed, astern, broadcast_all, Held, Shared, KEPT_BERTH};
+use crate::{aimed, astern, broadcast_all, carry_the_sleepers, Held, Shared};
 
 /// How often the sea moves the empty hulls, and tells of it. A client
 /// reckons a telling forward for about half a second before it stops
@@ -83,14 +85,6 @@ const MINDED: f32 = 2_048.0;
 /// creeps a few centimetres a second, which over a night is a bay.
 const LEEWAY: f32 = 0.06;
 
-/// How far downwind of its hook an anchored hull lies, in metres: the cable
-/// on the surface, which is the radius of the circle the hull swings on.
-///
-/// Longer than [`TENDER_ASTERN`], so that a ship swinging to a new wind and
-/// the boat on its painter — placed astern of wherever the ship goes — never
-/// have the hook between them.
-pub(crate) const SWING: f32 = 15.0;
-
 /// How fast an anchored hull takes up its cable when the wind shifts, in
 /// metres per second: a boat sheering round to a new wind rather than a boat
 /// sailing to a new spot.
@@ -114,11 +108,18 @@ const COMING_ROUND: f32 = 0.2;
 /// stopped it anyway.
 const AGROUND: f32 = 1.0;
 
-/// How close to where it should be lying an anchored hull has to be before
-/// the sea stops moving it, in metres — and how close to its bearing, in
-/// radians. Under both, the hull is told nothing: a boat riding to its
-/// anchor in a steady wind is telling-quiet.
-const SETTLED: (f32, f32) = (0.05, 0.01);
+/// How close to where it should be lying an anchored hull has to be, in
+/// metres, and how close to its bearing any empty hull has to be, in
+/// radians, before the sea stops moving it. Under both, the hull is told
+/// nothing: a boat riding to its anchor in a steady wind is telling-quiet.
+const SETTLED_OFF: f32 = 0.05;
+const SETTLED_BEARING: f32 = 0.01;
+
+/// Whether an anchor holds over a bed this high — the one rule of
+/// [`ANCHOR_DEPTH`], asked by the grant, the console's `grant`, and `where`.
+pub(crate) fn anchor_holds(bed: f32) -> bool {
+    bed >= -ANCHOR_DEPTH
+}
 
 /// Minds the empty hulls for the life of the session: see the module doc.
 pub(crate) fn mind_the_hulls(shared: &Arc<Shared>) {
@@ -181,6 +182,7 @@ fn beat(shared: &Shared, dt: f32) {
     let mut carried: Vec<(BoatId, Vec2, Vec2)> = Vec::new();
     {
         let mut boats = shared.boats.held();
+        let mut went: HashMap<BoatId, Underway> = HashMap::new();
         for (id, from, to) in moves {
             let Some(state) = boats.get_mut(&id) else {
                 continue;
@@ -191,44 +193,27 @@ fn beat(shared: &Shared, dt: f32) {
             state.hull = to;
             news.push(state.told(id));
             carried.push((id, from.at, to.at));
+            went.insert(id, to);
         }
         // The boat on a moved ship's painter goes with it, a painter's
         // length astern of wherever the ship now lies, exactly where a
         // client at that helm would have put it. Told after its ship, as a
         // join tells them — see [`crate::welcome_aboard`].
-        let mut tenders = Vec::new();
-        for (ship, _, _) in &carried {
-            let lies = boats[ship].hull;
-            for (id, state) in boats.iter_mut() {
-                if state.towed_by == Some(*ship) && state.occupant.is_none() {
-                    state.hull = Underway {
-                        at: astern(lies.at, lies.heading, TENDER_ASTERN),
-                        heading: lies.heading,
-                        way: lies.way,
-                        swinging: lies.swinging,
-                    };
-                    tenders.push(state.told(*id));
-                }
-            }
-        }
-        news.extend(tenders);
-    }
-
-    // The sleepers, carried with their hulls — see the module doc. Held
-    // alone, as every path to the remembered records holds it.
-    {
-        let mut remembered = shared.remembered.held();
-        for record in remembered.values_mut() {
-            let Some(aboard) = record.aboard else {
+        for (id, state) in boats.iter_mut() {
+            let Some(ship) = state.towed_by.and_then(|ship| went.get(&ship)) else {
                 continue;
             };
-            if let Some((_, from, to)) = carried.iter().find(|(boat, _, _)| *boat == aboard) {
-                if record.position.distance(*from) <= KEPT_BERTH {
-                    record.position = *to;
-                }
+            if state.occupant.is_none() {
+                state.hull = Underway {
+                    at: astern(ship.at, ship.heading, TENDER_ASTERN),
+                    ..*ship
+                };
+                news.push(state.told(*id));
             }
         }
     }
+
+    carry_the_sleepers(shared, &carried);
 
     let players = shared.players.held();
     for word in news {
@@ -256,71 +241,72 @@ fn moved(
         return None;
     }
     let downwind = wind.normalize_or_zero();
-    // The yaw that points a bow into the wind — the client's own convention,
-    // see [`aimed`]. The sky never goes slack, but the console can order a
-    // flat calm, and a calm names no bearing: the hull keeps the one it has.
-    let upwind = if downwind == Vec2::ZERO {
-        hull.heading
-    } else {
-        aimed(hull.at, hull.at - downwind)
-    };
 
-    let (at, bearing) = match anchor {
+    let at = match anchor {
+        // Riding to the anchor: drawn to the end of its cable downwind of
+        // the hook. In a calm the cable hangs slack and the hull drifts
+        // back over the hook.
         Some(hook) => {
-            // Riding to the anchor: the hull is drawn to the end of its
-            // cable downwind of the hook, bow to the wind.
-            let lie = hook + downwind * SWING;
-            let toward = lie - hull.at;
-            let off = toward.length();
-            let step = off.min(SWING_PACE * dt);
-            let at = if off > SETTLED.0 {
-                hull.at + toward * (step / off)
-            } else {
+            let toward = hook + downwind * ANCHOR_SWING - hull.at;
+            if toward.length() <= SETTLED_OFF {
                 hull.at
-            };
-            (at, upwind)
-        }
-        None => {
-            // Adrift: carried down the wind, and lying across it.
-            let at = hull.at + wind * LEEWAY * dt;
-            let half = std::f32::consts::FRAC_PI_2;
-            let beam_on = if swing_to(upwind + half, hull.heading).abs()
-                <= swing_to(upwind - half, hull.heading).abs()
-            {
-                upwind + half
             } else {
-                upwind - half
-            };
-            (at, beam_on)
+                hull.at + toward.clamp_length_max(SWING_PACE * dt)
+            }
+        }
+        // Adrift: carried down the wind.
+        None => hull.at + wind * LEEWAY * dt,
+    };
+    // A hull that would go aground fetches up instead — afloat where it
+    // was, and still coming round. Sounded only where it would move.
+    let at = if at == hull.at || !aground(at) {
+        at
+    } else {
+        hull.at
+    };
+
+    // How far the hull has to come round: bow to the wind at anchor, and
+    // across it adrift, whichever beam is nearer. The sky never goes slack,
+    // but the console can order a flat calm, and a calm names no bearing:
+    // the hull keeps the one it has.
+    let turn = if downwind == Vec2::ZERO {
+        0.0
+    } else {
+        // The yaw that points a bow into the wind — the client's own
+        // convention, see [`aimed`].
+        let upwind = aimed(hull.at, hull.at - downwind);
+        match anchor {
+            Some(_) => swing_to(upwind, hull.heading),
+            None => {
+                let half = std::f32::consts::FRAC_PI_2;
+                let port = swing_to(upwind + half, hull.heading);
+                let starboard = swing_to(upwind - half, hull.heading);
+                if port.abs() <= starboard.abs() {
+                    port
+                } else {
+                    starboard
+                }
+            }
         }
     };
-    let at = if aground(at) { hull.at } else { at };
-
-    let turn = swing_to(bearing, hull.heading);
-    let turned = turn.clamp(-COMING_ROUND * dt, COMING_ROUND * dt);
-    let heading = if turn.abs() > SETTLED.1 {
-        (hull.heading + turned).rem_euclid(std::f32::consts::TAU)
+    let turned = if turn.abs() > SETTLED_BEARING {
+        turn.clamp(-COMING_ROUND * dt, COMING_ROUND * dt)
     } else {
-        hull.heading
+        0.0
     };
 
-    if at == hull.at && heading == hull.heading && hull.way == Vec2::ZERO && hull.swinging == 0.0 {
+    if at == hull.at && turned == 0.0 && hull.way == Vec2::ZERO && hull.swinging == 0.0 {
         return None;
     }
+    // The motion the beat made, rather than a difference of endpoints: the
+    // heading is kept wrapped, and a difference across the wrap would be a
+    // whole turn a second on the wire.
     Some(Underway {
         at,
-        heading,
+        heading: (hull.heading + turned).rem_euclid(std::f32::consts::TAU),
         way: (at - hull.at) / dt,
-        swinging: (heading - hull.heading) / dt,
+        swinging: turned / dt,
     })
-}
-
-/// The shortest way round from one yaw to another, in radians: what a
-/// heading has to turn through to become `onto`, never more than half a
-/// turn either way.
-fn swing_to(onto: f32, from: f32) -> f32 {
-    let round = std::f32::consts::TAU;
-    (onto - from + round / 2.0).rem_euclid(round) - round / 2.0
 }
 
 #[cfg(test)]
@@ -380,9 +366,9 @@ mod tests {
             beats += 1;
             assert!(beats < 400, "the hull never settled at its anchor");
         }
-        let lie = hook + wind.normalize() * SWING;
+        let lie = hook + wind.normalize() * ANCHOR_SWING;
         assert!(
-            hull.at.distance(lie) <= SETTLED.0,
+            hull.at.distance(lie) <= SETTLED_OFF,
             "settled at {} rather than {lie}, downwind of the hook",
             hull.at
         );
@@ -407,8 +393,8 @@ mod tests {
                 hull = on;
             }
             assert!(
-                hull.at.distance(hook) <= SWING + 1e-3,
-                "beat {beat}: the hull is {} m from a hook on {SWING} m of cable",
+                hull.at.distance(hook) <= ANCHOR_SWING + 1e-3,
+                "beat {beat}: the hull is {} m from a hook on {ANCHOR_SWING} m of cable",
                 hull.at.distance(hook)
             );
         }
@@ -455,15 +441,55 @@ mod tests {
     fn a_hull_lying_still_where_it_should_is_telling_quiet() {
         let wind = Vec2::new(0.0, 6.0);
         let hook = Vec2::ZERO;
-        let riding = Underway::lying(hook + wind.normalize() * SWING, aimed(Vec2::ZERO, -wind));
+        let riding = Underway::lying(
+            hook + wind.normalize() * ANCHOR_SWING,
+            aimed(Vec2::ZERO, -wind),
+        );
         assert!(moved(riding, Some(hook), wind, 0.25, open_sea).is_none());
     }
 
     #[test]
-    fn the_shortest_way_round_is_taken() {
-        let round = std::f32::consts::TAU;
-        assert!((swing_to(0.1, round - 0.1) - 0.2).abs() < 1e-5);
-        assert!((swing_to(round - 0.1, 0.1) + 0.2).abs() < 1e-5);
-        assert!((swing_to(1.0, 1.0)).abs() < 1e-6);
+    fn a_calm_moves_nothing_and_turns_nothing() {
+        // The console's flat calm: no bearing to come round to, adrift or
+        // at anchor, so a hull lying still is left lying still — and one
+        // riding downwind of its hook drifts back over it on a slack cable.
+        let calm = Vec2::ZERO;
+        let still = Underway::lying(Vec2::new(3.0, 4.0), -0.5);
+        assert!(
+            moved(still, None, calm, 0.25, open_sea).is_none(),
+            "a calm turned a drifting hull"
+        );
+        let hook = Vec2::ZERO;
+        let out = Underway::lying(Vec2::new(0.0, ANCHOR_SWING), 0.0);
+        let mut hull = out;
+        let mut beats = 0;
+        while let Some(on) = moved(hull, Some(hook), calm, 0.25, open_sea) {
+            assert_eq!(on.heading, hull.heading, "a calm turned a hull at anchor");
+            hull = on;
+            beats += 1;
+            assert!(beats < 400, "the hull never came back over its hook");
+        }
+        assert!(hull.at.distance(hook) <= SETTLED_OFF);
+    }
+
+    #[test]
+    fn a_hull_told_a_negative_yaw_is_never_told_a_whole_turn_of_swing() {
+        // A client's yaw comes off atan2 and is as often negative as not;
+        // the sea keeps its own headings wrapped, and the swing it tells is
+        // the turn it made, never the difference across the wrap.
+        let wind = Vec2::new(0.0, -6.0);
+        let mut hull = Underway::lying(Vec2::ZERO, -0.5);
+        for _ in 0..200 {
+            let Some(on) = moved(hull, Some(Vec2::ZERO), wind, 0.25, open_sea) else {
+                break;
+            };
+            assert!(
+                on.swinging.abs() <= COMING_ROUND + 1e-5,
+                "told a swing of {} rad/s from a heading of {}",
+                on.swinging,
+                hull.heading
+            );
+            hull = on;
+        }
     }
 }

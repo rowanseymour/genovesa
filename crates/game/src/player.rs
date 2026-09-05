@@ -1436,16 +1436,6 @@ mod tests {
         );
     }
 
-    /// One press of the anchor key, released again afterwards.
-    fn press_anchor(app: &mut App) {
-        hold(app, KeyCode::KeyG);
-        run_frames(app, 1);
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .release(KeyCode::KeyG);
-        run_frames(app, 1);
-    }
-
     /// Where the ship's hook lies, if it has one down.
     fn hook_of(app: &mut App, ship: Entity) -> Option<Vec2> {
         app.world()
@@ -1463,7 +1453,7 @@ mod tests {
         let mut app = shore_app();
         let ship = hull_rigged(&mut app, BoatKind::Sloop);
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
-        press_anchor(&mut app);
+        tap(&mut app, KeyCode::KeyG);
         assert_eq!(
             hook_of(&mut app, ship),
             None,
@@ -1472,13 +1462,13 @@ mod tests {
 
         let anchorage = Vec2::new(SHORE_WATERLINE + ANCHORAGE, 0.0);
         place_boat(&mut app, anchorage);
-        press_anchor(&mut app);
+        tap(&mut app, KeyCode::KeyG);
         let hook = hook_of(&mut app, ship).expect("the anchorage refused the hook");
         assert!(
             hook.distance(anchorage) < 0.5,
             "the hook went down at {hook} for a ship at {anchorage}"
         );
-        press_anchor(&mut app);
+        tap(&mut app, KeyCode::KeyG);
         assert_eq!(
             hook_of(&mut app, ship),
             None,
@@ -1494,7 +1484,7 @@ mod tests {
         // `boat::tend_the_anchor` for the order that makes that so.
         let mut app = shore_app();
         let ship = hull_rigged(&mut app, BoatKind::Sloop);
-        press_anchor(&mut app);
+        tap(&mut app, KeyCode::KeyG);
         assert!(
             hook_of(&mut app, ship).is_some(),
             "the anchorage refused the hook"
@@ -1524,13 +1514,47 @@ mod tests {
         let mut app = shore_app();
         let ship = hull_rigged(&mut app, BoatKind::Sloop);
         set_wind(&mut app, Vec2::new(-12.0, 0.0));
-        press_anchor(&mut app);
+        tap(&mut app, KeyCode::KeyG);
         let lying = transform_of(&mut app, ship).translation.xz();
         run_frames(&mut app, 300);
         let still = transform_of(&mut app, ship).translation.xz();
         assert!(
             still.distance(lying) < 0.5,
             "a ship at anchor was carried from {lying} to {still}"
+        );
+        // And backing is refused at anchor: the cable holds, and the back
+        // key neither weighs nor drives the hull off its hook.
+        hold(&mut app, KeyCode::ArrowDown);
+        run_frames(&mut app, 120);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowDown);
+        let backed = transform_of(&mut app, ship).translation.xz();
+        assert!(
+            hook_of(&mut app, ship).is_some() && backed.distance(lying) < 0.5,
+            "a ship at anchor was backed from {lying} to {backed}"
+        );
+    }
+
+    #[test]
+    fn a_deck_making_way_drops_no_anchor() {
+        // Dropping the hook is asked of a hull at rest, on the terms every
+        // crossing is: the key does nothing while the ship is making way,
+        // and serves once the way has run off.
+        let mut app = shore_app();
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        set_wind(&mut app, Vec2::new(-7.0, 0.0));
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 20);
+        assert!(
+            way_of(&mut app, BoatKind::Sloop) > 0.0,
+            "canvas made no way"
+        );
+        tap(&mut app, KeyCode::KeyG);
+        assert_eq!(
+            hook_of(&mut app, ship),
+            None,
+            "an anchor went down off a deck making way"
         );
     }
 

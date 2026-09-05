@@ -59,7 +59,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, Vec2};
-use protocol::ground::{chunk_at, dequantize, ANCHOR_DEPTH, CHUNK_METRES};
+use protocol::ground::{chunk_at, dequantize, ANCHOR_SWING, CHUNK_METRES};
 use protocol::survey::{in_sight_along, Landmass, Soundings, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, WorldId,
@@ -2179,6 +2179,16 @@ fn take_the_helm(shared: &Shared, id: PlayerId, hull: Underway, tender: Option<U
         let mut boats = shared.boats.held();
         let state = boats.get_mut(&boat).expect("a boat once boarded exists");
         state.hull = hull;
+        // A hull sailed off its anchorage has parted its cable. An honest
+        // client weighs before it makes sail, so this only ever catches one
+        // that did not — and keeps the sea from reeling a hull back to a
+        // hook a whole bay away the moment its crew steps off.
+        if state
+            .anchor
+            .is_some_and(|hook| hull.at.distance(hook) > ANCHOR_SWING)
+        {
+            state.anchor = None;
+        }
         let told = state.told(boat);
         let towed = tender.and_then(|tender| {
             // The boat on this ship's painter, and empty: a hull with
@@ -2219,25 +2229,57 @@ fn shove(shared: &Shared, id: PlayerId, boat: BoatId, hull: Underway) -> Went {
     let Some(player) = players.get(&id) else {
         return Went::Over;
     };
-    let told = {
+    let (told, from) = {
         let mut boats = shared.boats.held();
         let Some(state) = boats.get_mut(&boat) else {
             return Went::Nowhere;
         };
         // A hull with somebody aboard is that player's to report, and one on
         // a painter is its ship's — see [`ToServer::Helm`], which carries
-        // both. Neither is anybody else's to push.
+        // both. Neither is anybody else's to push, and nor is a hull on its
+        // hook: its cable holds it, and what a client's bow does to it is
+        // the spring its telling already is at that end.
         if state.occupant.is_some()
             || state.towed_by.is_some()
+            || state.anchor.is_some()
             || state.hull.at.distance(player.position) > BOARD_GRANT
         {
             return Went::Nowhere;
         }
+        let from = state.hull.at;
         state.hull = hull;
-        state.told(boat)
+        (state.told(boat), from)
     };
     broadcast(&players, id, told);
+    drop(players);
+    // A shove is not somebody sailing the hull away either — see
+    // [`carry_the_sleepers`], which the sea's own moves go through.
+    carry_the_sleepers(shared, &[(boat, from, hull.at)]);
     Went::Nowhere
+}
+
+/// Carries the sleepers with their hulls: a remembered player whose record
+/// names a hull in `moved` — each `(boat, from, to)` — and who left within
+/// [`KEPT_BERTH`] of `from` is remembered at `to`, so that a hull the sea or
+/// a stranger's bow moved is still the hull lying where they left it as far
+/// as [`seat_the_arrival`] is concerned. Somebody sailing it away is a
+/// different matter, and nothing carries a sleeper through that. Holds the
+/// records' lock alone, as every path to them does.
+pub(crate) fn carry_the_sleepers(shared: &Shared, moved: &[(BoatId, Vec2, Vec2)]) {
+    if moved.is_empty() {
+        return;
+    }
+    let mut remembered = shared.remembered.held();
+    for record in remembered.values_mut() {
+        let Some(aboard) = record.aboard else {
+            continue;
+        };
+        if let Some((_, from, to)) = moved.iter().find(|(boat, _, _)| *boat == aboard) {
+            if record.position.distance(*from) <= KEPT_BERTH {
+                record.position = *to;
+            }
+        }
+    }
 }
 
 /// A boat's helm, asked for.
@@ -2391,21 +2433,14 @@ struct Boarded {
 }
 
 /// An anchor let go, where the asker's hull lies — see [`ToServer::Anchor`]
-/// for what is granted, and [`sea`] for what the hook then does.
-///
-/// Granted only where it would hold — [`ANCHOR_DEPTH`], and `world` for what
-/// makes water an anchorage — which is the one thing here the world has to
-/// be asked. Sounded with no lock held, because [`Archipelago::height`] may
-/// have an island to generate, the same order `survey_the_way` and the
-/// console keep; so the hull is looked up twice, here for where it lies and
-/// again under the grant's own hold, and a report between the two moves it
-/// a stride at most. The hook goes a cable's length to windward, so the
-/// hull lies where it asked — see [`sea::SWING`] — and the same wind the
-/// sea will swing it on is the one the hook is laid against.
-///
-/// Refused with the hull's own state, to the asker alone: a client that
-/// gated the key on the same number hears its own picture back, and one
-/// that disagreed by a quantisation step hears why nothing happened.
+/// for what is granted and [`sea`] for what the hook then does. The bed is
+/// the one thing the world has to be asked, and it is asked with no lock
+/// held, as every sounding is; nothing moves an occupied hull but its own
+/// occupant's thread, which is this one, so the hook goes down at the very
+/// spot that was sounded. Told to everyone when something changed, and to
+/// the asker alone when nothing did — a refusal, or a hook already down
+/// here — on [`board`]'s terms: a no-change answer that reached the roster
+/// would let one client's pestering fill everybody's outbox.
 fn drop_anchor(shared: &Shared, id: PlayerId) -> Went {
     let under = {
         let players = shared.players.held();
@@ -2421,24 +2456,24 @@ fn drop_anchor(shared: &Shared, id: PlayerId) -> Went {
     let Some((boat, at)) = under else {
         return Went::Nowhere;
     };
-    let holds = shared.world.height(at.x, at.y) >= -ANCHOR_DEPTH;
-    let wind = shared.wind();
+    let holds = sea::anchor_holds(shared.world.height(at.x, at.y));
 
     let players = shared.players.held();
     let Some(player) = players.get(&id) else {
         return Went::Over;
     };
-    let told = {
+    let (told, dropped) = {
         let mut boats = shared.boats.held();
         let Some(state) = boats.get_mut(&boat) else {
             return Went::Nowhere;
         };
-        if holds && state.occupant == Some(id) {
-            state.anchor = Some(state.hull.at - wind.normalize_or_zero() * sea::SWING);
+        let dropped = holds && state.occupant == Some(id) && state.anchor != Some(at);
+        if dropped {
+            state.anchor = Some(at);
         }
-        state.told(boat)
+        (state.told(boat), dropped)
     };
-    if holds {
+    if dropped {
         broadcast_all(&players, told);
     } else {
         post(player, told);

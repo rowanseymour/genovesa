@@ -40,7 +40,6 @@
 //! world would then disown.
 
 use glam::Vec2;
-use protocol::ground::ANCHOR_DEPTH;
 use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Underway};
 use world::archipelago::{berth_off, Archipelago, SOUNDING, SPAWN_OFFSHORE};
 
@@ -641,8 +640,7 @@ fn grant(asked: Asked) -> Result<String, String> {
     // Anchored on the terms an asker's own hull is — see `drop_anchor` —
     // where the water allows it, so a dealt hull waits to be boarded rather
     // than leaving on the wind.
-    let anchor = (shared.world.height(at.x, at.y) >= -ANCHOR_DEPTH)
-        .then(|| at - shared.wind().normalize_or_zero() * sea::SWING);
+    let anchor = sea::anchor_holds(shared.world.height(at.x, at.y)).then_some(at);
 
     {
         // The roster first and the boats under it — the nesting the two
@@ -819,11 +817,12 @@ fn spawn(asked: Asked) -> Result<String, String> {
 ///
 /// A reading of the world rather than of the client, because the numbers a
 /// client could answer from are the ones it was *sent* — quantised, and only
-/// for chunks that have arrived. This side is where [`ANCHOR_DEPTH`] is
-/// actually weighed — in `drop_anchor`, which is what refuses an anchor —
-/// so a reading taken anywhere else could disagree with the refusal it is
-/// being used to explain. Whether the hook is down is the world's word too,
-/// the same one the hull's telling carries.
+/// for chunks that have arrived. This side is where
+/// [`protocol::ground::ANCHOR_DEPTH`] is actually weighed — in
+/// `drop_anchor`, which is what refuses an anchor — so a reading taken
+/// anywhere else could disagree with the refusal it is being used to
+/// explain. Whether the hook is down is the world's word too, the same one
+/// the hull's telling carries.
 fn whereabouts(asked: Asked) -> Result<String, String> {
     let Asked { shared, from, .. } = asked;
 
@@ -865,13 +864,13 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
     }];
     // A tenth of a metre where the rest of the console rounds to whole ones:
     // what this line is read for is which side of a mark a hull is on, and
-    // both marks it can answer about — the waterline and [`ANCHOR_DEPTH`] —
-    // sit close enough together on a shelving coast that a metre of rounding
-    // would put the reading on the wrong side of one.
+    // both marks it can answer about — the waterline and the anchor's reach
+    // — sit close enough together on a shelving coast that a metre of
+    // rounding would put the reading on the wrong side of one.
     lines.push(match (helm, height >= 0.0) {
         (Some(_), true) => format!("aground, with {height:.1} m of it out of the water"),
         (Some((_, true)), false) => format!("afloat in {:.1} m, riding at anchor", -height),
-        (Some((_, false)), false) if -height <= ANCHOR_DEPTH => {
+        (Some((_, false)), false) if sea::anchor_holds(height) => {
             format!("afloat in {:.1} m, and an anchor holds here", -height)
         }
         (Some(_), false) => format!("afloat in {:.1} m, too deep to anchor", -height),
