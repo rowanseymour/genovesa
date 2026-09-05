@@ -405,7 +405,7 @@ impl Plugin for PlayerPlugin {
                 Update,
                 take_the_put_down
                     .in_set(crate::net::Wire::Read)
-                    .after(crate::boat::take_the_hulls),
+                    .after(crate::boat::lose_the_hulls),
             );
     }
 }

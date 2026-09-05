@@ -1573,6 +1573,54 @@ impl Fleet {
         hull.insert(telling);
     }
 
+    /// A boat is out of the world — see [`protocol::ToClient::BoatGone`].
+    /// The hull despawns, and a rope made fast to it goes with it.
+    ///
+    /// The wire never says this of a hull anybody is aboard, so the rest is
+    /// a defence against a server that broke that word: a player the book
+    /// still has at this helm is stood off where it lay rather than left
+    /// parented to nothing, and a tender on its painter is cut loose.
+    pub fn gone(
+        &mut self,
+        commands: &mut Commands,
+        players: &crate::player::Players,
+        poses: &Query<&Transform, With<Vessel>>,
+        ropes: &Query<&Painter>,
+        id: BoatId,
+    ) {
+        let Some(hull) = self.hulls.remove(&id) else {
+            return;
+        };
+        self.crews.remove(&id);
+        self.towed.take_if(|towed| *towed == id);
+        // A rope made fast to a hull that is going has to go with it. The
+        // joint is an entity of its own and nothing owns it but the hull it
+        // holds, so [`make_fast`]'s casting off cannot reach one whose
+        // tender has already been despawned — it can only iterate hulls
+        // that still exist. Left alone it stands there for the rest of the
+        // world, made fast to nothing.
+        if let Ok(painter) = ropes.get(hull) {
+            commands.entity(painter.0).despawn();
+        }
+        if self.helmed.take_if(|held| *held == id).is_some() {
+            // Where the hull stands. It always stands somewhere: this runs
+            // after the tellings' commands have been applied, so even a hull
+            // raised this frame has its pose — the origin is the type's
+            // fallback and not a case. `BoatGone` carries no pose of its own
+            // to prefer, and [`crate::player::Unsettled`] makes wherever
+            // this is recoverable.
+            let lying = poses.get(hull).copied().unwrap_or_default();
+            stand_off(commands, players, &lying);
+            // And the boat on our painter, if any, is nobody's to tow now:
+            // its own telling will moor it, and until then it must not hang
+            // off a ship that has gone.
+            if let Some(tender) = self.towed.take().and_then(|towed| self.hulls.get(&towed)) {
+                commands.entity(*tender).remove::<Towed>();
+            }
+        }
+        commands.entity(hull).despawn();
+    }
+
     /// The entity of the hull we hold the helm of, if any — see
     /// [`Fleet::helmed`].
     ///
@@ -1685,6 +1733,7 @@ impl Plugin for BoatPlugin {
         // module's own tests run it without the session that writes them.
         app.add_plugins(crate::waterline::WaterlinePlugin)
             .add_message::<crate::net::HullTold>()
+            .add_message::<crate::net::HullGone>()
             .init_resource::<sea::SeaConditions>()
             .init_resource::<Fleet>()
             // Cleared with the world it described: the next world's hulls
@@ -1700,10 +1749,11 @@ impl Plugin for BoatPlugin {
             )
             // What the world says about its boats, before anything that
             // draws one: a hull told this frame is rigged, moored and ridden
-            // in the same one.
+            // in the same one, and one told gone is out of it.
             .add_systems(
                 Update,
-                take_the_hulls
+                (take_the_hulls, lose_the_hulls)
+                    .chain()
                     .in_set(crate::net::Wire::Read)
                     .run_if(resource_exists::<crate::net::Online>),
             )
@@ -1737,7 +1787,7 @@ impl Plugin for BoatPlugin {
                     steer.run_if(in_state(Helm::Sailing)),
                 )
                     .chain()
-                    .after(take_the_hulls)
+                    .after(lose_the_hulls)
                     .before(PhysicsSystems::Prepare)
                     .run_if(in_state(AppState::InWorld)),
             )
@@ -2201,6 +2251,26 @@ pub(crate) fn take_the_hulls(
             hull.occupant,
             hull.towed_by,
         );
+    }
+}
+
+/// Takes the hulls the world has taken back — see [`Fleet::gone`].
+///
+/// After every telling of this frame rather than interleaved with them, which
+/// is the wire's own order and not a convenience: the world retires only
+/// hulls nobody is aboard, so no client hears a hull vanish while it still
+/// believes somebody is in it. Ids are retired with their hulls, so there is
+/// no telling about a boat this could run ahead of.
+pub(crate) fn lose_the_hulls(
+    mut commands: Commands,
+    mut fleet: ResMut<Fleet>,
+    players: crate::player::Players,
+    poses: Query<&Transform, With<Vessel>>,
+    ropes: Query<&Painter>,
+    mut gone: MessageReader<crate::net::HullGone>,
+) {
+    for hull in gone.read() {
+        fleet.gone(&mut commands, &players, &poses, &ropes, hull.id);
     }
 }
 
