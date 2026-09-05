@@ -847,14 +847,39 @@ const SAIL_HEAD: Vec3 = Vec3::new(0.0, 6.5, 0.0);
 const SAIL_CLEW: Vec3 = Vec3::new(0.0, 1.3, 3.0);
 /// The belly: pushed out to one side for exactly the pennant's reason — see
 /// [`pennant_mesh`] — and proportionally deeper, canvas drawing harder than
-/// a flag.
+/// a flag. Its `x` is the bag of a sail *full*: the only corner off the
+/// mast's plane, so scaling the sail along its own x — [`sail_fill`]'s
+/// number — bags the cloth by the wind and to the side the wind is pushing,
+/// and touches nothing else about the shape.
 const SAIL_BELLY: Vec3 = Vec3::new(0.4, 3.4, 1.1);
+
+/// The wind across the cloth that fills the sail to [`SAIL_BELLY`]'s full
+/// bag, in metres per second: the pennant's, so the two cloths on the one
+/// mast fill together — and for its reason, which is the drawing's rather
+/// than the weather's.
+const SAIL_FILLS: f32 = PENNANT_FLIES.0;
+
+/// The least a set sail ever bags, as a fraction of the full belly, so that a
+/// luffing sail is still cloth and not a line: a flat sail vanishes edge-on
+/// exactly as a flat pennant would — see [`pennant_mesh`] — and a scale of
+/// nothing along one axis is a transform that cannot be inverted for its
+/// normals. The side it keeps is the side the wind is pushing, however
+/// faintly, so a sail crossing the wind flips through this rather than
+/// through flat.
+const SAIL_SLACK: f32 = 0.15;
 
 /// How far the boom lies off the centreline, in radians: close-hauled at the
 /// edge of the no-go zone, eased out to nearly square on a dead run. Visual
 /// only — the drive is [`sail_drive`]'s business — but a sail sheeted the way
 /// the wind asks is what the eye reads as "the wind is doing this".
 const TRIM_BAND: (f32, f32) = (0.26, 1.35);
+
+/// How fast the boom swings to where the wind asks, in e-foldings per second
+/// — see [`eased`]. A gybe is the whole band's width twice over, and at this
+/// rate crosses in a couple of seconds: slow enough that a boom is seen to
+/// travel rather than to be on the other side, quick enough that a sail is
+/// never drawn filling from the side the wind has plainly left.
+const SHEETING: f32 = 2.0;
 
 /// The apparent wind that flies the pennant out, in metres per second, and
 /// how far it still sags at that wind, in radians. Both are the drawing's to
@@ -1038,12 +1063,15 @@ struct Pennant {
     bearing: f32,
 }
 
-/// The sail hung from the mast — a marker, unlike [`Pennant`], because trim
-/// carries no memory: the boom lies where [`sail_trim`] puts it this frame,
-/// and a wind too slack to name a side leaves it on the centreline, hidden
-/// under a furl nobody is watching for long anyway.
+/// The sail hung from the mast, and where its boom lies now, in radians about
+/// the mast — kept for the same reason as [`Pennant::bearing`]: a boom is
+/// eased towards where [`sail_trim`] asks rather than put there, so a wind
+/// crossing the stern swings it over instead of flipping it, and the ease
+/// needs last frame's angle to start from.
 #[derive(Component)]
-struct Sail;
+struct Sail {
+    boom: f32,
+}
 
 /// The rowboat scene hung under a hull — what [`conduct_the_oars`] looks for
 /// above an arriving animation player, so the oars claim only their own: the
@@ -2125,7 +2153,9 @@ fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: BoatKind)
         // boom where the wind asks.
         children.spawn((
             Name::new("Sail"),
-            Sail,
+            // Amidships, so the first setting swings it out from the
+            // centreline rather than finding it already lying on the wind.
+            Sail { boom: 0.0 },
             Mesh3d(fittings.sail_mesh),
             MeshMaterial3d(fittings.sail_material),
             Transform::from_xyz(0.0, 0.0, mast.station),
@@ -2384,7 +2414,8 @@ fn pennant_mesh(length: f32, hoist: f32) -> Mesh {
 /// facet carries its own flat normal, and bellied so no wind direction ever
 /// turns the cloth edge-on to the camera and deletes it. The luff runs up
 /// the mast from tack to head, the foot aft to the clew, and the whole shape
-/// is drawn sheeted amidships; where the boom actually lies is a rotation,
+/// is drawn sheeted amidships and bagged full to starboard; where the boom
+/// actually lies is a rotation and which way the cloth bags a scale, both
 /// [`trim_the_sails`]'s to make.
 fn sail_mesh() -> Mesh {
     Mesh::new(
@@ -2425,23 +2456,52 @@ fn sail_trim(bow: Vec2, wind: Vec2) -> f32 {
     -off.signum() * out
 }
 
-/// Shows the sail while it is set, hides it furled, and lays the boom on the
-/// wind — after [`steer`] for the pennant's reason: both read the heading
-/// and the sail state this frame's steering wrote. The rotation is about the
-/// sail's own local vertical, which *is* the mast however the hull heels and
-/// pitches, the sail being a child of it.
+/// How full the sail draws, and to which side, as the factor [`SAIL_BELLY`]'s
+/// bag is scaled by: the wind's push square across the cloth, out of the
+/// wind aboard — `aboard.x` to starboard, `aboard.y` ahead — for a boom
+/// lying `boom` radians about the mast, full at [`SAIL_FILLS`] and never
+/// slacker than [`SAIL_SLACK`]. Positive bags the cloth to starboard.
+///
+/// Push rather than side: a sail on a reach fills to leeward because that is
+/// where the wind is pushing, and a sail in irons backs — bags to windward
+/// of its own boom, faintly — for the same reason, which is what canvas does
+/// there. And as the boom swings through a gybe the push crosses zero at the
+/// moment the cloth lies along the wind, so the bag empties, flips and
+/// refills of itself rather than being told to.
+fn sail_fill(boom: f32, aboard: Vec2) -> f32 {
+    // The sail's own x, turned about the mast with the boom: a boom swung
+    // aft-and-to-port leans the cloth's starboard face forward, so some of
+    // a wind from ahead lands on it — the `sin` term.
+    let (sin, cos) = boom.sin_cos();
+    let push = aboard.x * cos + aboard.y * sin;
+    let full = (push.abs() / SAIL_FILLS).clamp(0.0, 1.0);
+    push.signum() * (SAIL_SLACK + (1.0 - SAIL_SLACK) * full)
+}
+
+/// Shows the sail while it is set, hides it furled, swings the boom towards
+/// the wind and bags the cloth by it — after [`steer`] for the pennant's
+/// reason: both read the heading and the sail state this frame's steering
+/// wrote. The rotation is about the sail's own local vertical, which *is*
+/// the mast however the hull heels and pitches, the sail being a child of
+/// it; the bag is a scale along the sail's own x, see [`sail_fill`].
+///
+/// The swing is an ease at [`SHEETING`], with [`settled`]'s tail-closing at
+/// [`HEEL_SETTLED`] so a boom done swinging holds one rotation and the
+/// transform goes unwritten. Furled, the boom stays where it was: canvas set
+/// again after the boat has turned is seen to come across.
 ///
 /// A hull with no [`Boat`] on it is nobody's here, and its canvas is furled
 /// without asking: whether those hulls have sails set is not on the wire, and
 /// reading the flag off a component just taken away would leave a beached hull
 /// under full sail.
 fn trim_the_sails(
+    time: Res<Time>,
     conditions: Res<sea::SeaConditions>,
     ground: Option<Res<Ground>>,
     boats: Hulls<Without<Sail>>,
-    mut sails: Query<(&ChildOf, &mut Transform, &mut Visibility), With<Sail>>,
+    mut sails: Query<(&mut Sail, &ChildOf, &mut Transform, &mut Visibility)>,
 ) {
-    for (of, mut transform, mut visibility) in &mut sails {
+    for (mut sail, of, mut transform, mut visibility) in &mut sails {
         let Ok((boat, hull, _)) = boats.get(of.parent()) else {
             continue;
         };
@@ -2458,9 +2518,20 @@ fn trim_the_sails(
         }
         if set {
             let wind = conditions.wind_at(ground.as_deref(), hull.translation.xz());
-            let trimmed = Quat::from_rotation_y(sail_trim(hull.forward().xz(), wind));
-            if transform.rotation != trimmed {
-                transform.rotation = trimmed;
+            let asked = sail_trim(hull.forward().xz(), wind);
+            let boom = settled(
+                sail.boom + (asked - sail.boom) * eased(SHEETING, time.delta_secs()),
+                asked,
+                HEEL_SETTLED,
+            );
+            let aboard = Vec2::new(wind.dot(hull.right().xz()), wind.dot(hull.forward().xz()));
+            let fill = Vec3::new(sail_fill(boom, aboard), 1.0, 1.0);
+            if boom != sail.boom {
+                sail.boom = boom;
+                transform.rotation = Quat::from_rotation_y(boom);
+            }
+            if transform.scale != fill {
+                transform.scale = fill;
             }
         }
     }
@@ -5365,6 +5436,135 @@ mod tests {
 
         // And a nameless wind leaves it amidships.
         assert_eq!(sail_trim(north, Vec2::new(0.1, -0.1)), 0.0);
+    }
+
+    #[test]
+    fn the_sail_bags_away_from_the_wind() {
+        // A wind from starboard, the boom swung to port as `sail_trim` puts
+        // it: the cloth bags to port — negative — which is to leeward, and
+        // a wind from port is the mirror.
+        let from_starboard = Vec2::new(-7.0, 0.0);
+        let port_boom = -1.0;
+        let leeward = sail_fill(port_boom, from_starboard);
+        assert!(
+            leeward < 0.0,
+            "a wind from starboard bagged the sail {leeward} — to windward"
+        );
+        assert_eq!(sail_fill(-port_boom, -from_starboard), -leeward);
+
+        // Fuller in more wind, up to the whole belly and no further.
+        let light = sail_fill(port_boom, Vec2::new(-1.0, 0.0)).abs();
+        assert!(light > SAIL_SLACK && light < leeward.abs());
+        assert_eq!(sail_fill(port_boom, Vec2::new(-20.0, 0.0)), -1.0);
+
+        // And never flat: a wind along the cloth leaves the slack bag, on the
+        // side of whatever push there is.
+        let along = sail_fill(0.0, Vec2::new(0.0, -7.0));
+        assert_eq!(along.abs(), SAIL_SLACK);
+
+        // Running: the boom out to port, the wind from dead astern pushing
+        // the cloth's forward-leaning face — to port too.
+        let running = sail_fill(-TRIM_BAND.1, Vec2::new(0.0, 7.0));
+        assert!(
+            running < 0.0,
+            "running with the boom to port bagged the sail {running}"
+        );
+        // In irons the sail backs: bagged to starboard of a boom lying to
+        // port, and faintly.
+        let backed = sail_fill(-TRIM_BAND.0, Vec2::new(0.0, -7.0));
+        assert!(
+            backed > 0.0 && backed < 0.5,
+            "in irons the sail bagged {backed}"
+        );
+    }
+
+    #[test]
+    fn the_boom_swings_across_rather_than_flipping() {
+        /// The boom's angle, the rotation it is drawn at, and which way the
+        /// belly stands off the rest of the cloth *in the world* — the mesh's
+        /// one off-plane corner carried through the sail's scale and turn and
+        /// the hull's own pose, so this is the side the eye sees the bag on.
+        fn boom(app: &mut App) -> (f32, Quat, Vec2) {
+            let (sail, transform, global) = app
+                .world_mut()
+                .query::<(&Sail, &Transform, &GlobalTransform)>()
+                .single(app.world())
+                .expect("a boat should carry a sail");
+            let bag =
+                global.transform_point(SAIL_BELLY) - global.transform_point(SAIL_BELLY.with_x(0.0));
+            (sail.boom, transform.rotation, bag.xz())
+        }
+
+        // Sails set on a beam reach with the wind from starboard: the boom
+        // swings out to port from amidships and settles there.
+        let mut app = test_app();
+        run_frames(&mut app, 2);
+        let bow = boat(&mut app).forward().xz().normalize();
+        let from_starboard = Vec2::new(bow.y, -bow.x) * 7.0;
+        set_wind(&mut app, from_starboard);
+        tap(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 200);
+        let (port, _, bag) = boom(&mut app);
+        // Within float noise of the trim: the hull's own forward is a heeled
+        // hull's, not the unit vector this reads off it.
+        assert!((port - sail_trim(bow, from_starboard)).abs() < 1e-4);
+        assert!(port < 0.0, "a wind from starboard laid the boom {port} rad");
+        // And the cloth is drawn bagged the way the wind is blowing — to
+        // leeward — and the whole belly deep, this being more wind than
+        // fills it.
+        assert!(
+            bag.dot(from_starboard) > 0.0,
+            "the sail bagged {bag} into a wind {from_starboard}"
+        );
+        assert!(
+            (bag.length() - SAIL_BELLY.x).abs() < 1e-3,
+            "the sail bagged {bag}"
+        );
+
+        // The wind crosses to port. Every frame the boom is nearer the new
+        // trim than the frame before and never past it — and the transform
+        // is the angle, drawn — until it stops moving, which is the tail
+        // closing on the trim rather than a stall short of it.
+        set_wind(&mut app, -from_starboard);
+        let asked = sail_trim(bow, -from_starboard);
+        let mut was = port;
+        let mut frames = 0;
+        loop {
+            run_frames(&mut app, 1);
+            frames += 1;
+            let (now, drawn, _) = boom(&mut app);
+            assert_eq!(drawn, Quat::from_rotation_y(now));
+            if now == was {
+                break;
+            }
+            assert!(
+                (asked - now).abs() < (asked - was).abs(),
+                "the boom went from {was} to {now} rad, away from {asked}"
+            );
+            assert!(
+                now <= asked + 1e-4,
+                "the boom overshot {asked} rad to {now}"
+            );
+            was = now;
+            assert!(frames < 400, "the boom never arrived at {asked} rad");
+        }
+        assert!(
+            (was - asked).abs() < 1e-4,
+            "the boom stalled at {was}, short of {asked}"
+        );
+        // Seen to travel: well over a frame, well under the time a player
+        // would read as a boom that had stuck.
+        assert!(
+            (10..300).contains(&frames),
+            "the boom crossed in {frames} frames"
+        );
+        // Across, the cloth has refilled on the other side.
+        let bag = boom(&mut app).2;
+        assert!(
+            bag.dot(from_starboard) < 0.0,
+            "the sail bagged {bag} into a wind {}",
+            -from_starboard
+        );
     }
 
     #[test]
