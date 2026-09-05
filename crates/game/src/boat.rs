@@ -1000,30 +1000,24 @@ impl Boat {
     }
 
     /// Where the hull parts the water, in its own frame — see [`Hull::stem`].
-    /// The wake is laid from here rather than from the origin amidships, so
-    /// that the white water the hull is standing in is water its own bow
-    /// turned over a moment ago.
     pub fn stem(&self) -> Vec3 {
         self.hull.stem()
     }
 
-    /// How wide a stretch of water the hull pushes aside, in metres — its
-    /// beam. What the wake is scaled off, a bigger hull leaving a broader
-    /// one; see [`crate::wake`].
     /// How long the hull is overall, in metres — see [`Hull::length`].
     pub fn length(&self) -> f32 {
         self.hull.length
     }
 
+    /// The hull's beam, in metres — see [`Hull::beam`].
     pub fn beam(&self) -> f32 {
         self.hull.beam
     }
 
-    /// The way the hull is making, in metres a second — negative going
-    /// astern. The hull's own number rather than anything measured off its
-    /// transform, which is the point: a transform moves for reasons that are
-    /// not sailing, and [`crate::wake`] wants the speed the water is being
-    /// stirred at.
+    /// The way the hull is making along its own keel, in metres a second —
+    /// negative going astern. The hull's own number rather than anything
+    /// measured off its transform, which moves for reasons that are not
+    /// sailing.
     pub fn way(&self) -> f32 {
         self.way
     }
@@ -1136,6 +1130,17 @@ impl Rigged {
         hull_of(self.0).length
     }
 
+    /// The hull's beam, in metres — see [`Hull::beam`].
+    pub(crate) fn beam(self) -> f32 {
+        hull_of(self.0).beam
+    }
+
+    /// The stem on the waterline, in the hull's own frame — see
+    /// [`Hull::stem`].
+    pub(crate) fn stem(self) -> Vec3 {
+        hull_of(self.0).stem()
+    }
+
     /// The stemhead in the hull's own frame — see [`Hull::stemhead`].
     pub(crate) fn stemhead(self) -> Vec3 {
         let hull = hull_of(self.0);
@@ -1197,7 +1202,12 @@ pub struct HullId(pub BoatId);
 /// Any hull at all — ours under sail, another's under way, anyone's at
 /// anchor. What the boarding key sweeps for, the components that say *whose*
 /// a hull is coming and going with the helm.
+///
+/// Every hull leaves a wake, whoever is moving it, so the track it is drawn
+/// from comes with the hull rather than with the sailing state — see
+/// [`crate::wake::Track`].
 #[derive(Component)]
+#[require(crate::wake::Track)]
 pub struct Vessel;
 
 /// The hull an oar belongs to, as [`row`] reads it: where it is, its

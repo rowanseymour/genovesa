@@ -25,9 +25,11 @@
     view_transformations::position_world_to_clip,
 }
 
-// How many points of track a wake arrives as — the twin of `wake::TRAIL`,
-// which `the_shader_walks_the_whole_track` holds this line to.
+// How many points of track a wake arrives as, and how many hulls' wakes
+// arrive — the twins of `wake::TRAIL` and `wake::WAKES`, which
+// `the_shader_walks_the_whole_track` holds these lines to.
 const TRAIL: i32 = 34;
+const WAKES: i32 = 4;
 
 // How many open hulls the sea can be cut for at once — the twin of
 // `boat::HOLES`, which `the_shader_cuts_for_every_hull` holds this line to.
@@ -72,19 +74,22 @@ struct SeaParams {
     // width of the terminator: x and y, exactly as the ground's own shader
     // carries them. zw padding.
     daylight: vec4<f32>,
-    // The wake's band: x the half-width of the water a hull turns over at its
-    // stem, y how far the arms open per metre run, z how thick an arm is, w
-    // how long a wake lasts.
+    // The wake's band: x how far the arms open per metre run, y how thick an
+    // arm is, z how long a wake lasts. w padding.
     wash: vec4<f32>,
     // The boil and what wears it away: x how fast it widens in metres per
     // second of age, y how many seconds of it there are, z the cell of the
     // field an ageing wake breaks up on, w the least way that leaves a mark.
     boil: vec4<f32>,
-    // Where the wake could possibly be: xy the least corner, zw the greatest.
-    wake_bounds: vec4<f32>,
-    // The hull's track, newest first: xy where its stem was, z how many
+    // Where each hull's wake could possibly be: xy the least corner, zw the
+    // greatest. A slot with no wake in it holds a box nothing is inside.
+    wake_bounds: array<vec4<f32>, WAKES>,
+    // Each hull's own shape in the water: x the half-width of the water it
+    // turns over at its stem. yzw padding.
+    wake_hull: array<vec4<f32>, WAKES>,
+    // Each hull's track, newest first: xy where its stem was, z how many
     // seconds ago, w the way it was making then.
-    wake: array<vec4<f32>, TRAIL>,
+    wake: array<array<vec4<f32>, TRAIL>, WAKES>,
     // The holes the open hulls cut in the surface, filled from the front and
     // nearest the eye first: xy the centre of one's waterline footprint —
     // its widest station — and zw the way that hull is pointing.
@@ -292,23 +297,39 @@ fn gustiness(at: vec2<f32>) -> f32 {
     return field * 2.0 - 1.0;
 }
 
-// The white a boat's wake lays down here — the twin of nothing, this being
+// The white the boats' wakes lay down here — the twin of nothing, this being
 // the one piece of foam the Rust side never has to agree about, since no
-// hull rides it. `sea.wake` is the hull's track, newest first; `wake.rs` owns
-// every constant it is read with, and the module doc there is where the shape
-// is argued.
+// hull rides it. `sea.wake` is a track per hull, each newest first; `wake.rs`
+// owns every constant they are read with, and the module doc there is where
+// the shape is argued.
+//
+// Every hull's wake, not just the sailed one's: a boat in tow throws the
+// same white as the ship pulling it. Where two overlap the water is simply
+// white, which is what two wakes crossing look like.
+fn wake_foam(at: vec2<f32>) -> f32 {
+    var foam = 0.0;
+    for (var k = 0; k < WAKES; k++) {
+        foam = max(foam, wake_of(at, k));
+    }
+    return foam;
+}
+
+// One hull's wake at a point of the water.
 //
 // The whole of the shape comes from one question: how far is this water from
 // the line the boat sailed, and how long ago was the nearest bit of that line
 // laid down? Distance gives the two arms and the boil their edges, age takes
 // both of them away again.
-fn wake_foam(at: vec2<f32>) -> f32 {
+fn wake_of(at: vec2<f32>, k: i32) -> f32 {
     // Water the wake cannot reach is off in two comparisons rather than
     // thirty-two segments. The box is most of the ocean, and the branch is
-    // coherent over it — whole tiles of the screen take it together.
-    if (any(at < sea.wake_bounds.xy) || any(at > sea.wake_bounds.zw)) {
+    // coherent over it — whole tiles of the screen take it together. A slot
+    // with no hull in it is a box nothing is inside, so it costs the same.
+    let bounds = sea.wake_bounds[k];
+    if (any(at < bounds.xy) || any(at > bounds.zw)) {
         return 0.0;
     }
+    let shoulder = sea.wake_hull[k].x;
 
     // The nearest point of the track, and what the track was doing there.
     // Slots past the end of a short track repeat its last point, which makes
@@ -318,8 +339,8 @@ fn wake_foam(at: vec2<f32>) -> f32 {
     var age = 0.0;
     var way = 0.0;
     for (var i = 1; i < TRAIL; i++) {
-        let newer = sea.wake[i - 1];
-        let older = sea.wake[i];
+        let newer = sea.wake[k][i - 1];
+        let older = sea.wake[k][i];
         let along = older.xy - newer.xy;
         let run = dot(along, along);
         let raw = select(0.0, dot(at - newer.xy, along) / run, run > 1e-6);
@@ -354,15 +375,15 @@ fn wake_foam(at: vec2<f32>) -> f32 {
     // The band the wake opens into: the hull's shoulder at the stem, spreading
     // at a fixed angle down the track — so the arms diverge with distance
     // run, which is way times age, and a boat crawling throws a narrow one.
-    let half = sea.wash.x + sea.wash.y * way * age;
-    let arms = step(half - sea.wash.z, nearest) * step(nearest, half)
-        * step(age / sea.wash.w, mottle);
+    let half = shoulder + sea.wash.x * way * age;
+    let arms = step(half - sea.wash.y, nearest) * step(nearest, half)
+        * step(age / sea.wash.z, mottle);
     // The boil: the water the hull is itself turning over, filled rather than
     // outlined, widening on its own clock rather than with distance run, and
     // breaking up on a life of its own — see `wake::BOIL`. Given a hard end
     // instead it finishes on a ruled line drawn across the wake, which is the
     // one shape water never makes.
-    let boil = step(nearest, sea.wash.x + sea.boil.x * age)
+    let boil = step(nearest, shoulder + sea.boil.x * age)
         * step(age / sea.boil.y, mottle);
 
     // Under the way it takes to stir the water, nothing at all — including
