@@ -865,7 +865,7 @@ mod tests {
                 .min_by(|a, b| a.distance(v).total_cmp(&b.distance(v)))
                 .unwrap()
         };
-        for triangle in positions.chunks_exact(3) {
+        for triangle in positions.as_chunks::<3>().0 {
             let (a, b, c) = (triangle[0], triangle[1], triangle[2]);
             let normal = (b - a).cross(c - a);
             let middle = (a + b + c) / 3.0;
