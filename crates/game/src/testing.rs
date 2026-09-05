@@ -27,6 +27,7 @@ use crate::bindings::{Action, KeyBindings};
 use crate::boat::BoatPlugin;
 use crate::camera::View;
 use crate::player::PlayerPlugin;
+use crate::tackle::TacklePlugin;
 use crate::terrain::Ground;
 use crate::wake::WakePlugin;
 use crate::{AppState, Helm};
@@ -107,6 +108,11 @@ pub fn world_app_ashore_of_entry() -> App {
         // boat's wake wants to look at, and what every other test here wants
         // running over the hulls it sails without ever noticing it.
         WakePlugin,
+        // The ground tackle draws nothing here either — no bottom is
+        // handed to most of these tests — but it has to be in the schedule
+        // for the tests of the tackle itself, and it stays quiet over every
+        // hull that has no hook down.
+        TacklePlugin,
         PlayerPlugin,
     ))
     .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))

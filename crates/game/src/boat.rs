@@ -203,14 +203,15 @@ const PAINTER_GIVE: f32 = 5.0;
 /// The painter: metres of rope from the ship's transom to the stem of the
 /// boat it tows — see [`make_fast`], which ties it.
 ///
-/// Bounded above by the wire: the server grants a ship's helm only within a
-/// dozen metres of it, and the way back up from a boat on the painter is
-/// asked from wherever on the painter it lies, so the far end of the rope
-/// plus the boat's own length has to stay inside that. Five metres of rope
-/// puts the tender's origin ten metres from the ship's at the very most, a
-/// good stride short of the limit — a hair inside a limit is a boarding
-/// refused on a quantisation step.
-pub(crate) const PAINTER: f32 = 5.0;
+/// Short, so the boat rides close under the transom rather than trailing
+/// a boat-length of open water behind the ship: the rope is drawn now, and
+/// a long one is a long thin thing across the view. Bounded above by the
+/// wire in any case: the server grants a ship's helm only within a dozen
+/// metres of it, and the way back up from a boat on the painter is asked
+/// from wherever on the painter it lies, so the far end of the rope plus
+/// the boat's own length has to stay inside that — a hair inside a limit
+/// is a boarding refused on a quantisation step.
+pub(crate) const PAINTER: f32 = 3.0;
 
 /// Which mesh in [`MODEL`] is which. glTF numbers its meshes rather than naming
 /// them in a way the loader can ask for, so these are positions in the file —
@@ -266,6 +267,13 @@ struct Hull {
     /// `the_model_is_the_hull_the_keel_is_probed_along`.
     helm_deck: f32,
     helm_station: f32,
+    /// The stemhead and the taffrail: how high the bow and the transom
+    /// stand above the waterline, in metres, at the stem and the transom
+    /// themselves. Where the anchor cable leaves the hull and where the
+    /// painter is made fast — see [`crate::tackle`] — and the model's
+    /// numbers, like the deck's, held to the file by the same tests.
+    stemhead: f32,
+    taffrail: f32,
     /// Where the keel begins and ends, in metres from amidships — negative
     /// forward, the same axis the hull is modelled on. [`grounding`] probes
     /// along these, so what runs aground is the line that is drawn.
@@ -514,6 +522,8 @@ const SHIP: Hull = Hull {
     // step.
     helm_deck: 1.2,
     helm_station: 2.6,
+    stemhead: 1.15,
+    taffrail: 1.2,
     // The forefoot stops short of the bow, which is what gives the stem its
     // rake; the heel runs right aft to the transom.
     forefoot_station: -7.0 * 0.5 * 0.7,
@@ -581,6 +591,8 @@ const ROWBOAT: Hull = Hull {
     // the sea's hole buys.
     helm_deck: -0.1,
     helm_station: 0.65,
+    stemhead: 0.42,
+    taffrail: 0.2945,
     // The keel is rockered: deepest a little abaft amidships, rising to the
     // forefoot forward and carried aft to the transom's skeg. The probes
     // read the full draft along all of it, which errs a few centimetres
@@ -1117,6 +1129,26 @@ struct Rower {
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub struct Rigged(pub BoatKind);
 
+impl Rigged {
+    /// Length overall, in metres — what the ground tackle is sized off, a
+    /// bigger hull carrying a bigger anchor on a heavier cable.
+    pub(crate) fn length(self) -> f32 {
+        hull_of(self.0).length
+    }
+
+    /// The stemhead in the hull's own frame — see [`Hull::stemhead`].
+    pub(crate) fn stemhead(self) -> Vec3 {
+        let hull = hull_of(self.0);
+        Vec3::new(0.0, hull.stemhead, -hull.length / 2.0)
+    }
+
+    /// The taffrail in the hull's own frame — see [`Hull::taffrail`].
+    pub(crate) fn taffrail(self) -> Vec3 {
+        let hull = hull_of(self.0);
+        Vec3::new(0.0, hull.taffrail, hull.length / 2.0)
+    }
+}
+
 /// A hull the sea is cut away inside — the shape of the hole, which is the
 /// hull's waterline outline in its own frame: two superellipse halves sharing
 /// their beam at the widest station, cut square at the transom. Two halves
@@ -1257,8 +1289,8 @@ pub struct Telling {
 /// wire's word, see [`protocol::ToClient::Boat`]; in a world with no server
 /// behind it, this client's own. On any hull, ours included: for ours it is
 /// what [`ride_at_anchor`] furls and holds for, and what [`tend_the_anchor`]
-/// reads to know which way the key goes. The hook itself is not drawn yet;
-/// it is kept because it is the fact, and the flag would be a summary of it.
+/// reads to know which way the key goes. Drawn — the anchor on the bottom
+/// and the cable up to the bow — by [`crate::tackle`].
 #[derive(Component, Clone, Copy)]
 pub struct Anchored(pub Vec2);
 
@@ -3695,6 +3727,26 @@ mod tests {
         world_app()
     }
 
+    /// How high a model's bow stands: its highest corner on the stem, the
+    /// stem being the corners furthest forward, `half` a length ahead of
+    /// amidships.
+    fn stemhead_of(corners: &[Vec3], half: f32) -> f32 {
+        highest_at(corners, -half)
+    }
+
+    /// And its transom, the same way, `half` a length abaft amidships.
+    fn taffrail_of(corners: &[Vec3], half: f32) -> f32 {
+        highest_at(corners, half)
+    }
+
+    fn highest_at(corners: &[Vec3], station: f32) -> f32 {
+        corners
+            .iter()
+            .filter(|c| (c.z - station).abs() < 1e-3)
+            .map(|c| c.y)
+            .fold(f32::MIN, f32::max)
+    }
+
     /// The hull the player is aboard — which is the only hull at all in most
     /// of these tests, and the one they mean in the rest: once the ship's
     /// boat is in the water there are two, and every helper below is asking
@@ -3896,6 +3948,22 @@ mod tests {
             SHIP.helm_station
         );
 
+        // The stemhead, where the cable leaves: the highest corner standing
+        // on the stem itself. A bow re-cut taller would have the cable
+        // leaving from inside the planking.
+        let stemhead = stemhead_of(&corners, half);
+        assert!(
+            (stemhead - SHIP.stemhead).abs() < 1e-4,
+            "the model's stemhead stands {stemhead} above the waterline, not {}",
+            SHIP.stemhead
+        );
+        let taffrail = taffrail_of(&corners, half);
+        assert!(
+            (taffrail - SHIP.taffrail).abs() < 1e-4,
+            "the model's taffrail stands {taffrail} above the waterline, not {}",
+            SHIP.taffrail
+        );
+
         // And the boom's sweep: the sail's foot turns about the mast at the
         // tack's height, out to the clew, so whatever the hull raises inside
         // that circle has to stay under it or the canvas drags through the
@@ -4008,6 +4076,18 @@ mod tests {
             "no sole at {} under the helm at {}",
             ROWBOAT.helm_deck,
             ROWBOAT.helm_station
+        );
+        let stemhead = stemhead_of(&corners, half);
+        assert!(
+            (stemhead - ROWBOAT.stemhead).abs() < 1e-3,
+            "the model's stemhead stands {stemhead} above the waterline, not {}",
+            ROWBOAT.stemhead
+        );
+        let taffrail = taffrail_of(&corners, half);
+        assert!(
+            (taffrail - ROWBOAT.taffrail).abs() < 1e-3,
+            "the model's taffrail stands {taffrail} above the waterline, not {}",
+            ROWBOAT.taffrail
         );
         // And that plane is under water, which is the whole of what the
         // sea's hole buys: a master re-lofted with its floor standing above

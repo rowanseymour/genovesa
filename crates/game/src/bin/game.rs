@@ -38,6 +38,7 @@ use game::settings::{self, DisplaySettings, SettingsPlugin};
 use game::shots::ShotsPlugin;
 use game::sky::SkyPlugin;
 use game::stopping::StoppingPlugin;
+use game::tackle::TacklePlugin;
 use game::terrain::TerrainPlugin;
 use game::trees::TreesPlugin;
 use game::wake::WakePlugin;
@@ -213,6 +214,7 @@ impl PluginGroup for GamePlugins {
             .add(CairnPlugin)
             // The white water the boat leaves, painted by the sea itself.
             .add(WakePlugin)
+            .add(TacklePlugin)
             .add(PlayerPlugin)
             .add(MapCameraPlugin)
             // The card in the corner, and the two readings that stand beside

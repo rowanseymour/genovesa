@@ -446,7 +446,7 @@ pub enum BoatKind {
 /// number *is*: it is worked out there from the rope and the two hulls, and
 /// `the_wires_astern_is_where_the_painter_puts_the_boat` is what holds the
 /// two to each other.
-pub const TENDER_ASTERN: f32 = 10.1;
+pub const TENDER_ASTERN: f32 = 8.1;
 
 impl BoatKind {
     fn from_byte(byte: u8) -> Option<Self> {
