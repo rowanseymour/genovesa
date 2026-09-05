@@ -34,7 +34,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use protocol::ground::{ANCHOR_DEPTH, CELL_METRES};
+use protocol::ground::CELL_METRES;
 use protocol::BoatKind;
 
 use crate::bindings::{Action, KeyBindings};
@@ -601,14 +601,16 @@ type Vessels<'w, 's> = Query<
 /// every crossing, because they are one threshold, and where the player
 /// stands names the only thing the key could mean:
 ///
-/// At the *ship's* helm, at rest and where the anchor holds, it steps down
-/// into the boat on the ship's painter, wherever on it the boat lies — the
-/// shore is reached by rowing. A ship towing nothing is stepped over the
-/// side of instead, onto the spot [`crate::boat::over_the_side`] picks:
-/// alongside, on the shoreward side when the ground says which that is, and
-/// whether that is a beach underfoot or a swim is the water's to say.
-/// Either way the sails are furled as the player goes, so the ship is never
-/// left riding at anchor under canvas.
+/// At the *ship's* helm, at rest, it steps down into the boat on the ship's
+/// painter, wherever on it the boat lies — the shore is reached by rowing.
+/// A ship towing nothing is stepped over the side of instead, onto the spot
+/// [`crate::boat::over_the_side`] picks: alongside, on the shoreward side
+/// when the ground says which that is, and whether that is a beach underfoot
+/// or a swim is the water's to say. Either way the sails are furled as the
+/// player goes, so the ship is never left under canvas. Nothing here looks
+/// at the water under the ship: a deck may be stepped off anywhere, and one
+/// stepped off with no anchor down is left to the sea — dropping the hook
+/// first is the crew's own act, see [`crate::boat::tend_the_anchor`].
 ///
 /// In the *rowboat*, at rest, a ship laid alongside outranks the shore: a
 /// boat pulled deliberately against a hull is asking aboard, and the tender
@@ -672,21 +674,7 @@ pub(crate) fn embark_or_land(
             }
 
             if hull.kind() == BoatKind::Sloop {
-                // The anchor has to hold first — [`ANCHOR_DEPTH`]'s own doc
-                // says why the client asks the same question. A chunk that
-                // has not arrived refuses too — water the client knows
-                // nothing about is treated as deep, exactly as the sea draws
-                // it — but no ground *resource* at all is a world with no
-                // terrain in it (the boat tests'), where there is no depth
-                // for the rule to be about.
                 let under = hull_place.translation.xz();
-                let holds = ground.is_none_or(|g| {
-                    g.height(under.x, under.y)
-                        .is_some_and(|height| height >= -ANCHOR_DEPTH)
-                });
-                if !holds {
-                    return;
-                }
 
                 // The boat on the painter, if the ship tows one: stepped
                 // down into wherever it lies.
@@ -699,18 +687,17 @@ pub(crate) fn embark_or_land(
                     // Nothing about the ship is touched on the way out: the
                     // grant strips its [`Boat`] and an unheld hull's canvas
                     // is furled without asking (see `trim_the_sails`), while
-                    // a refusal — the two machines can disagree about the
-                    // depth by a quantisation step — arrives as silence, and
-                    // a key refused must have done nothing at all.
+                    // a refusal arrives as silence, and a key refused must
+                    // have done nothing at all.
                     (Some(online), Some((tender, _))) => {
                         if let Ok((.., Some(named), _)) = vessels.get(tender) {
                             online.connection.board(named.0);
                         }
                     }
                     // Offline the whole exchange is local: the crew furls as
-                    // the skipper steps down, so the ship never lies at
-                    // anchor under canvas, and the last of the glide is
-                    // taken off so it lies where the gate read it as lying.
+                    // the skipper steps down, so the ship is never left
+                    // under canvas, and the last of the glide is taken off
+                    // so it lies where the gate read it as lying.
                     (None, Some((tender, _))) => {
                         hull.comes_to_rest();
                         hull.furl();
@@ -1327,17 +1314,12 @@ mod tests {
     #[test]
     fn going_ashore_is_refused_over_deep_water() {
         // Rowed off across deep water, the key finds neither footing nor a
-        // hull in reach, and does nothing. The ground goes in *after* the
-        // stepping down: a crew will no longer step off a ship over water
-        // the anchor cannot hold — see [`ANCHOR_DEPTH`] — and what is under
-        // test here is the landing, not the anchorage. A rowboat this far
-        // out is still a state the game reaches — stepped down into over a
-        // shelf and rowed away from it.
+        // hull in reach, and does nothing.
         let mut app = world_app();
+        app.insert_resource(test_shore());
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
 
         press_board(&mut app);
-        app.insert_resource(test_shore());
         assert_eq!(aboard_kind(&mut app), Some(BoatKind::Rowboat));
         pull_clear(&mut app);
         tap(&mut app, KeyCode::ArrowUp);
@@ -1363,11 +1345,8 @@ mod tests {
         let mut app = world_app();
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH + 8.0, 0.0));
 
-        // The ground arrives after the stepping down, for the reason
-        // `going_ashore_is_refused_over_deep_water` gives — and doubly here,
-        // a cliff island's bed plunging too deep for the anchor everywhere.
-        press_board(&mut app);
         app.insert_resource(test_ground());
+        press_board(&mut app);
         assert_eq!(aboard_kind(&mut app), Some(BoatKind::Rowboat));
 
         // The probe's own reach does hold dry land, so what refuses the landing
@@ -1441,28 +1420,141 @@ mod tests {
     }
 
     #[test]
-    fn a_ship_is_not_left_where_the_anchor_cannot_hold() {
-        // The client's half of the server's rule — see [`ANCHOR_DEPTH`]:
-        // over water too deep to anchor in, the gunwale key does nothing at
-        // all, sails and glide untouched, rather than asking for a grant the
-        // server would meet with silence. Back over the shelf the same key
-        // serves, so what refused was the water and not the key.
+    fn a_ship_is_stepped_off_wherever_it_lies() {
+        // The gunwale key no longer asks what water the ship is over: a
+        // deck may be stepped off in the open ocean, and what becomes of a
+        // ship left there with no hook down is the sea's business, not the
+        // key's — see `boat::tend_the_anchor` for the act that keeps it put.
         let mut app = world_app();
         app.insert_resource(test_shore());
         place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
         press_board(&mut app);
         assert_eq!(
             aboard_kind(&mut app),
-            Some(BoatKind::Sloop),
-            "the boat went over the side where no anchor holds"
+            Some(BoatKind::Rowboat),
+            "the gunwale key refused a deck over deep water"
+        );
+    }
+
+    /// Where the ship's hook lies, if it has one down.
+    fn hook_of(app: &mut App, ship: Entity) -> Option<Vec2> {
+        app.world()
+            .get::<crate::boat::Anchored>(ship)
+            .map(|anchored| anchored.0)
+    }
+
+    #[test]
+    fn the_anchor_key_drops_the_hook_over_the_shelf_and_not_over_deep_water() {
+        // The client's half of the server's rule — see
+        // [`protocol::ground::ANCHOR_DEPTH`]: over water too deep to anchor
+        // in the key does nothing at all, rather than asking for a grant the
+        // server would refuse. Over the shelf it drops the hook where the
+        // ship lies, and pressed again it weighs.
+        let mut app = shore_app();
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        place_boat(&mut app, Vec2::new(TEST_ISLAND_REACH * 2.0, 0.0));
+        tap(&mut app, KeyCode::KeyG);
+        assert_eq!(
+            hook_of(&mut app, ship),
+            None,
+            "an anchor was dropped where no anchor holds"
         );
 
-        place_boat(&mut app, Vec2::new(SHORE_WATERLINE + ANCHORAGE, 0.0));
-        press_board(&mut app);
+        let anchorage = Vec2::new(SHORE_WATERLINE + ANCHORAGE, 0.0);
+        place_boat(&mut app, anchorage);
+        tap(&mut app, KeyCode::KeyG);
+        let hook = hook_of(&mut app, ship).expect("the anchorage refused the hook");
+        assert!(
+            hook.distance(anchorage) < 0.5,
+            "the hook went down at {hook} for a ship at {anchorage}"
+        );
+        tap(&mut app, KeyCode::KeyG);
         assert_eq!(
-            aboard_kind(&mut app),
-            Some(BoatKind::Rowboat),
-            "the anchorage refused the boat too"
+            hook_of(&mut app, ship),
+            None,
+            "the second press did not weigh"
+        );
+    }
+
+    #[test]
+    fn making_sail_weighs_the_anchor() {
+        // A hull is never under canvas with its hook down: the hoist key on
+        // an anchored ship weighs, and the sail goes up in the same frame
+        // rather than being furled again by the hook — see
+        // `boat::tend_the_anchor` for the order that makes that so.
+        let mut app = shore_app();
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        tap(&mut app, KeyCode::KeyG);
+        assert!(
+            hook_of(&mut app, ship).is_some(),
+            "the anchorage refused the hook"
+        );
+        // Held down: a hook still down would furl every frame, and a single
+        // frame of canvas would not show.
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 5);
+        assert_eq!(
+            hook_of(&mut app, ship),
+            None,
+            "making sail left the hook down"
+        );
+        assert!(
+            app.world()
+                .get::<Boat>(ship)
+                .expect("a rigged hull sails")
+                .sails_set(),
+            "the sails were furled again by the anchor"
+        );
+    }
+
+    #[test]
+    fn a_ship_at_anchor_holds_station() {
+        // The hook holds the hull: whatever the wind, an anchored ship with
+        // the sails down goes nowhere over a good many frames.
+        let mut app = shore_app();
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        set_wind(&mut app, Vec2::new(-12.0, 0.0));
+        tap(&mut app, KeyCode::KeyG);
+        let lying = transform_of(&mut app, ship).translation.xz();
+        run_frames(&mut app, 300);
+        let still = transform_of(&mut app, ship).translation.xz();
+        assert!(
+            still.distance(lying) < 0.5,
+            "a ship at anchor was carried from {lying} to {still}"
+        );
+        // And backing is refused at anchor: the cable holds, and the back
+        // key neither weighs nor drives the hull off its hook.
+        hold(&mut app, KeyCode::ArrowDown);
+        run_frames(&mut app, 120);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowDown);
+        let backed = transform_of(&mut app, ship).translation.xz();
+        assert!(
+            hook_of(&mut app, ship).is_some() && backed.distance(lying) < 0.5,
+            "a ship at anchor was backed from {lying} to {backed}"
+        );
+    }
+
+    #[test]
+    fn a_deck_making_way_drops_no_anchor() {
+        // Dropping the hook is asked of a hull at rest, on the terms every
+        // crossing is: the key does nothing while the ship is making way,
+        // and serves once the way has run off.
+        let mut app = shore_app();
+        let ship = hull_rigged(&mut app, BoatKind::Sloop);
+        set_wind(&mut app, Vec2::new(-7.0, 0.0));
+        hold(&mut app, KeyCode::ArrowUp);
+        run_frames(&mut app, 20);
+        assert!(
+            way_of(&mut app, BoatKind::Sloop) > 0.0,
+            "canvas made no way"
+        );
+        tap(&mut app, KeyCode::KeyG);
+        assert_eq!(
+            hook_of(&mut app, ship),
+            None,
+            "an anchor went down off a deck making way"
         );
     }
 

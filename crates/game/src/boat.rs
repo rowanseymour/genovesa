@@ -50,8 +50,8 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use protocol::ground::CELL_METRES;
-use protocol::{BoatId, BoatKind, PlayerId, Underway};
+use protocol::ground::{ANCHOR_DEPTH, CELL_METRES};
+use protocol::{swing_to, BoatId, BoatKind, PlayerId, Underway};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::{MapCamera, View};
@@ -894,9 +894,10 @@ pub struct Boat {
     roll: f32,
     /// Whether the boat is being driven. On the ship this is the sails: set,
     /// the wind is the throttle — see [`sail_drive`]; furled, the target way
-    /// is zero, the hull glides to a stop and holds station, and that
-    /// holding is the whole of "anchored" here — the crew drops the hook,
-    /// nothing simulates it. On the rowboat the same flag is the oars being
+    /// is zero and the hull glides to a stop and holds station. Holding
+    /// station is not the anchor: that is [`Anchored`], a fact the server
+    /// holds, and what it does at this end is keep this flag down — see
+    /// [`ride_at_anchor`]. On the rowboat the same flag is the oars being
     /// pulled, on the same keys.
     sails_set: bool,
 }
@@ -1252,6 +1253,15 @@ pub struct Telling {
     spoken_for: bool,
 }
 
+/// A hull with its anchor down, and where the hook lies on the bottom — the
+/// wire's word, see [`protocol::ToClient::Boat`]; in a world with no server
+/// behind it, this client's own. On any hull, ours included: for ours it is
+/// what [`ride_at_anchor`] furls and holds for, and what [`tend_the_anchor`]
+/// reads to know which way the key goes. The hook itself is not drawn yet;
+/// it is kept because it is the fact, and the flag would be a summary of it.
+#[derive(Component, Clone, Copy)]
+pub struct Anchored(pub Vec2);
+
 /// A hull this client is shoving: an empty one our own has run into, ours to
 /// move and to report until it comes to rest — see [`claim_the_shoved`].
 ///
@@ -1320,14 +1330,6 @@ impl Motions<'_, '_> {
 /// and this client's only business with it is putting it where that word
 /// says.
 type Ours = Or<(Without<Telling>, With<Shoving>)>;
-
-/// The shortest way round from one angle to another, in radians: what a
-/// bearing has to swing to become another bearing, rather than the difference
-/// between two numbers that may be a turn and a bit apart.
-fn swing_to(onto: f32, from: f32) -> f32 {
-    let round = std::f32::consts::TAU;
-    (onto - from + std::f32::consts::PI).rem_euclid(round) - std::f32::consts::PI
-}
 
 /// The boats of the world, as this client was told them: the wire's ids to
 /// this side's entities, who is at each helm, and — the fact everything
@@ -1429,6 +1431,7 @@ impl Fleet {
         heard: f32,
         occupant: Option<PlayerId>,
         towed_by: Option<BoatId>,
+        anchor: Option<Vec2>,
     ) {
         let pose = || {
             Transform::from_xyz(told.at.x, 0.0, told.at.y)
@@ -1438,6 +1441,19 @@ impl Fleet {
             .hulls
             .entry(id)
             .or_insert_with(|| spawn_hull(commands, kit, kind, pose(), Some(id)));
+        // The hook, on every telling and before anything else about the
+        // hull is settled — our own included, which the rest of this
+        // function leaves alone: an anchor dropped or weighed is answered
+        // with a telling of our own hull, and it is the one word in it this
+        // client did not already know. See [`Anchored`].
+        match anchor {
+            Some(hook) => {
+                commands.entity(hull).insert(Anchored(hook));
+            }
+            None => {
+                commands.entity(hull).remove::<Anchored>();
+            }
+        }
         if self.helmed == Some(id) && occupant != Some(me) {
             // Ours until this telling said otherwise. Ordinarily our own
             // disembark already gave it back — see
@@ -1561,10 +1577,13 @@ impl Fleet {
         // does settle for such a hull is whether the claim may stand at all:
         // one the world has since seated somebody in, or put on a ship's
         // painter, stops being ours to push on the word that says so.
+        // A hull on its hook is spoken for by its cable: the server refuses
+        // a shove of one, so claiming it would be a claim the world never
+        // hears, and the spring its telling is holds it instead.
         let telling = Telling {
             hull: told,
             heard,
-            spoken_for: occupant.is_some() || towed_by.is_some(),
+            spoken_for: occupant.is_some() || towed_by.is_some() || anchor.is_some(),
         };
         let mut hull = commands.entity(hull);
         if telling.spoken_for {
@@ -1784,6 +1803,11 @@ impl Plugin for BoatPlugin {
                     make_fast,
                     the_water_holds,
                     trail,
+                    // The anchor before the helm: a hoist weighs, and the
+                    // hook has to be up before the sail it would furl goes
+                    // up — see [`tend_the_anchor`].
+                    tend_the_anchor.run_if(in_state(Helm::Sailing)),
+                    ride_at_anchor,
                     steer.run_if(in_state(Helm::Sailing)),
                 )
                     .chain()
@@ -2250,6 +2274,7 @@ pub(crate) fn take_the_hulls(
             heard,
             hull.occupant,
             hull.towed_by,
+            hull.anchor,
         );
     }
 }
@@ -3379,6 +3404,84 @@ pub(crate) fn over_the_side(ship: &Transform, ground: Option<&Ground>) -> Vec2 {
     }
 }
 
+/// Drops the anchor, or weighs it: one key, read either way by whether the
+/// hull under the player has its hook down — see [`Anchored`].
+///
+/// Dropping is asked from a hull at rest, the sails coming down as the hook
+/// goes over, and only where the water would hold it — [`ANCHOR_DEPTH`]'s
+/// own doc says why the client asks the question the server asks again. It
+/// is believed when the telling comes back; a refusal arrives as the hull's
+/// own state with no hook in it, and a key refused must have done nothing.
+/// Weighing is believed at once, the server granting it to anyone aboard.
+/// Canvas weighs: a hoist, or sails found set under a hook that has just
+/// come down — the grant crossing a hoist already made — so a hull is never
+/// under canvas with its hook down, and the astern drive is refused at
+/// anchor by [`steer`] itself. Offline the whole exchange is local.
+pub(crate) fn tend_the_anchor(
+    keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
+    mut commands: Commands,
+    ground: Option<Res<Ground>>,
+    online: Option<Res<crate::net::Online>>,
+    players: Query<&ChildOf, With<Player>>,
+    mut hulls: Query<(&Transform, &mut Boat, Has<Anchored>)>,
+) {
+    let Ok(aboard) = players.single().map(ChildOf::parent) else {
+        return;
+    };
+    let Ok((place, mut boat, anchored)) = hulls.get_mut(aboard) else {
+        return;
+    };
+    let anchor_key = keys.just_pressed(bindings.key(Action::Anchor));
+    let hoisting = bindings.tapped(&keys, Action::MoveForward, KeyCode::ArrowUp);
+    if anchored {
+        if anchor_key || hoisting || boat.sails_set() {
+            commands.entity(aboard).remove::<Anchored>();
+            if let Some(online) = online {
+                online.connection.weigh();
+            }
+        }
+        return;
+    }
+    if !anchor_key || !boat.reads_as_stopped() {
+        return;
+    }
+    // A chunk that has not arrived refuses too — water the client knows
+    // nothing about is treated as deep, exactly as the sea draws it — but
+    // no ground *resource* at all is a world with no terrain in it (the
+    // boat tests'), where there is no depth for the rule to be about.
+    let under = place.translation.xz();
+    let holds = ground.as_deref().is_none_or(|g| {
+        g.height(under.x, under.y)
+            .is_some_and(|h| h >= -ANCHOR_DEPTH)
+    });
+    if !holds {
+        return;
+    }
+    boat.furl();
+    boat.comes_to_rest();
+    match online {
+        Some(online) => online.connection.anchor(),
+        None => {
+            commands.entity(aboard).insert(Anchored(under));
+        }
+    }
+}
+
+/// Holds a hull to its anchor: sails furled and the way run off, every frame
+/// the hook is down. The whole of what an anchor does at this end — the
+/// swing to lie downwind of the hook is the server's, for a hull nobody is
+/// aboard, and a hull with somebody aboard sits where the hook was let go.
+/// Any hull with sailing state rather than ours alone, so that a world with
+/// no server behind it holds the hulls its player anchored and left exactly
+/// as a served one would.
+pub(crate) fn ride_at_anchor(mut hulls: Query<&mut Boat, With<Anchored>>) {
+    for mut boat in &mut hulls {
+        boat.furl();
+        boat.comes_to_rest();
+    }
+}
+
 /// Sails the boat the player is at the helm of, in its own frame. The view
 /// plays no part — turning the camera changes what the keys look like on
 /// screen, never what they do — so a long sail is a held course rather than
@@ -3426,7 +3529,7 @@ pub(crate) fn steer(
     // holds the pose and both velocities itself: asking for any of them
     // beside it is the same component borrowed twice, which Bevy refuses at
     // the first frame rather than at the first wrong answer.
-    mut boats: Query<(Forces, &mut Boat)>,
+    mut boats: Query<(Forces, &mut Boat, Has<Anchored>)>,
 ) {
     // A player ashore is in no boat's query, and that is the whole of how
     // the helm goes dead when they step off. It is also how a typed `w`
@@ -3435,7 +3538,7 @@ pub(crate) fn steer(
     let Ok(aboard) = players.single().map(ChildOf::parent) else {
         return;
     };
-    let Ok((mut forces, mut boat)) = boats.get_mut(aboard) else {
+    let Ok((mut forces, mut boat, anchored)) = boats.get_mut(aboard) else {
         return;
     };
 
@@ -3462,7 +3565,10 @@ pub(crate) fn steer(
     // share of the hull's full [`Hull::thrust`]. It names a *drive* and not
     // a speed: what speed comes of it is the water's answer, and is
     // [`Hull::speed_at`].
-    let astern = !boat.sails_set && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
+    // Backing is refused at anchor: the cable holds the hull, and the key
+    // that frees it is the anchor's — see [`tend_the_anchor`].
+    let astern =
+        !boat.sails_set && !anchored && bindings.held(&keys, Action::MoveBack, KeyCode::ArrowDown);
     let drive = if boat.sails_set {
         hull.thrust()
             * match hull.mast {
@@ -5644,8 +5750,8 @@ mod tests {
             -ground(&app, offshore),
             1.0,
         );
-        assert_eq!(
-            floated, water,
+        assert!(
+            (floated - water).abs() < AFLOAT_HAIR,
             "the boat floats at {floated} m, the swell there stands at {water} m"
         );
     }
@@ -5764,6 +5870,15 @@ mod tests {
         app.insert_resource(test_ground());
         app
     }
+
+    /// How far a hull may float from the height the water is worked out at,
+    /// in metres. The agreement pinned is a physical one — the hull at the
+    /// height the water is drawn at — and two paths to one function have
+    /// been seen to differ by four ten-millionths on one machine and not at
+    /// all on another: a toolchain's or a libm's last bits, which no eye
+    /// and no rule here turns on. A frame of motion is ten thousand times
+    /// this, so a hull read a frame late still fails.
+    const AFLOAT_HAIR: f32 = 1e-4;
 
     /// Puts the boat down at a spot, pointing a way — a put down in little.
     fn place(app: &mut App, at: Vec2, facing: Vec2) {
@@ -6016,23 +6131,24 @@ mod tests {
         tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
 
-        // Back at sea means back on the water: riding the swell exactly,
-        // rather than holding any height the hillside gave it.
+        // Back at sea means back on the water: riding the swell, rather than
+        // holding any height the hillside gave it.
         let at = boat(&mut app).translation;
         let depth = -app
             .world()
             .resource::<Ground>()
             .height(at.x, at.z)
             .expect("the boat sailed off the ground it was given");
-        assert_eq!(
-            at.y,
-            crate::sea::SeaConditions::default().swell(
-                Vec2::new(at.x, at.z),
-                elapsed(&app),
-                depth,
-                1.0
-            ),
-            "the boat never made it back to the water"
+        let water = crate::sea::SeaConditions::default().swell(
+            Vec2::new(at.x, at.z),
+            elapsed(&app),
+            depth,
+            1.0,
+        );
+        assert!(
+            (at.y - water).abs() < AFLOAT_HAIR,
+            "the boat never made it back to the water: it floats at {} m over a swell of {water} m",
+            at.y
         );
         let afloat = from_the_island(&mut app);
         assert!(

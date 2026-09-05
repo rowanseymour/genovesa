@@ -123,13 +123,26 @@ pub const OCEAN_DEPTH: f32 = 10.0;
 ///
 /// Set short of [`OCEAN_DEPTH`] on purpose: the open ocean's floor is out of
 /// the anchor's reach everywhere, so a ship can only be left riding at anchor
-/// over an island's own shelf — never abandoned in the middle of the sea.
-/// The server holds the line — it is what grants leaving a helm — and it is
-/// written here rather than there because a client wants the same number, to
-/// let a key that cannot be granted do nothing instead of asking.
+/// over an island's own shelf — one left in the middle of the sea is left
+/// adrift. The server holds the line — it is what grants an anchor, see
+/// [`crate::ToServer::Anchor`] — and it is written here rather than there
+/// because a client wants the same number, to let a key that cannot be
+/// granted do nothing instead of asking.
 pub const ANCHOR_DEPTH: f32 = 8.0;
 
 const _: () = assert!(ANCHOR_DEPTH < OCEAN_DEPTH);
+
+/// How far downwind of its hook an anchored hull lies, in metres: the cable
+/// on the surface, which is the radius of the circle the hull swings on.
+///
+/// The server swings an empty hull by it — the hook itself crosses the wire
+/// in [`crate::ToClient::Boat`] — and a client drawing the cable, or the
+/// swing, wants the same number rather than one of its own. Longer than
+/// [`crate::TENDER_ASTERN`], so a ship swinging to a new wind and the boat
+/// astern of it never have the hook between them.
+pub const ANCHOR_SWING: f32 = 15.0;
+
+const _: () = assert!(ANCHOR_SWING > crate::TENDER_ASTERN);
 
 /// Metres between the corners the ground is drawn from.
 ///

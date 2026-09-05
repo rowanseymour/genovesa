@@ -44,7 +44,7 @@ use protocol::{BeastKind, BoatId, BoatKind, Token, WorldId};
 /// The format this build writes, named in the file's first line. A file
 /// carrying a different number is refused whole rather than guessed at —
 /// see the module doc for why.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// The extension a kept world's file carries, so a directory of them can be
 /// told from whatever else ends up alongside. Public through
@@ -126,7 +126,15 @@ pub(crate) struct PlayerRecord {
 /// stops, and where they step back in is the players' own records' business.
 /// The painter is kept, a tow being a fact about two hulls and not about
 /// anybody aboard either: `towed_by` names the ship this boat is on the
-/// painter of, in [`WorldRecord::boats`] too.
+/// painter of, in [`WorldRecord::boats`] too. And the anchor is kept, being
+/// the one thing that decides whether a hull is where the file says when
+/// the world reopens: `anchor` is where its hook lies, for a hull with one
+/// down — see [`protocol::ToServer::Anchor`].
+///
+/// On the line the five fields every hull has come first, and then what
+/// only some have, each behind its own word — `towed <ship>`, `anchored <x>
+/// <y>` — so that a hull with an anchor and no painter is not a hull with a
+/// painter in the wrong column.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BoatRecord {
     pub id: BoatId,
@@ -134,6 +142,7 @@ pub(crate) struct BoatRecord {
     pub position: Vec2,
     pub heading: f32,
     pub towed_by: Option<BoatId>,
+    pub anchor: Option<Vec2>,
 }
 
 /// One island claimed, as the file keeps it: which island, whose it is, where
@@ -656,7 +665,10 @@ fn compose(record: &WorldRecord) -> String {
             boat.heading
         );
         if let Some(ship) = boat.towed_by {
-            let _ = write!(out, " {:016x}", ship.0);
+            let _ = write!(out, " towed {:016x}", ship.0);
+        }
+        if let Some(hook) = boat.anchor {
+            let _ = write!(out, " anchored {} {}", hook.x, hook.y);
         }
         let _ = writeln!(out);
     }
@@ -879,9 +891,25 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     fields.next().ok_or("a boat with half a position")?,
                     fields.next().ok_or("a boat with no heading")?,
                 );
-                let towed_by = fields.next().map(hex).transpose()?.map(BoatId);
-                if fields.next().is_some() {
-                    return Err(format!("too much about one boat: `{line}`"));
+                // What only some hulls have, each behind its own word — see
+                // [`BoatRecord`]. Said once at most: a hull on two painters
+                // or with two hooks down is a line somebody edited.
+                let (mut towed_by, mut anchor) = (None, None);
+                while let Some(word) = fields.next() {
+                    match word {
+                        "towed" if towed_by.is_none() => {
+                            let ship = fields.next().ok_or("a painter to nothing")?;
+                            towed_by = Some(BoatId(hex(ship)?));
+                        }
+                        "anchored" if anchor.is_none() => {
+                            let (x, y) = (
+                                fields.next().ok_or("an anchor with no position")?,
+                                fields.next().ok_or("an anchor with half a position")?,
+                            );
+                            anchor = Some(spot(x, y, "no anchor ever lay")?);
+                        }
+                        _ => return Err(format!("too much about one boat: `{line}`")),
+                    }
                 }
                 let position = spot(x, y, "no boat ever lay")?;
                 boats.push(BoatRecord {
@@ -891,6 +919,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
                     position,
                     heading: finite(heading)?,
                     towed_by,
+                    anchor,
                 });
             }
             // Five fields and then the rest of the line, which is the name:
@@ -1133,12 +1162,15 @@ mod tests {
                 ),
             ]),
             boats: vec![
+                // One at anchor and one on a painter: each of the two things
+                // a hull may have, on a hull without the other.
                 BoatRecord {
                     id: BoatId(0xB0A7),
                     kind: BoatKind::Sloop,
                     position: Vec2::new(12.5, -340.25),
                     heading: 1.5,
                     towed_by: None,
+                    anchor: Some(Vec2::new(0.5, -352.75)),
                 },
                 BoatRecord {
                     id: BoatId(0xDEAD),
@@ -1146,6 +1178,7 @@ mod tests {
                     position: Vec2::new(64.0, 8.0),
                     heading: -2.25,
                     towed_by: Some(BoatId(0xB0A7)),
+                    anchor: None,
                 },
             ],
             claims: vec![
@@ -1319,6 +1352,7 @@ mod tests {
                 position: -far,
                 heading: f32::MAX,
                 towed_by: Some(BoatId(u64::MAX)),
+                anchor: Some(far),
             }],
             claims: vec![
                 ClaimRecord {
@@ -1505,111 +1539,131 @@ mod tests {
         for (text, what) in [
             ("", "an empty file"),
             ("genovesa world 999\n", "a format from some other year"),
-            ("genovesa world 1\nseed 7\nopening 0.35\nage 0\n", "no id"),
+            ("genovesa world 2\nseed 7\nopening 0.35\nage 0\n", "no id"),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nfuture stuff\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nfuture stuff\n",
                 "a key this build has never heard of",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 2.5\nage 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 2.5\nage 0\n",
                 "an opening past the day",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage -4\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage -4\n",
                 "a negative age",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage NaN\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage NaN\n",
                 "an age that is not a number",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1e30 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1e30 0\n",
                 "a player past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2\n",
                 "half a beast",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast kraken 1 2 3\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nbeast kraken 1 2 3\n",
                 "a beast of a kind nothing keeps",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2 3 4\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nbeast shark 1 2 3 4\n",
                 "half a goal",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nbeast whale 1e30 0 5\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nbeast whale 1e30 0 5\n",
                 "a beast past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2\n",
                 "a boat with no heading",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 canoe 1 2 3\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 canoe 1 2 3\n",
                 "a boat of a kind nothing sails",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 nothex\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 towed nothex\n",
                 "a painter to something that is not a boat's name",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1 2 nothex\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 rowboat 1 2 3 towed\n",
+                "a painter to nothing",
+            ),
+            (
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 4\n",
+                "half an anchor",
+            ),
+            (
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 1e30 0\n",
+                "an anchor past where the world resolves",
+            ),
+            (
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 keel 4\n",
+                "a word no boat line has",
+            ),
+            (
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nboat 1 sloop 1 2 3 anchored 4 5 anchored 6 7\n",
+                "two hooks down",
+            ),
+            (
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nplayer 1 1 2 nothex\n",
                 "an aboard that is not a boat's name",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1\n",
                 "a survey of nowhere",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3 4\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3 4\n",
                 "surveyed chunks that name no column",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 99999999:0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 99999999:0\n",
                 "a chunk past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0,0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0,0\n",
                 "a survey stepping nowhere, which is one chunk twice",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:4,-1\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:4,-1\n",
                 "a survey stepping back the way it came",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 5:0 3:0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 5:0 3:0\n",
                 "survey columns out of order",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0 3:9\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nsurveyed 1 3:0 3:9\n",
                 "one column named twice",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\n\
                  player 1 0 0\nsurveyed 1 0:0\nsurveyed 1 4:4\n",
                 "one player's survey told twice",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\n\
                  player 1 0 0\nplayer 1 8 8\n",
                 "one player told twice",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 3\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 3\n",
                 "a cairn with half a position",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 1e30 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 1 2 7 1e30 0\n",
                 "a cairn past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 99999999 0 7 0 0\n",
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\nclaim 99999999 0 7 0 0\n",
                 "an island past where the world resolves",
             ),
             (
-                "genovesa world 1\nid 1\nseed 7\nopening 0.35\nage 0\n\
+                "genovesa world 2\nid 1\nseed 7\nopening 0.35\nage 0\n\
                  claim 1 2 7 0 0 Here\nclaim 1 2 9 4 4 There\n",
                 "one island claimed twice",
             ),
