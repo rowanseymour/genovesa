@@ -5750,8 +5750,8 @@ mod tests {
             -ground(&app, offshore),
             1.0,
         );
-        assert_eq!(
-            floated, water,
+        assert!(
+            (floated - water).abs() < AFLOAT_HAIR,
             "the boat floats at {floated} m, the swell there stands at {water} m"
         );
     }
@@ -5870,6 +5870,15 @@ mod tests {
         app.insert_resource(test_ground());
         app
     }
+
+    /// How far a hull may float from the height the water is worked out at,
+    /// in metres. The agreement pinned is a physical one — the hull at the
+    /// height the water is drawn at — and two paths to one function have
+    /// been seen to differ by four ten-millionths on one machine and not at
+    /// all on another: a toolchain's or a libm's last bits, which no eye
+    /// and no rule here turns on. A frame of motion is ten thousand times
+    /// this, so a hull read a frame late still fails.
+    const AFLOAT_HAIR: f32 = 1e-4;
 
     /// Puts the boat down at a spot, pointing a way — a put down in little.
     fn place(app: &mut App, at: Vec2, facing: Vec2) {
@@ -6122,23 +6131,24 @@ mod tests {
         tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, SETTLED);
 
-        // Back at sea means back on the water: riding the swell exactly,
-        // rather than holding any height the hillside gave it.
+        // Back at sea means back on the water: riding the swell, rather than
+        // holding any height the hillside gave it.
         let at = boat(&mut app).translation;
         let depth = -app
             .world()
             .resource::<Ground>()
             .height(at.x, at.z)
             .expect("the boat sailed off the ground it was given");
-        assert_eq!(
-            at.y,
-            crate::sea::SeaConditions::default().swell(
-                Vec2::new(at.x, at.z),
-                elapsed(&app),
-                depth,
-                1.0
-            ),
-            "the boat never made it back to the water"
+        let water = crate::sea::SeaConditions::default().swell(
+            Vec2::new(at.x, at.z),
+            elapsed(&app),
+            depth,
+            1.0,
+        );
+        assert!(
+            (at.y - water).abs() < AFLOAT_HAIR,
+            "the boat never made it back to the water: it floats at {} m over a swell of {water} m",
+            at.y
         );
         let afloat = from_the_island(&mut app);
         assert!(
