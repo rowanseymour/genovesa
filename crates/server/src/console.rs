@@ -641,6 +641,7 @@ fn grant(asked: Asked) -> Result<String, String> {
     // where the water allows it, so a dealt hull waits to be boarded rather
     // than leaving on the wind.
     let anchor = sea::anchor_holds(shared.world.height(at.x, at.y)).then_some(at);
+    let now = shared.age();
 
     {
         // The roster first and the boats under it — the nesting the two
@@ -659,6 +660,7 @@ fn grant(asked: Asked) -> Result<String, String> {
                 occupant: None,
                 towed_by: None,
                 anchor,
+                vacated: now,
             };
             let telling = state.told(boat);
             boats.insert(boat, state);

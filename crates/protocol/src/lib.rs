@@ -407,7 +407,8 @@ impl BeastKind {
 /// left it — at anchor if they dropped one, adrift on the wind if not, and
 /// visible to everyone either way, including while that player is offline —
 /// and its helm belongs to whoever reaches it next. See [`ToClient::Boat`]
-/// for how one is told, and [`ToServer::Board`] for how one changes hands.
+/// for how one is told, [`ToServer::Board`] for how one changes hands, and
+/// [`ToClient::BoatGone`] for how one leaves the world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BoatId(pub u64);
 
@@ -897,6 +898,20 @@ pub enum ToClient {
         towed_by: Option<BoatId>,
         anchor: Option<Vec2>,
     },
+    /// A boat is out of the world: nobody was using it — see the server for
+    /// what that takes — and the world has taken it back. The id is retired
+    /// with it; a client drops the hull. Unlike a beast's going this is not
+    /// a matter of who is near enough to care: a boat was told to everyone,
+    /// so everyone hears when it stops being there to see. Nobody is ever
+    /// aboard a boat this is said of, so it is never said of a hull its
+    /// hearer is steering.
+    ///
+    /// A name so retired is answered with silence if anything asks after it,
+    /// never with a hang-up: a client may honestly still have this message
+    /// in flight when it sends a [`ToServer::Board`] naming the hull.
+    BoatGone {
+        id: BoatId,
+    },
     /// This player is *here* now, whatever they thought: the world has moved
     /// them, and whatever carries them — the hull they hold the helm of, or
     /// their own feet — belongs at this point, pointed this way, on the
@@ -1287,6 +1302,10 @@ impl ToClient {
                     }
                 }
             }
+            Self::BoatGone { id } => {
+                payload.push(16);
+                put_u64(&mut payload, id.0);
+            }
             Self::PutDown { position, heading } => {
                 payload.push(17);
                 put_vec2(&mut payload, *position);
@@ -1500,6 +1519,9 @@ impl ToClient {
                 covers: (payload.vec2()?, payload.vec2()?),
                 yours: payload.u8()? != 0,
                 name: payload.str()?,
+            },
+            16 => Self::BoatGone {
+                id: BoatId(payload.u64()?),
             },
             17 => Self::PutDown {
                 position: payload.vec2()?,
@@ -1968,6 +1990,7 @@ mod tests {
                 towed_by: Some(BoatId(12)),
                 anchor: None,
             },
+            ToClient::BoatGone { id: BoatId(14) },
             ToClient::PutDown {
                 position: at,
                 heading: Some(-0.5),
@@ -2477,6 +2500,16 @@ mod tests {
             anchored[41..],
             [0, 0, 0xC0, 0x3F, 0, 0, 0, 0xC0],
             "the hook at (1.5, -2.0)"
+        );
+        assert_eq!(
+            bytes_of_server(&ToClient::BoatGone {
+                id: BoatId(0x0102_0304_0506_0708),
+            }),
+            [
+                9, 0, 0, 0,  // length
+                16, // tag
+                8, 7, 6, 5, 4, 3, 2, 1, // the boat retired, LE
+            ],
         );
         assert_eq!(
             bytes_of_server(&ToClient::PutDown {

@@ -617,6 +617,7 @@ impl Plugin for NetPlugin {
             .add_message::<BeastSeen>()
             .add_message::<BeastGone>()
             .add_message::<HullTold>()
+            .add_message::<HullGone>()
             .add_message::<PutDown>()
             .add_message::<CairnSeen>()
             .add_message::<Uncharted>()
@@ -657,7 +658,7 @@ impl Plugin for NetPlugin {
                 // frame eases and stands it on the ground there.
                 (shade_markers, place_markers)
                     .chain()
-                    .after(crate::boat::take_the_hulls)
+                    .after(crate::boat::lose_the_hulls)
                     .in_set(Wire::Read)
                     .run_if(resource_exists::<Online>),
             )
@@ -790,6 +791,12 @@ pub struct HullTold {
     pub occupant: Option<PlayerId>,
     pub towed_by: Option<BoatId>,
     pub anchor: Option<Vec2>,
+}
+
+/// A boat is out of the world. Read by [`crate::boat`].
+#[derive(Message)]
+pub struct HullGone {
+    pub id: BoatId,
 }
 
 /// The world has moved this player, whatever they thought — see
@@ -1025,6 +1032,9 @@ fn receive(
                     });
                 }
             }
+            ToClient::BoatGone { id } => {
+                said.hull_gone.write(HullGone { id });
+            }
             ToClient::PutDown { position, heading } => {
                 if position.is_finite() && heading.is_none_or(f32::is_finite) {
                     said.put_down.write(PutDown { position, heading });
@@ -1061,8 +1071,8 @@ fn receive(
 ///
 /// Together because they are one thing — the vocabulary of a session — and
 /// not merely to keep a system's parameter list under the sixteen Bevy allows,
-/// though twelve writers and three other parameters would have been at that
-/// wall too. Adding a word to the wire is a field here and an arm there, and
+/// though thirteen writers and three other parameters would have been at
+/// that wall too. Adding a word to the wire is a field here and an arm there, and
 /// nothing else in this module moves.
 #[derive(SystemParam)]
 struct Words<'w> {
@@ -1073,6 +1083,7 @@ struct Words<'w> {
     beast: MessageWriter<'w, BeastSeen>,
     beast_gone: MessageWriter<'w, BeastGone>,
     hull: MessageWriter<'w, HullTold>,
+    hull_gone: MessageWriter<'w, HullGone>,
     put_down: MessageWriter<'w, PutDown>,
     cairn: MessageWriter<'w, CairnSeen>,
     uncharted: MessageWriter<'w, Uncharted>,
@@ -1455,6 +1466,7 @@ mod tests {
                 // The hulls before the put down, which is the one order the
                 // wire fixes — see [`PutDown`].
                 crate::boat::take_the_hulls,
+                crate::boat::lose_the_hulls,
                 crate::player::take_the_put_down,
                 crate::cairn::raise_the_cairns,
                 crate::console::hear_the_server,
@@ -2248,6 +2260,128 @@ mod tests {
                 .iter(app.world())
                 .any(|named| named.0 == BoatId(2))
         });
+    }
+
+    #[test]
+    fn a_hull_told_gone_is_out_of_the_world_and_the_rest_are_not() {
+        // The ordinary shape of a boat leaving: two hulls moored by their
+        // tellings, one of them told gone. That one is dropped, the other is
+        // exactly as it was, and a later word about the retired name raises
+        // nothing — the world does not reuse a name, so a telling about one
+        // still in flight is a telling about nothing.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+
+        let hulls = |app: &mut App| -> Vec<BoatId> {
+            let mut named: Vec<BoatId> = app
+                .world_mut()
+                .query::<&crate::boat::HullId>()
+                .iter(app.world())
+                .map(|named| named.0)
+                .collect();
+            named.sort_by_key(|id| id.0);
+            named
+        };
+
+        for (id, at) in [
+            (BoatId(3), Vec2::new(40.0, 0.0)),
+            (BoatId(4), Vec2::new(-40.0, 0.0)),
+        ] {
+            (ToClient::Boat {
+                id,
+                kind: protocol::BoatKind::Sloop,
+                hull: Underway::lying(at, 0.0),
+                occupant: None,
+                towed_by: None,
+                anchor: None,
+            })
+            .write(&mut &server)
+            .expect("boat moored");
+        }
+        run_until(&mut app, "both hulls are raised", |app| {
+            hulls(app) == [BoatId(3), BoatId(4)]
+        });
+
+        (ToClient::BoatGone { id: BoatId(3) })
+            .write(&mut &server)
+            .expect("boat retired");
+        run_until(&mut app, "the retired hull is out of the world", |app| {
+            hulls(app) == [BoatId(4)]
+        });
+
+        // A name retired twice is silence, not a panic — and nor does the
+        // fleet keep a ghost of it that a second going could trip over.
+        (ToClient::BoatGone { id: BoatId(3) })
+            .write(&mut &server)
+            .expect("retired again");
+        (ToClient::Boat {
+            id: BoatId(5),
+            kind: protocol::BoatKind::Rowboat,
+            hull: Underway::lying(Vec2::new(0.0, 40.0), 0.0),
+            occupant: None,
+            towed_by: None,
+            anchor: None,
+        })
+        .write(&mut &server)
+        .expect("another boat");
+        run_until(&mut app, "the later telling is heard", |app| {
+            hulls(app) == [BoatId(4), BoatId(5)]
+        });
+    }
+
+    #[test]
+    fn a_hull_taken_from_under_a_player_leaves_them_where_it_lay() {
+        // The order this client is not supposed to have to handle: a hull
+        // told gone while the fleet still has us aboard it, with no word
+        // first about where we went. It cannot happen on this wire — the
+        // world retires only empty hulls — which is exactly why the answer
+        // to it wants pinning: a player is posed against their hull, so one
+        // taken away without a pose of their own stands at the world
+        // origin, an ocean from wherever they were.
+        let (addr, socket) = fake_server(Vec2::ZERO, Vec2::ZERO);
+        let connection = Connection::join(&addr).expect("join");
+        let server = socket.recv().expect("the fake server keeps its socket");
+        let mut app = test_app(connection);
+        let me = PlayerId(1);
+        let afloat = Vec2::new(60.0, -20.0);
+
+        (ToClient::Boat {
+            id: BoatId(2),
+            kind: protocol::BoatKind::Rowboat,
+            hull: Underway::lying(afloat, 0.0),
+            occupant: Some(me),
+            towed_by: None,
+            anchor: None,
+        })
+        .write(&mut &server)
+        .expect("tender granted");
+        run_until(&mut app, "the player is seated in the boat", |app| {
+            aboard_hull(app) == Some(BoatId(2))
+        });
+
+        (ToClient::BoatGone { id: BoatId(2) })
+            .write(&mut &server)
+            .expect("tender retired");
+        run_until(&mut app, "the boat is out from under them", |app| {
+            aboard_hull(app).is_none()
+        });
+
+        let (place, unsettled) = app
+            .world_mut()
+            .query_filtered::<(&Transform, Has<crate::player::Unsettled>), With<crate::player::Player>>()
+            .single(app.world())
+            .expect("the player went with the hull");
+        assert_eq!(
+            place.translation.xz(),
+            afloat,
+            "the player was left at the world's origin rather than where the boat lay"
+        );
+        assert!(
+            unsettled,
+            "the player was put down without being left to find the ground"
+        );
     }
 
     #[test]

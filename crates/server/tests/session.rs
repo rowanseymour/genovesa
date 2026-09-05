@@ -472,6 +472,7 @@ impl Client {
                 | ToClient::Beast { .. }
                 | ToClient::BeastGone { .. }
                 | ToClient::Boat { .. }
+                | ToClient::BoatGone { .. }
                 | ToClient::Surveyed { .. }
                 | ToClient::Cairn { .. }
                 | ToClient::Uncharted
@@ -672,6 +673,55 @@ impl Client {
                 ToClient::Reply { .. } => return told,
                 _ => {}
             }
+        }
+    }
+
+    /// The next `how_many` hulls the world takes back, in the order told,
+    /// ignoring everything else — bounded like every other reader here.
+    fn hear_hulls_gone(&self, how_many: usize) -> Vec<protocol::BoatId> {
+        let deadline = Instant::now() + PATIENCE;
+        let mut gone = Vec::new();
+        while gone.len() < how_many {
+            if let ToClient::BoatGone { id } = self.hear_by(
+                deadline,
+                &format!("{how_many} hulls taken out of the world"),
+            ) {
+                gone.push(id);
+            }
+        }
+        gone
+    }
+
+    /// Whether the world has taken back no hull this client has not already
+    /// heard of — bracketed by a `help`, on
+    /// [`Client::nothing_was_said_about_a_boat`]'s reasoning.
+    fn no_hull_was_retired(&self) -> bool {
+        self.say(ToServer::Command {
+            line: "help".to_string(),
+        });
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match self.hear_by(deadline, "the reply that brackets the ask") {
+                ToClient::BoatGone { .. } => return false,
+                ToClient::Reply { .. } => return true,
+                _ => {}
+            }
+        }
+    }
+
+    /// Runs the world's day on by at least one whole day, through the
+    /// console — the one way a test moves the world's clock other than
+    /// waiting for it. A hull's grace is a day of that clock, so after this
+    /// every hull that lay empty before it has lain empty long enough.
+    fn wind_on_a_day(&self) {
+        // Twice: the first ask reaches the next noon, which may be moments
+        // away, and the second is then a whole day on from it.
+        for _ in 0..2 {
+            self.say(ToServer::Command {
+                line: "world time 12".to_string(),
+            });
+            let answer = self.hear_reply();
+            assert!(answer.contains("12:00"), "the day did not run on: {answer}");
         }
     }
 
@@ -2322,11 +2372,13 @@ fn every_arrival_is_minted_a_hull_of_their_own() {
 }
 
 #[test]
-fn joining_and_hanging_up_over_and_over_leaves_a_hull_behind_every_time() {
-    // The rate, counted in the file: a ship and its boat per arrival, and
-    // nothing yet takes an unused one out of the world. A pin on the leak
-    // rather than a bound — when boats nobody uses start leaving the world,
-    // this is the count that should fall.
+fn hulls_stepped_out_of_and_left_behind_leave_the_world_and_its_file() {
+    // The leak #143 was about, closed: a client that joins, steps ashore and
+    // hangs up in a loop leaves a ship and a boat behind every time round,
+    // and once they have lain unused for a day with nobody near, the world
+    // takes every one of them back — told to whoever is left, and gone from
+    // the file. The boat on a painter whose ship somebody is still sailing
+    // is the one hull as old and as far off that stays.
     let path = scratch("hulls").join("one.world");
     let world = Server::bind(("127.0.0.1", 0), 7)
         .expect("bind")
@@ -2336,27 +2388,173 @@ fn joining_and_hanging_up_over_and_over_leaves_a_hull_behind_every_time() {
     let host = world.spawn().expect("spawn");
 
     // Somebody who stays, so that each leaving is heard to have been dealt
-    // with before the next arrival knocks.
-    let (watcher, ..) = Client::join(addr);
+    // with before the next arrival knocks — and who will sail out of range
+    // of the lot of them when the loop is done.
+    let (watcher, _w, spawn, _token, watchers) = Client::join_aboard(addr, None);
+    let watchers = watchers.expect("aboard");
+    let (watchers_boat, _) = watcher.hear_the_tender_of(watchers);
 
+    let mut ships = Vec::new();
     for _ in 0..20 {
-        let (client, id, spawn, _token, _aboard) = Client::join_aboard(addr, None);
+        let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+        ships.push(aboard.expect("a newcomer's story starts aboard"));
         client.say(ToServer::Disembark { position: spawn });
         drop(client);
         while !matches!(watcher.hear(), ToClient::Left { id: gone } if gone == id) {}
     }
+
+    // Out of range of the spawn, with the ship's own boat left lying there
+    // on the painter — `tender: None` being a report that says nothing about
+    // it, so it stays exactly where it was minted.
+    watcher.say(ToServer::Helm {
+        hull: Underway::lying(spawn + Vec2::new(3_000.0, 0.0), 0.0),
+        tender: None,
+    });
+    watcher.wind_on_a_day();
+
+    let gone = watcher.hear_hulls_gone(2 * ships.len());
+    for ship in &ships {
+        assert!(
+            gone.contains(ship),
+            "a ship stepped out of was kept: {ship}"
+        );
+    }
+    assert!(
+        !gone.contains(&watchers) && !gone.contains(&watchers_boat),
+        "the watcher's own ship or the boat on its painter was taken: {gone:?}"
+    );
+    assert!(
+        watcher.no_hull_was_retired(),
+        "more than the leavers' hulls were taken"
+    );
+
     drop(watcher);
     drop(host);
-
     let kept = std::fs::read_to_string(&path).expect("the kept world");
-    let hulls = kept
+    let hulls: Vec<&str> = kept
         .lines()
         .filter(|line| line.starts_with("boat "))
-        .count();
+        .collect();
     assert_eq!(
-        hulls,
-        2 * 21,
-        "twenty-one arrivals at a ship and a boat each left {hulls} hulls"
+        hulls.len(),
+        2,
+        "the file should hold the watcher's ship and its boat and nothing else:\n{}",
+        hulls.join("\n")
+    );
+}
+
+#[test]
+fn a_hull_stays_while_anybody_is_near_it_and_goes_once_nobody_is() {
+    // Two leavers step ashore and hang up, one on the spawn and one three
+    // kilometres off; the watcher stands on the spawn. A day on, the far
+    // hulls are taken and the near ones are not — and once the watcher sails
+    // out of their range, those go too.
+    let addr = host(7);
+    let (watcher, _w, spawn, _t, _aboard) = Client::join_aboard(addr, None);
+
+    let leave = |where_to: Option<Vec2>| {
+        let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+        let ship = aboard.expect("aboard");
+        let ashore = where_to.unwrap_or(spawn);
+        if let Some(out) = where_to {
+            client.say(ToServer::Helm {
+                hull: Underway::lying(out, 0.0),
+                tender: Some(Underway::lying(out + Vec2::new(0.0, 10.0), 0.0)),
+            });
+        }
+        client.say(ToServer::Disembark { position: ashore });
+        client.boat_changed_hands(ship, None);
+        drop(client);
+        while !matches!(watcher.hear(), ToClient::Left { id: gone } if gone == id) {}
+        ship
+    };
+    let near = leave(None);
+    let far = leave(Some(spawn + Vec2::new(3_000.0, 0.0)));
+
+    watcher.wind_on_a_day();
+    let gone = watcher.hear_hulls_gone(2);
+    assert!(gone.contains(&far), "the far ship was kept: {gone:?}");
+    assert!(
+        !gone.contains(&near),
+        "the ship beside the watcher was taken"
+    );
+    assert!(
+        watcher.no_hull_was_retired(),
+        "a hull beside the watcher was taken"
+    );
+
+    watcher.say(ToServer::Helm {
+        hull: Underway::lying(spawn + Vec2::new(-3_000.0, 0.0), 0.0),
+        tender: None,
+    });
+    let gone = watcher.hear_hulls_gone(2);
+    assert!(
+        gone.contains(&near),
+        "the ship the watcher sailed away from was kept: {gone:?}"
+    );
+}
+
+#[test]
+fn a_helm_hung_up_at_is_kept_for_its_helmsman() {
+    // Hanging up at a helm is a promise the world makes: the boat is where
+    // it was left, for as long as it lies free. So a ship and its tender
+    // abandoned three kilometres from anyone for a day are kept all the
+    // same when somebody's papers name the helm — and, for contrast, a
+    // leaver who stepped ashore beside them loses theirs.
+    let addr = host(7);
+    let (watcher, _w, spawn, ..) = Client::join_aboard(addr, None);
+    let out = spawn + Vec2::new(3_000.0, 0.0);
+
+    let (alice, a, _, token, aboard) = Client::join_aboard(addr, None);
+    let alices = aboard.expect("aboard");
+    let (alices_boat, _) = alice.hear_the_tender_of(alices);
+    alice.say(ToServer::Helm {
+        hull: Underway::lying(out, 1.0),
+        tender: Some(Underway::lying(out + Vec2::new(0.0, 10.0), 1.0)),
+    });
+    // An answered chunk proves the helm report was processed.
+    let _ = alice.ask_for(IVec2::new(5_000, 5_000));
+    drop(alice);
+    while !matches!(watcher.hear(), ToClient::Left { id } if id == a) {}
+
+    // With her boat in tow: a tender left lying on the spawn would be
+    // beside the watcher, and a ship stays for the boat on its painter as
+    // much as the other way about.
+    let (carol, c, _, _, aboard) = Client::join_aboard(addr, None);
+    let carols = aboard.expect("aboard");
+    let carols_way = out + Vec2::new(100.0, 0.0);
+    carol.say(ToServer::Helm {
+        hull: Underway::lying(carols_way, 0.0),
+        tender: Some(Underway::lying(carols_way + Vec2::new(0.0, 10.0), 0.0)),
+    });
+    carol.say(ToServer::Disembark {
+        position: carols_way,
+    });
+    carol.boat_changed_hands(carols, None);
+    drop(carol);
+    while !matches!(watcher.hear(), ToClient::Left { id } if id == c) {}
+
+    watcher.wind_on_a_day();
+    let gone = watcher.hear_hulls_gone(2);
+    assert!(
+        gone.contains(&carols),
+        "the ship stepped out of was kept: {gone:?}"
+    );
+    assert!(
+        watcher.no_hull_was_retired(),
+        "a helm somebody hung up at was taken"
+    );
+
+    // And the promise honoured: seated back at that helm, the tender still
+    // on its painter.
+    let (alice, _, _, _, aboard) = Client::join_aboard(addr, Some(token));
+    assert_eq!(aboard, Some(alices), "seated at some other helm");
+    let introduced = alice.boats_introduced();
+    assert!(
+        introduced
+            .iter()
+            .any(|(id, _, towed_by)| *id == alices_boat && *towed_by == Some(alices)),
+        "the tender was not on the painter: {introduced:?}"
     );
 }
 
