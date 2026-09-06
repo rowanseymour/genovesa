@@ -2558,11 +2558,11 @@ fn trim_the_sails(
     boats: Hulls<Without<Sail>>,
     mut sails: Query<(&ChildOf, &mut Transform, &mut Visibility), With<Sail>>,
 ) {
-    let dt = if clock.is_some_and(|clock| clock.is_paused()) {
-        0.0
-    } else {
-        time.delta_secs()
-    };
+    // Held with the hulls — see `hold_the_clock` in the waterline — and
+    // not by easing a step of nothing: that still reads the angle back off
+    // the quaternion and writes it again, an ulp adrift on some libms,
+    // and a held boom should hold to the bit.
+    let held = clock.is_some_and(|clock| clock.is_paused());
     for (of, mut transform, mut visibility) in &mut sails {
         let Ok((boat, hull, _)) = boats.get(of.parent()) else {
             continue;
@@ -2578,7 +2578,7 @@ fn trim_the_sails(
         if *visibility != shown {
             *visibility = shown;
         }
-        if set {
+        if set && !held {
             let wind = conditions.wind_at(ground.as_deref(), hull.translation.xz());
             // The hull's axes flattened to the water and made unit again:
             // heel and pitch shorten their shadows, and a component read
@@ -2587,7 +2587,13 @@ fn trim_the_sails(
             let bow = hull.forward().xz().normalize_or_zero();
             let beam = hull.right().xz().normalize_or_zero();
             let was = transform.rotation.to_euler(EulerRot::YXZ).0;
-            let boom = eased_to(was, sail_trim(bow, wind), SHEETING, dt, ANGLE_SETTLED);
+            let boom = eased_to(
+                was,
+                sail_trim(bow, wind),
+                SHEETING,
+                time.delta_secs(),
+                ANGLE_SETTLED,
+            );
             let trimmed = Quat::from_rotation_y(boom);
             if transform.rotation != trimmed {
                 transform.rotation = trimmed;
