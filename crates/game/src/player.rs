@@ -2302,8 +2302,8 @@ mod tests {
         tap(&mut app, KeyCode::ArrowUp);
         run_frames(&mut app, 300);
 
-        let beams = (app.world().get::<Boat>(ship).expect("a boat").beam()
-            + app.world().get::<Boat>(tender).expect("a boat").beam())
+        let beams = (app.world().get::<Rigged>(ship).expect("a hull").beam()
+            + app.world().get::<Rigged>(tender).expect("a hull").beam())
             / 2.0;
         let abeam = (transform_of(&mut app, tender).translation.xz() - ship_place.translation.xz())
             .dot(right);
@@ -2332,7 +2332,7 @@ mod tests {
         // because sliding along a hull carries a boat round the end of it
         // and out along the other side, where an athwartships reading
         // changes sign and says nothing.
-        let ship_hull = app.world().get::<Boat>(ship).expect("a boat");
+        let ship_hull = *app.world().get::<Rigged>(ship).expect("a hull");
         let (half_beam, half_length) = (ship_hull.beam() / 2.0, ship_hull.length() / 2.0);
         let offset = transform_of(&mut app, tender).translation.xz() - ship_place.translation.xz();
         let athwart = offset.dot(right).abs() - half_beam;
@@ -2381,10 +2381,10 @@ mod tests {
             ship_place.translation.xz().distance(from) > 20.0,
             "the ship never got under way"
         );
-        let ship_stem = app.world().get::<Boat>(ship).expect("a boat").stem();
+        let ship_stem = app.world().get::<Rigged>(ship).expect("a hull").stem();
         let transom = ship_place.transform_point(-ship_stem).xz();
         let stem = tender_place
-            .transform_point(Boat::of(BoatKind::Rowboat).stem())
+            .transform_point(Rigged(BoatKind::Rowboat).stem())
             .xz();
         let rope = stem.distance(transom);
         assert!(
@@ -2431,7 +2431,7 @@ mod tests {
         let tender_place = transform_of(&mut app, tender);
         let transom = ship_place.transform_point(-ship_stem).xz();
         let stem = tender_place
-            .transform_point(Boat::of(BoatKind::Rowboat).stem())
+            .transform_point(Rigged(BoatKind::Rowboat).stem())
             .xz();
         let rope = stem.distance(transom);
         assert!(

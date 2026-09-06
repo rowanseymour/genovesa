@@ -301,11 +301,8 @@ fn gustiness(at: vec2<f32>) -> f32 {
 // the one piece of foam the Rust side never has to agree about, since no
 // hull rides it. `sea.wake` is a track per hull, each newest first; `wake.rs`
 // owns every constant they are read with, and the module doc there is where
-// the shape is argued.
-//
-// Every hull's wake, not just the sailed one's: a boat in tow throws the
-// same white as the ship pulling it. Where two overlap the water is simply
-// white, which is what two wakes crossing look like.
+// the shape is argued. Where two wakes overlap the water is simply white,
+// which is what two wakes crossing look like.
 fn wake_foam(at: vec2<f32>) -> f32 {
     var foam = 0.0;
     for (var k = 0; k < WAKES; k++) {

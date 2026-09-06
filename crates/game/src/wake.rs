@@ -29,7 +29,13 @@
 //! V as ours. The track comes with the hull — every [`Vessel`] carries one —
 //! and the way it is laid at is read off the water plane the hull is solved
 //! on, which every hull has, rather than off sailing state, which only ours
-//! does. The shader takes the nearest [`WAKES`] of them.
+//! does. Its length, so a hull carried sideways stirs the water it is
+//! actually crossing. The one exception is a hull the wire moves: its way is
+//! the wire's word rather than the spring steering it onto that word, since
+//! the spring peaks well above [`STIRS`] bringing a hull a hand's breadth
+//! home, and foam at a boat that did not sail is worse than a wake a telling
+//! late. The shader takes the nearest [`WAKES`] of them, ranked for the
+//! [`Eye`] the holes are cut for.
 
 use std::collections::VecDeque;
 
@@ -38,9 +44,7 @@ use bevy::prelude::*;
 
 use avian2d::prelude::LinearVelocity;
 
-use crate::boat::{Rigged, Vessel};
-use crate::camera::MapCamera;
-use crate::player::Player;
+use crate::boat::{Eye, Rigged, Shoving, Telling, Vessel};
 use crate::sea::{DepthWindow, SeaMaterial};
 use crate::AppState;
 
@@ -55,18 +59,14 @@ use crate::AppState;
 /// `the_shader_walks_the_whole_track` holds it to.
 pub(crate) const TRAIL: usize = 34;
 
-/// How many hulls' tracks the shader is handed at once.
+/// How many hulls' tracks the shader is handed at once — the twin of the
+/// array length in the shader, which `the_shader_walks_the_whole_track`
+/// holds it to.
 ///
-/// Every hull keeps a track; this is how many of them the water is painted
-/// from. Four is the ship with her boat in tow and another player's pair
-/// beside them, and past that the ones furthest from the eye go unpainted —
-/// see [`lay_the_wake`] for the ranking. Each track costs the ocean two
-/// comparisons a fragment and the water inside its box a walk down
-/// [`TRAIL`] points, so the room is not free the way the holes' is, and a
-/// hull lying still with no wake left takes no slot at all.
-///
-/// The twin of the array length in the shader, which
-/// `the_shader_walks_the_whole_track` holds it to.
+/// Four is the ship with her boat in tow and another player's pair beside
+/// them; past that the ones furthest from the [`Eye`] go unpainted. The room
+/// is not free the way the holes' is — see [`Track::packed`] for what a slot
+/// costs — so a hull with nothing to show takes none: see [`Track::shows`].
 pub(crate) const WAKES: usize = 4;
 
 /// Metres of travel between one point of the track and the next.
@@ -107,9 +107,8 @@ const LIFE: f32 = 8.0;
 /// travel — the distance its stem moved in a frame, over the length of the
 /// frame — which is exact right up until a frame is a few microseconds long,
 /// or the hull swings its stem by pitching rather than by sailing. Both
-/// happen. The way is read off the water plane now — the solver's own
-/// velocity, which cannot answer nonsense — and this is still here because
-/// one bad number is enough.
+/// happen. The way is the plane's now, which cannot answer nonsense, and
+/// this is still here because one bad number is enough.
 const FASTEST: f32 = 12.0;
 
 /// How wide the water a hull turns over is where it leaves the stem, as a
@@ -182,9 +181,7 @@ struct Mark {
 }
 
 /// Where a hull has been lately: the bow where it is this frame, and the
-/// points laid behind it, newest first. Carried by every hull — [`Vessel`]
-/// requires it — so a track comes and goes with the hull it belongs to, and
-/// a world left takes every wake with it.
+/// points laid behind it, newest first. Every [`Vessel`] carries one.
 ///
 /// The head is kept apart from them because it is not a laid point — it is
 /// carried, moved to wherever the bow now is every single frame, and only
@@ -205,12 +202,11 @@ const LAID: usize = TRAIL - 1;
 /// The box a track with nothing in it answers — the least corner past the
 /// greatest, so no water is inside it. What every slot the shader is given
 /// holds until a hull with a wake takes it; see [`Track::packed`].
-const NOWHERE: Vec4 = Vec4::new(1.0, 1.0, -1.0, -1.0);
+pub(crate) const NOWHERE: Vec4 = Vec4::new(1.0, 1.0, -1.0, -1.0);
 
 impl Track {
     /// Ages the track and brings its head to `at` — wherever the hull is
-    /// laying its white this frame — `way` being how fast the hull says it
-    /// is going.
+    /// laying its white this frame — `way` being how fast the hull is going.
     fn follow(&mut self, at: Vec2, way: f32, dt: f32) {
         let way = way.abs().min(FASTEST);
 
@@ -263,6 +259,16 @@ impl Track {
         self.head = Some(Mark { at, age: 0.0, way });
     }
 
+    /// Whether the shader would paint anything from this track: a point laid
+    /// and not yet worn away, or a head stirring the water now. The head is
+    /// carried every frame whether the hull moves or not, so a hull lying
+    /// still has one, and it is this and not the head that earns a slot of
+    /// the [`WAKES`] — otherwise a crowded anchorage fills them with hulls
+    /// painting nothing and the one boat sailing past goes without.
+    fn shows(&self) -> bool {
+        !self.laid.is_empty() || self.head.is_some_and(|head| head.way >= STIRS)
+    }
+
     /// The track as the shader takes it, and the box it lies in.
     ///
     /// Slots past the end of the track repeat its last point rather than
@@ -274,11 +280,12 @@ impl Track {
     /// The box is every point of track grown by the furthest the foam could
     /// possibly be from it, and it is the whole of why this is affordable:
     /// water outside it can reject the wake with two comparisons instead of
-    /// walking [`TRAIL`] segments. A track with no head answers a box nothing
-    /// is inside — the least corner past the greatest — which is a sea with
-    /// no wake on it at all.
+    /// walking [`TRAIL`] segments. A track that [`shows`] nothing answers
+    /// [`NOWHERE`], which is a sea with no wake on it at all.
+    ///
+    /// [`shows`]: Track::shows
     fn packed(&self, stem_half: f32) -> ([Vec4; TRAIL], Vec4) {
-        let Some(head) = self.head else {
+        let Some(head) = self.head.filter(|_| self.shows()) else {
             return ([Vec4::ZERO; TRAIL], NOWHERE);
         };
         let last = self.laid.back().copied().unwrap_or(head);
@@ -306,13 +313,15 @@ pub struct WakePlugin;
 
 impl Plugin for WakePlugin {
     fn build(&self, app: &mut App) {
-        // After the hulls have been put where this frame leaves them, or the
+        // After every hull has been put where this frame leaves it, and
+        // after the sailed one has had its tilt composed on top, or the
         // white water would be attached to where a boat was last frame —
         // which at ten metres a second is a hand's breadth, and free to
-        // avoid.
+        // avoid. Both named, because the second only places the one hull.
         app.add_systems(
             Update,
             lay_the_wake
+                .after(crate::boat::ride_the_plane)
                 .after(crate::boat::float)
                 .run_if(in_state(AppState::InWorld)),
         );
@@ -320,7 +329,8 @@ impl Plugin for WakePlugin {
 }
 
 /// Every hull afloat, as the wake reads one: where it is, what it is, how
-/// fast the plane says it is going, and the track it is dragging.
+/// fast the plane says it is going — or the wire, for a hull the wire moves
+/// and this client is not shoving — and the track it is dragging.
 type Hulls<'w, 's> = Query<
     'w,
     's,
@@ -329,6 +339,8 @@ type Hulls<'w, 's> = Query<
         &'static Transform,
         &'static Rigged,
         &'static LinearVelocity,
+        Option<&'static Telling>,
+        Has<Shoving>,
         &'static mut Track,
     ),
     With<Vessel>,
@@ -336,66 +348,51 @@ type Hulls<'w, 's> = Query<
 
 /// Carries every hull's track along with it and writes the nearest
 /// [`WAKES`] of them into the sea's material, which is the whole of how the
-/// water hears about the wake.
-///
-/// The way is the plane's, not the sailing state's: a hull in tow has no
-/// sailing state and is going as fast as the ship pulling it, and a hull
-/// nobody here is steering is moving on the wire's word. Its length, so a
-/// hull carried sideways stirs the water it is actually crossing.
-///
-/// More hulls may have a wake than the material has slots for, so the tracks
-/// with anything to show are ranked before they are written: the player's
-/// own hull first, whatever else is about, and the rest by how near the
-/// world's one [`MapCamera`] they lie — the same order the holes are cut in.
-/// A schedule with no camera in it ranks on nothing, which is the headless
-/// app the boat's tests sail in, where there is no sea to write to either.
+/// water hears about the wake. The module doc says whose way a track is laid
+/// at; [`Eye`] says which tracks go in when there are more than fit.
 ///
 /// The material is reached through the depth window because that is where the
 /// handle already lives, and the write goes through the same
-/// read-compare-write two-step the depth sweep and the weather use, so hulls
-/// lying at anchor with their wakes gone re-upload nothing frame after frame.
+/// read-compare-write two-step the depth sweep and the weather use.
 pub(crate) fn lay_the_wake(
     time: Res<Time>,
     mut hulls: Hulls,
-    players: Query<&ChildOf, With<Player>>,
-    cameras: Query<&MapCamera>,
+    eye: Eye,
     window: Option<Res<DepthWindow>>,
     materials: Option<ResMut<Assets<SeaMaterial>>>,
 ) {
     let dt = time.delta_secs();
-    for (_, transform, rigged, velocity, mut track) in &mut hulls {
-        track.follow(bow_of(transform, *rigged), velocity.0.length(), dt);
+    for (_, transform, rigged, velocity, telling, shoving, mut track) in &mut hulls {
+        let way = match telling {
+            Some(told) if !shoving => told.way(),
+            _ => velocity.0,
+        };
+        track.follow(bow_of(transform, *rigged), way.length(), dt);
     }
 
     let (Some(window), Some(mut materials)) = (window, materials) else {
         return;
     };
-    let carrier = players.single().ok().map(ChildOf::parent);
-    let eye = cameras.single().ok().map(|camera| camera.focus.xz());
+    let Some(focus) = eye.focus() else {
+        return;
+    };
 
     let mut showing: Vec<_> = hulls
         .iter()
-        .filter(|(_, _, _, _, track)| track.head.is_some())
-        .map(|(hull, transform, rigged, _, track)| {
-            let off = eye.map_or(0.0, |eye| transform.translation.xz().distance_squared(eye));
-            // `false` before `true`, so the player's own hull sorts to the
-            // front of every other boat however far off it is lying.
-            ((Some(hull) != carrier, off), shoulder_of(*rigged), track)
+        .filter(|(_, _, _, _, _, _, track)| track.shows())
+        .map(|(hull, transform, rigged, _, _, _, track)| {
+            (focus.rank(hull, transform), *rigged, track)
         })
         .collect();
-    showing.sort_by(|left, right| {
-        left.0
-             .0
-            .cmp(&right.0 .0)
-            .then(left.0 .1.total_cmp(&right.0 .1))
-    });
+    showing.sort_by_key(|(rank, _, _)| *rank);
 
     let mut wake = [[Vec4::ZERO; TRAIL]; WAKES];
     let mut bounds = [NOWHERE; WAKES];
     let mut hull = [Vec4::ZERO; WAKES];
-    for (slot, (_, shoulder, track)) in showing.iter().take(WAKES).enumerate() {
-        (wake[slot], bounds[slot]) = track.packed(*shoulder);
-        hull[slot] = Vec4::new(*shoulder, 0.0, 0.0, 0.0);
+    for (slot, (_, rigged, track)) in showing.iter().take(WAKES).enumerate() {
+        let shoulder = shoulder_of(*rigged);
+        (wake[slot], bounds[slot]) = track.packed(shoulder);
+        hull[slot] = Vec4::new(shoulder, 0.0, 0.0, 0.0);
     }
     let wash = Vec4::new(SPREAD, ARM, LIFE, 0.0);
     let boil = Vec4::new(BOIL.0, BOIL.1, BREAKUP, STIRS);
@@ -592,6 +589,33 @@ mod tests {
     }
 
     #[test]
+    fn a_hull_with_nothing_to_show_yields_its_slot() {
+        // The head is carried every frame whether the hull moves or not, so
+        // "has a head" would admit every hull afloat and a crowded anchorage
+        // would fill the slots with boats painting nothing. What earns a slot
+        // is white the shader could paint: a head stirring the water, or a
+        // point laid behind it and not yet worn away.
+        let mut track = Track::default();
+        sail(&mut track, 0.0, 1.0);
+        assert!(!track.shows(), "a hull that has never moved shows a wake");
+        assert_eq!(track.packed(STEM_HALF).1, NOWHERE);
+
+        sail(&mut track, 8.0, 1.0);
+        assert!(track.shows(), "a hull under way shows nothing");
+        sail(&mut track, 0.0, 1.0);
+        assert!(
+            track.shows(),
+            "a hull just stopped lost the wake still lying behind it"
+        );
+        sail(&mut track, 0.0, LIFE);
+        assert!(
+            !track.shows(),
+            "a wake that has had its time keeps its slot"
+        );
+        assert_eq!(track.packed(STEM_HALF).1, NOWHERE);
+    }
+
+    #[test]
     fn the_box_holds_every_scrap_of_the_wake() {
         // The box is an optimisation that can only be wrong one way: water
         // outside it never asks about the wake at all, so any foam that would
@@ -643,10 +667,7 @@ mod tests {
         let (transform, rigged, track) = hulls
             .single(app.world())
             .expect("a world should have a boat in it");
-        let shoulder = rigged.beam() * 0.5 * SHOULDER;
-        let bow = transform
-            .transform_point(rigged.stem() + Vec3::Z * shoulder)
-            .xz();
+        let bow = bow_of(transform, *rigged);
         let amidships = transform.translation.xz();
 
         let head = track
@@ -665,36 +686,13 @@ mod tests {
         // one — and is going wherever the ship goes, as fast as the ship
         // goes. It is a hull through water all the same, and the water has
         // to say so: its own track, laid at its own bow, at the ship's way.
-        use bevy::ecs::system::RunSystemOnce;
-
-        use crate::boat::{self, Towed};
+        use crate::boat::{with_the_ships_boat, Towed};
         use crate::testing::{hold, run_frames, set_wind};
 
         let mut app = crate::testing::world_app();
-        let ship = app
-            .world_mut()
-            .query_filtered::<&ChildOf, With<Player>>()
-            .single(app.world())
-            .expect("the player is aboard something")
-            .parent();
+        let dinghy = with_the_ships_boat(&mut app);
+        let ship = app.world().get::<Towed>(dinghy).expect("in tow").by();
         let ship_pose = *app.world().get::<Transform>(ship).unwrap();
-        let astern = ship_pose.translation + ship_pose.back() * (boat::PAINTER + 2.0);
-        let dinghy = app
-            .world_mut()
-            .run_system_once(move |mut commands: Commands, mut kit: boat::HullKit| {
-                boat::spawn_hull(
-                    &mut commands,
-                    &mut kit,
-                    protocol::BoatKind::Rowboat,
-                    Transform::from_translation(astern.with_y(0.0))
-                        .with_rotation(ship_pose.rotation),
-                    None,
-                )
-            })
-            .expect("a hull can be spawned");
-        app.world_mut()
-            .entity_mut(dinghy)
-            .insert(Towed::behind(ship));
 
         set_wind(&mut app, ship_pose.forward().xz() * 10.0);
         hold(&mut app, KeyCode::ArrowUp);

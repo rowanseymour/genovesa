@@ -517,7 +517,7 @@ pub struct SeaExtension {
     pub(crate) wake_hull: [Vec4; crate::wake::WAKES],
     /// Each hull's track, newest first: `xy` where its stem was, `z` how many
     /// seconds ago, `w` the way it was making then. Written by
-    /// [`crate::wake`], which owns every number in these last five fields and
+    /// [`crate::wake`], which owns every number in the wake's five fields and
     /// is where the reasoning for all of them lives; the sea only carries
     /// them to the shader that paints the foam.
     #[uniform(100)]
@@ -581,7 +581,7 @@ impl SeaExtension {
             // never allowed to be inside the bounds of.
             wash: Vec4::ZERO,
             boil: Vec4::ZERO,
-            wake_bounds: [Vec4::new(1.0, 1.0, -1.0, -1.0); crate::wake::WAKES],
+            wake_bounds: [crate::wake::NOWHERE; crate::wake::WAKES],
             wake_hull: [Vec4::ZERO; crate::wake::WAKES],
             wake: [[Vec4::ZERO; crate::wake::TRAIL]; crate::wake::WAKES],
             hole: [Vec4::ZERO; crate::boat::HOLES],
