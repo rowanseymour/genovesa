@@ -24,7 +24,8 @@
 //! ask whether one was still ordered, and `natural` could be given back to a
 //! sky that already had it. And `where` reads the asker's own situation,
 //! which is the world's to answer rather than the client's for the reason
-//! [`whereabouts`] gives.
+//! [`whereabouts`] gives; `islands` reads the layout around them, which is
+//! the world's alone.
 //!
 //! The acts stay acts. Giving `goto` a second, argumentless meaning would
 //! hide a reading behind a verb, which is what `where` is there for.
@@ -41,7 +42,7 @@
 
 use glam::Vec2;
 use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Underway};
-use world::archipelago::{berth_off, Archipelago, SOUNDING, SPAWN_OFFSHORE};
+use world::archipelago::{berth_off, Archipelago, BERTH_OFFING, SOUNDING};
 
 use crate::{
     aimed, beasts, broadcast, broadcast_all, keeper, post, reachable, sea, BoatState, Held, Shared,
@@ -78,7 +79,7 @@ struct Command {
 
 /// Every command there is, in the order `help` prints them: the acts first,
 /// then the shelf the world's own dials stand on.
-const COMMANDS: [Command; 6] = [
+const COMMANDS: [Command; 7] = [
     Command {
         word: "goto",
         usage: &["<x> <z> — be taken to a place, however you are travelling"],
@@ -102,6 +103,14 @@ const COMMANDS: [Command; 6] = [
         usage: &["— where you stand, what you are on or keep, and the water under you"],
         tails: none,
         run: whereabouts,
+    },
+    Command {
+        word: "islands",
+        usage: &[
+            "— the nearest islands: the middle of each, a place for `goto`, its size and how far",
+        ],
+        tails: none,
+        run: islands,
     },
     Command {
         word: "help",
@@ -540,9 +549,7 @@ fn point(args: &[&str]) -> Option<Vec2> {
 }
 
 /// Where a hull lies for somebody who asked to be taken to dry land: off the
-/// nearest shore to the point they named, on the offing a world is entered
-/// on — see `world::archipelago::Archipelago::spawn`, whose walk this is,
-/// worked outward from a point on the land instead of inward from the sea.
+/// nearest shore to the point they named, on [`BERTH_OFFING`].
 ///
 /// Sounded on [`BEARINGS`] rays at widening radii, and the first water any
 /// of them finds is the shore taken. Bounded by the island's own frame,
@@ -564,7 +571,7 @@ fn point(args: &[&str]) -> Option<Vec2> {
 fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
     let bound = world
         .island_at(asked.x, asked.y)
-        .map_or(SPAWN_OFFSHORE, |spec| spec.extent().length());
+        .map_or(BERTH_OFFING, |spec| spec.extent().length());
     let steps = (bound / SOUNDING) as usize;
 
     let bearings: Vec<Vec2> = (0..BEARINGS)
@@ -580,10 +587,9 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
             if world.height(shore.x, shore.y) >= 0.0 {
                 continue;
             }
-            // Water: the hull is put down at a berth off it — the same
-            // walk [`Archipelago::spawn`] uses, see [`berth_off`], so a
-            // driven ship is left in water its crew can step off it in
-            // wherever the coast allows.
+            // Water: the hull is put down at a berth off it — see
+            // [`berth_off`] — so a driven ship is left in water its crew can
+            // step off it in wherever the coast allows.
             return (berth_off(shore, *out, |x, z| world.height(x, z)), shore);
         }
     }
@@ -891,6 +897,50 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+/// How many islands `islands` names. Enough to pick a shape or a size from,
+/// few enough to read at a glance.
+const NEAREST_ISLANDS: usize = 8;
+
+/// `islands`: the nearest islands to the asker, nearest first — see
+/// [`nearby`]. What a tester needs to look at a seed's islands: the layout
+/// is the server's, so the console is the one place the places can be read
+/// from, and `goto` takes what this says.
+fn islands(asked: Asked) -> Result<String, String> {
+    let Asked { shared, from, .. } = asked;
+    let Some(at) = stands_at(shared, from) else {
+        // Unreachable from a served connection — see [`stands_at`].
+        return Err("you are nowhere the world could look out from".to_string());
+    };
+    let lines = nearby(&shared.world, at);
+    if lines.is_empty() {
+        return Err("no island anywhere near".to_string());
+    }
+    Ok(lines.join("\n"))
+}
+
+/// One line per island of the [`NEAREST_ISLANDS`] nearest `at`, nearest
+/// first: the middle of it as the two numbers `goto` takes, its size, and
+/// how far off its frame stands — the frame rather than the shore, that
+/// being the honest bound the layout can give without generating anything,
+/// see `IslandSpec::frame_point`.
+fn nearby(world: &Archipelago, at: Vec2) -> Vec<String> {
+    world
+        .nearest(at, NEAREST_ISLANDS)
+        .iter()
+        .map(|spec| {
+            let (middle, size) = (spec.centre(), spec.extent());
+            format!(
+                "{} {} — {} by {} m, {} m to its frame",
+                round(middle.x),
+                round(middle.y),
+                round(size.x),
+                round(size.y),
+                round(spec.frame_point(at).distance(at))
+            )
+        })
+        .collect()
+}
+
 /// The `world` grammar: `world` reads every dial, `world <dial>` reads one,
 /// `world <dial> <value>` turns one. The same three forms the client's own
 /// `client` lines have, for the same reason — a dial nobody can read is a
@@ -1183,6 +1233,43 @@ mod tests {
     }
 
     #[test]
+    fn islands_wants_somebody_to_be() {
+        let shared = a_world(0.5);
+        let reply = answer(&shared, PlayerId(9), "islands");
+        assert_eq!(reply, "you are nowhere the world could look out from");
+    }
+
+    #[test]
+    fn the_nearest_islands_are_named_as_places_goto_takes() {
+        let shared = a_world(0.5);
+        let lines = nearby(&shared.world, world::archipelago::ENTRY);
+        assert_eq!(lines.len(), NEAREST_ISLANDS);
+
+        // The first line is the first land, the island the welcome faces,
+        // and every line leads with a place that is that island's own —
+        // the two numbers `goto` wants, cut off the front of the line.
+        let first = shared
+            .world
+            .first_land()
+            .expect("a world has islands in it");
+        let places: Vec<Vec2> = lines
+            .iter()
+            .map(|line| {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                point(&words[..2]).unwrap_or_else(|| panic!("no place leads `{line}`"))
+            })
+            .collect();
+        assert_eq!(places[0], first.centre().round());
+        for (place, line) in places.iter().zip(&lines) {
+            let island = shared.world.island_at(place.x, place.y);
+            assert!(
+                island.is_some_and(|spec| spec.centre().round() == *place),
+                "`{line}` names a place that is no island's middle"
+            );
+        }
+    }
+
+    #[test]
     fn a_place_is_two_numbers() {
         let there = Vec2::new(98.0, -317.0);
         assert_eq!(point(&["98", "-317"]), Some(there));
@@ -1198,12 +1285,13 @@ mod tests {
 
     #[test]
     fn a_hull_is_stood_off_the_shore_that_was_asked_for() {
-        // Somewhere on the entry island's land — found the way the entry
-        // point itself is found, by walking in from the water until the
-        // ground comes up.
+        // Somewhere on the first island's land: its middle.
         let shared = a_world(0.5);
-        let spawn = shared.world.spawn().expect("a world has islands in it");
-        let inland = spawn.island.centre();
+        let island = shared
+            .world
+            .first_land()
+            .expect("a world has islands in it");
+        let inland = island.centre();
         assert!(
             shared.world.height(inland.x, inland.y) >= 0.0,
             "the middle of an island should be land to be stood off from"
@@ -1220,7 +1308,7 @@ mod tests {
         );
         // Off *that* shore, not off the far side of the world: the island is
         // its own bound on how far the walk can have gone.
-        let reach = spawn.island.extent().length() + SPAWN_OFFSHORE;
+        let reach = island.extent().length() + BERTH_OFFING;
         assert!(
             off.distance(inland) <= reach,
             "the shore found for {inland} was {off}, {} m away",
@@ -1228,7 +1316,7 @@ mod tests {
         );
         // And clear of the beach rather than on it — an arrival stands off.
         assert!(
-            off.distance(inland) >= SPAWN_OFFSHORE,
+            off.distance(inland) >= BERTH_OFFING,
             "a hull was anchored within a stride of the land it asked for"
         );
     }

@@ -305,10 +305,17 @@ impl PlayerPlace<'_, '_> {
 /// [`crate::net::enter_afoot`] puts down somebody entering on their own feet:
 /// the ground at the far end of a jump has not arrived yet, and their old
 /// island's height is no better a guess than the waterline.
+///
+/// The boat on the hull's painter goes too, laid astern where the rope
+/// holds it, when the heading says where astern is. The rope is a joint,
+/// and a ship put down half a kilometre from its tender is snatched back
+/// along the painter by the solver — measured at nine parts in ten of the
+/// distance undone, which read as a `goto` that had not quite worked.
 pub fn put_down(
     commands: &mut Commands,
     fleet: &Fleet,
     players: &Players,
+    tows: &Query<(Entity, &Towed)>,
     at: Vec2,
     facing: Option<f32>,
 ) {
@@ -347,15 +354,35 @@ pub fn put_down(
             .entity(carrier)
             .entry::<Boat>()
             .and_modify(|mut boat| *boat = Boat::of(boat.kind()));
+        if let Some(facing) = facing {
+            let rotation = Quat::from_rotation_y(facing);
+            let astern =
+                Vec3::new(at.x, 0.0, at.y) - rotation * Vec3::NEG_Z * protocol::TENDER_ASTERN;
+            for (tender, _) in tows.iter().filter(|(_, towed)| towed.by() == carrier) {
+                commands
+                    .entity(tender)
+                    .entry::<Transform>()
+                    .and_modify(move |mut place| {
+                        place.translation.x = astern.x;
+                        place.translation.z = astern.z;
+                        place.rotation = rotation;
+                    });
+            }
+        }
     }
 }
 
 /// Moves whatever carries this player wherever the world says they now are.
 ///
-/// After [`crate::boat::take_the_hulls`], and that ordering is the whole of
-/// what makes a `goto` from a helm work: a player seated at one in the same
+/// After [`crate::boat::take_the_hulls`] and before
+/// [`crate::boat::OntoThePlane`], and those two orderings are the whole of
+/// what makes a `goto` from a helm work. A player seated at one in the same
 /// breath is carried by that hull, so the seating has to have been heard
-/// before this moves anything. The wire says as much — see
+/// before this moves anything. And the move is a transform the solver has
+/// to be handed, which that set is where it happens: a put down flushed
+/// after it had run was drawn straight back over by the solver's own pose
+/// before the next frame could adopt it — a `goto` that answered and moved
+/// nothing. The wire says as much — see
 /// [`crate::net::PutDown`] — and reading the two words in two systems is what
 /// keeps the order a thing somebody can point at rather than a line's
 /// position in a match.
@@ -363,10 +390,18 @@ pub(crate) fn take_the_put_down(
     mut commands: Commands,
     fleet: Res<Fleet>,
     players: Players,
+    tows: Query<(Entity, &Towed)>,
     mut moved: MessageReader<crate::net::PutDown>,
 ) {
     for put in moved.read() {
-        put_down(&mut commands, &fleet, &players, put.position, put.heading);
+        put_down(
+            &mut commands,
+            &fleet,
+            &players,
+            &tows,
+            put.position,
+            put.heading,
+        );
     }
 }
 
@@ -405,7 +440,8 @@ impl Plugin for PlayerPlugin {
                 Update,
                 take_the_put_down
                     .in_set(crate::net::Wire::Read)
-                    .after(crate::boat::lose_the_hulls),
+                    .after(crate::boat::lose_the_hulls)
+                    .before(crate::boat::OntoThePlane),
             );
     }
 }
@@ -1989,6 +2025,39 @@ mod tests {
             "the swimmer never climbed aboard"
         );
         assert!(!swimming(&mut app), "aboard and still swimming");
+    }
+
+    #[test]
+    fn a_helm_put_down_somewhere_is_there_next_frame() {
+        // The world's `goto` at a helm, as the wire delivers it: the hull the
+        // player is seated at stands where the world said, at rest, facing
+        // the way it said — and stays there, rather than being drawn back to
+        // where the solver last had it. The word lands in the same drain the
+        // solver's own frame starts from, so where it lands in that frame is
+        // the whole of whether it holds.
+        let mut app = world_app();
+        let there = Vec2::new(300.0, -200.0);
+        app.world_mut().write_message(crate::net::PutDown {
+            position: there,
+            heading: Some(1.0),
+        });
+        run_frames(&mut app, 3);
+
+        let hull = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Boat>>()
+            .single(app.world())
+            .expect("a match should have a boat in it");
+        let at = Vec2::new(hull.translation.x, hull.translation.z);
+        assert!(
+            at.distance(there) < 0.5,
+            "the hull was put down at {there} and stands at {at}"
+        );
+        let (yaw, ..) = hull.rotation.to_euler(EulerRot::YXZ);
+        assert!(
+            (yaw - 1.0).abs() < 1e-3,
+            "the hull was put down on 1.0 rad and lies on {yaw}"
+        );
     }
 
     #[test]

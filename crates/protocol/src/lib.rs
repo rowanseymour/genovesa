@@ -709,9 +709,9 @@ pub enum ToClient {
     ///
     /// The seed is not here, and that is the point — a client has no use for
     /// one, having nothing to generate. `facing` is a ground point the view
-    /// opens towards, so that a player arrives looking at the island they
-    /// were put down beside rather than out to sea; a server with nothing in
-    /// particular to look at sends the spawn itself, which names no direction.
+    /// opens towards, so that a player arrives looking the way the nearest
+    /// land lies rather than nowhere in particular; a server with nothing to
+    /// look at sends the spawn itself, which names no direction.
     /// For a returning player (see [`ToServer::Papers`]) the spawn is not the
     /// world's but their own — wherever the world last saw them.
     ///

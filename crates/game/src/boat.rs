@@ -1856,7 +1856,7 @@ impl Plugin for BoatPlugin {
             .add_systems(
                 Update,
                 (
-                    take_the_plane,
+                    take_the_plane.in_set(OntoThePlane),
                     claim_the_shoved,
                     follow_the_telling,
                     make_fast,
@@ -3129,6 +3129,15 @@ fn claim_the_shoved(
         }
     }
 }
+
+/// Where a hull somebody moved is carried onto the water: [`take_the_plane`]
+/// alone. Named so that whatever moves a hull by writing its transform from
+/// inside the frame — the put down, see [`crate::player`] — can be ordered
+/// before it, which is the only way such a move survives the frame: after
+/// this the solver's own pose is written back over the transform, and a
+/// transform nobody had adopted by then is simply gone.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct OntoThePlane;
 
 /// Every hull, as [`take_the_plane`] reads one: what it is drawn at, what
 /// it was drawn at last frame, and everything the plane would have to be

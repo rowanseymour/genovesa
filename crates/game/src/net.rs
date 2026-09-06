@@ -1549,10 +1549,11 @@ mod tests {
         assert_eq!(first.hosting.as_ref().expect("hosting").seed(), 77);
         // But the seed never reaches a *client*, so that the chosen one
         // actually reached the generator shows only in two of them being two
-        // places.
+        // places — every world is entered on the same water, and what tells
+        // them apart is the land that water faces.
         assert_ne!(
-            first.connection.spawn, second.connection.spawn,
-            "two seeds opened onto the same patch of water"
+            first.connection.facing, second.connection.facing,
+            "two seeds opened facing the same land"
         );
     }
 
@@ -1967,6 +1968,7 @@ mod tests {
                   mut kit: crate::boat::HullKit,
                   mut fleet: ResMut<crate::boat::Fleet>,
                   players: crate::player::Players,
+                  tows: Query<(Entity, &crate::boat::Towed)>,
                   poses: Query<&Transform, With<crate::boat::Vessel>>| {
                 if std::mem::replace(&mut once, true) {
                     return;
@@ -1985,7 +1987,14 @@ mod tests {
                     None,
                     None,
                 );
-                crate::player::put_down(&mut commands, &fleet, &players, afloat, Some(-0.75));
+                crate::player::put_down(
+                    &mut commands,
+                    &fleet,
+                    &players,
+                    &tows,
+                    afloat,
+                    Some(-0.75),
+                );
             },
         );
         run_until(&mut app, "the hull is seated and put down", |app| {
