@@ -60,8 +60,8 @@ pub(crate) struct WorldRecord {
     pub id: WorldId,
     pub seed: u32,
     /// What the world is called on the screens that list worlds — see
-    /// `Server::named`. Empty for a world nobody named, which is every world
-    /// a dedicated server makes.
+    /// `Server::named`. Empty for a world nobody named — a dedicated server
+    /// run without `--name`.
     pub name: String,
     /// The phase of the day the clock read at age zero — see
     /// [`crate::OPENING`].
