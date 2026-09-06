@@ -4436,7 +4436,7 @@ fn an_anchor_holds_over_the_shelf_and_not_over_the_open_sea() {
     let addr = host(7);
     let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
-    let (tender, astern) = client.hear_the_tender_of(ship);
+    let (tender, _) = client.hear_the_tender_of(ship);
     client.order("world weather breeze");
     let berth = berthed_off_the_first_land(&client, 7);
 
@@ -4451,9 +4451,11 @@ fn an_anchor_holds_over_the_shelf_and_not_over_the_open_sea() {
     assert_eq!(hull.at, deep, "the refusal moved the ship");
     assert_eq!(anchor, None, "an anchor held over the open ocean");
 
+    // Back to the berth by the same report, tender and all: a hull the
+    // client moves is the client's to report, boat on the painter included.
     client.say(ToServer::Helm {
         hull: Underway::lying(berth, 0.0),
-        tender: Some(Underway::lying(berth + (astern - spawn), 0.0)),
+        tender: Some(Underway::lying(berth + Vec2::new(0.0, 8.0), 0.0)),
     });
     client.say(ToServer::Anchor);
     let (hull, _, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the anchor");
@@ -4624,17 +4626,12 @@ fn a_boat_taken_in_tow_comes_off_its_anchor() {
     // so the hook comes up with the painter — told in the very telling that
     // ties it.
     let addr = host(7);
-    let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let (client, id, _spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
-    let (tender, astern) = client.hear_the_tender_of(ship);
-    // Over the shelf, where a hook can hold, with the boat brought along on
-    // its painter: the jump moved the ship, and the ship's own client is the
-    // authority on where its boat lies.
-    let berth = berthed_off_the_first_land(&client, 7);
-    client.say(ToServer::Helm {
-        hull: Underway::lying(berth, 0.0),
-        tender: Some(Underway::lying(berth + (astern - spawn), 0.0)),
-    });
+    let (tender, _) = client.hear_the_tender_of(ship);
+    // Over the shelf, where a hook can hold; the jump brings the boat on the
+    // painter along, so it is alongside to be boarded.
+    berthed_off_the_first_land(&client, 7);
     client.say(ToServer::Board { boat: tender });
     client.boat_changed_hands(tender, Some(id));
     client.say(ToServer::Anchor);

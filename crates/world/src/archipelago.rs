@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use glam::{IVec2, UVec2, Vec2, Vec3};
-use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH};
+use protocol::ground::{quantize, ChunkPayload, Material, ANCHOR_DEPTH, ANCHOR_SWING};
 
 use crate::deeps::{Deeps, Roughness, REACH};
 use crate::noise::smoothstep;
@@ -176,12 +176,15 @@ pub fn a_berth(height: f32) -> bool {
 
 /// Where a hull is put down off a coast: the furthest sounding within
 /// [`BERTH_OFFING`] of `wet` — itself a sounding at or just off the
-/// waterline — along the unit direction `seaward`, that [`a_berth`] accepts.
-/// Dry soundings along the way (a spit, an islet beside the line) are
+/// waterline — along the unit direction `seaward`, that [`a_berth`] accepts
+/// and that stands at least [`ANCHOR_SWING`] off `wet`, so that a hull
+/// anchored there has a cable's worth of water to swing in before the
+/// beach. Dry soundings along the way (a spit, an islet beside the line) are
 /// stepped past rather than ending the walk. Where no sounding qualifies —
-/// a wall of a coast, plunging straight past the band — the deepest wet
-/// sounding stands in: wet-but-deep leaves the hull afloat and sailable,
-/// where dry or ankle-deep leaves it aground.
+/// a wall of a coast, whose band is a sounding wide against the rock — the
+/// deepest wet sounding stands in: wet-but-deep leaves the hull afloat and
+/// sailable, where a berth hard against the shore cannot swing without
+/// grounding, and dry or ankle-deep leaves it aground.
 pub fn berth_off(wet: Vec2, seaward: Vec2, height: impl Fn(f32, f32) -> f32) -> Vec2 {
     let stride = seaward * SOUNDING;
     let (mut fallback, mut deepest) = (wet, height(wet.x, wet.y));
@@ -189,7 +192,7 @@ pub fn berth_off(wet: Vec2, seaward: Vec2, height: impl Fn(f32, f32) -> f32) -> 
     for i in 0..(BERTH_OFFING / SOUNDING) as i32 {
         let at = wet + stride * i as f32;
         let h = height(at.x, at.y);
-        if a_berth(h) {
+        if a_berth(h) && i as f32 * SOUNDING >= ANCHOR_SWING {
             berth = Some(at);
         }
         if h < deepest {
@@ -1076,6 +1079,10 @@ mod tests {
                 .fold(f32::INFINITY, f32::min);
             let taken = first.frame_point(ENTRY).length();
             assert!(
+                closest.is_finite(),
+                "seed {seed} has no land within a parcel of the entry — nothing to face"
+            );
+            assert!(
                 taken <= closest + 1e-3,
                 "seed {seed} passed over an island {closest} m out for one {taken} m out"
             );
@@ -1086,6 +1093,22 @@ mod tests {
             assert_eq!(ocean.first_land(), Some(first));
             assert_eq!(world(seed).first_land(), Some(first));
         }
+    }
+
+    #[test]
+    fn a_berth_has_room_to_swing_or_is_not_a_berth() {
+        // Three coasts, `wet` at the origin and the sea along +x. Shelving:
+        // the band runs from 6 to 24 m out, and the berth is its seaward
+        // end, well past a cable. Steep: the band is the one sounding at the
+        // shore, which no hull could swing at, so the walk prefers deep
+        // water it can float in. Wall: nothing is ever in band, and the
+        // deepest sounding stands in as before.
+        let shelving = |x: f32, _: f32| -(0.5 + 0.25 * x);
+        assert_eq!(berth_off(Vec2::ZERO, Vec2::X, shelving).x, 24.0);
+        let steep = |x: f32, _: f32| if x < 2.0 { -4.0 } else { -12.0 };
+        assert_eq!(berth_off(Vec2::ZERO, Vec2::X, steep).x, 4.0);
+        let wall = |x: f32, _: f32| -(8.0 + x);
+        assert_eq!(berth_off(Vec2::ZERO, Vec2::X, wall).x, 44.0);
     }
 
     #[test]

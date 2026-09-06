@@ -45,7 +45,8 @@ use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Underway}
 use world::archipelago::{berth_off, Archipelago, BERTH_OFFING, SOUNDING};
 
 use crate::{
-    aimed, beasts, broadcast, broadcast_all, keeper, post, reachable, sea, BoatState, Held, Shared,
+    aimed, astern, beasts, broadcast, broadcast_all, keeper, post, reachable, sea, BoatState, Held,
+    Shared,
 };
 
 /// One command, as the table has it: the word that reaches it, what `help`
@@ -480,28 +481,39 @@ fn goto(asked: Asked) -> Result<String, String> {
                 state.hull.heading
             };
             state.hull = Underway::lying(at, heading);
-            (at, Some(heading), Some(state.told(boat)))
+            let mut told = vec![state.told(boat)];
+            // And the boat on its painter with it, a painter's length
+            // astern as the sea lays one behind a ship it moves: the jump
+            // is the world's, so the world's own book has to say where the
+            // tow lies rather than wait for the client to report it.
+            for (id, tow) in boats.iter_mut().filter(|(_, s)| s.towed_by == Some(boat)) {
+                tow.hull = Underway::lying(astern(at, heading, protocol::TENDER_ASTERN), heading);
+                told.push(tow.told(*id));
+            }
+            (at, Some(heading), told)
         }
         // Afoot: the point itself, whatever is under it, and which way they
         // face is their own business — see [`ToClient::PutDown`], whose
         // `None` heading this is.
-        None => (wanted, None, None),
+        None => (wanted, None, Vec::new()),
     };
     player.position = at;
 
-    match told {
-        // A word about a hull is news to everyone but the client steering
-        // it, which is the authority on its own hull and is told where it
-        // stands by the put down instead.
-        Some(telling) => broadcast(&players, from, telling),
-        None => broadcast(
+    if told.is_empty() {
+        broadcast(
             &players,
             from,
             ToClient::Moved {
                 id: from,
                 position: at,
             },
-        ),
+        );
+    }
+    // A word about a hull is news to everyone but the client steering it,
+    // which is the authority on its own hull and is told where it stands by
+    // the put down instead.
+    for telling in told {
+        broadcast(&players, from, telling);
     }
     if let Some(player) = players.get(&from) {
         post(
@@ -1262,9 +1274,31 @@ mod tests {
         assert_eq!(places[0], first.centre().round());
         for (place, line) in places.iter().zip(&lines) {
             let island = shared.world.island_at(place.x, place.y);
-            assert!(
-                island.is_some_and(|spec| spec.centre().round() == *place),
-                "`{line}` names a place that is no island's middle"
+            let Some(spec) = island.filter(|spec| spec.centre().round() == *place) else {
+                panic!("`{line}` names a place that is no island's middle");
+            };
+            // And the rest of the line is what `help` says it is: the
+            // island's size, and how far off its frame stands.
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let number = |i: usize| -> i32 {
+                words[i]
+                    .trim_end_matches(',')
+                    .parse()
+                    .unwrap_or_else(|_| panic!("`{line}` has no number where one was promised"))
+            };
+            let (size, apart) = (
+                spec.extent(),
+                spec.frame_point(world::archipelago::ENTRY).length(),
+            );
+            assert_eq!(
+                (number(3), words[4], number(5), words[6]),
+                (round(size.x), "by", round(size.y), "m,"),
+                "`{line}` does not give the size `help` promises"
+            );
+            assert_eq!(
+                (number(7), &words[8..]),
+                (round(apart), &["m", "to", "its", "frame"][..]),
+                "`{line}` does not say how far off `help` promises"
             );
         }
     }
@@ -1314,10 +1348,15 @@ mod tests {
             "the shore found for {inland} was {off}, {} m away",
             off.distance(inland)
         );
-        // And clear of the beach rather than on it — an arrival stands off.
+        // And where a hull is anchored it has room to swing before the
+        // beach — [`berth_off`]'s own promise, which the sounding line's
+        // shore is the point to measure from.
+        let depth = shared.world.height(off.x, off.y);
         assert!(
-            off.distance(inland) >= BERTH_OFFING,
-            "a hull was anchored within a stride of the land it asked for"
+            !world::archipelago::a_berth(depth)
+                || off.distance(shore) >= protocol::ground::ANCHOR_SWING,
+            "a hull was berthed {} m off the shore, inside a cable's swing",
+            off.distance(shore)
         );
     }
 

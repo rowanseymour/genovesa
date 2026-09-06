@@ -1856,7 +1856,8 @@ impl Plugin for BoatPlugin {
             .add_systems(
                 Update,
                 (
-                    take_the_plane.in_set(OntoThePlane),
+                    take_the_placing,
+                    take_the_plane,
                     claim_the_shoved,
                     follow_the_telling,
                     make_fast,
@@ -3130,14 +3131,79 @@ fn claim_the_shoved(
     }
 }
 
-/// Where a hull somebody moved is carried onto the water: [`take_the_plane`]
-/// alone. Named so that whatever moves a hull by writing its transform from
-/// inside the frame — the put down, see [`crate::player`] — can be ordered
-/// before it, which is the only way such a move survives the frame: after
-/// this the solver's own pose is written back over the transform, and a
-/// transform nobody had adopted by then is simply gone.
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct OntoThePlane;
+/// Where something outside the solver has put a hull — the world's put
+/// down, see [`crate::player::put_down`] — waiting for [`take_the_placing`]
+/// to carry it onto the water.
+///
+/// A component rather than a transform write, because a transform written
+/// from inside the frame survives only if it lands before [`take_the_plane`]
+/// and after the solver's own write-back — an ordering every mover would
+/// have to be taught, and one that fails silently when forgotten: the frame
+/// draws the solver's pose back over it and nothing errors. A component
+/// waits on the entity until the next placing reads it, whenever it landed.
+#[derive(Component)]
+pub(crate) struct Placing {
+    pub at: Vec2,
+    /// The heading to lie on, in the client's yaw — `None` keeps the one
+    /// the hull has.
+    pub heading: Option<f32>,
+}
+
+/// Carries every [`Placing`] onto the plane: the hull at rest where it was
+/// put, and the boat on its painter laid [`protocol::TENDER_ASTERN`] astern
+/// of it — the rope is a joint, and a ship put down half a kilometre from
+/// its tender is snatched most of the way back along it. The reset is
+/// [`take_the_plane`]'s, for the reasons given there.
+#[allow(clippy::type_complexity)]
+fn take_the_placing(
+    mut commands: Commands,
+    mut placed: Query<(
+        Entity,
+        &Placing,
+        &mut Position,
+        &mut Rotation,
+        &mut LinearVelocity,
+        &mut AngularVelocity,
+        &mut Sounding,
+    )>,
+    mut towed: Query<
+        (
+            &Towed,
+            &mut Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+            &mut Sounding,
+        ),
+        Without<Placing>,
+    >,
+) {
+    let mut ships: Vec<(Entity, Vec2, Rotation)> = Vec::new();
+    for (hull, placing, mut at, mut angle, mut way, mut spin, mut sounding) in &mut placed {
+        at.0 = placing.at;
+        if let Some(heading) = placing.heading {
+            *angle = Rotation::radians(waterline::across(heading));
+        }
+        way.0 = Vec2::ZERO;
+        spin.0 = 0.0;
+        sounding.at = at.0;
+        sounding.aground = f32::INFINITY;
+        ships.push((hull, at.0, *angle));
+        commands.entity(hull).remove::<Placing>();
+    }
+    for (tow, mut at, mut angle, mut way, mut spin, mut sounding) in &mut towed {
+        let Some((_, ship_at, ship_angle)) = ships.iter().find(|(ship, ..)| *ship == tow.by())
+        else {
+            continue;
+        };
+        at.0 = *ship_at - waterline::bow(ship_angle) * protocol::TENDER_ASTERN;
+        *angle = *ship_angle;
+        way.0 = Vec2::ZERO;
+        spin.0 = 0.0;
+        sounding.at = at.0;
+        sounding.aground = f32::INFINITY;
+    }
+}
 
 /// Every hull, as [`take_the_plane`] reads one: what it is drawn at, what
 /// it was drawn at last frame, and everything the plane would have to be

@@ -1640,7 +1640,7 @@ mod tests {
         let shared = Server::bind(("127.0.0.1", 0), 7)
             .expect("a server should bind")
             .shared;
-        let (spawn, facing) = (ENTRY, shared.facing);
+        let (spawn, facing) = (ENTRY, shared.facing.expect("seed 7 has land to face"));
         let middle = (spawn + facing) / 2.0;
         for row in -60..=60 {
             for column in -60..=60 {

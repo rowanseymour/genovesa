@@ -442,9 +442,10 @@ pub(crate) struct Shared {
     /// asked once when the server binds — so that a client opens its view
     /// looking towards land rather than nowhere in particular. A client has
     /// no layout to work it out from, so this is the whole of what it is told
-    /// about where it has arrived beyond the entry itself. Equal to the entry
-    /// when the layout offered nothing, which names no direction.
-    facing: Vec2,
+    /// about where it has arrived beyond the entry itself. `None` when the
+    /// layout offered nothing: each arrival is then sent their own spot,
+    /// which names no direction.
+    facing: Option<Vec2>,
     /// Which world this is — see [`protocol::WorldId`]. Minted when the
     /// world was first made and constant for its life, however many times it
     /// is reopened or rehosted.
@@ -724,15 +725,12 @@ impl BoatState {
 }
 
 impl Server {
-    /// Binds the listener, makes a fresh world, and asks it where it is
-    /// entered.
+    /// Binds the listener, makes a fresh world, and asks it which land the
+    /// entry faces — a question of the layout alone, so nothing is generated
+    /// until a client asks for ground. The world then stays: everything
+    /// served afterwards comes out of it.
     ///
-    /// That generates the entry island — tens to hundreds of milliseconds,
-    /// once, before anyone can join — and the origin is the fallback the
-    /// world's clearing keeps open should the layout offer nothing. The world
-    /// then stays: everything served afterwards comes out of it.
-    ///
-    /// Nothing is generated beyond that entry island, and no worker is
+    /// Nothing is generated here, and no worker is
     /// started: a bound server is a world with a door, and [`Server::spawn`]
     /// is what opens it. The world is ephemeral until [`Server::keeping_in`]
     /// or [`Server::keeping_at`] says otherwise.
@@ -807,9 +805,7 @@ impl Server {
             queue: mpsc::sync_channel(CHUNK_QUEUE_DEPTH),
             shared: Arc::new(Shared {
                 world,
-                // A world with no island to look at leaves the bearing to the
-                // client, which is what a facing equal to the entry means.
-                facing: first_land.map_or(ENTRY, |spec| spec.centre()),
+                facing: first_land.map(|spec| spec.centre()),
                 world_id: record.id,
                 name: record.name,
                 next_id: AtomicU32::new(1),
@@ -1820,7 +1816,7 @@ fn welcome_aboard(
         // direction, which leaves the bearing to the client, exactly as
         // a world with no island to look at does.
         facing: match (returning.is_some(), bow) {
-            (false, _) => shared.facing,
+            (false, _) => shared.facing.unwrap_or(player.position),
             (true, Some(heading)) => {
                 player.position + Vec2::new(-heading.sin(), -heading.cos()) * 64.0
             }
@@ -1940,7 +1936,7 @@ fn seat_the_arrival(
         // boat somebody rowed ashore and left on a beach. With its own boat
         // astern, because nothing else ever puts a rowing boat in the water
         // and a ship without one has no way to the shore but a swim.
-        let heading = aimed(at, shared.facing);
+        let heading = aimed(at, shared.facing.unwrap_or(at));
         let ship = BoatId(keeper::mint());
         boats.insert(
             ship,
@@ -2035,7 +2031,7 @@ fn seat_the_arrival(
 
 /// The point `metres` straight astern of a hull lying at `at` and pointing
 /// `heading` — the client's own convention, see [`aimed`], run backwards.
-fn astern(at: Vec2, heading: f32, metres: f32) -> Vec2 {
+pub(crate) fn astern(at: Vec2, heading: f32, metres: f32) -> Vec2 {
     at + Vec2::new(heading.sin(), heading.cos()) * metres
 }
 

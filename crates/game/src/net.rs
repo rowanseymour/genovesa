@@ -94,10 +94,8 @@ pub struct Connection {
     pub id: PlayerId,
     /// Where the server puts arriving players down.
     pub spawn: Vec2,
-    /// A ground point the opening view is turned towards — the island the
-    /// spawn stands off. Equal to the spawn when the server had nothing in
-    /// particular to offer, which names no direction and leaves the bearing
-    /// alone.
+    /// A ground point the opening view is turned towards — see
+    /// [`protocol::ToClient::Welcome`], whose `facing` this is.
     pub facing: Vec2,
     /// Which world this is — what the client's own files about the world are
     /// keyed by. See [`protocol::WorldId`].
@@ -1968,7 +1966,6 @@ mod tests {
                   mut kit: crate::boat::HullKit,
                   mut fleet: ResMut<crate::boat::Fleet>,
                   players: crate::player::Players,
-                  tows: Query<(Entity, &crate::boat::Towed)>,
                   poses: Query<&Transform, With<crate::boat::Vessel>>| {
                 if std::mem::replace(&mut once, true) {
                     return;
@@ -1987,14 +1984,7 @@ mod tests {
                     None,
                     None,
                 );
-                crate::player::put_down(
-                    &mut commands,
-                    &fleet,
-                    &players,
-                    &tows,
-                    afloat,
-                    Some(-0.75),
-                );
+                crate::player::put_down(&mut commands, &fleet, &players, afloat, Some(-0.75));
             },
         );
         run_until(&mut app, "the hull is seated and put down", |app| {
