@@ -75,6 +75,7 @@ fn main() -> ExitCode {
         // dedicated `server` is the other binary.
         (None, AppState::InWorld) => Some(Session::open(
             args.seed,
+            "",
             Reach::Alone,
             server::OPENING,
             false,

@@ -1601,7 +1601,7 @@ mod tests {
     /// of this game's vocabularies that needs holding: the other two are
     /// tables now, and their listings are folds over them.
     ///
-    /// The five that carry something are given one here. A button that grew
+    /// The six that carry something are given one here. A button that grew
     /// an argument and did not say so would show up as its bare name failing
     /// to parse.
     #[test]
@@ -1611,6 +1611,7 @@ mod tests {
                 "open-kept" | "ask-discard" | "discard" => vec![name, "0"],
                 "rebind" => vec![name, "forward"],
                 "resolution" => vec![name, "native"],
+                "edit" => vec![name, "name"],
                 _ => vec![name],
             };
             let button = MenuButton::parse(&line)

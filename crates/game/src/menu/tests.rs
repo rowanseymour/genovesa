@@ -21,12 +21,13 @@ use super::display::{DisplayText, Dropped};
 use super::join::MAX_ADDRESS;
 use super::kit::ON_PAPER;
 use super::kit::{ScrollingPanel, SCROLL_NOTCH};
-use super::new_world::MAX_SEED_DIGITS;
-use super::set_sail::MOST_KEPT_WORLDS;
+use super::new_world::{Field, MAX_SEED_DIGITS};
+use super::set_sail::{sailed_when, world_title, MOST_KEPT_WORLDS};
 use super::*;
 use crate::net;
 use crate::net::fake_server;
 use crate::testing::run_until;
+use protocol::NAME_LETTERS;
 use server::random_seed;
 use server::KeptWorld;
 use std::time::SystemTime;
@@ -210,12 +211,14 @@ fn named(app: &mut App, name: &str) -> usize {
 
 /// Everything the screen currently says, run together.
 fn screen_text(app: &mut App) -> String {
-    app.world_mut()
+    let world = app.world_mut();
+    let mut text: Vec<String> = world
         .query::<&Text>()
-        .iter(app.world())
+        .iter(world)
         .map(|t| t.0.clone())
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    text.extend(world.query::<&TextSpan>().iter(world).map(|t| t.0.clone()));
+    text.join(" ")
 }
 
 /// A wheel notch, the way the input plugin would report it: accumulated
@@ -401,7 +404,49 @@ fn a_kept_world_is_offered_with_a_way_to_throw_it_away() {
         text.contains("Test Water 51"),
         "the world is not offered: {text}"
     );
+    assert!(
+        text.contains("Day 1 — sailed just now"),
+        "the row does not say when: {text}"
+    );
     assert!(text.contains("Discard"), "no way to throw it away: {text}");
+}
+
+#[test]
+fn a_row_is_headed_by_the_name_the_world_was_given() {
+    let mut world = a_kept_world(0x52);
+    assert_eq!(world_title(&world), "Test Water 52");
+    // A file from somewhere else — a dedicated server's — has none, and the
+    // row says so rather than standing empty.
+    world.name.clear();
+    assert_eq!(world_title(&world), "a world without a name");
+}
+
+#[test]
+fn a_row_says_when_finely_enough_to_put_the_rows_in_order() {
+    let now = SystemTime::now();
+    const HOUR: u64 = 3600;
+    const DAY: u64 = 24 * HOUR;
+    for (ago, expected) in [
+        (0, "sailed just now"),
+        (59, "sailed just now"),
+        (60, "sailed a minute ago"),
+        (30 * 60, "sailed 30 minutes ago"),
+        (HOUR, "sailed an hour ago"),
+        (5 * HOUR, "sailed 5 hours ago"),
+        (DAY, "sailed yesterday"),
+        (3 * DAY, "sailed 3 days ago"),
+        (7 * DAY, "sailed a week ago"),
+        (20 * DAY, "sailed 2 weeks ago"),
+        (30 * DAY, "sailed a month ago"),
+        (100 * DAY, "sailed 3 months ago"),
+    ] {
+        assert_eq!(sailed_when(now - Duration::from_secs(ago)), expected);
+    }
+    // A file stamped in the future is a clock that moved.
+    assert_eq!(
+        sailed_when(now + Duration::from_secs(HOUR)),
+        "sailed just now"
+    );
 }
 
 #[test]
@@ -582,6 +627,7 @@ fn even_a_world_of_ones_own_is_served() {
         !app.world().resource::<NewWorldSettings>().share,
         "this test is about the switch being off"
     );
+    name_the_world(&mut app);
     click_once(&mut app, MenuButton::Start);
 
     assert_eq!(state(&app), AppState::NewWorld, "entered without a world");
@@ -602,6 +648,7 @@ fn a_shared_world_waits_on_the_server_it_starts() {
     // test's business — and on the machine a test runs on it may well
     // already be somebody's world.
     let mut app = test_app(AppState::NewWorld);
+    name_the_world(&mut app);
     click(&mut app, MenuButton::ToggleShare);
     click_once(&mut app, MenuButton::Start);
 
@@ -762,9 +809,87 @@ fn keys_pressed_before_the_join_screen_opened_are_not_typed_into_it() {
     );
 }
 
+/// Gives the dialog the one thing it will not start without.
+fn name_the_world(app: &mut App) {
+    app.world_mut().resource_mut::<NewWorldSettings>().name = "Windward Reach".to_string();
+}
+
+fn settings(app: &App) -> &NewWorldSettings {
+    app.world().resource::<NewWorldSettings>()
+}
+
+#[test]
+fn a_world_is_not_started_without_a_name() {
+    let mut app = test_app(AppState::NewWorld);
+    click(&mut app, MenuButton::Start);
+    assert!(
+        !app.world().contains_resource::<Dialing>(),
+        "a nameless world was started"
+    );
+    let text = screen_text(&mut app);
+    assert!(text.contains("needs a name"), "nothing said why: {text}");
+
+    // Spaces are not a name either.
+    app.world_mut().resource_mut::<NewWorldSettings>().name = "   ".to_string();
+    click(&mut app, MenuButton::Start);
+    assert!(!app.world().contains_resource::<Dialing>());
+}
+
+#[test]
+fn typing_names_the_world_and_the_keyboard_starts_in_the_name() {
+    let mut app = test_app(AppState::NewWorld);
+    assert_eq!(settings(&app).editing, Field::Name);
+
+    type_key(&mut app, KeyCode::KeyH, "H");
+    type_key(&mut app, KeyCode::KeyI, "i");
+    // A space is a key of its own rather than a character typed.
+    app.world_mut().write_message(KeyboardInput {
+        logical_key: Key::Space,
+        ..a_press(KeyCode::Space, " ")
+    });
+    app.update();
+    type_key(&mut app, KeyCode::Digit7, "7");
+    assert_eq!(settings(&app).name, "Hi 7");
+    type_key(&mut app, KeyCode::Backspace, "\u{8}");
+    assert_eq!(settings(&app).name, "Hi ");
+
+    // As long as a name is allowed to be, and no longer.
+    for _ in 0..NAME_LETTERS + 5 {
+        type_key(&mut app, KeyCode::KeyA, "é");
+    }
+    assert_eq!(settings(&app).name.chars().count(), NAME_LETTERS);
+    // And the readout wears what was typed, with the caret.
+    let text = screen_text(&mut app);
+    assert!(
+        text.contains(&format!("{}_", settings(&app).name)),
+        "{text}"
+    );
+}
+
+#[test]
+fn clicking_a_field_moves_the_keyboard_to_it() {
+    let mut app = test_app(AppState::NewWorld);
+    click(&mut app, MenuButton::Edit(Field::Seed));
+    assert_eq!(settings(&app).editing, Field::Seed);
+    let before = settings(&app).seed.clone();
+    type_key(&mut app, KeyCode::KeyA, "a");
+    assert_eq!(
+        settings(&app).name,
+        "",
+        "a letter typed into the seed landed in the name"
+    );
+    assert_eq!(settings(&app).seed, before);
+
+    click(&mut app, MenuButton::Edit(Field::Name));
+    type_key(&mut app, KeyCode::KeyA, "a");
+    assert_eq!(settings(&app).name, "a");
+    assert_eq!(settings(&app).seed, before);
+}
+
 #[test]
 fn typing_edits_the_seed() {
     let mut app = test_app(AppState::NewWorld);
+    click(&mut app, MenuButton::Edit(Field::Seed));
     app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
 
     type_key(&mut app, KeyCode::Digit4, "4");
@@ -780,6 +905,7 @@ fn typing_edits_the_seed() {
 #[test]
 fn the_seed_field_takes_only_digits() {
     let mut app = test_app(AppState::NewWorld);
+    click(&mut app, MenuButton::Edit(Field::Seed));
     app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
 
     // A letter, a symbol and a space: a seed is a number, and anything
@@ -812,11 +938,17 @@ fn keys_pressed_before_the_new_world_dialog_opened_are_not_typed_into_it() {
         before,
         "a digit pressed on the way here landed in the seed"
     );
+    assert_eq!(
+        app.world().resource::<NewWorldSettings>().name,
+        "",
+        "a digit pressed on the way here landed in the name"
+    );
 }
 
 #[test]
 fn seed_field_is_length_capped() {
     let mut app = test_app(AppState::NewWorld);
+    click(&mut app, MenuButton::Edit(Field::Seed));
     app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
 
     for _ in 0..MAX_SEED_DIGITS + 5 {

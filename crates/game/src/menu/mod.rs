@@ -42,8 +42,8 @@ use ladder::{
 };
 use main_menu::{main_menu_actions, spawn_main_menu};
 use new_world::{
-    dialog_actions, open_world, refresh_dialog, share_label, spawn_new_world_dialog, type_seed,
-    NewWorldSettings,
+    dialog_actions, open_world, refresh_dialog, share_label, spawn_new_world_dialog,
+    type_into_field, Field, NewWorldSettings,
 };
 use set_sail::{read_the_harbour, set_sail_actions, show_set_sail, Harbour};
 
@@ -163,9 +163,9 @@ impl Plugin for MenuPlugin {
                         .run_if(in_state(AppState::SetSail)),
                     (dialog_actions, open_world, refresh_dialog)
                         .run_if(in_state(AppState::NewWorld)),
-                    // `type_seed` carries no run condition of its own, for
-                    // the reason `join_keys` and `settings_keys` carry none.
-                    type_seed,
+                    // `type_into_field` carries no run condition of its own,
+                    // for the reason `join_keys` and `settings_keys` carry none.
+                    type_into_field,
                     // `join_keys` carries no run condition of its own, for the
                     // reason `settings_keys` below carries none.
                     (
@@ -244,6 +244,8 @@ pub(crate) enum MenuButton {
     Display,
     Controls,
     Exit,
+    /// Puts the keyboard in this field of the new-world dialog.
+    Edit(Field),
     RandomSeed,
     /// Turns sharing the world about to be started on and off.
     ToggleShare,
@@ -294,7 +296,7 @@ impl MenuButton {
     /// Matched on `self` rather than listed beside the enum, which is the
     /// whole point: a button added to a screen cannot be added without being
     /// named, because the compiler asks. [`Action::name`] is the same shape
-    /// for the same reason. The five that carry something are named without
+    /// for the same reason. The six that carry something are named without
     /// it; what comes after is [`MenuButton::parse`]'s business.
     ///
     /// One word, hyphenated where it needs to be, because a line is split on
@@ -308,6 +310,7 @@ impl MenuButton {
             Self::Display => "display",
             Self::Controls => "controls",
             Self::Exit => "exit",
+            Self::Edit(_) => "edit",
             Self::RandomSeed => "random-seed",
             Self::ToggleShare => "share",
             Self::Start => "start",
@@ -338,7 +341,7 @@ impl MenuButton {
     /// list is for is [`MenuButton::name`], which does not look. It is the
     /// grammar's index rather than the grammar, and a test holds the two to
     /// agreement.
-    const EVERY: [Self; 26] = [
+    const EVERY: [Self; 27] = [
         Self::SetSail,
         Self::NewWorld,
         Self::JoinWorld,
@@ -346,6 +349,7 @@ impl MenuButton {
         Self::Display,
         Self::Controls,
         Self::Exit,
+        Self::Edit(Field::Name),
         Self::RandomSeed,
         Self::ToggleShare,
         Self::Start,
@@ -373,14 +377,14 @@ impl MenuButton {
         Self::EVERY.iter().map(|button| button.name()).collect()
     }
 
-    /// What the five buttons that carry something want said after their name.
+    /// What the six buttons that carry something want said after their name.
     pub(crate) const WANTS: &'static str = "`open-kept`, `ask-discard` and `discard` want a row \
                                             number, `rebind` a control, `resolution` a rung or \
-                                            `native`";
+                                            `native`, `edit` a field: `name` or `seed`";
 
     /// The button a `click` line names, or `None` for a line that names none.
     ///
-    /// One word and, for the five that carry something, one more.
+    /// One word and, for the six that carry something, one more.
     pub(crate) fn parse(words: &[&str]) -> Option<Self> {
         Some(match words {
             ["set-sail"] => Self::SetSail,
@@ -390,6 +394,11 @@ impl MenuButton {
             ["display"] => Self::Display,
             ["controls"] => Self::Controls,
             ["exit"] => Self::Exit,
+            ["edit", field] => Self::Edit(
+                [Field::Name, Field::Seed]
+                    .into_iter()
+                    .find(|candidate| candidate.name() == *field)?,
+            ),
             ["random-seed"] => Self::RandomSeed,
             ["share"] => Self::ToggleShare,
             ["start"] => Self::Start,

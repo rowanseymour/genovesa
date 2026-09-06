@@ -451,11 +451,12 @@ pub(crate) struct Shared {
     /// world was first made and constant for its life, however many times it
     /// is reopened or rehosted.
     world_id: WorldId,
-    /// What the world is called on screens that list worlds. Empty for every
-    /// world today — naming is a design still owed — and carried through from
-    /// the file so a hand-named world keeps its name. The file's line-based
-    /// parse is what guarantees it can never hold a newline, which the format
-    /// could not survive.
+    /// What the world is called on screens that list worlds — given at
+    /// birth by [`Server::named`], carried through from the file after that,
+    /// and empty for a world nobody named, which is every world a dedicated
+    /// server makes. Held to [`keeper::filtered`] on both ways in, which is
+    /// what guarantees it can never hold a newline, which the format could
+    /// not survive.
     name: String,
     /// Dealt in joining order, and never reused within a session.
     next_id: AtomicU32,
@@ -936,6 +937,21 @@ impl Server {
             Arc::get_mut(&mut self.shared)
                 .expect("a server that has not been run yet owns its shared state")
                 .opening = phase;
+        }
+        self
+    }
+
+    /// Names the world — what the screens that list worlds call it. For a
+    /// world being made: a reopened world already has its name, and this one
+    /// is dropped on the floor rather than written over it, on the terms
+    /// [`Server::opening_at`] keeps a reopened world's clock. Trimmed and
+    /// stripped of control characters on the way in — see
+    /// [`keeper::filtered`] — so an empty name is a name not given.
+    pub fn named(mut self, name: &str) -> Self {
+        if !self.loaded {
+            Arc::get_mut(&mut self.shared)
+                .expect("a server that has not been run yet owns its shared state")
+                .name = keeper::filtered(name);
         }
         self
     }

@@ -1496,6 +1496,34 @@ fn leaving_and_rejoining_with_papers_resumes_in_place() {
 }
 
 #[test]
+fn a_world_is_named_at_birth_and_keeps_the_name_it_was_given() {
+    let path = scratch("named").join("one.world");
+    // Trimmed and stripped of what a line of the file could not carry —
+    // the file's own rule, applied before the name is ever written.
+    let first = Server::bind(("127.0.0.1", 0), 7)
+        .expect("bind")
+        .named("  Windward\nReach ")
+        .keeping_at(path.clone())
+        .expect("keeping");
+    drop(first);
+    let listed = server::kept_worlds(path.parent().expect("dir"));
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "WindwardReach");
+
+    // A reopened world already has its name, and a naming on the way back
+    // in is a naming of the wrong world.
+    let again = Server::reopen(("127.0.0.1", 0), &path)
+        .expect("reopen")
+        .named("Somewhere Else");
+    // Opened and closed, which is what writes the world back down.
+    drop(again.spawn().expect("spawn"));
+    assert_eq!(
+        server::kept_worlds(path.parent().expect("dir"))[0].name,
+        "WindwardReach"
+    );
+}
+
+#[test]
 fn a_kept_world_reopens_where_it_left_off() {
     // The whole story: a world kept to a file, sailed, left, reopened — and
     // it is the same world, at the same hour, with the player where the
