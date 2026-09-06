@@ -10,13 +10,24 @@
 //! weather starts from the beginning, which for weather — unlike ground —
 //! reads as weather.
 //!
-//! The wind is a point wandering a 2D noise field, read off as a velocity: its
-//! bearing is the point's bearing from the origin, its strength the point's
-//! distance out. So the wind veers smoothly, and every so often the walk passes
-//! near the origin where the strength falls away and the bearing swings freely
-//! — a calm, out of which the wind returns from somewhere new. But a calm is a
-//! spell of light air, never a dead sky — see [`MIN_WIND`]. Nothing here
-//! decides "now a storm"; storms are the far excursions of the same walk.
+//! The wind is two points wandering 2D noise fields, at two paces. The
+//! strength is one point's distance from the origin, read on a walk brisk
+//! enough that a session sees calms and blows come and go; the bearing is the
+//! *other* point's bearing from the origin, on a walk slow enough that a
+//! passage holds its wind — see [`BEARING_PACE`] for the figure and the test
+//! that holds it. A calm is a spell of light air, never a dead sky — see
+//! [`MIN_WIND`]. Nothing here decides "now a storm"; storms are the far
+//! excursions of the strength's walk.
+//!
+//! They used to be one point, the bearing and the strength read off the same
+//! walk. That coupled them the wrong way round for a sailor: the walk sits
+//! mostly near the origin, where a small step is a large swing, so the bearing
+//! turned over in about three minutes — two islets' worth of sailing — and one
+//! crossing in four ended with its destination in the no-go zone. Reading the
+//! bearing from a walk of its own is what lets a fresh breeze hold its
+//! direction while the strength stays restless. What it gives up is the old
+//! design's one nicety, a calm out of which the wind came back from somewhere
+//! new: now a lull may lift with the wind where it was.
 //!
 //! No trigonometry anywhere, and that is a constraint rather than a style:
 //! `sin` and `cos` are not correctly-rounded and drift between platforms,
@@ -34,12 +45,24 @@ use crate::noise::Noise;
 /// one intended.
 const WEATHER_SEED: u32 = 0x57EA_7E12;
 
-/// Seconds across one cell of the walk's noise, which sets how fast the
-/// weather has ideas: with the octaves in [`wind`], the wind's character
-/// drifts over a few minutes and turns over entirely in ten or twenty —
-/// long enough for a calm or a blow to be a *spell* somebody sails through,
-/// short enough that a session sees more than one sky.
+/// Seconds across one cell of the strength's walk, which sets how fast the
+/// weather has ideas: with the octaves in [`wind`], the strength drifts over
+/// a few minutes and turns over entirely in ten or twenty — long enough for
+/// a calm or a blow to be a *spell* somebody sails through, short enough
+/// that a session sees more than one sky.
 const WEATHER_PACE: f32 = 240.0;
+
+/// Seconds across one cell of the bearing's walk — a single octave, so the
+/// figure is the whole of the wind's rate of veer. Tuned to a target rather
+/// than a feel: a boat that sets off on a beam reach for the next island
+/// must still fetch it, four times in five, over the five minutes a big
+/// island's neighbour is away — which `a_passage_holds_its_wind` holds it
+/// to. Measured over nine seeds this pace fails one crossing in eight, a
+/// pace of 960 one in four, and the strength's own pace one in four at any
+/// window at all. Over twenty minutes the bearing is as good as new either
+/// way: the walk spends most of its time near the origin, where one cell's
+/// travel is a full turn.
+const BEARING_PACE: f32 = 1_440.0;
 
 /// The hardest the wind blows, in metres per second — a near gale, reached
 /// only at the walk's farthest excursions. The shaping in [`wind`] keeps the
@@ -71,11 +94,11 @@ const MIN_WIND: f32 = protocol::LIGHT_AIR;
 /// the world was opened — the server's clock, whose zero is the session's.
 pub fn wind(seed: u32, elapsed: f32) -> Vec2 {
     let noise = Noise::new(seed ^ WEATHER_SEED);
-    let t = elapsed / WEATHER_PACE;
 
     // Two independent channels of the same field — far-apart lanes, so the
     // walk's x and y never correlate. Three octaves: the slowest sets the
     // spells, the fastest puts a little restlessness on top.
+    let t = elapsed / WEATHER_PACE;
     let walk = Vec2::new(noise.fbm(t, 7.3, 3), noise.fbm(t, 41.9, 3));
 
     // Three octaves of fbm keep the walk mostly within half a cell of the
@@ -83,10 +106,16 @@ pub fn wind(seed: u32, elapsed: f32) -> Vec2 {
     // of the distance — slow to leave a lull, quick through the top of the
     // range — and is capped where the walk outruns its usual bounds, so the
     // rare wilder wander is a hard blow rather than an impossible one.
-    let out = walk.length();
-    let reach = (out / 0.55).min(1.0);
+    let reach = (walk.length() / 0.55).min(1.0);
     let strength = MIN_WIND + (MAX_WIND - MIN_WIND) * reach * reach;
 
+    // The bearing's own walk, on lanes of its own and one octave: any
+    // restlessness laid on top would be laid on the bearing, which is the
+    // one thing this walk exists to keep still.
+    let b = elapsed / BEARING_PACE;
+    let heading = Vec2::new(noise.fbm(b, 83.7, 1), noise.fbm(b, 127.1, 1));
+
+    let out = heading.length();
     if out == 0.0 {
         // The walk is standing exactly on the origin, where it has no bearing
         // to read and nothing at all to divide by. Only the exact zero needs
@@ -94,14 +123,13 @@ pub fn wind(seed: u32, elapsed: f32) -> Vec2 {
         // a good deal larger than the smallest float — there is no denormal
         // `out` for `strength / out` to overflow through, and every walk that
         // rounds to a positive length still points somewhere honest. Guarding
-        // a whole neighbourhood instead would snap the bearing due south with
-        // a full light air behind it, a jump of metres a second across a
-        // boundary the walk crosses far more often than it lands on. A moment
-        // of measure zero: hand the light air an arbitrary fixed bearing and
-        // let the client's easing swallow it.
-        return Vec2::new(0.0, -MIN_WIND);
+        // a whole neighbourhood instead would snap the bearing due south
+        // across a boundary the walk crosses far more often than it lands
+        // on. A moment of measure zero: hand the strength an arbitrary fixed
+        // bearing and let the client's easing swallow it.
+        return Vec2::new(0.0, -strength);
     }
-    walk * (strength / out)
+    heading * (strength / out)
 }
 
 #[cfg(test)]
@@ -123,7 +151,7 @@ mod tests {
         });
         let got = digest(floats(samples));
         println!("weather digests to {got:#018X}");
-        assert_eq!(got, 0x5805_0321_DF7B_4B27);
+        assert_eq!(got, 0x9C1C_70DC_72B4_233E);
     }
 
     #[test]
@@ -181,6 +209,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_passage_holds_its_wind() {
+        // What BEARING_PACE is tuned to, held so it cannot drift back: a boat
+        // that sets off on a beam reach — the first point of sail to earn full
+        // drive, a right angle off the wind — and sails for five minutes must
+        // find, four times in five, that the wind has not swung her course
+        // into the no-go zone. Every hop between islets is shorter than this
+        // and a big island's nearest neighbour is about this far, so it is the
+        // crossing a player commits to. No trigonometry: the beam-reach course
+        // is the wind's perpendicular, and "inside the no-go zone" is the
+        // course's dot with where the air comes from exceeding cos 45°.
+        let crossing = 300.0;
+        let (mut foul, mut total) = (0, 0);
+        for seed in [1, 7, 42, 20040112] {
+            for i in 0..1_500 {
+                let at = i as f32 * 10.0;
+                let set_off = wind(seed, at);
+                let arrived = wind(seed, at + crossing);
+                let course = Vec2::new(-set_off.y, set_off.x).normalize();
+                let eye = -arrived.normalize();
+                total += 1;
+                if course.dot(eye) > std::f32::consts::FRAC_1_SQRT_2 {
+                    foul += 1;
+                }
+            }
+        }
+        let percent = 100.0 * foul as f32 / total as f32;
+        assert!(
+            percent < 20.0,
+            "the wind fouled {percent:.0}% of five-minute beam reaches"
+        );
     }
 
     #[test]
