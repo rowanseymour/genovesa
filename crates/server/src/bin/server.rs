@@ -1,7 +1,8 @@
 //! The server binary: hosts one world until it is asked to stop.
 //!
-//! `server --help` lists what little it takes: a port, a world, and a file to
-//! keep it in. Nothing about what the world *does* once it is up — the hour
+//! `server --help` lists what little it takes: a port, a world, a file to
+//! keep it in and a name to keep it under. Nothing about what the world
+//! *does* once it is up — the hour
 //! included, which is the console's `time`, said from inside the world by
 //! anyone in it. There is no window and no rendering — the world is generated
 //! here and handed to clients a chunk at a time. Given `--world` the world
@@ -28,10 +29,10 @@ fn main() -> ExitCode {
 
     let addr = ("0.0.0.0", args.port);
     let (server, begin_at) = match &args.world {
-        // A world file that exists is a world that already has its seed, so
-        // a `--seed` aimed at it is a contradiction to refuse rather than a
-        // preference to ignore: one of the two named worlds was not going
-        // to be the one hosted.
+        // A world file that exists is a world that already has its seed and
+        // its name, so a `--seed` or `--name` aimed at it is a contradiction
+        // to refuse rather than a preference to ignore: one of the two named
+        // worlds was not going to be the one hosted.
         Some(path) if path.exists() => {
             if args.seed_chosen {
                 eprintln!(
@@ -40,9 +41,20 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
+            if args.name.is_some() {
+                eprintln!(
+                    "server: {} is already a world — its name is not for choosing",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
             (Server::reopen(addr, path), None)
         }
-        Some(path) => (Server::bind(addr, args.seed), Some(path.clone())),
+        Some(path) => (
+            Server::bind(addr, args.seed)
+                .map(|server| server.named(args.name.as_deref().unwrap_or(""))),
+            Some(path.clone()),
+        ),
         None => (Server::bind(addr, args.seed), None),
     };
     let mut server = match server {

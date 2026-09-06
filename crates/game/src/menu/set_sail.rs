@@ -286,8 +286,8 @@ pub(super) fn kept_row() -> Node {
 
 /// What a kept world's row is headed by: the name the player gave it. Every
 /// world made from the menu has one, so a world without is one that came
-/// from somewhere else — a dedicated server's file copied in — and is said
-/// to be nameless rather than shown as a blank.
+/// from somewhere else — a dedicated server's file, begun without `--name`
+/// and copied in — and is said to be nameless rather than shown as a blank.
 pub(super) fn world_title(world: &KeptWorld) -> String {
     if world.name.is_empty() {
         "a world without a name".to_string()

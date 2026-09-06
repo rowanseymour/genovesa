@@ -453,8 +453,8 @@ pub(crate) struct Shared {
     world_id: WorldId,
     /// What the world is called on screens that list worlds — given at
     /// birth by [`Server::named`], carried through from the file after that,
-    /// and empty for a world nobody named, which is every world a dedicated
-    /// server makes. Held to [`keeper::filtered`] on both ways in, which is
+    /// and empty for a world nobody named — a dedicated server run without
+    /// `--name`. Held to [`keeper::filtered`] on both ways in, which is
     /// what guarantees it can never hold a newline, which the format could
     /// not survive.
     name: String,
