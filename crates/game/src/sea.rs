@@ -2,10 +2,11 @@
 //! them.
 //!
 //! The sea is drawn as low-poly waves — real geometry, displaced in the vertex
-//! shader and shaded flat, so a wave is a run of tilting facets rather than a
-//! normal-mapped shimmer. On water this matte a normal map would barely read:
-//! there is no specular for it to perturb, and what sells the motion is facets
-//! changing tone as they tilt and the waterline creeping up every beach.
+//! shader and shaded flat in a few fixed tones (see [`TONE`]), so a wave is a
+//! run of tilting facets rather than a normal-mapped shimmer. On water this
+//! matte a normal map would barely read: there is no specular for it to
+//! perturb, and what sells the motion is facets stepping from tone to tone as
+//! they tilt and the waterline creeping up every beach.
 //!
 //! The sea belongs to the weather now. The server owns the wind — one
 //! authority, so every player in a world is under the same sky — and tells
@@ -374,6 +375,32 @@ const BENDS: [(Vec2, f32); 4] = [
 /// is the wind's business; `cap_bar` in the shader carries the rest of it.
 const WHITECAP: (f32, f32, f32) = (0.60, 0.23, 0.45);
 
+/// The facets' tones: how far apart they lie, as a fraction of the sunlight
+/// flat water takes; how many lie either side of flat; and the highest the
+/// sun is allowed to stand for the purpose, in radians of elevation.
+///
+/// A facet is not drawn the shade its slope works out to but the nearest of
+/// a few fixed tones — the same step from continuous to flat the ground made
+/// when it took its palette. Lit honestly, a swell this gentle is a faint
+/// gradient of blues that the eye reads as one; snapped, a wave is a run of
+/// cells changing tone as it passes, which is the ground's own look on the
+/// water beside it. The step is most of the tuning: at the reference wind
+/// [`SHADING_TILT`] takes a typical facet a step either side of flat and a
+/// crest two, so a breeze reads as a mosaic rather than a sheet, and a gale
+/// climbs to the last tone and stops. A facet crossing a threshold pops from
+/// one tone to the next — a sparkle at this spacing, a flicker at a finer
+/// one.
+///
+/// The cap on the sun is what keeps the mosaic through the middle of the
+/// day. A facet leaning towards a sun that is nearly overhead gains almost
+/// nothing — the lit side of every wave was falling short of its first step
+/// while the shaded side dropped two, and the sea at noon was flat blue with
+/// dark triangles scattered over it. So the tones are lit from the sun's own
+/// bearing but from no higher than this, the same bargain
+/// [`protocol::SUN_TILT`] makes for the ground; below the cap the true sun
+/// is used, and an evening sea stripes the way an evening sea does.
+const TONE: (f32, f32, f32) = (0.15, 2.0, 0.75);
+
 /// Wavelength, in metres, of a slow drift the shore wave's phase picks up
 /// along the coast. Without it the phase at the waterline is `ω·t` alone
 /// and every beach in the world breaks in unison, like lights on one
@@ -476,6 +503,10 @@ pub struct SeaExtension {
     /// `xy` is [`BREAKING_FIELD`]; `z` is [`LEE_SEA`]; `w` is padding.
     #[uniform(100)]
     breaking: Vec4,
+    /// `xy` is [`TONE`]'s step and count, `z` the sine of its cap on the
+    /// sun; `w` padding.
+    #[uniform(100)]
+    tone: Vec4,
     /// The depth window's place in the world: `xy` the world coordinates of
     /// its corner texel's corner, `z` `1 / DEPTH_EXTENT`, `w`
     /// [`DEPTH_RANGE`]. Rewritten whenever the window scrolls.
@@ -573,6 +604,7 @@ impl SeaExtension {
             feed: Vec4::new(FOAM_FEED.0, FOAM_FEED.1, MURK.0, MURK.1),
             caps: Vec4::new(WHITECAP.0, WHITECAP.1, WHITECAP.2, 0.0),
             breaking: Vec4::new(BREAKING_FIELD.0, BREAKING_FIELD.1, 0.0, 0.0).with_z(LEE_SEA),
+            tone: Vec4::new(TONE.0, TONE.1, TONE.2.sin(), 0.0),
             window: Self::window_uniform(origin),
             // Noon until the sky says otherwise, as the ground opens too.
             daylight: crate::terrain::DAYLIGHT_AT_NOON,

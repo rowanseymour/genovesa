@@ -19,7 +19,7 @@
     ambient,
     forward_io::{Vertex, VertexOutput, FragmentOutput},
     mesh_functions,
-    mesh_view_bindings::{globals, view},
+    mesh_view_bindings::{globals, lights, view},
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     view_transformations::position_world_to_clip,
@@ -67,6 +67,10 @@ struct SeaParams {
     // in metres, y how fast it drifts downwind; z the least of the open sea's
     // height a lee leaves standing (`sea::LEE_SEA`); w padding.
     breaking: vec4<f32>,
+    // The facets' tones — `sea::TONE`: x how far apart they lie, as a
+    // fraction of flat water's sunlight, y how many either side of flat, z
+    // the sine of the highest the sun is let stand to light them. w padding.
+    tone: vec4<f32>,
     // The depth window: xy the world coordinates of its corner, z one over
     // its extent, w the depth a full texel encodes.
     window: vec4<f32>,
@@ -500,16 +504,33 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // the terrain builds the same look into its buffers instead. The cross
     // product's handedness depends on the screen's, so rather than reason
     // about it the normal is simply pointed up, which for a sea it always is.
-    var faceted = in;
     let slope = cross(dpdy(in.world_position.xyz), dpdx(in.world_position.xyz));
     var normal = normalize(slope) * sign(slope.y);
     // Lit more steeply than the water really slopes — see `sea::SHADING_TILT`
     // for why the honest tilt cannot be seen. Scaling the horizontal
     // components of a unit normal scales the slope it encodes.
     normal = normalize(vec3(normal.x * sea.fade.z, normal.y, normal.z * sea.fade.z));
-    faceted.world_normal = normal;
 
-    var pbr_input = pbr_input_from_standard_material(faceted, is_front);
+    // What the tilt does to the sun's share, as a fraction of what flat water
+    // takes — and then snapped to one of a few tones, see `sea::TONE`. The
+    // standard lighting below is run on the *flat* normal, and the facet's
+    // tilt is applied afterwards to the sun's share alone: the sky's own
+    // light hardly cares which way a facet leans, and it is the sun's share
+    // that the tones are steps of. Light 0 is the sky's, sun or moon by
+    // turns, and the world hangs no other; with none at all the ratio is
+    // left at flat rather than dividing by nothing. The light is taken from
+    // the body's own bearing but from no higher than `sea::TONE` allows,
+    // which is what keeps a noon sea a mosaic — the bearing is always there
+    // to take, the arc never passing overhead.
+    let body = lights.directional_lights[0].direction_to_light;
+    let capped = sea.tone.z;
+    let level = normalize(vec3(body.x, 0.0, body.z)) * sqrt(1.0 - capped * capped);
+    let to_light = select(body, vec3(level.x, capped, level.z), body.y > capped);
+    let flat_sun = to_light.y;
+    let tilted_sun = max(dot(normal, to_light), 0.0);
+    let ratio = select(1.0, tilted_sun / flat_sun, flat_sun > 1e-3);
+
+    var pbr_input = pbr_input_from_standard_material(in, is_front);
 
     // Foam: white where the shore wave is breaking — its cap biting, which
     // is water shallower than the unbroken wave demands — and only on the
@@ -604,6 +625,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         max(max(foam, cap), wake_foam(at)),
     );
 
+    // The tone this facet is drawn in: the tilt's ratio snapped to the
+    // nearest step, and held to the last step either side of flat. Foam
+    // takes it too, so a sheet of surf still lies over the wave it rides.
+    let steps = clamp(round((ratio - 1.0) / sea.tone.x), -sea.tone.y, sea.tone.y);
+    let tone = 1.0 + steps * sea.tone.x;
+
     pbr_input.material.base_color =
         alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
@@ -626,7 +653,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.diffuse_occlusion,
     ) * view.exposure;
 
-    out.color = mix(vec4(shaded, full.a), full, sunlight_at(at));
+    // The sun's share is what is left of the full result once the sky's has
+    // been taken back out, and the tone is a factor on that alone — so a
+    // trough in a headland's shadow is no darker for being a trough, and the
+    // hull's cast shadow, which the standard path folded into the direct
+    // light, stays exactly where it fell.
+    let sun = (full.rgb - shaded) * tone * sunlight_at(at);
+    out.color = vec4(shaded + sun, full.a);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }
