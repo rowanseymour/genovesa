@@ -1170,7 +1170,7 @@ mod tests {
         // it out of the night.
         crate::testing::quarantine_data_dir();
         let session =
-            Session::open(5, Reach::Alone, 0.19, false).expect("a world to lie at anchor in");
+            Session::open(5, "", Reach::Alone, 0.19, false).expect("a world to lie at anchor in");
         // The session in hand *before* the threshold, as a real join has it:
         // the boat lain at anchor is the one the server tells of, not one
         // the offline entry would have launched beside it.

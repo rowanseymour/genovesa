@@ -370,15 +370,23 @@ impl Session {
     /// Joined over the loopback whatever it is bound to: whoever opened the
     /// world gets there the short way.
     ///
-    /// `opening` is the hour of its day the world starts at, as a phase —
-    /// [`server::OPENING`] for a world nobody asked anything particular of.
-    /// `keep` files the world in this machine's worlds directory, to be
-    /// offered again from the menu: what the menu asks and the command line
-    /// does not, a `--seed` run being a world to look at rather than one to
-    /// live in.
-    pub fn open(seed: u32, reach: Reach, opening: f32, keep: bool) -> Result<Self, String> {
+    /// `name` is what the world is called on the screen that lists them —
+    /// see [`Server::named`] — and `opening` is the hour of its day the world
+    /// starts at, as a phase: [`server::OPENING`] for a world nobody asked
+    /// anything particular of. `keep` files the world in this machine's
+    /// worlds directory, to be offered again from the menu: what the menu
+    /// asks and the command line does not, a `--seed` run being a world to
+    /// look at rather than one to live in, and one that gets no name.
+    pub fn open(
+        seed: u32,
+        name: &str,
+        reach: Reach,
+        opening: f32,
+        keep: bool,
+    ) -> Result<Self, String> {
         let mut server = Server::bind(reach.bound_to(), seed)
             .map_err(|error| format!("cannot open a world: {error}"))?
+            .named(name)
             .opening_at(opening);
         if keep {
             let worlds = worlds_dir()
@@ -477,9 +485,9 @@ impl Dialing {
 
     /// Starts opening a world on this machine — see [`Session::open`], which
     /// this is the off-the-frame-loop way to reach.
-    pub fn opening(seed: u32, reach: Reach, opening: f32, keep: bool) -> Self {
+    pub fn opening(seed: u32, name: String, reach: Reach, opening: f32, keep: bool) -> Self {
         Self::on(reach.described(), move || {
-            Session::open(seed, reach, opening, keep)
+            Session::open(seed, &name, reach, opening, keep)
         })
     }
 
@@ -1525,7 +1533,7 @@ mod tests {
         // `Reach::Alone` is — a test run cannot collide with a real server on
         // this machine, and neither can a player.
         crate::testing::quarantine_data_dir();
-        let dialing = Dialing::opening(77, Reach::Alone, server::OPENING, false);
+        let dialing = Dialing::opening(77, String::new(), Reach::Alone, server::OPENING, false);
         let session = settle(&dialing).expect("the world should be opened and joined");
 
         assert!(
@@ -1540,10 +1548,22 @@ mod tests {
     #[test]
     fn the_seed_asked_for_is_the_world_that_opens() {
         crate::testing::quarantine_data_dir();
-        let first = settle(&Dialing::opening(77, Reach::Alone, server::OPENING, false))
-            .expect("a world should open");
-        let second = settle(&Dialing::opening(78, Reach::Alone, server::OPENING, false))
-            .expect("a world should open");
+        let first = settle(&Dialing::opening(
+            77,
+            String::new(),
+            Reach::Alone,
+            server::OPENING,
+            false,
+        ))
+        .expect("a world should open");
+        let second = settle(&Dialing::opening(
+            78,
+            String::new(),
+            Reach::Alone,
+            server::OPENING,
+            false,
+        ))
+        .expect("a world should open");
         // A host can ask its own server which world it made — that is where
         // the debug readout's seed comes from.
         assert_eq!(first.hosting.as_ref().expect("hosting").seed(), 77);
@@ -1562,7 +1582,7 @@ mod tests {
         // from outside, and whoever arrives is somebody else in the same
         // world rather than the host again.
         crate::testing::quarantine_data_dir();
-        let dialing = Dialing::opening(3, Reach::Alone, server::OPENING, false);
+        let dialing = Dialing::opening(3, String::new(), Reach::Alone, server::OPENING, false);
         let session = settle(&dialing).expect("the world should be opened and joined");
         let port = session.hosting.as_ref().expect("hosting").addr().port();
 

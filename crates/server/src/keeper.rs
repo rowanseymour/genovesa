@@ -59,8 +59,9 @@ const EXTENSION: &str = "world";
 pub(crate) struct WorldRecord {
     pub id: WorldId,
     pub seed: u32,
-    /// What the world is called on the screens that list worlds. Empty for a
-    /// world nobody has named, which is every world a dedicated server makes.
+    /// What the world is called on the screens that list worlds — see
+    /// `Server::named`. Empty for a world nobody named, which is every world
+    /// a dedicated server makes.
     pub name: String,
     /// The phase of the day the clock read at age zero — see
     /// [`crate::OPENING`].
@@ -1039,7 +1040,7 @@ fn parse(text: &str) -> Result<WorldRecord, String> {
 /// offering. This is the format's rule, and it repairs rather than refuses
 /// because what it guards is only that a line stays a line — a world must not
 /// become unreadable over a stray byte in a name.
-fn filtered(name: &str) -> String {
+pub(crate) fn filtered(name: &str) -> String {
     name.chars()
         .filter(|letter| !letter.is_control())
         .collect::<String>()

@@ -6,8 +6,9 @@
 //! screen with two things to read on one line, and a question walked away
 //! from is not a yes.
 //!
-//! What a world is called on the row is the seed and when it was last sailed,
-//! naming no seed at the player — see [`world_label`].
+//! A row is the world's name — the one the player gave it when it was made,
+//! see [`world_title`] — over how far into its days it is and when it was
+//! last sailed, which is what puts the rows in order — see [`world_detail`].
 
 use std::time::SystemTime;
 
@@ -19,8 +20,8 @@ use protocol::{DAY_SECONDS, DEFAULT_PORT};
 use server::{kept_worlds, KeptWorld};
 
 use super::kit::{
-    cartouche_rule, heading, label, panel, screen, spawn_button, status_line, Palette, ON_PAPER,
-    PANEL_PADDING,
+    button, button_label, cartouche_rule, heading, label, panel, screen, spawn_button, status_line,
+    Palette, ON_PAPER, PANEL_PADDING,
 };
 use super::{share_label, MenuButton, Status};
 
@@ -217,13 +218,25 @@ pub(super) fn spawn_kept_row(
     world: &KeptWorld,
 ) {
     parent.spawn(kept_row()).with_children(|line| {
-        spawn_button(
-            line,
-            ink,
-            MenuButton::OpenKept(row),
-            &world_label(world),
-            KEPT_WIDTH,
-        );
+        // Two lines on the one button, the second smaller and dimmer: the
+        // name is what is being chosen, the rest is what tells this row from
+        // the one under it. One text with a span rather than two texts, so
+        // the button lays out one label like every other button does.
+        line.spawn(button(ink, MenuButton::OpenKept(row), KEPT_WIDTH))
+            .with_children(|button| {
+                button
+                    .spawn(button_label(ink, &world_title(world)))
+                    .with_children(|title| {
+                        title.spawn((
+                            TextSpan::new(format!("\n{}", world_detail(world))),
+                            TextFont {
+                                font_size: FontSize::Px(15.0),
+                                ..default()
+                            },
+                            TextColor(ink.dim),
+                        ));
+                    });
+            });
         spawn_button(
             line,
             ink,
@@ -271,35 +284,51 @@ pub(super) fn kept_row() -> Node {
     }
 }
 
-/// What a kept world's row reads. The place's own story where it has one —
-/// its name, once worlds have names — and otherwise how far into its days it
-/// is, which is the one fact the file can offer that describes the world
-/// rather than the machinery. "Sailed when" is what tells two rows apart on
-/// a machine that keeps several.
-pub(super) fn world_label(world: &KeptWorld) -> String {
-    let day = (world.age / DAY_SECONDS) as u32 + 1;
-    let sailed = sailed_when(world.kept);
+/// What a kept world's row is headed by: the name the player gave it. Every
+/// world made from the menu has one, so a world without is one that came
+/// from somewhere else — a dedicated server's file copied in — and is said
+/// to be nameless rather than shown as a blank.
+pub(super) fn world_title(world: &KeptWorld) -> String {
     if world.name.is_empty() {
-        format!("Day {day} — {sailed}")
+        "a world without a name".to_string()
     } else {
-        format!("{} — {sailed}", world.name)
+        world.name.clone()
     }
 }
 
-/// A last-sailed moment as prose. Coarse on purpose: "sailed today" is what
-/// a person checks a list by, and an hour count would just be a smaller
-/// number to ignore.
+/// The line under the title: how far into its days the world is, and when it
+/// was last sailed — which, on a machine keeping several, is what says which
+/// of them is the latest.
+pub(super) fn world_detail(world: &KeptWorld) -> String {
+    let day = (world.age / DAY_SECONDS) as u32 + 1;
+    format!("Day {day} — {}", sailed_when(world.kept))
+}
+
+/// A last-sailed moment as prose, as fine as it takes to put the rows in
+/// order and no finer: minutes within the hour, hours within the day, then
+/// days, weeks and months. It used to stop at "today", and three worlds all
+/// sailed today said nothing about which was the one left an hour ago.
 pub(super) fn sailed_when(kept: SystemTime) -> String {
-    match kept.elapsed() {
-        Ok(since) => match since.as_secs() / 86_400 {
-            0 => "sailed today".to_string(),
-            1 => "sailed yesterday".to_string(),
-            days => format!("sailed {days} days ago"),
-        },
-        // A file stamped in the future is a clock that moved, not a world
-        // that has not been played yet.
-        Err(_) => "sailed today".to_string(),
-    }
+    // A file stamped in the future is a clock that moved, not a world that
+    // has not been played yet — and reads as one just sailed.
+    let since = kept.elapsed().unwrap_or_default().as_secs();
+    const HOUR: u64 = 60 * 60;
+    const DAY: u64 = 24 * HOUR;
+    let (count, unit) = match since {
+        s if s < 60 => return "sailed just now".to_string(),
+        s if s < HOUR => (s / 60, "minute"),
+        s if s < DAY => (s / HOUR, "hour"),
+        s if s < 2 * DAY => return "sailed yesterday".to_string(),
+        s if s < 7 * DAY => (s / DAY, "day"),
+        s if s < 30 * DAY => (s / (7 * DAY), "week"),
+        s => (s / (30 * DAY), "month"),
+    };
+    let ago = match (count, unit) {
+        (1, "hour") => "an hour".to_string(),
+        (1, unit) => format!("a {unit}"),
+        (count, unit) => format!("{count} {unit}s"),
+    };
+    format!("sailed {ago} ago")
 }
 
 pub(super) fn set_sail_actions(
