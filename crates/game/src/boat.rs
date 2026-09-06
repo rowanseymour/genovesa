@@ -56,7 +56,7 @@ use protocol::{swing_to, BoatId, BoatKind, PlayerId, Underway};
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::{MapCamera, View};
 use crate::models::above;
-use crate::player::Player;
+use crate::player::{Player, PlayerPlace};
 use crate::sea;
 use crate::terrain::Ground;
 use crate::waterline;
@@ -1019,31 +1019,15 @@ impl Boat {
         self.hull.helm()
     }
 
-    /// Where the hull parts the water, in its own frame — see [`Hull::stem`].
-    /// The wake is laid from here rather than from the origin amidships, so
-    /// that the white water the hull is standing in is water its own bow
-    /// turned over a moment ago.
-    pub fn stem(&self) -> Vec3 {
-        self.hull.stem()
-    }
-
-    /// How wide a stretch of water the hull pushes aside, in metres — its
-    /// beam. What the wake is scaled off, a bigger hull leaving a broader
-    /// one; see [`crate::wake`].
     /// How long the hull is overall, in metres — see [`Hull::length`].
     pub fn length(&self) -> f32 {
         self.hull.length
     }
 
-    pub fn beam(&self) -> f32 {
-        self.hull.beam
-    }
-
-    /// The way the hull is making, in metres a second — negative going
-    /// astern. The hull's own number rather than anything measured off its
-    /// transform, which is the point: a transform moves for reasons that are
-    /// not sailing, and [`crate::wake`] wants the speed the water is being
-    /// stirred at.
+    /// The way the hull is making along its own keel, in metres a second —
+    /// negative going astern. The hull's own number rather than anything
+    /// measured off its transform, which moves for reasons that are not
+    /// sailing.
     pub fn way(&self) -> f32 {
         self.way
     }
@@ -1156,6 +1140,17 @@ impl Rigged {
         hull_of(self.0).length
     }
 
+    /// The hull's beam, in metres — see [`Hull::beam`].
+    pub(crate) fn beam(self) -> f32 {
+        hull_of(self.0).beam
+    }
+
+    /// The stem on the waterline, in the hull's own frame — see
+    /// [`Hull::stem`].
+    pub(crate) fn stem(self) -> Vec3 {
+        hull_of(self.0).stem()
+    }
+
     /// The stemhead in the hull's own frame — see [`Hull::stemhead`].
     pub(crate) fn stemhead(self) -> Vec3 {
         let hull = hull_of(self.0);
@@ -1217,7 +1212,12 @@ pub struct HullId(pub BoatId);
 /// Any hull at all — ours under sail, another's under way, anyone's at
 /// anchor. What the boarding key sweeps for, the components that say *whose*
 /// a hull is coming and going with the helm.
+///
+/// Every hull leaves a wake, whoever is moving it, so the track it is drawn
+/// from comes with the hull rather than with the sailing state — see
+/// [`crate::wake::Track`].
 #[derive(Component)]
+#[require(crate::wake::Track)]
 pub struct Vessel;
 
 /// The hull an oar belongs to, as [`row`] reads it: where it is, its
@@ -1303,6 +1303,13 @@ pub struct Telling {
     /// client may shove and then report; see [`Shoving`], and
     /// [`protocol::ToServer::Shove`] for the rule the server holds it to.
     spoken_for: bool,
+}
+
+impl Telling {
+    /// The way the wire last said the hull was making.
+    pub(crate) fn way(&self) -> Vec2 {
+        self.hull.way
+    }
 }
 
 /// A hull with its anchor down, and where the hook lies on the bottom — the
@@ -2155,6 +2162,79 @@ fn rig(commands: &mut Commands, kit: &mut HullKit, hull: Entity, kind: BoatKind)
     });
 }
 
+/// The eye the sea's lists of hulls are ranked for — the holes it is cut
+/// with and the wakes it is painted from, capped by [`HOLES`] and
+/// [`crate::wake::WAKES`]. The player's own hull comes first whatever else
+/// is about, being the one the camera looks straight down into; the rest go
+/// by how near the world's one [`MapCamera`] they lie.
+///
+/// A schedule without exactly one camera draws nothing and so ranks nothing
+/// — [`Eye::focus`] is `None` — the same precondition
+/// [`crate::sea::refresh_depth`] takes, and the reason a headless test of
+/// either list has to put a camera down before it looks.
+#[derive(SystemParam)]
+pub(crate) struct Eye<'w, 's> {
+    place: PlayerPlace<'w, 's>,
+    cameras: Query<'w, 's, &'static MapCamera>,
+}
+
+impl Eye<'_, '_> {
+    /// What to rank hulls against this frame — see the type.
+    pub(crate) fn focus(&self) -> Option<Focus> {
+        let camera = self.cameras.single().ok()?;
+        Some(Focus {
+            carrier: self.place.carrier(),
+            at: camera.focus.xz(),
+        })
+    }
+}
+
+/// An [`Eye`] resolved for the frame.
+pub(crate) struct Focus {
+    carrier: Option<Entity>,
+    at: Vec2,
+}
+
+impl Focus {
+    /// A hull's place in the list, least first.
+    pub(crate) fn rank(&self, hull: Entity, transform: &Transform) -> Rank {
+        Rank {
+            stranger: Some(hull) != self.carrier,
+            off: transform.translation.xz().distance_squared(self.at),
+        }
+    }
+}
+
+/// Where a hull sorts for an [`Eye`]: `false` before `true`, so the player's
+/// own hull comes first however far off it lies, then nearer before further.
+#[derive(Clone, Copy)]
+pub(crate) struct Rank {
+    stranger: bool,
+    off: f32,
+}
+
+impl Ord for Rank {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.stranger
+            .cmp(&other.stranger)
+            .then(self.off.total_cmp(&other.off))
+    }
+}
+
+impl PartialOrd for Rank {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Rank {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Rank {}
+
 /// How many open hulls the sea can be cut for at once.
 ///
 /// A number rather than a bound worth arguing over: eight is a crowded
@@ -2177,44 +2257,23 @@ pub(crate) const HOLES: usize = 8;
 /// [`crate::wake::lay_the_wake`] — so hulls lying still re-upload nothing.
 ///
 /// A world can hold more open hulls than the material has slots for — tenders
-/// in tow, beached, abandoned — so they are ranked before they are written.
-/// The player's own boat is cut for first whatever else is about, being the
-/// one whose bilges the camera is looking straight down into; the rest go in
-/// by how near the eye they lie, and [`HOLES`] says where that stops.
-///
-/// That eye is the world's one [`MapCamera`], so a schedule without exactly
-/// one of those cuts nothing at all and says nothing about it — the same
-/// precondition [`crate::sea::refresh_depth`] takes, and the reason a headless
-/// test of this has to put a camera down before it looks.
+/// in tow, beached, abandoned — so they are ranked for the [`Eye`] before
+/// they are written, and [`HOLES`] says where that stops.
 fn cut_the_water(
     hulls: Query<(Entity, &Transform, &OpenHull)>,
-    players: Query<&ChildOf, With<Player>>,
-    cameras: Query<&MapCamera>,
+    eye: Eye,
     window: Option<Res<sea::DepthWindow>>,
     materials: Option<ResMut<Assets<sea::SeaMaterial>>>,
 ) {
     let (Some(window), Some(mut materials)) = (window, materials) else {
         return;
     };
-    let Ok(camera) = cameras.single() else {
+    let Some(focus) = eye.focus() else {
         return;
     };
-    let carrier = players.single().ok().map(ChildOf::parent);
 
-    let eye = camera.focus.xz();
     let mut open: Vec<_> = hulls.iter().collect();
-    open.sort_by(|left, right| {
-        let rank = |(hull, transform, _): &(Entity, &Transform, &OpenHull)| {
-            // `false` before `true`, so the player's own hull sorts to the
-            // front of every other boat however far off it is lying.
-            (
-                Some(*hull) != carrier,
-                transform.translation.xz().distance_squared(eye),
-            )
-        };
-        let (left, right) = (rank(left), rank(right));
-        left.0.cmp(&right.0).then(left.1.total_cmp(&right.1))
-    });
+    open.sort_by_key(|(hull, transform, _)| focus.rank(*hull, transform));
 
     // Filled from the front and left zero past the end, which is how the
     // shader knows where the list stops.
@@ -3249,7 +3308,7 @@ fn hold_the_ground(ground: Option<Res<Ground>>, mut hulls: Sounded) {
 /// player steers, the one on its painter, and a stranger's at anchor all
 /// sit on the same surface, and saying so once here is what let the
 /// moorings and the tow stop each keeping an answer of their own.
-fn ride_the_plane(
+pub(crate) fn ride_the_plane(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
     sea: Res<sea::SeaConditions>,

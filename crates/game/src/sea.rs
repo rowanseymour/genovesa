@@ -494,9 +494,8 @@ pub struct SeaExtension {
     /// the difference is read as its neighbour.
     #[uniform(100)]
     pub(crate) daylight: Vec4,
-    /// The wake's band: `x` the half-width of the water a hull turns over at
-    /// its stem, `y` how far the arms open per metre run, `z` how thick an
-    /// arm is, `w` how long a wake lasts.
+    /// The wake's band: `x` how far the arms open per metre run, `y` how
+    /// thick an arm is, `z` how long a wake lasts, `w` padding.
     #[uniform(100)]
     pub(crate) wash: Vec4,
     /// The boil and what wears it away: `x` how fast it widens in metres per
@@ -505,20 +504,24 @@ pub struct SeaExtension {
     /// any mark at all.
     #[uniform(100)]
     pub(crate) boil: Vec4,
-    /// Where the wake could possibly be: `xy` the least corner, `zw` the
-    /// greatest. Water outside it rejects the wake in two comparisons rather
-    /// than walking the track, and a box with its least corner past its
-    /// greatest — which is what this opens as — is water with no wake on it
-    /// at all.
+    /// Where each hull's wake could possibly be: `xy` the least corner, `zw`
+    /// the greatest. Water outside it rejects that wake in two comparisons
+    /// rather than walking the track, and a box with its least corner past
+    /// its greatest — which is what every slot opens as — is a slot with no
+    /// wake in it at all.
     #[uniform(100)]
-    pub(crate) wake_bounds: Vec4,
-    /// The hull's track, newest first: `xy` where its stem was, `z` how many
+    pub(crate) wake_bounds: [Vec4; crate::wake::WAKES],
+    /// Each hull's own shape in the water: `x` the half-width of the water it
+    /// turns over at its stem, `yzw` padding.
+    #[uniform(100)]
+    pub(crate) wake_hull: [Vec4; crate::wake::WAKES],
+    /// Each hull's track, newest first: `xy` where its stem was, `z` how many
     /// seconds ago, `w` the way it was making then. Written by
-    /// [`crate::wake`], which owns every number in these last four fields and
+    /// [`crate::wake`], which owns every number in the wake's five fields and
     /// is where the reasoning for all of them lives; the sea only carries
     /// them to the shader that paints the foam.
     #[uniform(100)]
-    pub(crate) wake: [Vec4; crate::wake::TRAIL],
+    pub(crate) wake: [[Vec4; crate::wake::TRAIL]; crate::wake::WAKES],
     /// The holes the open boats cut in the surface: `xy` the centre of one's
     /// waterline footprint on the map — its widest station — and `zw` the
     /// way that hull is pointing, as a unit vector. Written by
@@ -578,8 +581,9 @@ impl SeaExtension {
             // never allowed to be inside the bounds of.
             wash: Vec4::ZERO,
             boil: Vec4::ZERO,
-            wake_bounds: Vec4::new(1.0, 1.0, -1.0, -1.0),
-            wake: [Vec4::ZERO; crate::wake::TRAIL],
+            wake_bounds: [crate::wake::NOWHERE; crate::wake::WAKES],
+            wake_hull: [Vec4::ZERO; crate::wake::WAKES],
+            wake: [[Vec4::ZERO; crate::wake::TRAIL]; crate::wake::WAKES],
             hole: [Vec4::ZERO; crate::boat::HOLES],
             hole_axes: [Vec4::ZERO; crate::boat::HOLES],
             hole_shape: [Vec4::ZERO; crate::boat::HOLES],

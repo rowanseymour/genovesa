@@ -254,9 +254,10 @@ fn sound_the_wash(
     // Nothing to do until the file has loaded and been given a sink.
     let Some(mut wash) = wash else { return };
 
-    // One boat, because one hull is this player's — the same reason the wake
-    // keeps one track. Told hulls carry neither way nor canvas across the
-    // wire, so a passing stranger is silent until that changes.
+    // One boat, because what is heard is the water in earshot, and that is
+    // the hull under the player's feet. Told hulls carry neither way nor
+    // canvas across the wire, so a passing stranger is silent until that
+    // changes.
     let hull = boats
         .iter()
         .next()
