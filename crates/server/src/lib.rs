@@ -60,7 +60,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{chunk_at, dequantize, ANCHOR_SWING, CHUNK_METRES};
-use protocol::survey::{in_sight_along, Landmass, Soundings, Survey, SIGHT_RADIUS};
+use protocol::survey::{in_sight_along, Landmass, Soundings, Standing, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, WorldId,
     PROTOCOL_VERSION, SURVEY_BATCH_BYTES, TENDER_ASTERN,
@@ -2769,7 +2769,7 @@ fn survey_the_island(world: &Archipelago, spec: &IslandSpec) -> Survey {
 /// Order matters twice here. The held claims are asked before anything else,
 /// so an island somebody already holds is settled without a walk; and the
 /// asker's *own* record is asked before the island's, because
-/// [`Survey::ashore`] costs microseconds where the island walk costs real
+/// [`Survey::standing`] costs microseconds where the island walk costs real
 /// work. Every refusal reaches the asker alone or not at all — broadcast, a
 /// client could pester the whole roster — and the first hold decides, the
 /// claims being re-checked under their lock at the grant.
@@ -2816,12 +2816,12 @@ fn settle_a_claim(shared: &Shared, id: PlayerId) -> bool {
     }
 
     // Standing where a cairn could stand, by the very question the claim key
-    // asked before sending — [`Survey::ashore`], of the server's record for
-    // this player, so the two ends of the gate cannot disagree. A record
+    // asked before sending — [`Survey::standing`], of the server's record
+    // for this player, so the two ends of the gate cannot disagree. A record
     // that rings nothing around the asker's own feet is a survey with coast
     // still open right here, and says so; it is also the cheap half, asked
     // before the island's own coasts are fetched.
-    if !surveyed.held().ashore(at) {
+    if surveyed.held().standing(at) != Standing::Ashore {
         let players = shared.players.held();
         if let Some(player) = players.get(&id) {
             post(player, ToClient::Uncharted);
@@ -3945,6 +3945,37 @@ mod tests {
 mod claims {
     use super::*;
     use glam::IVec2;
+    use protocol::survey::SKERRY_REACH;
+
+    /// The skerry line has to sit under every island the layout places, or
+    /// an island the generator meant is refused as a rock — which is how a
+    /// one-chunk island with a mountain on it went unclaimable once. Swept
+    /// over the smallest islands of more than one seed rather than pinned to
+    /// a favourite, the line being a claim about the generator's whole
+    /// range: a red run here means the line has to move, or the generator
+    /// has started making islands too small to stand on.
+    #[test]
+    fn every_placed_island_clears_the_skerry_line() {
+        let window = Vec2::splat(3_072.0);
+        for seed in [1, 2, 3] {
+            let world = Archipelago::new(&WorldConfig { seed });
+            for spec in world.islands_within(-window, window) {
+                if spec.chunks.max_element() > 2 {
+                    continue;
+                }
+                let biggest = survey_the_island(&world, &spec)
+                    .landmasses()
+                    .iter()
+                    .map(|landmass| landmass.extent)
+                    .fold(0.0, f32::max);
+                assert!(
+                    biggest >= SKERRY_REACH,
+                    "seed {seed}: the island at {:?} is {biggest:.0} m across, under the skerry line",
+                    spec.origin
+                );
+            }
+        }
+    }
 
     /// The crux of a claim, pinned without a socket: an island is every one
     /// of its coastlines, skerries included, and both ends of the comparison

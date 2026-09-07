@@ -21,7 +21,7 @@ use crate::AppState;
 /// The claim key's refusals, in the world's words. Why each is given is the
 /// key's business — see [`crate::player::claim_the_island`].
 pub const AFLOAT: &str = "A cairn is raised on foot";
-pub const A_SKERRY: &str = "A rock this small is nobody's to claim";
+pub const A_SKERRY: &str = "No cairn will stand on a rock this small";
 pub const UNCHARTED: &str = "There is more coast here than you have charted";
 
 /// What the world just said. Inserting it is the whole of asking for it to be
@@ -76,13 +76,14 @@ impl Plugin for NoticePlugin {
             .add_systems(Update, hear.in_set(crate::net::Wire::Read))
             .add_systems(
                 Update,
-                // After `hear`, so a word and a fading line meeting on one
-                // frame resolve in that order: unordered, `speak`'s teardown
-                // commands could apply after `hear`'s insert and delete a
-                // notice that was never drawn — and ordered, a fresh word
-                // shows the same frame it is heard.
+                // After both writers, so a word and a fading line meeting on
+                // one frame resolve in that order: unordered, `speak`'s
+                // teardown commands could apply after a writer's insert and
+                // delete a notice that was never drawn — and ordered, a
+                // fresh word shows the same frame it is heard.
                 speak
                     .after(hear)
+                    .after(crate::player::Afoot)
                     .run_if(in_state(AppState::InWorld).and_then(resource_exists::<Notice>)),
             )
             .add_systems(OnExit(AppState::InWorld), hush);

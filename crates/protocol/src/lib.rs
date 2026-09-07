@@ -645,7 +645,7 @@ pub enum ToServer {
     /// shore and its skerries — and where one island ends is the layout's
     /// business, so the server reads the island from where the asker stands.
     ///
-    /// Granted to a player afoot where [`survey::Survey::ashore`] says a
+    /// Granted to a player afoot where [`survey::Survey::standing`] says a
     /// cairn could stand, whose survey has closed every one of the island's
     /// coastlines, skerries included — both judged over the server's survey
     /// *for that player*, never over the client's assertion. A grant raises

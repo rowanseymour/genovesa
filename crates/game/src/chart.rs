@@ -63,6 +63,16 @@ use crate::{AppState, Helm};
 /// anybody what an island is called. They are held together because they are
 /// the same kind of fact: what *this* player holds about *this* world, gone
 /// with the world when they leave it.
+/// The reach below which an unclaimed landmass goes unlettered, in metres.
+///
+/// The skerry line ([`protocol::survey::SKERRY_REACH`]) sits where a cairn can
+/// stand, and a big island's waterline cuts off dozens of rocks above it —
+/// every one a landmass, none of them a place. A claim gathers them under its
+/// one name; unclaimed, each would be lettered "Unnamed island" on its own,
+/// so the sheet keeps a taller line for those and draws the ground under it
+/// without writing on it.
+const UNNAMED_REACH: f32 = 100.0;
+
 #[derive(Resource, Default)]
 pub struct Chart {
     survey: Survey,
@@ -158,9 +168,12 @@ impl Chart {
             .landmasses()
             .into_iter()
             .filter(|landmass| !landmass.is_skerry())
-            .map(|landmass| {
+            .filter_map(|landmass| {
                 let claim = self.claim_covering(landmass.centre);
-                Landmass {
+                if claim.is_none() && landmass.extent < UNNAMED_REACH {
+                    return None;
+                }
+                Some(Landmass {
                     id: landmass.id,
                     // The survey measures in the world and the lettering goes
                     // on the paper, so the centre makes the same crossing
@@ -171,7 +184,7 @@ impl Chart {
                     extent: landmass.extent,
                     claim,
                     name: claim.and_then(|claim| self.name(claim).map(str::to_string)),
-                }
+                })
             })
             .collect()
     }
@@ -223,10 +236,10 @@ impl Chart {
         self.claims.iter().map(|(island, claim)| (*island, claim))
     }
 
-    /// Whether a world point stands where a cairn could — the survey's own
-    /// question ([`protocol::survey::Survey::ashore`]), asked in world metres
-    /// rather than on the paper. What the claim key asks before it asks the
-    /// world; see [`crate::player::claim_the_island`].
+    /// Where a world point stands — the survey's own question
+    /// ([`protocol::survey::Survey::standing`]), asked in world metres rather
+    /// than on the paper. What the claim key asks before it asks the world;
+    /// see [`crate::player::claim_the_island`].
     pub fn standing(&self, at: Vec2) -> Standing {
         self.survey.standing(at)
     }

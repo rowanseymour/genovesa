@@ -41,7 +41,8 @@ pub enum Action {
     /// takes it off — see `chart::chart_key`.
     Chart,
     /// Stands a cairn on the island underfoot, claiming it — see
-    /// `player::claim_the_island`, which says why when it will not.
+    /// `player::claim_the_island`. Always live: pressed where no cairn can
+    /// be raised, it says why.
     Claim,
 }
 

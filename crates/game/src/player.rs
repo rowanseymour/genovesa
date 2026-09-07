@@ -44,7 +44,7 @@ use crate::cairn::{Cairn, BERTH};
 use crate::chart::Chart;
 use crate::figure::FigurePlugin;
 use crate::net::Online;
-use crate::notice::Notice;
+use crate::notice::{self, Notice};
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
 use crate::{AppState, Helm};
@@ -227,6 +227,7 @@ fn carrier_of(players: &Players) -> Option<Entity> {
 pub struct PlayerPlace<'w, 's> {
     players: Players<'w, 's>,
     carriers: Query<'w, 's, &'static Transform>,
+    swimmers: Query<'w, 's, Has<Swimming>, With<Player>>,
 }
 
 impl PlayerPlace<'_, '_> {
@@ -254,6 +255,12 @@ impl PlayerPlace<'_, '_> {
         self.players
             .single()
             .is_ok_and(|(_, aboard)| aboard.is_some())
+    }
+
+    /// Whether the player is past their depth — see [`Swimming`]. `false`
+    /// outside a match.
+    pub fn swimming(&self) -> bool {
+        self.swimmers.single().is_ok_and(|swimming| swimming)
     }
 
     /// Which way the carrier is pointing on the map, as a unit vector — the
@@ -414,31 +421,21 @@ impl Plugin for PlayerPlugin {
 
 /// Stands a cairn on the island underfoot: the claim, asked for.
 ///
-/// The client asks and the server rules. It could not do otherwise — a claim
-/// is settled against the coast the *world* has watched this player sail, and
-/// this side's chart is a drawing of what it was told, not evidence. Nothing
-/// is named in the ask, because the claimable unit is the island whole —
-/// however many coastlines the world says that is — and where one island
-/// ends is the world's to know. So what this does is ask on the two counts a
-/// player can see for themselves: they are on their own feet, and the sheet
-/// says they stand where a cairn could — see [`protocol::survey::Survey::standing`].
-/// What comes back is the cairn, or word that there is more coast here than
-/// they have surveyed — see [`protocol::ToClient::Uncharted`] — or a silence
-/// that deserves to be one: an island somebody claimed while you were walking
-/// up to it answers itself, the refusal carrying the cairn that beat you to
-/// it.
-///
-/// A refusal judged here is said here, in the same voice the world's is —
-/// see [`crate::notice`]. A key that goes dead without a word reads as a
-/// broken key, and the first such island was taken for a bug: it was a rock
-/// under the skerry line, with a mountain on it, and nothing said so.
+/// The client asks and the server rules — a claim is settled against the
+/// coast the *world* has watched this player sail, and this side's chart is
+/// a drawing of what it was told, not evidence. Nothing is named in the ask,
+/// the claimable unit being the island whole, and where one island ends is
+/// the world's to know. So this asks on the two counts a player can see for
+/// themselves — on their own feet, and standing where the sheet says a cairn
+/// could, see [`protocol::survey::Survey::standing`] — and where either
+/// fails it says which, in the world's own voice: see [`crate::notice`].
 pub(crate) fn claim_the_island(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     online: Option<Res<Online>>,
     chart: Option<Res<Chart>>,
-    players: Query<(&Transform, Option<&ChildOf>), With<Player>>,
+    place: PlayerPlace,
 ) {
     if !keys.just_pressed(bindings.key(Action::Claim)) {
         return;
@@ -446,30 +443,26 @@ pub(crate) fn claim_the_island(
     let Some(chart) = chart else {
         return;
     };
-    let Ok((place, aboard)) = players.single() else {
-        return;
-    };
-    // Afoot: a player aboard is a child of their hull. A cairn is built by
-    // somebody standing on the ground with stones in their hands.
-    if aboard.is_some() {
-        commands.insert_resource(Notice::new(crate::notice::AFLOAT));
+    // A cairn is built by somebody standing on the ground with stones in
+    // their hands: not from a deck, and not treading water.
+    if place.aboard() || place.swimming() {
+        commands.insert_resource(Notice::new(notice::AFLOAT));
         return;
     }
-    let standing = Vec2::new(place.translation.x, place.translation.z);
-    // Asked of the sheet's own survey, and the server asks the very same
-    // question of its own record before granting — one arithmetic, two ends,
-    // see [`protocol::survey::Survey::ashore`]. Not the whole of the
-    // server's judgement, which also wants every coastline of the island
-    // closed; it is the standing half, and it keeps the key from asking
-    // about open water and bare rocks.
+    let Some(standing) = place.on_the_map() else {
+        return;
+    };
+    // The standing half of the server's judgement, which also wants every
+    // coastline of the island closed; that half comes back over the wire as
+    // [`crate::net::Uncharted`].
     match chart.standing(standing) {
         Standing::Ashore => {
             if let Some(online) = online {
                 online.connection.claim();
             }
         }
-        Standing::OnASkerry => commands.insert_resource(Notice::new(crate::notice::A_SKERRY)),
-        Standing::Open => commands.insert_resource(Notice::new(crate::notice::UNCHARTED)),
+        Standing::OnASkerry => commands.insert_resource(Notice::new(notice::A_SKERRY)),
+        Standing::Open => commands.insert_resource(Notice::new(notice::UNCHARTED)),
     }
 }
 
@@ -1191,11 +1184,6 @@ mod tests {
             .expect("a hull has a transform")
     }
 
-    fn boat_transform(app: &mut App) -> Transform {
-        let ship = hull_rigged(app, BoatKind::Sloop);
-        transform_of(app, ship)
-    }
-
     /// One tap of a key — down for a frame, then released — which is the
     /// whole gesture the oar keys read.
     fn tap(app: &mut App, key: KeyCode) {
@@ -1303,6 +1291,14 @@ mod tests {
         go_ashore(&mut app);
         tap(&mut app, KeyCode::KeyC);
         assert_eq!(notice(&app), Some(crate::notice::UNCHARTED));
+        app.world_mut().remove_resource::<Notice>();
+
+        // Afoot on a rock under the skerry line, the ring closed round it:
+        // the case that was taken for a broken key.
+        let standing = player_transform(&mut app).translation.xz();
+        app.insert_resource(a_chart_with_an_island_at(standing, 10.0));
+        tap(&mut app, KeyCode::KeyC);
+        assert_eq!(notice(&app), Some(crate::notice::A_SKERRY));
     }
 
     #[test]
@@ -2687,22 +2683,19 @@ mod tests {
     /// what the claim key reads is the sheet. The block of chunks is what
     /// closes the ring — a cone with no water recorded round it is a coast
     /// that has not been shown to end.
-    fn a_chart_with_an_island_at(middle: Vec2) -> Chart {
+    /// A chart holding one cone of land, `reach` metres in radius about
+    /// `middle` — comfortably inside one chunk, so the block of water round
+    /// it closes the ring. Sixty reads as an island; ten is a skerry.
+    fn a_chart_with_an_island_at(middle: Vec2, reach: f32) -> Chart {
         use protocol::ground::{CHUNK_METRES, CORNERS};
         use protocol::survey::survey;
-
-        // Comfortably inside one chunk, so the block of water round it closes
-        // the ring. A skerry would do as well — the gate is about standing
-        // inside a closed ring, whatever its size — but sixty metres reads as
-        // an island.
-        const REACH: f32 = 60.0;
 
         let heights = |chunk: IVec2| -> Vec<f32> {
             let base = chunk.as_vec2() * CHUNK_METRES;
             (0..CORNERS * CORNERS)
                 .map(|i| {
                     let local = Vec2::new((i % CORNERS) as f32, (i / CORNERS) as f32) * CELL_METRES;
-                    REACH - (base + local).distance(middle)
+                    reach - (base + local).distance(middle)
                 })
                 .collect()
         };
@@ -2718,11 +2711,11 @@ mod tests {
     }
 
     #[test]
-    fn the_claim_key_asks_from_the_beach_and_says_nothing_from_the_helm() {
+    fn the_claim_key_asks_from_the_beach_and_refuses_from_the_helm() {
         // Both halves of what this side judges for itself. A cairn is built by
-        // somebody standing on the ground, so the key is dead at the helm —
-        // and afoot inside a ring the sheet has closed, it asks, the world
-        // being the one that rules on it.
+        // somebody standing on the ground, so at the helm the key says so and
+        // asks nothing — and afoot inside a ring the sheet has closed, it
+        // asks, the world being the one that rules on it.
         use crate::net::{fake_server, Online};
         use protocol::ToServer;
 
@@ -2733,16 +2726,20 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set timeout");
 
+        // The sheet's island is drawn round a spot on the shore's dry apron,
+        // where a walker put down by hand is on their feet rather than over
+        // their depth.
+        let standing = Vec2::new(SHORE_WATERLINE - 10.0, 0.0);
         let mut app = shore_app();
-        let afloat = boat_transform(&mut app).translation.xz();
-        app.insert_resource(a_chart_with_an_island_at(afloat));
+        app.insert_resource(a_chart_with_an_island_at(standing, 60.0));
         app.insert_resource(Online::new(connection));
 
-        // Aboard, standing inside the very ring that would earn it: nothing
-        // crosses. The silence is bracketed by a word said after it, a socket
-        // that has gone quiet being indistinguishable from one that never
-        // spoke.
-        press_claim(&mut app);
+        // Aboard, the refusal is said here and nothing crosses. The silence
+        // is bracketed by a word said after it, a socket that has gone quiet
+        // being indistinguishable from one that never spoke.
+        tap(&mut app, KeyCode::KeyC);
+        assert_eq!(notice(&app), Some(crate::notice::AFLOAT));
+        app.world_mut().remove_resource::<Notice>();
         app.world()
             .resource::<Online>()
             .connection
@@ -2760,25 +2757,24 @@ mod tests {
         // rather than by the gunwale key: a served world's crossings wait on
         // tellings this fake server will never send, and none of that is what
         // the claim key is about.
-        let player = app
-            .world_mut()
-            .query_filtered::<Entity, With<Player>>()
-            .single(app.world())
-            .expect("a match should have a player in it");
-        app.world_mut()
-            .entity_mut(player)
-            .remove::<ChildOf>()
-            .insert(Transform::from_xyz(afloat.x, 0.0, afloat.y));
-        app.update();
+        put_afoot(&mut app, standing);
         assert_eq!(aboard(&mut app), None, "the player is still aboard");
-        let standing = player_transform(&mut app).translation.xz();
+        assert!(
+            !swimming(&mut app),
+            "ten metres up the apron is not dry ground"
+        );
         assert_eq!(
             app.world().resource::<Chart>().standing(standing),
             Standing::Ashore,
             "the walker was stood inside the test island's ring"
         );
-        press_claim(&mut app);
+        tap(&mut app, KeyCode::KeyC);
         assert_eq!(next_word(&server), ToServer::Claim);
+        assert_eq!(
+            notice(&app),
+            None,
+            "an ask that crossed was refused here too"
+        );
     }
 
     /// The next thing the client actually *says*, past the traffic every
@@ -2794,16 +2790,6 @@ mod tests {
                 word => return word,
             }
         }
-    }
-
-    /// One press of the claim key, released again afterwards.
-    fn press_claim(app: &mut App) {
-        hold(app, KeyCode::KeyC);
-        run_frames(app, 1);
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .release(KeyCode::KeyC);
-        run_frames(app, 1);
     }
 
     fn place_in<T>(world: &mut World, read: impl FnOnce(PlayerPlace) -> T) -> T {

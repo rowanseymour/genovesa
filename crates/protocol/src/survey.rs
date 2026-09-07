@@ -700,20 +700,12 @@ impl Survey {
         landmasses
     }
 
-    /// Whether a point stands where a cairn could — [`Standing::Ashore`],
-    /// see [`Survey::standing`].
-    ///
-    /// The standing half of the claim, and deliberately *one* question: the
-    /// claim key asks it before sending and the server asks it of its own
-    /// record before granting — see [`crate::ToServer::Claim`] — so the two
-    /// ends cannot disagree about where the key is live.
-    pub fn ashore(&self, at: Vec2) -> bool {
-        self.standing(at) == Standing::Ashore
-    }
-
-    /// Where a point stands, by the coastlines this survey has closed —
-    /// what [`Survey::ashore`] asks, kept apart into its refusals so a client
-    /// can say which one it is giving.
+    /// Where a point stands, by the coastlines this survey has closed: the
+    /// standing half of the claim, and deliberately *one* question. The claim
+    /// key asks it before sending and the server asks it of its own record
+    /// before granting — see [`crate::ToServer::Claim`] — so the two ends
+    /// cannot disagree about where the key is live; the refusals are kept
+    /// apart so a client can say which one it is giving.
     ///
     /// A point in a lagoon is ashore — the water in the middle of a place is
     /// part of the place, and somebody who has run the whole outer shore has
@@ -765,7 +757,7 @@ impl Survey {
 /// One walked ring as a landmass, if it is one — the measuring and the test
 /// that decides, in the one place, for every caller who walks the coasts.
 ///
-/// [`Survey::landmasses`], [`Survey::ashore`] and [`Survey::tally`] each ask
+/// [`Survey::landmasses`], [`Survey::standing`] and [`Survey::tally`] each ask
 /// the same question of every ring [`Survey::coastlines`] hands over, and what
 /// a landmass *is* must be one answer: a ring that counted towards the tally
 /// and then failed to appear in the list would be two rules wearing one name.
@@ -1736,16 +1728,30 @@ mod tests {
             kept.record(chunk, survey(&a_cone(chunk, middle, 60.0)));
         }
 
-        assert!(kept.ashore(middle), "the middle of a landmass is not on it");
-        assert_eq!(kept.standing(middle), Standing::Ashore);
-        assert!(
-            !kept.ashore(middle + Vec2::new(400.0, 0.0)),
-            "open water four hundred metres out is somebody's ground"
+        assert_eq!(
+            kept.standing(middle),
+            Standing::Ashore,
+            "the middle of a landmass is not on it"
         );
         assert_eq!(
             kept.standing(middle + Vec2::new(400.0, 0.0)),
-            Standing::Open
+            Standing::Open,
+            "open water four hundred metres out is somebody's ground"
         );
+    }
+
+    #[test]
+    fn an_island_just_past_the_skerry_line_is_ground_to_claim_from() {
+        // The band the line was moved for: the smallest island the generator
+        // sets out to make comes out under a hundred metres of dry ground,
+        // and every one of those has to be lettered and claimable. Fifty
+        // metres across, which a hundred-metre line would have called a rock.
+        let middle = Vec2::splat(CHUNK_METRES / 2.0);
+        let mut kept = Survey::default();
+        kept.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 25.0)));
+
+        assert_eq!(counted(&kept), (1, 0, 1), "a small island went unlettered");
+        assert_eq!(kept.standing(middle), Standing::Ashore);
     }
 
     #[test]
@@ -1772,8 +1778,11 @@ mod tests {
 
         assert_eq!(counted(&kept), (1, 0, 0), "a skerry was worth lettering");
         assert_eq!(kept.landmasses().len(), 1, "a skerry is still a landmass");
-        assert!(!kept.ashore(middle), "a rock awash took the claim key live");
-        assert_eq!(kept.standing(middle), Standing::OnASkerry);
+        assert_eq!(
+            kept.standing(middle),
+            Standing::OnASkerry,
+            "a rock awash took the claim key live"
+        );
         assert_eq!(
             kept.standing(middle + Vec2::new(50.0, 0.0)),
             Standing::Open,
@@ -1821,12 +1830,16 @@ mod tests {
         assert_eq!((complete, open), (2, 0), "an atoll is two closed shores");
         assert_eq!(lettered, 1, "the lagoon counted as a landmass of its own");
 
-        assert!(
-            kept.ashore(middle),
+        assert_eq!(
+            kept.standing(middle),
+            Standing::Ashore,
             "the lagoon is a hole in its own landmass"
         );
         // And the land itself, out between the lagoon and the sea, is ashore
         // just the same.
-        assert!(kept.ashore(middle + Vec2::new(65.0, 0.0)));
+        assert_eq!(
+            kept.standing(middle + Vec2::new(65.0, 0.0)),
+            Standing::Ashore
+        );
     }
 }
