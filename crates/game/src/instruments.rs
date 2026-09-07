@@ -16,10 +16,11 @@
 //! than that is drawn as the line running off the end of the scale with
 //! nothing on it — no bottom found. So the question a sounding is taken to
 //! answer, *can I lie here*, is answered by whether there is a weight on the
-//! line at all, with no mark to learn. That is the reading over every open
-//! sea, and it is the true one: a client is not told the ocean's floor — see
-//! [`protocol::ground::OCEAN_DEPTH`] — so past the anchor's line the lead has
-//! nothing honest to say anyway.
+//! line at all, with no mark to learn. The shelf between the anchor's reach
+//! and the ocean plane is water the client does know, and it is drawn as no
+//! bottom on purpose, because the answer there is the same. Past the plane
+//! the client is told nothing — see [`protocol::ground::OCEAN_DEPTH`] — so
+//! that is also the reading over every open sea.
 //!
 //! **The day's arc** is the sky seen side-on, with whichever body is up riding
 //! across it — see [`crate::sky::aloft`]. It is a clock and not a bearing: the
@@ -34,7 +35,7 @@ use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource};
 
-use protocol::ground::ANCHOR_DEPTH;
+use protocol::ground::{anchor_holds, ANCHOR_DEPTH};
 
 use crate::camera::PITCH;
 use crate::compass::{FACE_SIZE, MARGIN};
@@ -53,12 +54,8 @@ use crate::{AppState, INK, INK_DIM};
 /// beside it would have the game speaking two measures at one player, the odd
 /// one chosen for flavour. Flavour is what the *drawing* is for.
 ///
-/// Struck from [`ANCHOR_DEPTH`] and not from [`protocol::ground::OCEAN_DEPTH`].
-/// The scale is how much water this instrument *answers for*, and the one
-/// thing it is hung to answer is whether the anchor would hold. A line marked
-/// down to the ocean's floor read *10 m* over every open sea — the client's
-/// ground stops there — and left the player to learn which mark the anchor
-/// stops at. See the module doc for what the line does when it runs out.
+/// Struck from [`ANCHOR_DEPTH`] because the anchor is the question the
+/// instrument answers — the module doc says what the line does past it.
 const SCALE_METRES: f32 = ANCHOR_DEPTH;
 /// Metres of water between one graduation and the next.
 ///
@@ -433,15 +430,13 @@ fn sound(ground: &Ground, at: Vec2) -> Sounding {
     let Some(height) = ground.height(at.x, at.y) else {
         return Sounding::Nothing;
     };
+    if !anchor_holds(height) {
+        return Sounding::NoBottom;
+    }
     // Ground standing above the waterline sounds as no water rather than as
     // negative depth: a boat that has run itself up a beach is in nought
     // water, which is a true and useful thing for the instrument to say.
-    let depth = (-height).max(0.0);
-    if depth > SCALE_METRES {
-        Sounding::NoBottom
-    } else {
-        Sounding::Bottom(depth)
-    }
+    Sounding::Bottom((-height).max(0.0))
 }
 
 /// The sounding written out: whole metres, and the unit with them.
@@ -500,8 +495,8 @@ fn heave_the_lead(
         Sounding::Bottom(depth) => depth * METRE_PIXELS,
         // No bottom runs the line off the end of the marked scale rather than
         // stopping it at the last mark, which would read as a sounding of
-        // five: what says *no bottom* is that there is nothing resting on the
-        // end of it.
+        // exactly that mark: what says *no bottom* is that there is nothing
+        // resting on the end of it.
         Sounding::NoBottom => SCALE + PLUMMET.y,
         Sounding::Nothing => 0.0,
     };
