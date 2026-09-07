@@ -4,9 +4,9 @@
 //
 // This extends the standard PBR material rather than replacing it — the
 // fragment half runs the ordinary standard-material path (colour, alpha,
-// lighting, fog) with two changes: the normal it lights is the facet's own,
-// derived from the displaced surface's slope, and a breaking crest whitens
-// the water's colour before the lighting sees it.
+// lighting, fog) on a flat surface, with two changes: the sun's share of the
+// result is stepped by how the facet leans, in a few fixed tones, and a
+// breaking crest whitens the water's colour before the lighting sees it.
 //
 // The wave parameters arrive through the uniform below, packed by the Rust
 // side (`sea.rs`), which is the single authority on them; the depth of the
@@ -40,9 +40,8 @@ struct SeaParams {
     // w amplitude.
     waves: array<vec4<f32>, 3>,
     // x is where the swell starts fading with distance from the mesh's
-    // centre, y where it has fully gone; z is how much the lit slope is
-    // exaggerated over the real one (`sea::SHADING_TILT`); w how far the
-    // crests are bent off straight (`sea::BEND`).
+    // centre, y where it has fully gone; z padding; w how far the crests are
+    // bent off straight (`sea::BEND`).
     fade: vec4<f32>,
     // The shore wave: x its wavenumber down the depth, y its angular
     // frequency, z its unbroken amplitude, w the breaking slope.
@@ -67,12 +66,17 @@ struct SeaParams {
     // in metres, y how fast it drifts downwind; z the least of the open sea's
     // height a lee leaves standing (`sea::LEE_SEA`); w padding.
     breaking: vec4<f32>,
+    // The facets' tones — `sea::TONE`: x the slope one step takes, y what a
+    // step is as a fraction of the sun's share, z how many steps either side
+    // of flat. w padding.
+    tone: vec4<f32>,
     // The depth window: xy the world coordinates of its corner, z one over
     // its extent, w the depth a full texel encodes.
     window: vec4<f32>,
     // The hour to hold the window's lit intervals against, and half the
     // width of the terminator: x and y, exactly as the ground's own shader
-    // carries them. zw padding.
+    // carries them. zw is where the body lighting that hour stands on the
+    // map, as a unit vector — what the tones are stepped towards.
     daylight: vec4<f32>,
     // The wake's band: x how far the arms open per metre run, y how thick an
     // arm is, z how long a wake lasts. w padding.
@@ -477,8 +481,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     out.world_position = world_position;
     out.position = position_world_to_clip(world_position.xyz);
-    // A placeholder: the fragment half rederives the true facet normal from
-    // the displaced surface itself.
+    // Up, and what the standard lighting lights: a facet's own slope reaches
+    // the picture as a step of tone in the fragment half, not as a normal.
     out.world_normal = vec3(0.0, 1.0, 0.0);
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
@@ -494,22 +498,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         discard;
     }
 
-    // The facet's own normal, from how the displaced surface slopes across
-    // this triangle. Screen-space derivatives are constant across a
-    // triangle, so this is flat shading without duplicating any vertex —
-    // the terrain builds the same look into its buffers instead. The cross
-    // product's handedness depends on the screen's, so rather than reason
-    // about it the normal is simply pointed up, which for a sea it always is.
-    var faceted = in;
-    let slope = cross(dpdy(in.world_position.xyz), dpdx(in.world_position.xyz));
-    var normal = normalize(slope) * sign(slope.y);
-    // Lit more steeply than the water really slopes — see `sea::SHADING_TILT`
-    // for why the honest tilt cannot be seen. Scaling the horizontal
-    // components of a unit normal scales the slope it encodes.
-    normal = normalize(vec3(normal.x * sea.fade.z, normal.y, normal.z * sea.fade.z));
-    faceted.world_normal = normal;
-
-    var pbr_input = pbr_input_from_standard_material(faceted, is_front);
+    var pbr_input = pbr_input_from_standard_material(in, is_front);
 
     // Foam: white where the shore wave is breaking — its cap biting, which
     // is water shallower than the unbroken wave demands — and only on the
@@ -607,6 +596,18 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.material.base_color =
         alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
+    // The tone this facet is drawn in — see `sea::TONE`. The cross product of
+    // the position's screen-space derivatives is the facet's normal, constant
+    // across a triangle, so this is flat shading without duplicating any
+    // vertex; its horizontal part over its vertical is how steeply the facet
+    // leans, and dividing takes the cross product's handedness out with it.
+    // Leaning towards the light's bearing is positive. Snapped to the nearest
+    // step and held to the last step either side of flat.
+    let slope = cross(dpdy(in.world_position.xyz), dpdx(in.world_position.xyz));
+    let lean = dot(slope.xz, sea.daylight.zw) * sign(slope.y) / max(abs(slope.y), 1e-6);
+    let steps = clamp(round(lean / sea.tone.x), -sea.tone.z, sea.tone.z);
+    let tone = 1.0 + steps * sea.tone.y;
+
     var out: FragmentOutput;
     let full = apply_pbr_lighting(pbr_input);
 
@@ -626,7 +627,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.diffuse_occlusion,
     ) * view.exposure;
 
-    out.color = mix(vec4(shaded, full.a), full, sunlight_at(at));
+    // Composed as the ground composes its shadow, with the tone a factor on
+    // the sun's share alone — `mix` does not clamp, so a tone over one
+    // brightens — so a trough in a headland's shadow is no darker for being
+    // a trough. The share is only as exact as `shaded` matches the ambient
+    // inside `full`: the material's trace of reflectance is on the sun's
+    // side of the split.
+    out.color = mix(vec4(shaded, full.a), full, tone * sunlight_at(at));
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }

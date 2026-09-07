@@ -978,7 +978,13 @@ fn shade_the_ground(
         }
     }
     if let Some(mut sea) = window.and_then(|window| seas.get_mut(window.material())) {
-        sea.extension.daylight.x = hour;
+        // The mirrored hour is the moon's hour, so this is the moon's bearing
+        // by night — the same body the light is hung from. Never zero: the
+        // arc leans off the pole (`protocol::SUN_TILT`), so the body always
+        // stands somewhere on the map.
+        let body = protocol::towards_the_sun(hour);
+        let bearing = Vec2::new(body.x, body.z).normalize_or_zero();
+        sea.extension.daylight = Vec4::new(hour, sea.extension.daylight.y, bearing.x, bearing.y);
     }
 }
 
