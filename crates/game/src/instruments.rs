@@ -11,12 +11,15 @@
 //! graduated, and the weight resting where the bottom is. The reading is the
 //! *position of the weight*: the figure beside it says the same thing in
 //! metres, but a player who never reads it still sees the bottom coming up as
-//! they close a shore, which is the question the instrument exists for. Water
-//! deeper than the scale is drawn as the line running off the end of it with
-//! nothing on it — no bottom found — and that is deliberately the shape the
-//! reading will keep when the ocean is deepened past anchoring: the instrument
-//! already says *this is more water than you can lie to*, and will not need a
-//! second way of saying it.
+//! they close a shore, which is the question the instrument exists for. The
+//! line is marked down to the anchor's reach and no further, and water deeper
+//! than that is drawn as the line running off the end of the scale with
+//! nothing on it — no bottom found. So the question a sounding is taken to
+//! answer, *can I lie here*, is answered by whether there is a weight on the
+//! line at all, with no mark to learn. That is the reading over every open
+//! sea, and it is the true one: a client is not told the ocean's floor — see
+//! [`protocol::ground::OCEAN_DEPTH`] — so past the anchor's line the lead has
+//! nothing honest to say anyway.
 //!
 //! **The day's arc** is the sky seen side-on, with whichever body is up riding
 //! across it — see [`crate::sky::aloft`]. It is a clock and not a bearing: the
@@ -30,6 +33,8 @@ use std::f32::consts::TAU;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource};
+
+use protocol::ground::ANCHOR_DEPTH;
 
 use crate::camera::PITCH;
 use crate::compass::{FACE_SIZE, MARGIN};
@@ -48,13 +53,13 @@ use crate::{AppState, INK, INK_DIM};
 /// beside it would have the game speaking two measures at one player, the odd
 /// one chosen for flavour. Flavour is what the *drawing* is for.
 ///
-/// Not struck from [`protocol::ground::OCEAN_DEPTH`], either. The scale is how
-/// much water this instrument can *answer for*, and the ocean's floor is how
-/// much there is — tying them would grow the line every time the world got
-/// deeper, when the right answer past a certain depth is that the lead has
-/// stopped being the tool. See the module doc for what the line does when it
-/// runs out.
-const SCALE_METRES: f32 = 10.0;
+/// Struck from [`ANCHOR_DEPTH`] and not from [`protocol::ground::OCEAN_DEPTH`].
+/// The scale is how much water this instrument *answers for*, and the one
+/// thing it is hung to answer is whether the anchor would hold. A line marked
+/// down to the ocean's floor read *10 m* over every open sea — the client's
+/// ground stops there — and left the player to learn which mark the anchor
+/// stops at. See the module doc for what the line does when it runs out.
+const SCALE_METRES: f32 = ANCHOR_DEPTH;
 /// Metres of water between one graduation and the next.
 ///
 /// Two rather than one: at a metre the marks crowd close enough to read as a
@@ -167,7 +172,7 @@ struct DayBody {
 enum Sounding {
     /// The weight is on the bottom, this many metres down.
     Bottom(f32),
-    /// Deeper than the line is marked for — see the module doc.
+    /// Deeper than the anchor holds in — see the module doc.
     NoBottom,
     /// Nothing to sound: the ground under the boat has not arrived. Refused
     /// rather than held, for the reason the compass hides its bow when there
@@ -656,6 +661,7 @@ mod tests {
     use crate::terrain::Ground;
     use protocol::ground::{
         quantize, ChunkPayload, Material, CELL_COUNT, CELL_METRES, CORNERS, LIT_ALL_DAY,
+        OCEAN_DEPTH,
     };
 
     /// A chunk of sea bed at one depth all over. Open to the sun everywhere:
@@ -803,9 +809,9 @@ mod tests {
             top
         };
 
-        let mut deep = a_player_over(-8.0, true);
+        let mut deep = a_player_over(-6.0, true);
         let mut shoal = a_player_over(-2.0, true);
-        assert!((plummet(&mut deep) - 8.0 * METRE_PIXELS).abs() < 1.0);
+        assert!((plummet(&mut deep) - 6.0 * METRE_PIXELS).abs() < 1.0);
         assert!((plummet(&mut shoal) - 2.0 * METRE_PIXELS).abs() < 1.0);
         assert_eq!(reading(&mut shoal).1, "2 m");
     }
@@ -847,11 +853,23 @@ mod tests {
         assert!((depth - 3.0).abs() < 0.01, "sounded {depth} metres");
     }
 
+    /// The line runs out exactly where the anchor does — the same number
+    /// [`crate::boat::tend_the_anchor`] refuses at — so a weight on the line
+    /// is a promise the hook would hold. Either side of the line rather than
+    /// on it: the bed's height comes through the wire's own steps.
     #[test]
-    fn water_past_the_scale_finds_no_bottom() {
-        // The reading the deep ocean will give when it is deepened — see the
-        // module doc. Nothing rests on the end of the line.
-        let (ground, at) = over_a_bed(-(SCALE_METRES + 1.0));
+    fn the_line_runs_out_where_the_anchor_does() {
+        let (ground, at) = over_a_bed(-(ANCHOR_DEPTH - 0.1));
+        assert!(matches!(sound(&ground, at), Sounding::Bottom(_)));
+        let (ground, at) = over_a_bed(-(ANCHOR_DEPTH + 0.1));
+        assert_eq!(sound(&ground, at), Sounding::NoBottom);
+    }
+
+    #[test]
+    fn the_open_sea_finds_no_bottom() {
+        // What a client is told of the ocean's floor is only that it is at
+        // least this deep, and the line does not reach it either way.
+        let (ground, at) = over_a_bed(-OCEAN_DEPTH);
         assert_eq!(sound(&ground, at), Sounding::NoBottom);
     }
 
