@@ -38,7 +38,7 @@ use protocol::ground::CELL_METRES;
 use protocol::BoatKind;
 
 use crate::bindings::{Action, KeyBindings};
-use crate::boat::{over_the_side, Boat, Fleet, HullId, Rigged, Towed, Vessel};
+use crate::boat::{over_the_side, Boat, Fleet, HullId, Placing, Rigged, Towed, Vessel};
 use crate::cairn::{Cairn, BERTH};
 use crate::chart::Chart;
 use crate::figure::FigurePlugin;
@@ -305,6 +305,12 @@ impl PlayerPlace<'_, '_> {
 /// [`crate::net::enter_afoot`] puts down somebody entering on their own feet:
 /// the ground at the far end of a jump has not arrived yet, and their old
 /// island's height is no better a guess than the waterline.
+///
+/// A hull is handed to the solver as a [`Placing`] as well as moved by its
+/// transform — the transform for everything that reads the pose this frame,
+/// the placing for the solver, which would otherwise write its own pose back
+/// over the transform; see there. The placing also brings the boat on the
+/// hull's painter along.
 pub fn put_down(
     commands: &mut Commands,
     fleet: &Fleet,
@@ -336,6 +342,10 @@ pub fn put_down(
     if afoot {
         commands.entity(carrier).insert(Unsettled);
     } else {
+        commands.entity(carrier).insert(Placing {
+            at,
+            heading: facing,
+        });
         // Way off, sails furled, heel and pitch back to nothing. Written as
         // a whole boat rather than as a furl and a stop because that is what
         // "at rest" already is here, and the two would drift apart the day
@@ -1989,6 +1999,53 @@ mod tests {
             "the swimmer never climbed aboard"
         );
         assert!(!swimming(&mut app), "aboard and still swimming");
+    }
+
+    #[test]
+    fn a_helm_put_down_somewhere_is_there_next_frame() {
+        // The world's `goto` at a helm, as the wire delivers it: the hull the
+        // player is seated at stands where the world said, at rest, facing
+        // the way it said — and stays there, rather than being drawn back to
+        // where the solver last had it. The word lands in the same drain the
+        // solver's own frame starts from, so where it lands in that frame is
+        // the whole of whether it holds.
+        let mut app = world_app();
+        let there = Vec2::new(300.0, -200.0);
+        app.world_mut().write_message(crate::net::PutDown {
+            position: there,
+            heading: Some(1.0),
+        });
+        run_frames(&mut app, 3);
+
+        let hull = *app
+            .world_mut()
+            .query_filtered::<&Transform, With<Boat>>()
+            .single(app.world())
+            .expect("a match should have a boat in it");
+        let at = Vec2::new(hull.translation.x, hull.translation.z);
+        assert!(
+            at.distance(there) < 0.5,
+            "the hull was put down at {there} and stands at {at}"
+        );
+        let (yaw, ..) = hull.rotation.to_euler(EulerRot::YXZ);
+        assert!(
+            (yaw - 1.0).abs() < 1e-3,
+            "the hull was put down on 1.0 rad and lies on {yaw}"
+        );
+        // And the boat on the painter with it, a painter's length astern,
+        // rather than left behind for the rope to snatch the ship back to.
+        let forward = *hull.forward();
+        let tender = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Towed>>()
+            .single(app.world())
+            .expect("the ship has a boat on its painter");
+        let astern = hull.translation - forward * protocol::TENDER_ASTERN;
+        assert!(
+            tender.translation.xz().distance(astern.xz()) < 0.5,
+            "the boat lies at {} rather than astern of the ship at {astern}",
+            tender.translation
+        );
     }
 
     #[test]

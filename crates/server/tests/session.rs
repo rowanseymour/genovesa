@@ -12,8 +12,7 @@ use protocol::{
     BeastId, BeastKind, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, PROTOCOL_VERSION,
 };
 use server::{Host, Server};
-use world::archipelago::WorldConfig;
-use world::archipelago::{Archipelago, IslandSpec};
+use world::archipelago::{Archipelago, IslandSpec, WorldConfig, ENTRY};
 
 /// How long a reader waits for the message it is after before failing the
 /// test. Long enough that a loaded machine is not mistaken for a session that
@@ -47,6 +46,26 @@ const ADRIFT: f32 = 8.0;
 /// are here to say what the server's answers *should* have been.
 fn behind_the_curtain(seed: u32) -> Archipelago {
     Archipelago::new(&WorldConfig { seed })
+}
+
+/// A newcomer taken by the console from the entry to a berth off the nearest
+/// land — water the anchor holds in, which the open sea a world is entered
+/// on is not. Where every test of a hull at rest starts, and the same door a
+/// tester goes through to look at an island.
+fn berthed_off_the_first_land(client: &Client, seed: u32) -> Vec2 {
+    let inland = behind_the_curtain(seed)
+        .first_land()
+        .expect("a world has land to berth off")
+        .centre();
+    // The joining chatter first, so that the put down is the only word about
+    // this hull still to come — see `Client::hear_put_down_alone`.
+    client.caught_up();
+    client.say(ToServer::Command {
+        line: format!("goto {} {}", inland.x, inland.y),
+    });
+    let (berth, _) = client.hear_put_down_alone();
+    let _ = client.hear_reply();
+    berth
 }
 
 /// The chunk a world point stands in.
@@ -891,20 +910,20 @@ fn a_client_is_welcomed_with_somewhere_to_stand_and_something_to_look_at() {
 
     // The welcome no longer names a seed — a client has nothing to generate,
     // so the world it is in is a place rather than a number. What identifies
-    // it is where the player was put down: players enter on the world's own
-    // spawn point, the open water off its first island, scattered a few
-    // boat-lengths so arrivals don't stack.
-    let entry = behind_the_curtain(7)
-        .spawn()
-        .expect("the seed offers somewhere to enter");
+    // it is where the player was put down: players enter on the world's
+    // entry, the open water around the origin, scattered a few boat-lengths
+    // so arrivals don't stack.
     assert!(
-        spawn.distance(entry.point) <= server::SPAWN_SCATTER,
+        spawn.distance(ENTRY) <= server::SPAWN_SCATTER,
         "{spawn} is not the patch of water players enter on"
     );
 
-    // And the view opens on the island that water stands off, which the
-    // client could not have worked out for itself.
-    assert_eq!(facing, entry.island.centre());
+    // And the view opens towards the nearest land, which the client could
+    // not have worked out for itself.
+    let first = behind_the_curtain(7)
+        .first_land()
+        .expect("the seed offers land to face");
+    assert_eq!(facing, first.centre());
 }
 
 #[test]
@@ -1214,8 +1233,7 @@ fn a_spawned_host_serves_the_same_world() {
     // is drawing frames alongside it.
     let host = spawn_host(7);
     let (_client, _id, spawn, _facing) = Client::join(host.addr());
-    let entry = behind_the_curtain(7).spawn().expect("somewhere to enter");
-    assert!(spawn.distance(entry.point) <= server::SPAWN_SCATTER);
+    assert!(spawn.distance(ENTRY) <= server::SPAWN_SCATTER);
 }
 
 #[test]
@@ -1263,10 +1281,10 @@ fn a_port_can_be_hosted_again_once_the_host_is_dropped() {
         .expect("the port is still held")
         .spawn()
         .expect("spawn");
-    let (_client, _id, spawn, _) = Client::join(again.addr());
-    let entry = behind_the_curtain(2).spawn().expect("somewhere to enter");
+    let (_client, _id, spawn, facing) = Client::join(again.addr());
+    let first = behind_the_curtain(2).first_land().expect("land to face");
     assert!(
-        spawn.distance(entry.point) <= server::SPAWN_SCATTER,
+        spawn.distance(ENTRY) <= server::SPAWN_SCATTER && facing == first.centre(),
         "the second world is not the one being served"
     );
 }
@@ -1431,11 +1449,10 @@ fn a_stranger_and_a_token_nobody_dealt_both_enter_fresh() {
     // after all: the join starts them on the spawn with fresh papers, as if
     // they had presented nothing.
     let addr = host(7);
-    let entry = behind_the_curtain(7).spawn().expect("somewhere to enter");
     let (_client, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(Token(12_345)));
     assert_ne!(dealt, Token(12_345), "a token nobody dealt was believed");
     assert!(
-        spawn.distance(entry.point) <= server::SPAWN_SCATTER,
+        spawn.distance(ENTRY) <= server::SPAWN_SCATTER,
         "a stranger was put down somewhere other than the spawn"
     );
 }
@@ -2686,9 +2703,8 @@ fn in_sight_of(at: Vec2) -> Vec<IVec2> {
 #[test]
 fn a_player_is_told_the_survey_of_where_they_are_put_down() {
     // The survey is the world's: nobody has to look at anything to have it,
-    // and arriving is already having looked. Exactly the ground within sight
-    // of the spawn, and no more — the far side of the island they were put
-    // down beside is theirs to go round for.
+    // and arriving is already having looked. Exactly the water within sight
+    // of the spawn, and no more — every coast is theirs to sail for.
     let addr = host(7);
     let (client, _id, spawn, _facing) = Client::join(addr);
     let wanted = in_sight_of(spawn);
@@ -2703,12 +2719,6 @@ fn a_player_is_told_the_survey_of_where_they_are_put_down() {
             "{chunk} was surveyed from {spawn}, which cannot see it"
         );
     }
-    // And there is a coast in it: the world is entered a few dozen metres off
-    // one, so a survey of the spawn that found nothing found nothing wrong.
-    assert!(
-        charted.values().any(|ink| !ink.coast.is_empty()),
-        "the water off an island surveyed to no coast at all"
-    );
 }
 
 #[test]
@@ -2721,16 +2731,18 @@ fn the_two_ends_survey_one_chunk_the_same_way() {
     // coast runs disagree about whether it closes, and so about whether
     // anybody has been round it.
     let addr = host(7);
-    let (client, _id, spawn, _facing) = Client::join(addr);
+    let (client, _id, _spawn, _facing) = Client::join(addr);
+    // Off a coast, the entry being open sea with none in sight.
+    let berth = berthed_off_the_first_land(&client, 7);
     let charted = client.hear_the_survey(HashMap::new(), |charted| {
-        charted.len() >= in_sight_of(spawn).len()
+        charted.len() >= in_sight_of(berth).len()
             && charted.values().any(|ink| !ink.coast.is_empty())
     });
 
     let (chunk, told) = charted
         .iter()
         .find(|(_, ink)| !ink.coast.is_empty())
-        .expect("some coast within sight of the spawn");
+        .expect("some coast within sight of the berth");
     let ground = client.ask_for(*chunk).expect("ground under a coast");
     let heights: Vec<f32> = ground.heights.iter().copied().map(dequantize).collect();
     assert_eq!(
@@ -3372,8 +3384,17 @@ fn a_passing_hull_reads_the_stones_and_a_landing_reads_the_word() {
     let (centre, _across, _ashore) = an_island_to_sail_round(&world, ashore);
     let seaward = (ashore - centre).normalize_or(Vec2::X);
     let standing_off = ashore + seaward * ((server::CAIRN_SIGHT + server::CAIRN_VISIT) / 2.0);
-    let (bob, _id, spawn, _facing) = Client::join(addr);
-    sail_to(&bob, spawn, standing_off);
+    // Put down well out to sea beyond it first: a way sailed from the entry
+    // could pass anywhere, the stones included, and a jump is not a way.
+    let (bob, _id, _spawn, _facing) = Client::join(addr);
+    bob.caught_up();
+    let far = ashore + seaward * (2.0 * server::CAIRN_SIGHT);
+    bob.say(ToServer::Command {
+        line: format!("goto {} {}", far.x, far.y),
+    });
+    let (seaward_of_it, _) = bob.hear_put_down_alone();
+    let _ = bob.hear_reply();
+    sail_to(&bob, seaward_of_it, standing_off);
 
     let (told, at, name, yours) = bob.hear_a_cairn();
     assert_eq!(told, island, "a cairn for some other island");
@@ -3989,7 +4010,7 @@ fn grant_deals_a_hull_and_leaves_the_boarding_to_whoever_asked() {
 
     // And from dry land, where a hull cannot be: it lies off the nearest
     // shore instead, and the answer says how far there is to swim for it.
-    let inland = world.spawn().expect("a world has islands").island.centre();
+    let inland = world.first_land().expect("a world has islands").centre();
     assert!(
         world.height(inland.x, inland.y) >= 0.0,
         "the middle of an island should be land for this to be about anything"
@@ -4026,25 +4047,20 @@ fn where_reads_the_helm_the_water_and_the_tow() {
     let ship = aboard.expect("a newcomer's story starts aboard");
 
     // Aboard and afloat, which is how every world is entered: the helm names
-    // the hull, and the water under it is the water the world has there.
+    // the hull, and the water under it is the open sea the world has there —
+    // too deep for the hook, which is the first thing a newcomer learns.
     client.say(ToServer::Command {
         line: "where".to_string(),
     });
     let reply = client.hear_reply();
-    let depth = -world.height(spawn.x, spawn.y);
+    let open = -world.height(spawn.x, spawn.y);
     assert!(
         reply.starts_with("at the helm of a sloop at"),
         "a newcomer at a helm was answered: {reply}"
     );
     assert!(
-        reply.contains(&format!("afloat in {depth:.1} m")),
-        "the world has {depth:.1} m at the spawn, and `where` said: {reply}"
-    );
-    // The spawn is a berth, so it is inside the anchor's reach by
-    // construction — see `world::archipelago::a_berth`.
-    assert!(
-        reply.contains("an anchor holds here"),
-        "a world is entered at an anchorage, and `where` said: {reply}"
+        reply.contains(&format!("afloat in {open:.1} m, too deep to anchor")),
+        "the world has {open:.1} m at the entry, and `where` said: {reply}"
     );
     // And the boat astern, which is the third thing the reading is for.
     assert!(
@@ -4052,21 +4068,37 @@ fn where_reads_the_helm_the_water_and_the_tow() {
         "a newcomer's ship has its boat on the painter, and `where` said: {reply}"
     );
 
+    // Off a shore, taken there by the console, which berths a driven hull
+    // in water the anchor holds in — see `world::archipelago::a_berth`.
+    let inland = world
+        .first_land()
+        .expect("a world has islands in it")
+        .centre();
+    client.say(ToServer::Command {
+        line: format!("goto {} {}", inland.x, inland.y),
+    });
+    let (berth, _) = client.hear_put_down_alone();
+    let _ = client.hear_reply();
+    client.say(ToServer::Command {
+        line: "where".to_string(),
+    });
+    let reply = client.hear_reply();
+    let depth = -world.height(berth.x, berth.y);
+    assert!(
+        reply.contains(&format!("afloat in {depth:.1} m, and an anchor holds here")),
+        "a hull is berthed at an anchorage, and `where` said: {reply}"
+    );
+
     // Ashore on their own feet. The sloop is nobody's now, so nothing is
     // read about it or the boat behind it.
-    // The beach the spawn lies off, walked to along the line to the island's
+    // The beach the berth lies off, walked to along the line to the island's
     // middle: a few dozen metres, so the hull left behind is still alongside
     // enough to board back from at the end.
-    let inland = world
-        .spawn()
-        .expect("a world has islands in it")
-        .island
-        .centre();
-    let towards = (inland - spawn).normalize();
+    let towards = (inland - berth).normalize();
     let ashore = (1..200)
-        .map(|out| spawn + towards * out as f32 * 2.0)
+        .map(|out| berth + towards * out as f32 * 2.0)
         .find(|at| world.height(at.x, at.y) >= 0.0)
-        .expect("a spawn lies off a shore that can be walked up");
+        .expect("a berth lies off a shore that can be walked up");
     client.say(ToServer::Disembark { position: ashore });
     client.caught_up();
     client.say(ToServer::Command {
@@ -4091,7 +4123,7 @@ fn where_reads_the_helm_the_water_and_the_tow() {
     // with water under them rather than beach, and the fifth wording the
     // reading has. Beside the sloop as well, a boarding being granted only
     // within `BOARD_GRANT` of a helm.
-    client.say(ToServer::Move { position: spawn });
+    client.say(ToServer::Move { position: berth });
     client.caught_up();
     client.say(ToServer::Command {
         line: "where".to_string(),
@@ -4147,7 +4179,7 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
     let ship = aboard.expect("a world is entered at a helm");
     let (tender, _) = client.hear_the_tender_of(ship);
     let world = behind_the_curtain(7);
-    let inland = world.spawn().expect("a world has islands").island.centre();
+    let inland = world.first_land().expect("a world has islands").centre();
     assert!(
         world.height(inland.x, inland.y) >= 0.0,
         "the middle of an island should be land for this to be about anything"
@@ -4390,6 +4422,29 @@ fn open_sea_near(world: &Archipelago, spawn: Vec2) -> Vec2 {
         .expect("an ocean has open water in it")
 }
 
+/// Water an anchor holds in with sea room down the wind: the spot nearest
+/// `near` over the shelf whose whole swing downwind is afloat. The console
+/// berths a hull a sounding off the shore, and a hull whose cable would lay
+/// it on the beach fetches up instead of swinging — see `server::sea` — so a
+/// test of the swing wants water the swing can happen in.
+fn an_anchorage_with_sea_room(world: &Archipelago, near: Vec2, downwind: Vec2) -> Vec2 {
+    let afloat = |at: Vec2| world.height(at.x, at.y) < -2.0;
+    let holds = |at: Vec2| world.height(at.x, at.y) > -protocol::ground::ANCHOR_DEPTH;
+    let swing = protocol::ground::ANCHOR_SWING + 3.0;
+    let mut best: Option<(f32, Vec2)> = None;
+    for dz in -64..=64 {
+        for dx in -64..=64 {
+            let at = near + Vec2::new(dx as f32, dz as f32) * 4.0;
+            let room = (0..=6).all(|i| afloat(at + downwind * (swing * i as f32 / 6.0)));
+            if holds(at) && room && best.is_none_or(|(d, _)| at.distance(near) < d) {
+                best = Some((at.distance(near), at));
+            }
+        }
+    }
+    best.expect("some water over the shelf with sea room down the wind")
+        .1
+}
+
 /// The console's `gale`, as the sea tests order it after its `breeze`: a
 /// bearing a right angle from the breeze's, so ordering one after the other
 /// is a wind that has veered. The vector is the console's own — see
@@ -4409,9 +4464,9 @@ fn an_anchor_holds_over_the_shelf_and_not_over_the_open_sea() {
     let addr = host(7);
     let (client, id, spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
-    let (tender, astern) = client.hear_the_tender_of(ship);
+    let (tender, _) = client.hear_the_tender_of(ship);
     client.order("world weather breeze");
-    client.caught_up();
+    let berth = berthed_off_the_first_land(&client, 7);
 
     let world = behind_the_curtain(7);
     let deep = open_sea_near(&world, spawn);
@@ -4424,16 +4479,18 @@ fn an_anchor_holds_over_the_shelf_and_not_over_the_open_sea() {
     assert_eq!(hull.at, deep, "the refusal moved the ship");
     assert_eq!(anchor, None, "an anchor held over the open ocean");
 
+    // Back to the berth by the same report, tender and all: a hull the
+    // client moves is the client's to report, boat on the painter included.
     client.say(ToServer::Helm {
-        hull: Underway::lying(spawn, 0.0),
-        tender: Some(Underway::lying(astern, 0.0)),
+        hull: Underway::lying(berth, 0.0),
+        tender: Some(Underway::lying(berth + Vec2::new(0.0, 8.0), 0.0)),
     });
     client.say(ToServer::Anchor);
     let (hull, _, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the anchor");
-    assert_eq!(hull.at, spawn, "dropping the hook moved the ship");
+    assert_eq!(hull.at, berth, "dropping the hook moved the ship");
     let hook = anchor.expect("an anchor refused over the shelf");
     assert_eq!(
-        hook, spawn,
+        hook, berth,
         "the hook went down somewhere other than under the hull"
     );
     let reply = client.order("where");
@@ -4549,16 +4606,23 @@ fn an_anchored_hull_swings_to_lie_downwind_of_its_hook() {
     // hull is drawn round to lie downwind of its hook on the new wind, and
     // at no point is it further from the hook than its cable.
     let addr = host(7);
-    let (client, _id, spawn, _token, aboard) = Client::join_aboard(addr, None);
+    let (client, _id, _spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
     client.order("world weather breeze");
-    client.caught_up();
+    let berth = berthed_off_the_first_land(&client, 7);
+    // And from the berth to water the swing has room in.
+    let world = behind_the_curtain(7);
+    let anchorage = an_anchorage_with_sea_room(&world, berth, GALE.normalize());
+    client.say(ToServer::Helm {
+        hull: Underway::lying(anchorage, 0.0),
+        tender: None,
+    });
     client.say(ToServer::Anchor);
     let (_, _, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the anchor");
     let hook = anchor.expect("an anchor refused over the shelf");
     let cable = protocol::ground::ANCHOR_SWING;
     client.say(ToServer::Disembark {
-        position: spawn + Vec2::new(3.0, 0.0),
+        position: anchorage + Vec2::new(3.0, 0.0),
     });
     client.order("world weather gale");
 
@@ -4593,6 +4657,9 @@ fn a_boat_taken_in_tow_comes_off_its_anchor() {
     let (client, id, _spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
     let (tender, _) = client.hear_the_tender_of(ship);
+    // Over the shelf, where a hook can hold; the jump brings the boat on the
+    // painter along, so it is alongside to be boarded.
+    berthed_off_the_first_land(&client, 7);
     client.say(ToServer::Board { boat: tender });
     client.boat_changed_hands(tender, Some(id));
     client.say(ToServer::Anchor);
@@ -4679,7 +4746,7 @@ fn a_kept_world_reopens_with_its_anchors_down() {
 
     let (client, _id, _spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("aboard");
-    client.caught_up();
+    berthed_off_the_first_land(&client, 7);
     client.say(ToServer::Anchor);
     let (_, _, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the anchor");
     let hook = anchor.expect("an anchor refused over the shelf");
