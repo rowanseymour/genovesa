@@ -1,5 +1,13 @@
 //! A server and its clients talking over real sockets: the handshake, the
 //! introductions, the relay, the ground, and leaving.
+//!
+//! The night tests read the clock's pace off the clock's own steps, never off
+//! a stopwatch, because how long a tick takes in real seconds is the
+//! machine's business: on a loaded one the asking waits seconds behind the
+//! survey of the asker's own arrival before the first tick is wound at all,
+//! and a stopwatch cannot tell that wait from a night that never ran. Ten
+//! seconds of one failed on it, and six hundred milliseconds before that
+//! failed on a tick that did not fit.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
@@ -33,18 +41,12 @@ const PATIENCE: Duration = Duration::from_secs(120);
 /// than sent in one burst.
 const SURVEY_PATIENCE: Duration = Duration::from_secs(240);
 
-/// The smallest step between two tellings of the time that can only be a
-/// night being run off. A wound tick moves the day by a fiftieth of it
-/// exactly, where a telling's worth of the day passing on its own moves it a
-/// six-hundredth, so any step is plainly one or the other.
-///
-/// The night tests read the pace off the clock's steps rather than off a
-/// stopwatch because how long a tick takes in real seconds is the machine's
-/// business, and on a loaded one the asking waits seconds behind the survey
-/// of the asker's own arrival before the first tick is wound at all. A
-/// stopwatch cannot tell that wait from a night that never ran: ten seconds
-/// of one failed on it, and six hundred milliseconds before that failed on a
-/// tick that did not fit.
+/// The least the day may have moved between two tellings of the time, over
+/// and above what the wall clock between them moved it, that can only be a
+/// wound tick — see [`Client::ask_for_dawn_by`]. A wound tick runs the day
+/// on by a fiftieth of it; the day passing on its own moves it by the wall
+/// clock and nothing more, however long the sky thread took over the
+/// telling, so any telling is plainly one or the other.
 const PLAINLY_WOUND: f32 = 0.01;
 
 /// How far the sea may have carried a hull nobody is aboard — and the
@@ -853,12 +855,30 @@ impl Client {
 
     /// The next word on what time it is, ignoring everything else.
     fn hear_the_time(&self) -> f32 {
-        let deadline = Instant::now() + PATIENCE;
+        self.hear_the_time_by(Instant::now() + PATIENCE, "the time of day")
+    }
+
+    /// The same, on a caller's deadline and in a caller's words — see
+    /// [`Client::hear_a_boat_kinded_by`].
+    fn hear_the_time_by(&self, deadline: Instant, awaited: &str) -> f32 {
         loop {
-            if let ToClient::Daylight { phase } = self.hear_by(deadline, "the time of day") {
+            if let ToClient::Daylight { phase } = self.hear_by(deadline, awaited) {
                 return phase;
             }
         }
+    }
+
+    /// Asks for the night to be over and reads the next telling of the time:
+    /// the hour told, and how far the day moved on from `since` over and
+    /// above what the wall clock in between moved it anyway — a wound tick's
+    /// worth or nothing, which is what [`PLAINLY_WOUND`] tells apart.
+    fn ask_for_dawn_by(&self, since: f32, deadline: Instant, awaited: &str) -> (f32, f32) {
+        let asked = Instant::now();
+        self.say(ToServer::WantDawn);
+        let told = self.hear_the_time_by(deadline, awaited);
+        let step = (told - since).rem_euclid(1.0);
+        let own = asked.elapsed().as_secs_f32() / protocol::DAY_SECONDS;
+        (told, step - own)
     }
 
     /// Reads until the line gives out, and says how. Whatever the session had
@@ -1343,46 +1363,49 @@ fn a_night_everybody_is_waiting_out_runs_off_to_daybreak() {
     let addr = host_at(3, 0.10);
     let (client, _id, _, _) = Client::join(addr);
 
-    // Asked until daybreak, the wall clock only a hang guard — see
-    // `PLAINLY_WOUND` for why the pace is not read off it. What the pace is
-    // read off is what the day did once the night was plainly running: a
-    // fiftieth of it at most may have passed at the day's own pace, which is
-    // twelve seconds of the asking lapsing against a run that wants about
-    // one. A night crawled through unwound ends the loop the same way and
-    // fails the same check, having never plainly run at all.
+    // Asked until daybreak, the wall clock only a hang guard: the pace is
+    // read off the clock's own steps, see `PLAINLY_WOUND`. What is proved is
+    // that the night was run off rather than sat through — once it was
+    // plainly running, the day passing on its own while the asking lapsed
+    // counts for less than the wound ticks do. Against them rather than
+    // against a fixed share of the night, because a loaded machine lapses
+    // the asking for as long as it likes, and what that must not do is
+    // outweigh a run that still happened. A night crawled through unwound
+    // ends the loop the same way, having never plainly run at all.
     let opened = client.hear_the_time();
     let deadline = Instant::now() + PATIENCE;
     let mut phase = opened;
-    let mut running_from = None;
+    let mut wound = 0.0;
     let mut crawled = 0.0;
     while protocol::is_night(phase) {
-        assert!(
-            Instant::now() < deadline,
-            "the night never ran off: {opened} then {phase}"
+        let (told, beyond) = client.ask_for_dawn_by(
+            phase,
+            deadline,
+            &format!("the night to run off from {opened}, at {phase}"),
         );
-        client.say(ToServer::WantDawn);
-        let told = client.hear_the_time();
-        let step = (told - phase).rem_euclid(1.0);
-        if step >= PLAINLY_WOUND {
-            running_from.get_or_insert(phase);
-        } else if running_from.is_some() && protocol::is_night(told) {
+        if beyond >= PLAINLY_WOUND {
+            wound += beyond;
+        } else if wound > 0.0 && protocol::is_night(told) {
             // The step onto daybreak is left out: it is the run capped at
             // what was left of the night, which the check below is about.
-            crawled += step;
+            crawled += (told - phase).rem_euclid(1.0);
         }
         phase = told;
     }
-    let running_from = running_from.unwrap_or_else(|| {
-        panic!("the night passed at the day's own pace from {opened} to {phase}")
-    });
     assert!(
-        crawled < 0.02,
-        "the day passed on its own for {crawled} between {running_from} and {phase} with everybody waiting"
+        wound > 0.0,
+        "the night passed at the day's own pace from {opened} to {phase}"
+    );
+    assert!(
+        crawled < wound,
+        "the day passed on its own for {crawled} against {wound} run off, with everybody waiting"
     );
     // Landed on daybreak, not somewhere past it: a fast clock that overshot
-    // would take the sunrise with it.
+    // would take the sunrise with it. Within a quarter of a wound tick, so
+    // that a run left uncapped could not land inside the tolerance from
+    // anywhere in the night.
     assert!(
-        phase < protocol::DAYBREAK + 0.02,
+        phase < protocol::DAYBREAK + 0.005,
         "the night ran past daybreak to {phase}"
     );
 }
@@ -1435,15 +1458,13 @@ fn a_night_stops_running_off_once_the_asking_stops() {
     let giving_up = Instant::now() + PATIENCE;
     let mut phase = opened;
     loop {
-        assert!(
-            Instant::now() < giving_up,
-            "the night never started running: {opened} then {phase}"
+        let (told, beyond) = client.ask_for_dawn_by(
+            phase,
+            giving_up,
+            &format!("the night to start running: {opened} then {phase}"),
         );
-        client.say(ToServer::WantDawn);
-        let told = client.hear_the_time();
-        let step = (told - phase).rem_euclid(1.0);
         phase = told;
-        if step >= PLAINLY_WOUND {
+        if beyond >= PLAINLY_WOUND {
             break;
         }
     }
@@ -1707,14 +1728,10 @@ fn a_boat_left_at_anchor_is_anyones_within_reach() {
     // Bob hears the helm empty out where she left it.
     let deadline = Instant::now() + PATIENCE;
     let at = loop {
-        let (told, at, _h, occupant) = bob.hear_a_boat();
-        if told == a_boat && occupant.is_none() {
-            break at;
+        let (hull, occupant, _, _) = bob.hear_of(a_boat, deadline, "the abandoned helm told empty");
+        if occupant.is_none() {
+            break hull.at;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the abandoned helm was never told empty"
-        );
     };
     assert_eq!(at, far, "the boat did not stay where its helmsman left it");
 
@@ -1736,17 +1753,7 @@ fn a_boat_left_at_anchor_is_anyones_within_reach() {
         position: far + Vec2::new(1.0, 0.0),
     });
     bob.say(ToServer::Board { boat: a_boat });
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let (told, _, _, occupant) = bob.hear_a_boat();
-        if told == a_boat && occupant == Some(b) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the helm alongside was never granted"
-        );
-    }
+    bob.boat_changed_hands(a_boat, Some(b));
     let _ = a; // Alice's id has no further part; the boat outlived her visit.
 }
 
@@ -1814,9 +1821,7 @@ fn a_tender_stays_on_its_painter_when_its_helmsman_leaves_the_world() {
     // Bob hears her go and her helm freed, and nothing about the boat
     // behind it: nothing about it changed.
     let deadline = Instant::now() + PATIENCE;
-    while bob.hear() != (ToClient::Left { id: a }) {
-        assert!(Instant::now() < deadline, "nobody left the world");
-    }
+    while bob.hear_by(deadline, "anybody leaving the world") != (ToClient::Left { id: a }) {}
     let (told, _, _, occupant, _) = bob.hear_a_hull();
     assert_eq!(
         (told, occupant),
@@ -2072,8 +2077,7 @@ fn hanging_up_in_the_boat_puts_you_back_in_it() {
         alice.boat_changed_hands(tender, Some(a));
         drop(alice);
         let deadline = Instant::now() + PATIENCE;
-        while watcher.hear() != (ToClient::Left { id: a }) {
-            assert!(Instant::now() < deadline, "nobody left the world");
+        while watcher.hear_by(deadline, "anybody leaving the world") != (ToClient::Left { id: a }) {
         }
 
         let (back, id, _spawn, dealt, seat) = Client::join_aboard(addr, Some(token));
@@ -2123,9 +2127,7 @@ fn a_returner_seated_in_a_towed_boat_comes_off_the_painter() {
     alice.boat_changed_hands(tender, Some(a));
     drop(alice);
     let deadline = Instant::now() + PATIENCE;
-    while bob.hear() != (ToClient::Left { id: a }) {
-        assert!(Instant::now() < deadline, "nobody left the world");
-    }
+    while bob.hear_by(deadline, "anybody leaving the world") != (ToClient::Left { id: a }) {}
 
     // Bob steps off his own deck, swims across to the boat she left, and
     // takes the helm of her ship from its thwarts — which puts her boat on
@@ -2263,14 +2265,7 @@ fn a_taken_boat_is_not_resumed_into() {
         position: far + Vec2::new(1.0, 0.0),
     });
     bob.say(ToServer::Board { boat: a_boat });
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let (told, _, _, occupant) = bob.hear_a_boat();
-        if told == a_boat && occupant == Some(b) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the take never took");
-    }
+    bob.boat_changed_hands(a_boat, Some(b));
 
     // Where she was, give or take what the sea did with the hull before Bob
     // took it — see [`ADRIFT`].
@@ -2330,14 +2325,11 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     });
     let deadline = Instant::now() + PATIENCE;
     loop {
-        let (told, at, _h, occupant) = bob.hear_a_boat();
-        if told == a_boat && occupant.is_none() && at == moored {
+        let (hull, occupant, _, _) =
+            bob.hear_of(a_boat, deadline, "the boat left free somewhere else");
+        if occupant.is_none() && hull.at == moored {
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the boat was never left free somewhere else"
-        );
     }
     let _ = b;
 
@@ -2381,25 +2373,11 @@ fn a_boat_taken_up_and_left_where_it_lay_is_resumed_into() {
         position: alices_spawn,
     });
     bob.say(ToServer::Board { boat: a_boat });
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let (told, _at, _h, occupant) = bob.hear_a_boat();
-        if told == a_boat && occupant == Some(b) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the take never took");
-    }
+    bob.boat_changed_hands(a_boat, Some(b));
     bob.say(ToServer::Disembark {
         position: alices_spawn,
     });
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let (told, _at, _h, occupant) = bob.hear_a_boat();
-        if told == a_boat && occupant.is_none() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the step ashore was never told");
-    }
+    bob.boat_changed_hands(a_boat, None);
 
     let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
     assert!(
@@ -3904,14 +3882,11 @@ fn console_lines_are_answered_and_a_time_command_reaches_everyone() {
     });
     assert_eq!(asker.hear_reply(), "the day has run on to 18:00");
     let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let heard = bystander.hear_the_time();
-        if (heard - 0.75).abs() < 0.01 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the bystander's day stands at {heard}, not the evening the console ordered"
+    let mut heard = bystander.hear_the_time_by(deadline, "the evening the console ordered");
+    while (heard - 0.75).abs() >= 0.01 {
+        heard = bystander.hear_the_time_by(
+            deadline,
+            &format!("the evening the console ordered, the bystander's day standing at {heard}"),
         );
     }
 }
@@ -4732,9 +4707,7 @@ fn a_sleeper_at_a_drifting_helm_is_carried_with_the_hull() {
     let watcher = Client::join(addr).0;
     drop(alice);
     let deadline = Instant::now() + PATIENCE;
-    while watcher.hear() != (ToClient::Left { id: a }) {
-        assert!(Instant::now() < deadline, "nobody left");
-    }
+    while watcher.hear_by(deadline, "anybody leaving the world") != (ToClient::Left { id: a }) {}
 
     // Long enough for a gale to have plainly moved the hull.
     std::thread::sleep(Duration::from_secs(3));
