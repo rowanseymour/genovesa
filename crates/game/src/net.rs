@@ -94,10 +94,8 @@ pub struct Connection {
     pub id: PlayerId,
     /// Where the server puts arriving players down.
     pub spawn: Vec2,
-    /// A ground point the opening view is turned towards — the island the
-    /// spawn stands off. Equal to the spawn when the server had nothing in
-    /// particular to offer, which names no direction and leaves the bearing
-    /// alone.
+    /// A ground point the opening view is turned towards — see
+    /// [`protocol::ToClient::Welcome`], whose `facing` this is.
     pub facing: Vec2,
     /// Which world this is — what the client's own files about the world are
     /// keyed by. See [`protocol::WorldId`].
@@ -1569,10 +1567,11 @@ mod tests {
         assert_eq!(first.hosting.as_ref().expect("hosting").seed(), 77);
         // But the seed never reaches a *client*, so that the chosen one
         // actually reached the generator shows only in two of them being two
-        // places.
+        // places — every world is entered on the same water, and what tells
+        // them apart is the land that water faces.
         assert_ne!(
-            first.connection.spawn, second.connection.spawn,
-            "two seeds opened onto the same patch of water"
+            first.connection.facing, second.connection.facing,
+            "two seeds opened facing the same land"
         );
     }
 

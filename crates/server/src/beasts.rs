@@ -1627,18 +1627,20 @@ fn span(entropy: u32, salt: u32, span: (u32, u32)) -> u32 {
 mod tests {
     use super::*;
 
+    use world::archipelago::ENTRY;
+
     use crate::Server;
 
     /// The seed the session tests sail, and a world of it with the ground
-    /// around the spawn already made: the warden sounds with `ready_height`,
-    /// which answers for open ocean always and for an island only once
-    /// somebody has paid for it. A test that skipped this would be swimming
-    /// beasts through a world that reads as unbroken ocean.
+    /// between the entry and the first land already made: the warden sounds
+    /// with `ready_height`, which answers for open ocean always and for an
+    /// island only once somebody has paid for it. A test that skipped this
+    /// would be swimming beasts through a world that reads as unbroken ocean.
     fn a_sea() -> (Arc<Shared>, Vec2, Vec2) {
         let shared = Server::bind(("127.0.0.1", 0), 7)
             .expect("a server should bind")
             .shared;
-        let (spawn, facing) = (shared.spawn, shared.facing);
+        let (spawn, facing) = (ENTRY, shared.facing.expect("seed 7 has land to face"));
         let middle = (spawn + facing) / 2.0;
         for row in -60..=60 {
             for column in -60..=60 {

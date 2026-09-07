@@ -88,10 +88,10 @@ impl Args {
     /// Points the run at the world a server has just described: where it put
     /// this player down, and the land it said to look at.
     ///
-    /// The spawn stands `SPAWN_OFFSHORE` metres off the coast precisely so
-    /// that land fills the opening screen. An island's portrait — somewhere
-    /// else, from some other bearing — is the socket's business now, and it
-    /// can be taken at any point rather than only at the start.
+    /// The entry is open sea with the nearest land a few hundred metres off,
+    /// so nothing is on the opening screen but the boat. An island's portrait
+    /// — somewhere else, from some other bearing — is the socket's business,
+    /// and it can be taken at any point rather than only at the start.
     pub fn opened_on(&mut self, spawn: Vec2, facing: Vec2) {
         self.view.focus = Vec3::new(spawn.x, 0.0, spawn.y);
         self.view.face(facing);

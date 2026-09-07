@@ -65,7 +65,7 @@ use protocol::{
     BeastKind, BoatId, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, WorldId,
     PROTOCOL_VERSION, SURVEY_BATCH_BYTES, TENDER_ASTERN,
 };
-use world::archipelago::{Archipelago, IslandSpec, WorldConfig};
+use world::archipelago::{Archipelago, IslandSpec, WorldConfig, ENTRY};
 
 pub use keeper::{data_dir, discard, keep_data_in, kept_worlds, KeptWorld};
 
@@ -188,11 +188,11 @@ const ABANDONED_RANGE: f32 = 2_048.0;
 /// further apart than this.
 const ROWED_FROM: f32 = 1_024.0;
 
-/// How far from the world's spawn point an arriving player may be put down,
-/// in metres. A few boat-lengths: enough that two markers are plainly two
+/// How far from the world's entry an arriving player may be put down, in
+/// metres. A few boat-lengths: enough that two markers are plainly two
 /// markers, small enough that everyone still arrives in the same patch of
-/// open water, which the offing `world::archipelago::SPAWN_OFFSHORE` leaves
-/// between the spawn and the nearest frame swallows several times over.
+/// open water, which the clearing around `world::archipelago::ENTRY` swallows
+/// many times over.
 pub const SPAWN_SCATTER: f32 = 12.0;
 
 /// How near a boat a player must stand for a boarding to be granted, in
@@ -438,15 +438,14 @@ pub(crate) struct Shared {
     /// two clients asking for the same chunk are answered from the same
     /// island, not from two generations of it that merely ought to agree.
     pub(crate) world: Arc<Archipelago>,
-    /// Where this world is entered — [`Archipelago::spawn`]'s answer, asked
-    /// once when the server binds. A client has no layout to work it out
-    /// from, so this and [`Shared::facing`] are the whole of what it is told
-    /// about where it has arrived.
-    spawn: Vec2,
-    /// The middle of the island the spawn stands off, so that a client opens
-    /// its view looking at land rather than out to sea. Equal to the spawn
-    /// itself when the layout offered nothing, which names no direction.
-    facing: Vec2,
+    /// The middle of the island nearest the entry — [`Archipelago::first_land`],
+    /// asked once when the server binds — so that a client opens its view
+    /// looking towards land rather than nowhere in particular. A client has
+    /// no layout to work it out from, so this is the whole of what it is told
+    /// about where it has arrived beyond the entry itself. `None` when the
+    /// layout offered nothing: each arrival is then sent their own spot,
+    /// which names no direction.
+    facing: Option<Vec2>,
     /// Which world this is — see [`protocol::WorldId`]. Minted when the
     /// world was first made and constant for its life, however many times it
     /// is reopened or rehosted.
@@ -727,15 +726,12 @@ impl BoatState {
 }
 
 impl Server {
-    /// Binds the listener, makes a fresh world, and asks it where it is
-    /// entered.
+    /// Binds the listener, makes a fresh world, and asks it which land the
+    /// entry faces — a question of the layout alone, so nothing is generated
+    /// until a client asks for ground. The world then stays: everything
+    /// served afterwards comes out of it.
     ///
-    /// That generates the entry island — tens to hundreds of milliseconds,
-    /// once, before anyone can join — and the origin is the fallback the
-    /// world's clearing keeps open should the layout offer nothing. The world
-    /// then stays: everything served afterwards comes out of it.
-    ///
-    /// Nothing is generated beyond that entry island, and no worker is
+    /// Nothing is generated here, and no worker is
     /// started: a bound server is a world with a door, and [`Server::spawn`]
     /// is what opens it. The world is ephemeral until [`Server::keeping_in`]
     /// or [`Server::keeping_at`] says otherwise.
@@ -768,8 +764,7 @@ impl Server {
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let world = Arc::new(Archipelago::new(&WorldConfig { seed: record.seed }));
-        let entry = world.spawn();
-        let spawn = entry.map_or(Vec2::ZERO, |entry| entry.point);
+        let first_land = world.first_land();
 
         // Each claim's reach comes from the layout rather than the file: the
         // layout is the seed's to say. A record naming a chunk this seed
@@ -811,10 +806,7 @@ impl Server {
             queue: mpsc::sync_channel(CHUNK_QUEUE_DEPTH),
             shared: Arc::new(Shared {
                 world,
-                spawn,
-                // A world with no island to look at leaves the bearing to the
-                // client, which is what a facing equal to the spawn means.
-                facing: entry.map_or(spawn, |entry| entry.island.centre()),
+                facing: first_land.map(|spec| spec.centre()),
                 world_id: record.id,
                 name: record.name,
                 next_id: AtomicU32::new(1),
@@ -1467,38 +1459,21 @@ impl Shared {
     }
 
     /// Where a given player is put down. Everyone enters on the world's
-    /// spawn point — open water just off the first island's coast, see
-    /// [`Archipelago::spawn`] — but not on the same square metre: markers
-    /// standing exactly on top of each other read as one player, and what a
-    /// joined session has to show first is that there is somebody else here.
+    /// entry — the open water of [`ENTRY`] — but not on the same square
+    /// metre: markers standing exactly on top of each other read as one
+    /// player, and what a joined session has to show first is that there is
+    /// somebody else here.
     ///
     /// The offset is the player's id run through two irrational strides — the
     /// golden angle for the bearing, a smaller one for how far out — so that
     /// arrivals land well apart without any of them leaving one small circle,
-    /// however many ids a long-lived server has dealt.
+    /// however many ids a long-lived server has dealt. Nothing is sounded:
+    /// the clearing around the entry is open ocean on every seed.
     fn spawn_for(&self, id: PlayerId) -> Vec2 {
         let n = id.0 as f32;
         let bearing = n * 137.508_f32.to_radians();
         let out = SPAWN_SCATTER * (0.4 + 0.6 * (n * 0.618_034).fract());
-        // Halved until the scattered point is still a berth — on a steep
-        // coast a few metres either way is the sand or water the anchor
-        // cannot hold — with the spawn itself the last resort. Asked of
-        // [`Archipelago::ready_height`], this being called with the roster
-        // held on one path: an evicted entry island reads as no answer, and
-        // no answer keeps the scatter rather than generating under a lock.
-        let mut offset = Vec2::from_angle(bearing) * out;
-        for _ in 0..3 {
-            let at = self.spawn + offset;
-            if self
-                .world
-                .ready_height(at.x, at.y)
-                .is_none_or(world::archipelago::a_berth)
-            {
-                return at;
-            }
-            offset *= 0.5;
-        }
-        self.spawn
+        ENTRY + Vec2::from_angle(bearing) * out
     }
 }
 
@@ -1857,7 +1832,7 @@ fn welcome_aboard(
         // direction, which leaves the bearing to the client, exactly as
         // a world with no island to look at does.
         facing: match (returning.is_some(), bow) {
-            (false, _) => shared.facing,
+            (false, _) => shared.facing.unwrap_or(player.position),
             (true, Some(heading)) => {
                 player.position + Vec2::new(-heading.sin(), -heading.cos()) * 64.0
             }
@@ -1977,7 +1952,7 @@ fn seat_the_arrival(
         // boat somebody rowed ashore and left on a beach. With its own boat
         // astern, because nothing else ever puts a rowing boat in the water
         // and a ship without one has no way to the shore but a swim.
-        let heading = aimed(at, shared.facing);
+        let heading = aimed(at, shared.facing.unwrap_or(at));
         let ship = BoatId(keeper::mint());
         boats.insert(
             ship,
@@ -2072,7 +2047,7 @@ fn seat_the_arrival(
 
 /// The point `metres` straight astern of a hull lying at `at` and pointing
 /// `heading` — the client's own convention, see [`aimed`], run backwards.
-fn astern(at: Vec2, heading: f32, metres: f32) -> Vec2 {
+pub(crate) fn astern(at: Vec2, heading: f32, metres: f32) -> Vec2 {
     at + Vec2::new(heading.sin(), heading.cos()) * metres
 }
 

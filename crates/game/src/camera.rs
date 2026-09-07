@@ -78,8 +78,8 @@ impl Default for View {
 
 impl View {
     /// Opens the view on a world: focused where that world is entered, and
-    /// turned to face the island the entry stands off — so a match opens
-    /// with its first land dead ahead of a bow already pointing at it.
+    /// turned towards the nearest land — so a match opens with a bow
+    /// already pointing the way the first leg goes.
     ///
     /// Both are the server's to say, and neither is a client's to recompute:
     /// `spawn` is where this player was put down — the world's own entry
@@ -95,10 +95,9 @@ impl View {
 
     /// Turns the view to look from its focus towards a ground point. The
     /// boat launches pointing down the view's yaw, so this also points the
-    /// bow there — it is what entry uses to open facing the island the
-    /// spawn stands off, first land dead ahead rather than at the camera's
-    /// back. A target at the focus itself names no direction and leaves the
-    /// yaw where it was.
+    /// bow there — it is what entry uses to open facing the nearest land
+    /// rather than with it at the camera's back. A target at the focus
+    /// itself names no direction and leaves the yaw where it was.
     pub fn face(&mut self, target: Vec2) {
         let towards = target - Vec2::new(self.focus.x, self.focus.z);
         if towards == Vec2::ZERO {
