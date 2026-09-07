@@ -35,6 +35,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use protocol::ground::CELL_METRES;
+use protocol::survey::Standing;
 use protocol::BoatKind;
 
 use crate::bindings::{Action, KeyBindings};
@@ -43,6 +44,7 @@ use crate::cairn::{Cairn, BERTH};
 use crate::chart::Chart;
 use crate::figure::FigurePlugin;
 use crate::net::Online;
+use crate::notice::Notice;
 use crate::sea::SeaConditions;
 use crate::terrain::Ground;
 use crate::{AppState, Helm};
@@ -419,17 +421,19 @@ impl Plugin for PlayerPlugin {
 /// however many coastlines the world says that is — and where one island
 /// ends is the world's to know. So what this does is ask on the two counts a
 /// player can see for themselves: they are on their own feet, and the sheet
-/// says they stand where a cairn could — see [`protocol::survey::Survey::ashore`].
+/// says they stand where a cairn could — see [`protocol::survey::Survey::standing`].
 /// What comes back is the cairn, or word that there is more coast here than
 /// they have surveyed — see [`protocol::ToClient::Uncharted`] — or a silence
 /// that deserves to be one: an island somebody claimed while you were walking
 /// up to it answers itself, the refusal carrying the cairn that beat you to
 /// it.
 ///
-/// Asking from a boat is not offered at all. A cairn is built by somebody
-/// standing on the ground with stones in their hands, and the key that would
-/// have done it from the helm is a key that says the world is a menu.
+/// A refusal judged here is said here, in the same voice the world's is —
+/// see [`crate::notice`]. A key that goes dead without a word reads as a
+/// broken key, and the first such island was taken for a bug: it was a rock
+/// under the skerry line, with a mountain on it, and nothing said so.
 pub(crate) fn claim_the_island(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
     online: Option<Res<Online>>,
@@ -439,13 +443,18 @@ pub(crate) fn claim_the_island(
     if !keys.just_pressed(bindings.key(Action::Claim)) {
         return;
     }
-    let (Some(online), Some(chart)) = (online, chart) else {
+    let Some(chart) = chart else {
         return;
     };
-    // Afoot: a player aboard is a child of their hull.
-    let Ok((place, None)) = players.single() else {
+    let Ok((place, aboard)) = players.single() else {
         return;
     };
+    // Afoot: a player aboard is a child of their hull. A cairn is built by
+    // somebody standing on the ground with stones in their hands.
+    if aboard.is_some() {
+        commands.insert_resource(Notice::new(crate::notice::AFLOAT));
+        return;
+    }
     let standing = Vec2::new(place.translation.x, place.translation.z);
     // Asked of the sheet's own survey, and the server asks the very same
     // question of its own record before granting — one arithmetic, two ends,
@@ -453,8 +462,14 @@ pub(crate) fn claim_the_island(
     // server's judgement, which also wants every coastline of the island
     // closed; it is the standing half, and it keeps the key from asking
     // about open water and bare rocks.
-    if chart.ashore(standing) {
-        online.connection.claim();
+    match chart.standing(standing) {
+        Standing::Ashore => {
+            if let Some(online) = online {
+                online.connection.claim();
+            }
+        }
+        Standing::OnASkerry => commands.insert_resource(Notice::new(crate::notice::A_SKERRY)),
+        Standing::Open => commands.insert_resource(Notice::new(crate::notice::UNCHARTED)),
     }
 }
 
@@ -1262,6 +1277,32 @@ mod tests {
             .resource::<Ground>()
             .height(at.x, at.y)
             .expect("the test ground has arrived")
+    }
+
+    /// What the notice line says, if anything is up.
+    fn notice(app: &App) -> Option<&str> {
+        app.world().get_resource::<Notice>().map(Notice::text)
+    }
+
+    #[test]
+    fn the_claim_key_says_why_it_refuses() {
+        let mut app = shore_app();
+        // A chart of nothing: no coast closed anywhere, so wherever the
+        // player stands is open by the sheet's reckoning.
+        app.insert_resource(Chart::default());
+
+        // Aboard, the key is not the claim: it says so rather than going
+        // dead, which is what an unbound key would do.
+        assert!(aboard(&mut app).is_some());
+        tap(&mut app, KeyCode::KeyC);
+        assert_eq!(notice(&app), Some(crate::notice::AFLOAT));
+        app.world_mut().remove_resource::<Notice>();
+
+        // Afoot but ringed by nothing closed: the world's own refusal, given
+        // before the world is asked, in the world's own words.
+        go_ashore(&mut app);
+        tap(&mut app, KeyCode::KeyC);
+        assert_eq!(notice(&app), Some(crate::notice::UNCHARTED));
     }
 
     #[test]
@@ -2731,8 +2772,9 @@ mod tests {
         app.update();
         assert_eq!(aboard(&mut app), None, "the player is still aboard");
         let standing = player_transform(&mut app).translation.xz();
-        assert!(
-            app.world().resource::<Chart>().ashore(standing),
+        assert_eq!(
+            app.world().resource::<Chart>().standing(standing),
+            Standing::Ashore,
             "the walker was stood inside the test island's ring"
         );
         press_claim(&mut app);

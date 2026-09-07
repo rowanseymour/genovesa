@@ -44,7 +44,7 @@ use bevy::prelude::*;
 use bevy::text::{Font, FontSize, FontSource};
 use bevy::window::PrimaryWindow;
 
-use protocol::survey::{Soundings, Survey, SurveyTally};
+use protocol::survey::{Soundings, Standing, Survey, SurveyTally};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::MapCamera;
@@ -227,8 +227,8 @@ impl Chart {
     /// question ([`protocol::survey::Survey::ashore`]), asked in world metres
     /// rather than on the paper. What the claim key asks before it asks the
     /// world; see [`crate::player::claim_the_island`].
-    pub fn ashore(&self, at: Vec2) -> bool {
-        self.survey.ashore(at)
+    pub fn standing(&self, at: Vec2) -> Standing {
+        self.survey.standing(at)
     }
 
     /// What a claimed island is called, if it has been named.

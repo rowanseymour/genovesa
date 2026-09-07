@@ -138,13 +138,15 @@ pub const LEAST_ISLET: f32 = 6.0;
 /// A skerry is surveyed, drawn, and part of the coast a claim requires closed
 /// — but not a place anybody would letter a name over, and not enough on its
 /// own to make its island worth a cairn: an island holding nothing bigger is
-/// refused as though it were bare sea. A hundred metres is a little under the
-/// smallest island the generator sets out to make, so everything *meant* as an
-/// island clears it and the accidents of a coast mostly do not.
+/// refused as though it were bare sea. The line has to sit under the smallest
+/// island the generator *means* to make, and that is a one-chunk map, whose
+/// dry ground comes out anywhere from forty to ninety metres across — a
+/// hundred here once made half the small islands unclaimable, mountain, palms
+/// and all. Thirty admits every one of them and still loses the rocks awash.
 ///
 /// Not to be confused with [`LEAST_ISLET`], which is about ink — what is too
 /// small to draw at all. The gap between the two is exactly the skerries.
-pub const SKERRY_REACH: f32 = 100.0;
+pub const SKERRY_REACH: f32 = 30.0;
 
 // ---------------------------------------------------------------------------
 // The pieces of a survey
@@ -476,6 +478,20 @@ impl Landmass {
     }
 }
 
+/// Where a point stands, as far as a survey can tell — see
+/// [`Survey::standing`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// Inside a closed coastline of a landmass past the skerry line: where a
+    /// cairn could stand.
+    Ashore,
+    /// Inside a closed coastline, but only a skerry's — see [`SKERRY_REACH`].
+    OnASkerry,
+    /// Ringed by nothing closed: open water, or a shore not yet followed all
+    /// the way round.
+    Open,
+}
+
 /// What a survey holds, counted — the whole of it in one walk of the coasts.
 ///
 /// The first two are the record of where somebody has been. The last three are
@@ -684,29 +700,45 @@ impl Survey {
         landmasses
     }
 
-    /// Whether a point stands where a cairn could: inside a closed coastline
-    /// of a landmass past the skerry line. A point in a lagoon counts —
-    /// the water in the middle of a place is part of the place, and somebody
-    /// who has run the whole outer shore has earned it either way — and a
-    /// skerry does not: a rock awash is coast to close, never ground to
-    /// build on.
+    /// Whether a point stands where a cairn could — [`Standing::Ashore`],
+    /// see [`Survey::standing`].
     ///
     /// The standing half of the claim, and deliberately *one* question: the
     /// claim key asks it before sending and the server asks it of its own
     /// record before granting — see [`crate::ToServer::Claim`] — so the two
     /// ends cannot disagree about where the key is live.
     pub fn ashore(&self, at: Vec2) -> bool {
-        let mut inside = false;
+        self.standing(at) == Standing::Ashore
+    }
+
+    /// Where a point stands, by the coastlines this survey has closed —
+    /// what [`Survey::ashore`] asks, kept apart into its refusals so a client
+    /// can say which one it is giving.
+    ///
+    /// A point in a lagoon is ashore — the water in the middle of a place is
+    /// part of the place, and somebody who has run the whole outer shore has
+    /// earned it either way — and so is a point on an islet in a lagoon, the
+    /// atoll's ring being round it too. A skerry alone is not: a rock awash
+    /// is coast to close, never ground to build on.
+    pub fn standing(&self, at: Vec2) -> Standing {
+        let mut found = Standing::Open;
         self.coastlines(&mut |id, ring| {
-            if inside {
+            if found == Standing::Ashore {
                 return;
             }
             let points: Vec<Vec2> = ring.collect();
-            inside = landmass_of(id, &mut points.iter().copied())
-                .is_some_and(|landmass| !landmass.is_skerry())
-                && rings(&points, at);
+            let Some(landmass) = landmass_of(id, &mut points.iter().copied()) else {
+                return;
+            };
+            if rings(&points, at) {
+                found = if landmass.is_skerry() {
+                    Standing::OnASkerry
+                } else {
+                    Standing::Ashore
+                };
+            }
         });
-        inside
+        found
     }
 
     /// Everything the survey holds, counted in a single walk of the coasts.
@@ -1663,12 +1695,12 @@ mod tests {
 
     #[test]
     fn an_islet_ringed_in_one_chunk_is_already_closed() {
-        // Big enough to close, and — at sixty metres across — too small to be
+        // Big enough to close, and — at twenty metres across — too small to be
         // an island anybody names.
         let mut kept = Survey::default();
         kept.record(
             IVec2::ZERO,
-            survey(&a_cone(IVec2::ZERO, Vec2::splat(CHUNK_METRES / 2.0), 30.0)),
+            survey(&a_cone(IVec2::ZERO, Vec2::splat(CHUNK_METRES / 2.0), 10.0)),
         );
 
         assert_eq!(counted(&kept), (1, 0, 0));
@@ -1705,9 +1737,14 @@ mod tests {
         }
 
         assert!(kept.ashore(middle), "the middle of a landmass is not on it");
+        assert_eq!(kept.standing(middle), Standing::Ashore);
         assert!(
             !kept.ashore(middle + Vec2::new(400.0, 0.0)),
             "open water four hundred metres out is somebody's ground"
+        );
+        assert_eq!(
+            kept.standing(middle + Vec2::new(400.0, 0.0)),
+            Standing::Open
         );
     }
 
@@ -1720,7 +1757,7 @@ mod tests {
         half.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 60.0)));
 
         assert_eq!(half.landmasses(), &[], "half a coast closed a landmass");
-        assert!(!half.ashore(middle));
+        assert_eq!(half.standing(middle), Standing::Open);
     }
 
     #[test]
@@ -1731,11 +1768,17 @@ mod tests {
         // off a shore somebody could claim from instead.
         let middle = Vec2::splat(CHUNK_METRES / 2.0);
         let mut kept = Survey::default();
-        kept.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 30.0)));
+        kept.record(IVec2::ZERO, survey(&a_cone(IVec2::ZERO, middle, 10.0)));
 
         assert_eq!(counted(&kept), (1, 0, 0), "a skerry was worth lettering");
         assert_eq!(kept.landmasses().len(), 1, "a skerry is still a landmass");
         assert!(!kept.ashore(middle), "a rock awash took the claim key live");
+        assert_eq!(kept.standing(middle), Standing::OnASkerry);
+        assert_eq!(
+            kept.standing(middle + Vec2::new(50.0, 0.0)),
+            Standing::Open,
+            "the water off a skerry is somebody's ground"
+        );
     }
 
     /// A ring of land with water inside it — an atoll, and the shape that has

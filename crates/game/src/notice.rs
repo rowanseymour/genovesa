@@ -2,20 +2,32 @@
 //!
 //! The wire mostly carries state, and state is drawn where it lives — the
 //! ground as ground, a cairn as stones. This is for the one kind of answer
-//! that is words: today only [`protocol::ToClient::Uncharted`], the claim key
-//! answered with *there is more coast here than you have charted*. The line
+//! that is words: the claim key refused, whether by the world
+//! ([`protocol::ToClient::Uncharted`]) or by the key itself before it asked —
+//! see [`crate::player::claim_the_island`], the one other writer. The line
 //! sits low over the view, holds long enough to be read, and fades — the
 //! world said a thing, and the world is not a dialog to be dismissed.
+//!
+//! The words are kept here, together, because they are one voice: a refusal
+//! judged this side and one judged by the world must read as the same
+//! speaker, and the one the two ends both give — more coast to chart — must
+//! be one string.
 
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource, FontStyle};
 
 use crate::AppState;
 
-/// What the world just said. Inserting it — see [`hear`], the only writer —
-/// is the whole of asking for it to be shown; a new one takes the line over
-/// from whatever was fading there. Showing, holding and fading are this
-/// module's business, and it removes the resource when the line has gone.
+/// The claim key's refusals, in the world's words. Why each is given is the
+/// key's business — see [`crate::player::claim_the_island`].
+pub const AFLOAT: &str = "A cairn is raised on foot";
+pub const A_SKERRY: &str = "A rock this small is nobody's to claim";
+pub const UNCHARTED: &str = "There is more coast here than you have charted";
+
+/// What the world just said. Inserting it is the whole of asking for it to be
+/// shown; a new one takes the line over from whatever was fading there.
+/// Showing, holding and fading are this module's business, and it removes the
+/// resource when the line has gone.
 #[derive(Resource)]
 pub struct Notice {
     text: String,
@@ -29,6 +41,11 @@ impl Notice {
             text: text.into(),
             shown: 0.0,
         }
+    }
+
+    /// The line as it reads.
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -72,14 +89,11 @@ impl Plugin for NoticePlugin {
     }
 }
 
-/// Turns the world's word into the line it means. Today the vocabulary is one
-/// word long; a second speaker would earn `Notice::new` a second caller, not
-/// a queue — the newest word takes the line over, as [`Notice`] says.
+/// Turns the world's word into the line it means. No queue — the newest word
+/// takes the line over, as [`Notice`] says.
 fn hear(mut commands: Commands, mut heard: MessageReader<crate::net::Uncharted>) {
     if heard.read().next().is_some() {
-        commands.insert_resource(Notice::new(
-            "There is more coast here than you have charted",
-        ));
+        commands.insert_resource(Notice::new(UNCHARTED));
     }
 }
 

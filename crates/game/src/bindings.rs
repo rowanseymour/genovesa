@@ -41,7 +41,7 @@ pub enum Action {
     /// takes it off — see `chart::chart_key`.
     Chart,
     /// Stands a cairn on the island underfoot, claiming it — see
-    /// `player::claim_the_island`. Only offered where it would be granted.
+    /// `player::claim_the_island`, which says why when it will not.
     Claim,
 }
 
