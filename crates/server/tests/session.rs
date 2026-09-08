@@ -43,11 +43,21 @@ const SURVEY_PATIENCE: Duration = Duration::from_secs(240);
 
 /// The least the day may have moved between two tellings of the time, over
 /// and above what the wall clock between them moved it, that can only be a
-/// wound tick — see [`Client::ask_for_dawn_by`]. A wound tick runs the day
-/// on by a fiftieth of it; the day passing on its own moves it by the wall
-/// clock and nothing more, however long the sky thread took over the
-/// telling, so any telling is plainly one or the other.
+/// wound tick — see [`Told::beyond`]. A wound tick runs the day on by a
+/// fiftieth of it; the day passing on its own moves it by the wall clock and
+/// nothing more, however long the sky thread took over the telling, so any
+/// telling is plainly one or the other.
 const PLAINLY_WOUND: f32 = 0.01;
+
+/// How many tellings of the time a test watches to satisfy itself that the
+/// night is *not* running off.
+///
+/// A count rather than a while, because what is being watched for would show
+/// on the first telling: a night that is running tells the time every sky
+/// tick and steps a wound tick each time. A fixed stretch of seconds cannot
+/// promise even one telling on a machine loaded enough to matter, and a test
+/// that took no readings would pass by having looked at nothing.
+const TELLINGS_WATCHED: usize = 3;
 
 /// What a seed's world is, to a test that is allowed to know. A client never
 /// gets one of these — that is the whole point of the arrangement — so these
@@ -876,17 +886,19 @@ impl Client {
         }
     }
 
-    /// Asks for the night to be over and reads the next telling of the time:
-    /// the hour told, and how far the day moved on from `since` over and
-    /// above what the wall clock in between moved it anyway — a wound tick's
-    /// worth or nothing, which is what [`PLAINLY_WOUND`] tells apart.
-    fn ask_for_dawn_by(&self, since: f32, deadline: Instant, awaited: &str) -> (f32, f32) {
-        let asked = Instant::now();
+    /// The same, stamped with when it arrived — see [`Told`], which is what
+    /// the night tests read the clock's pace off.
+    fn hear_a_telling_by(&self, deadline: Instant, awaited: &str) -> Told {
+        Told {
+            phase: self.hear_the_time_by(deadline, awaited),
+            heard: Instant::now(),
+        }
+    }
+
+    /// Asks for the night to be over and reads the next telling of the time.
+    fn ask_for_dawn_by(&self, deadline: Instant, awaited: &str) -> Told {
         self.say(ToServer::WantDawn);
-        let told = self.hear_the_time_by(deadline, awaited);
-        let step = (told - since).rem_euclid(1.0);
-        let own = asked.elapsed().as_secs_f32() / protocol::DAY_SECONDS;
-        (told, step - own)
+        self.hear_a_telling_by(deadline, awaited)
     }
 
     /// Reads until the line gives out, and says how. Whatever the session had
@@ -923,6 +935,32 @@ impl Client {
             ToClient::World { id } => id,
             other => panic!("expected to hear which world, heard {other:?}"),
         }
+    }
+}
+
+/// A telling of the time, and when it was heard.
+///
+/// The stamp is the whole of it. How far the day moved between two tellings
+/// says nothing on its own — the day moves anyway — so what a test can read
+/// is what it moved *beyond* the wall clock between them, which is a wound
+/// tick's worth or nothing. Keeping the stamp with the telling rather than
+/// timing a single call is what makes that honest when the tellings are not
+/// read back to back: a baseline that sat in the socket while the test did
+/// something else would otherwise show the wait it sat out as a night
+/// running off.
+#[derive(Clone, Copy)]
+struct Told {
+    phase: f32,
+    heard: Instant,
+}
+
+impl Told {
+    /// How far the day moved on from `since` over and above what the wall
+    /// clock between the two tellings moved it anyway — a wound tick's worth
+    /// or nothing, which is what [`PLAINLY_WOUND`] tells apart.
+    fn beyond(self, since: Told) -> f32 {
+        let step = (self.phase - since.phase).rem_euclid(1.0);
+        step - self.heard.duration_since(since.heard).as_secs_f32() / protocol::DAY_SECONDS
     }
 }
 
@@ -1368,7 +1406,14 @@ fn a_night_everybody_is_waiting_out_runs_off_to_daybreak() {
     // Opened in the small hours, with one player in the world asking for it
     // to be over. The night has to pass at a pace nobody sits through, and
     // stop at daybreak rather than carrying the morning away with it.
-    let addr = host_at(3, 0.10);
+    //
+    // Two and a half wound ticks short of daybreak, and the half is the
+    // point: the landing below can only see a run that was not capped if
+    // there is part of a tick left to cap it to. Opened where the ticks
+    // divide the rest of the night evenly — 0.10 was, within a thousandth —
+    // an uncapped run lands on daybreak by arithmetic, and the check watches
+    // nothing. Half a tick over is the furthest from that either way.
+    let addr = host_at(3, 0.17);
     let (client, _id, _, _) = Client::join(addr);
 
     // Asked until daybreak, the wall clock only a hang guard: the pace is
@@ -1380,41 +1425,56 @@ fn a_night_everybody_is_waiting_out_runs_off_to_daybreak() {
     // the asking for as long as it likes, and what that must not do is
     // outweigh a run that still happened. A night crawled through unwound
     // ends the loop the same way, having never plainly run at all.
-    let opened = client.hear_the_time();
     let deadline = Instant::now() + PATIENCE;
+    let opened = client.hear_a_telling_by(deadline, "the time of day");
     let mut phase = opened;
     let mut wound = 0.0;
     let mut crawled = 0.0;
-    while protocol::is_night(phase) {
-        let (told, beyond) = client.ask_for_dawn_by(
-            phase,
+    // Where the last step of the night set out from, and how much of it was
+    // run off rather than passed — the landing below is about that step.
+    let mut landing = (opened.phase, 0.0);
+    while protocol::is_night(phase.phase) {
+        let told = client.ask_for_dawn_by(
             deadline,
-            &format!("the night to run off from {opened}, at {phase}"),
+            &format!(
+                "the night to run off from {}, at {}",
+                opened.phase, phase.phase
+            ),
         );
+        let beyond = told.beyond(phase);
         if beyond >= PLAINLY_WOUND {
             wound += beyond;
-        } else if wound > 0.0 && protocol::is_night(told) {
+        } else if wound > 0.0 && protocol::is_night(told.phase) {
             // The step onto daybreak is left out: it is the run capped at
             // what was left of the night, which the check below is about.
-            crawled += (told - phase).rem_euclid(1.0);
+            crawled += (told.phase - phase.phase).rem_euclid(1.0);
         }
+        landing = (phase.phase, beyond.max(0.0));
         phase = told;
     }
     assert!(
         wound > 0.0,
-        "the night passed at the day's own pace from {opened} to {phase}"
+        "the night passed at the day's own pace from {} to {}",
+        opened.phase,
+        phase.phase
     );
     assert!(
         crawled < wound,
         "the day passed on its own for {crawled} against {wound} run off, with everybody waiting"
     );
     // Landed on daybreak, not somewhere past it: a fast clock that overshot
-    // would take the sunrise with it. Within a quarter of a wound tick, so
-    // that a run left uncapped could not land inside the tolerance from
-    // anywhere in the night.
+    // would take the sunrise with it. What is held to a quarter of a wound
+    // tick is the run and not where the hour ended up, because the step that
+    // ends the night is one the asking can lapse inside — and a machine that
+    // lapsed it passes the morning at the day's own pace, which is the day
+    // breaking rather than a clock carrying it off. A quarter of a tick is
+    // the tolerance because an uncapped run would overshoot by half of one
+    // from this opening — see it above.
+    let (from, run) = landing;
     assert!(
-        phase < protocol::DAYBREAK + 0.005,
-        "the night ran past daybreak to {phase}"
+        from + run < protocol::DAYBREAK + 0.005,
+        "the night was run from {from} to {} past daybreak, {run} of it wound",
+        from + run
     );
 }
 
@@ -1427,20 +1487,23 @@ fn a_night_keeps_its_pace_while_somebody_is_still_sailing() {
     let (alice, _a, _, _) = Client::join(addr);
     let (_bob, _b, _, _) = Client::join(addr);
 
-    let opened = alice.hear_the_time();
-    let until = std::time::Instant::now() + Duration::from_secs(1);
-    let mut phase = opened;
-    while std::time::Instant::now() < until {
-        alice.say(ToServer::WantDawn);
-        phase = alice.hear_the_time();
+    // Caught up first, so the baseline telling is one that has just been
+    // said rather than one that sat in the socket through Bob's arrival —
+    // see [`Told`].
+    alice.caught_up();
+    let deadline = Instant::now() + PATIENCE;
+    let mut since = alice.hear_a_telling_by(deadline, "the time of day");
+    for _ in 0..TELLINGS_WATCHED {
+        let told = alice.ask_for_dawn_by(deadline, "the night to go on being a night");
+        let beyond = told.beyond(since);
+        assert!(
+            beyond < PLAINLY_WOUND,
+            "the night ran on by {beyond} from {} to {} with somebody still sailing",
+            since.phase,
+            told.phase
+        );
+        since = told;
     }
-
-    // About a second of a ten-minute day has passed, which is under a
-    // hundredth of it; a second of a night running off would be a tenth.
-    assert!(
-        phase - opened < 0.02,
-        "the night ran on from {opened} to {phase} with somebody still sailing"
-    );
 }
 
 #[test]
@@ -1462,15 +1525,18 @@ fn a_night_stops_running_off_once_the_asking_stops() {
     // could only be a wound tick, see `PLAINLY_WOUND` — rather than for a
     // fixed while and then asked whether that was long enough. The deadline
     // is only what a night that never started running looks like.
-    let opened = client.hear_the_time();
     let giving_up = Instant::now() + PATIENCE;
+    let opened = client.hear_a_telling_by(giving_up, "the time of day");
     let mut phase = opened;
     loop {
-        let (told, beyond) = client.ask_for_dawn_by(
-            phase,
+        let told = client.ask_for_dawn_by(
             giving_up,
-            &format!("the night to start running: {opened} then {phase}"),
+            &format!(
+                "the night to start running: {} then {}",
+                opened.phase, phase.phase
+            ),
         );
+        let beyond = told.beyond(phase);
         phase = told;
         if beyond >= PLAINLY_WOUND {
             break;
@@ -1484,28 +1550,31 @@ fn a_night_stops_running_off_once_the_asking_stops() {
     let quiet = std::time::Instant::now();
     let mut before = phase;
     while quiet.elapsed() < Duration::from_millis(2_500) {
-        before = client.hear_the_time();
+        before = client.hear_a_telling_by(giving_up, "the night to be let alone");
     }
     assert!(
-        protocol::is_night(before),
-        "the night ran itself out with nobody asking for it: {before}"
+        protocol::is_night(before.phase),
+        "the night ran itself out with nobody asking for it: {}",
+        before.phase
     );
 
-    // And now the day moves at the pace of a day: a couple of real seconds
-    // of a ten-minute one is a few thousandths, where a night still running
-    // off would be a fifth. Bounded loosely on purpose — what is being told
-    // apart here is two paces sixty times apart, and a loaded machine that
-    // took a few seconds over this is still nowhere near.
-    let measured = std::time::Instant::now();
-    let mut after = before;
-    while measured.elapsed() < Duration::from_secs(2) {
-        after = client.hear_the_time();
+    // And now the day moves at the pace of a day: no telling steps it beyond
+    // what the wall clock moved it anyway, where a night still running off
+    // would step a wound tick every one. Read off the clock's own steps and
+    // not off a stretch of seconds, because a stretch is the one thing a
+    // loaded machine will not honour — see `TELLINGS_WATCHED`.
+    let mut since = before;
+    for _ in 0..TELLINGS_WATCHED {
+        let told = client.hear_a_telling_by(giving_up, "the day to go on passing");
+        let beyond = told.beyond(since);
+        assert!(
+            beyond < PLAINLY_WOUND,
+            "the day ran on by {beyond} from {} to {} with nobody asking",
+            since.phase,
+            told.phase
+        );
+        since = told;
     }
-    let moved = (after - before).rem_euclid(1.0);
-    assert!(
-        moved < 0.02,
-        "the day moved {moved} from {before} to {after} with nobody asking"
-    );
 }
 
 #[test]
@@ -3873,15 +3942,22 @@ fn console_lines_are_answered_and_a_time_command_reaches_everyone() {
 
     // The day run on to evening: the asker hears what came of it, and the
     // bystander's sun moves without them having asked anything — on the beat
-    // of the command, not of the sky thread's next telling. The deadline
-    // does the proving: at ten minutes to the day, the clock could not reach
-    // evening from noon on its own in under two and a half minutes, and a
-    // loaded machine has the whole of the minute to tell of the jump.
+    // of the command, not of the sky thread's next telling.
+    //
+    // What proves the evening was ordered rather than waited for is the wall
+    // clock afterwards, not the wait's own bound: the day could not have
+    // reached evening from noon on its own in under a quarter of it. Which
+    // leaves the wait free to be the usual hang guard. One bound doing both
+    // has to be short enough to prove something and long enough for a loaded
+    // machine to answer inside, and does neither well: at a minute it was a
+    // minute of starvation away from failing, and every second added to it
+    // was a second off the proof.
     asker.say(ToServer::Command {
         line: "world time 18:00".to_string(),
     });
     assert_eq!(asker.hear_reply(), "the day has run on to 18:00");
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let ordered = Instant::now();
+    let deadline = ordered + PATIENCE;
     let mut heard = bystander.hear_the_time_by(deadline, "the evening the console ordered");
     while (heard - 0.75).abs() >= 0.01 {
         heard = bystander.hear_the_time_by(
@@ -3889,6 +3965,11 @@ fn console_lines_are_answered_and_a_time_command_reaches_everyone() {
             &format!("the evening the console ordered, the bystander's day standing at {heard}"),
         );
     }
+    let waited = ordered.elapsed();
+    assert!(
+        waited < Duration::from_secs_f32(0.25 * protocol::DAY_SECONDS),
+        "evening took {waited:?}, which the day could have reached by itself"
+    );
 }
 
 #[test]
