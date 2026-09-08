@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use glam::{IVec2, Vec2};
 use protocol::ground::{dequantize, CHUNK_METRES};
-use protocol::survey::{in_sight, in_sight_along, Soundings, Survey, SIGHT_RADIUS};
+use protocol::survey::{in_sight, in_sight_along, Soundings, Standing, Survey, SIGHT_RADIUS};
 use protocol::{
     BeastId, BeastKind, BoatKind, PlayerId, ToClient, ToServer, Token, Underway, PROTOCOL_VERSION,
 };
@@ -3204,7 +3204,7 @@ fn sail_round_the_island(
     let (centre, across, ashore) = an_island_to_sail_round(&world, spawn);
     let charted = sail_around(&client, spawn, centre, across / 2.0 + OFFING, LEGS);
     assert!(
-        chart_of(&charted).ashore(ashore),
+        chart_of(&charted).standing(ashore) == Standing::Ashore,
         "a coast sailed right round closes a coastline round the summit"
     );
     // The identity a cairn will be told under is the island's own, and a
@@ -3275,7 +3275,7 @@ fn part_of_a_coast_earns_uncharted_rather_than_a_cairn() {
     let offshore = centre + Vec2::from_angle(std::f32::consts::TAU / 4.0) * reach;
     let landfall = a_shore_to_step_out_onto(&world, offshore, centre);
     assert!(
-        !chart_of(&charted).ashore(landfall),
+        chart_of(&charted).standing(landfall) != Standing::Ashore,
         "a quarter of a coast closed a coastline"
     );
 
