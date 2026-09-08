@@ -179,8 +179,23 @@ impl Client {
                 "the deadline passed",
             ));
         }
-        self.0.set_read_timeout(Some(left)).expect("set timeout");
+        self.bound_the_next_read(left);
         ToClient::read(&mut &self.0)
+    }
+
+    /// Bounds the next read at `left` — or leaves it unbounded, on a socket
+    /// the platform will not let us bound.
+    ///
+    /// macOS answers `setsockopt` with `EINVAL` on a socket that can neither
+    /// send nor receive any more, which is where a line the server has hung
+    /// up on ends up. Accepting that refusal costs nothing: such a socket is
+    /// the one whose reads cannot block — whatever is still buffered comes
+    /// back at once, and then the end of the line. So the read is worth
+    /// making anyway, and it is the read that answers the caller. Failing on
+    /// the bookkeeping call instead would report how a timeout went to a
+    /// test that asked how a session ended.
+    fn bound_the_next_read(&self, left: Duration) {
+        let _ = self.0.set_read_timeout(Some(left));
     }
 
     fn join(addr: SocketAddr) -> (Self, PlayerId, Vec2, Vec2) {
@@ -895,7 +910,7 @@ impl Client {
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             assert!(!left.is_zero(), "the session never hung up");
-            self.0.set_read_timeout(Some(left)).expect("set timeout");
+            self.bound_the_next_read(left);
             match ToClient::read(&mut &self.0) {
                 Ok(_) => {}
                 Err(why) if ran_out_of_time(&why) => panic!("the session never hung up"),
@@ -1291,6 +1306,38 @@ fn dropping_the_host_hangs_up_on_everybody() {
             "{who} was left holding a line to a world that has ended: {error}"
         );
     }
+}
+
+#[test]
+fn a_line_finished_at_both_ends_is_still_read_out() {
+    // The test above meets a socket finished in both directions only under
+    // load, a few runs in a hundred, and macOS will not set a read timeout on
+    // one of those — `EINVAL` from the bookkeeping call, on precisely the
+    // socket the reader was called to hear out. So reach that state on
+    // purpose: the client hangs up its own sending half, the server hangs up
+    // in return, and the line is read to its end before the question is put.
+    // What is asked is what the tests above ask, and the answer must be the
+    // same — how the session ended, not how the timeout went.
+    use std::io::Read;
+
+    let host = spawn_host(1);
+    let (client, _id, _, _) = Client::join(host.addr());
+    client
+        .0
+        .shutdown(std::net::Shutdown::Write)
+        .expect("hang up the sending half");
+
+    // Read out whatever the session had already said, and the end of the
+    // line after it, so that nothing below is waiting on the network.
+    let mut sink = [0u8; 1024];
+    while (&client.0).read(&mut sink).expect("the end of the line") > 0 {}
+
+    let error = client.until_hung_up();
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::UnexpectedEof,
+        "a line finished at both ends was reported as {error}"
+    );
 }
 
 #[test]
