@@ -2511,7 +2511,7 @@ fn drop_anchor(shared: &Shared, id: PlayerId) -> Went {
     let Some((boat, at)) = under else {
         return Went::Nowhere;
     };
-    let holds = sea::anchor_holds(shared.world.height(at.x, at.y));
+    let holds = protocol::ground::anchor_holds(shared.world.height(at.x, at.y));
 
     let players = shared.players.held();
     let Some(player) = players.get(&id) else {

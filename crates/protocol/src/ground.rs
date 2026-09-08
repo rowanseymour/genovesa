@@ -132,6 +132,14 @@ pub const ANCHOR_DEPTH: f32 = 8.0;
 
 const _: () = assert!(ANCHOR_DEPTH < OCEAN_DEPTH);
 
+/// Whether an anchor holds over a bed this high — the one rule of
+/// [`ANCHOR_DEPTH`], and the only place it is compared, so the server that
+/// grants an anchor, the key that asks for one and the instrument that says
+/// whether asking is worth it cannot drift apart.
+pub fn anchor_holds(bed: f32) -> bool {
+    bed >= -ANCHOR_DEPTH
+}
+
 /// How far downwind of its hook an anchored hull lies, in metres: the cable
 /// on the surface, which is the radius of the circle the hull swings on.
 ///

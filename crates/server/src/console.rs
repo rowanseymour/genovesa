@@ -45,7 +45,7 @@ use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Underway}
 use world::archipelago::{berth_off, Archipelago, BERTH_OFFING, SOUNDING};
 
 use crate::{
-    aimed, astern, beasts, broadcast, broadcast_all, keeper, post, reachable, sea, BoatState, Held,
+    aimed, astern, beasts, broadcast, broadcast_all, keeper, post, reachable, BoatState, Held,
     Shared,
 };
 
@@ -611,7 +611,7 @@ fn standing_off(world: &Archipelago, asked: Vec2) -> (Vec2, Vec2) {
 /// `grant <kind>`: a hull of that kind put in the water for the asker, with
 /// nobody aboard — at anchor where the water lets an anchor hold, and
 /// otherwise adrift from the moment it is dealt, which is what any empty
-/// hull in that water is; see [`sea`].
+/// hull in that water is; see [`crate::sea`].
 ///
 /// It deals a boat and stops there. Boarding is walking up to a free helm
 /// and taking it — the one way anybody gets aboard anything — and a command
@@ -658,7 +658,7 @@ fn grant(asked: Asked) -> Result<String, String> {
     // Anchored on the terms an asker's own hull is — see `drop_anchor` —
     // where the water allows it, so a dealt hull waits to be boarded rather
     // than leaving on the wind.
-    let anchor = sea::anchor_holds(shared.world.height(at.x, at.y)).then_some(at);
+    let anchor = protocol::ground::anchor_holds(shared.world.height(at.x, at.y)).then_some(at);
     let now = shared.age();
 
     {
@@ -890,7 +890,7 @@ fn whereabouts(asked: Asked) -> Result<String, String> {
     lines.push(match (helm, height >= 0.0) {
         (Some(_), true) => format!("aground, with {height:.1} m of it out of the water"),
         (Some((_, true)), false) => format!("afloat in {:.1} m, riding at anchor", -height),
-        (Some((_, false)), false) if sea::anchor_holds(height) => {
+        (Some((_, false)), false) if protocol::ground::anchor_holds(height) => {
             format!("afloat in {:.1} m, and an anchor holds here", -height)
         }
         (Some(_), false) => format!("afloat in {:.1} m, too deep to anchor", -height),

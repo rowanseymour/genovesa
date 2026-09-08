@@ -50,7 +50,7 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use protocol::ground::{ANCHOR_DEPTH, CELL_METRES};
+use protocol::ground::{anchor_holds, CELL_METRES};
 use protocol::{swing_to, BoatId, BoatKind, PlayerId, Underway};
 
 use crate::bindings::{Action, KeyBindings};
@@ -3658,9 +3658,10 @@ pub(crate) fn over_the_side(ship: &Transform, ground: Option<&Ground>) -> Vec2 {
 /// hull under the player has its hook down — see [`Anchored`].
 ///
 /// Dropping is asked from a hull at rest, the sails coming down as the hook
-/// goes over, and only where the water would hold it — [`ANCHOR_DEPTH`]'s
-/// own doc says why the client asks the question the server asks again. It
-/// is believed when the telling comes back; a refusal arrives as the hull's
+/// goes over, and only where the water would hold it —
+/// [`protocol::ground::ANCHOR_DEPTH`]'s own doc says why the client asks the
+/// question the server asks again. It is believed when the telling comes
+/// back; a refusal arrives as the hull's
 /// own state with no hook in it, and a key refused must have done nothing.
 /// Weighing is believed at once, the server granting it to anyone aboard.
 /// Canvas weighs: a hoist, or sails found set under a hook that has just
@@ -3701,10 +3702,9 @@ pub(crate) fn tend_the_anchor(
     // no ground *resource* at all is a world with no terrain in it (the
     // boat tests'), where there is no depth for the rule to be about.
     let under = place.translation.xz();
-    let holds = ground.as_deref().is_none_or(|g| {
-        g.height(under.x, under.y)
-            .is_some_and(|h| h >= -ANCHOR_DEPTH)
-    });
+    let holds = ground
+        .as_deref()
+        .is_none_or(|g| g.height(under.x, under.y).is_some_and(anchor_holds));
     if !holds {
         return;
     }

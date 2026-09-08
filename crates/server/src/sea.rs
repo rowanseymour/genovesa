@@ -51,7 +51,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use glam::Vec2;
-use protocol::ground::{ANCHOR_DEPTH, ANCHOR_SWING};
+use protocol::ground::ANCHOR_SWING;
 use protocol::{swing_to, BoatId, Underway, TENDER_ASTERN};
 
 use crate::{aimed, astern, broadcast_all, carry_the_sleepers, Held, Shared};
@@ -114,12 +114,6 @@ const AGROUND: f32 = 1.0;
 /// nothing: a boat riding to its anchor in a steady wind is telling-quiet.
 const SETTLED_OFF: f32 = 0.05;
 const SETTLED_BEARING: f32 = 0.01;
-
-/// Whether an anchor holds over a bed this high — the one rule of
-/// [`ANCHOR_DEPTH`], asked by the grant, the console's `grant`, and `where`.
-pub(crate) fn anchor_holds(bed: f32) -> bool {
-    bed >= -ANCHOR_DEPTH
-}
 
 /// Minds the empty hulls for the life of the session: see the module doc.
 pub(crate) fn mind_the_hulls(shared: &Arc<Shared>) {
