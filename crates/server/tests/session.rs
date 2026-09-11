@@ -1821,6 +1821,10 @@ fn a_boat_left_at_anchor_is_anyones_within_reach() {
     let addr = host(1);
     let (alice, a, alices_spawn, _t, a_boat) = Client::join_aboard(addr, None);
     let a_boat = a_boat.expect("aboard");
+    // The hull she leaves is told where she left it and then boarded from
+    // alongside, and the sea would be carrying it off between the two — see
+    // [`Client::orders_a_calm`].
+    alice.orders_a_calm();
     let (bob, b, bobs_spawn, _t2, _b_boat) = Client::join_aboard(addr, None);
     // Bob steps off his own boat first: a helm is only granted to somebody
     // on their own feet, there being no stepping across decks.
