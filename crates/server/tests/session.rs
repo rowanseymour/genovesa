@@ -59,14 +59,6 @@ const PLAINLY_WOUND: f32 = 0.01;
 /// that took no readings would pass by having looked at nothing.
 const TELLINGS_WATCHED: usize = 3;
 
-/// How far the sea may have carried a hull nobody is aboard — and the
-/// sleeper the world remembers aboard it — in the seconds a test takes, in
-/// metres. A bound on the drift and not a measure of it: the tests that leave
-/// a hull unanchored in open water and expect it, or its helmsman, back
-/// compare against this rather than the exact spot. What the sea does with an
-/// empty hull is its own tests' business, below.
-const ADRIFT: f32 = 8.0;
-
 /// What a seed's world is, to a test that is allowed to know. A client never
 /// gets one of these — that is the whole point of the arrangement — so these
 /// are here to say what the server's answers *should* have been.
@@ -473,6 +465,50 @@ impl Client {
             line: line.to_string(),
         });
         self.hear_reply()
+    }
+
+    /// Stops the weather over this world, and takes the answer.
+    ///
+    /// What it buys is a hull nobody is aboard lying exactly where it was
+    /// left. The sea carries an empty hull down the wind and swings it beam
+    /// on, both at a pace in *seconds* — see the server's `sea` module — so
+    /// a test that leaves a hull and later says where it is, or walks
+    /// somebody up to it, is reading a stopwatch: the answer depends on how
+    /// many quarter-seconds the machine spent on the work in between, and a
+    /// loaded one spends more. In a calm the sea moves nothing and tells
+    /// nothing about it, and every such spot is an exact one.
+    ///
+    /// So every test below whose subject is *not* the sea's hand orders one
+    /// before leaving a hull. The ones that are about the drift order
+    /// themselves a wind instead, and read the moving as movement rather
+    /// than as a distance covered by a deadline.
+    fn becalm(&self) {
+        assert_eq!(
+            self.order("world weather calm"),
+            "the wind is ordered calm",
+            "the sky would not be stopped"
+        );
+    }
+
+    /// Reads on until the world says this hull is nobody's, and says where
+    /// it lies.
+    ///
+    /// Which is how a test waits for a helm to fall free before asking for
+    /// it. A helm stays its holder's until their leaving is *filed* — see
+    /// the server's `depart` — and a hang-up is filed on that connection's
+    /// own thread, whenever the machine gets round to it; a hundred
+    /// milliseconds behind the hang-up has been seen here. A boarding asked
+    /// for before then is refused, a refusal says nothing a grant does not
+    /// also say, and no client asks twice — so a test that raced it waited
+    /// out its whole patience for a grant that was never coming.
+    fn helm_fell_free(&self, boat: protocol::BoatId) -> Vec2 {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let (hull, occupant, _, _) = self.hear_of(boat, deadline, "that helm falling free");
+            if occupant.is_none() {
+                return hull.at;
+            }
+        }
     }
 
     /// The boat on a ship's painter, as the world tells it: reads on until
@@ -1646,6 +1682,11 @@ fn leaving_and_rejoining_with_papers_resumes_in_place() {
     // not arrival.
     let addr = host(1);
     let (alice, ..) = Client::join(addr);
+    // Where Bob is put back down is where his hull lies, and the bearing he
+    // opens on is how it lies: the sea would be moving and turning it for
+    // however long the machine took over the re-entry, and a quarter of a
+    // second of that is enough to swing a bow — see [`Client::becalm`].
+    alice.becalm();
     let (bob, b, _, _, bobs_token) = Client::join_presenting(addr, None);
     let _ = alice.hear(); // Bob's arrival
 
@@ -1663,11 +1704,10 @@ fn leaving_and_rejoining_with_papers_resumes_in_place() {
     // remembers a leaver before anyone is told they left.
     assert_eq!(alice.hear(), ToClient::Left { id: b });
 
-    // Where the world saw him, give or take what the sea did with his hull
-    // while nobody was aboard — see [`ADRIFT`].
+    // Where the world saw him, to the metre: nothing was moving his hull.
     let (_bob, _id, spawn, facing, dealt) = Client::join_presenting(addr, Some(bobs_token));
-    assert!(
-        spawn.distance(out) < ADRIFT,
+    assert_eq!(
+        spawn, out,
         "Bob was not put back where the world saw him: {spawn} for {out}"
     );
     assert_eq!(
@@ -1729,6 +1769,11 @@ fn a_kept_world_reopens_where_it_left_off() {
     let world_before = Client::which_world(addr);
 
     let (client, _id, _spawn, _facing, token) = Client::join_presenting(addr, None);
+    // Nothing is to move the hull between the hang-up and the closing save
+    // — see [`Client::becalm`]. The reopened world needs no such order:
+    // there is nobody in it to mind a hull for until the join that asks it
+    // where its player is, and that join is the answer.
+    client.becalm();
     let out = Vec2::new(2_048.0, -512.0);
     client.say(ToServer::Helm {
         hull: Underway::lying(out, 0.0),
@@ -1752,11 +1797,10 @@ fn a_kept_world_reopens_where_it_left_off() {
     // reopening...
     assert_eq!(Client::which_world(addr), world_before);
 
-    // ...same player, back where the world last saw them — give or take the
-    // sea's hand on a hull left unanchored, see [`ADRIFT`]...
+    // ...same player, back where the world last saw them, to the metre...
     let (client, _id, spawn, _facing, dealt) = Client::join_presenting(addr, Some(token));
-    assert!(
-        spawn.distance(out) < ADRIFT,
+    assert_eq!(
+        spawn, out,
         "the world forgot where it last saw its player: {spawn} for {out}"
     );
     assert_eq!(dealt, token, "kept papers were re-dealt");
@@ -1817,6 +1861,10 @@ fn a_boat_left_at_anchor_is_anyones_within_reach() {
     let addr = host(1);
     let (alice, a, alices_spawn, _t, a_boat) = Client::join_aboard(addr, None);
     let a_boat = a_boat.expect("aboard");
+    // The helm she leaves is told where she left it and then boarded from
+    // alongside, and the sea would be carrying it away between the two —
+    // see [`Client::becalm`].
+    alice.becalm();
     let (bob, b, bobs_spawn, _t2, _b_boat) = Client::join_aboard(addr, None);
     // Bob steps off his own boat first: a helm is only granted to somebody
     // on their own feet, there being no stepping across decks.
@@ -2304,6 +2352,9 @@ fn a_returning_helmsman_is_seated_back_at_their_helm() {
 
     let (client, _id, spawn, token, aboard) = Client::join_aboard(addr, None);
     let boat = aboard.expect("aboard");
+    // Nothing is to move the hull between the hang-up and the world
+    // stopping — see [`Client::becalm`].
+    client.becalm();
     let out = spawn + Vec2::new(900.0, -250.0);
     client.say(ToServer::Helm {
         hull: Underway::lying(out, 2.0),
@@ -2319,11 +2370,10 @@ fn a_returning_helmsman_is_seated_back_at_their_helm() {
     let _host = again.spawn().expect("spawn");
     let (_client, _id, spawn, _token, aboard) = Client::join_aboard(addr, Some(token));
     assert_eq!(aboard, Some(boat), "seated at some other helm");
-    // Give or take the beat or two the sea had at the hull between the
-    // hang-up and the world stopping — see [`ADRIFT`]. While the world was
-    // stopped, nothing moved it.
-    assert!(
-        spawn.distance(out) < ADRIFT,
+    // Exactly where it was left: nothing moved it before the world stopped,
+    // and nothing moved it while it was stopped.
+    assert_eq!(
+        spawn, out,
         "the boat moved while the world was stopped: {spawn} for {out}"
     );
 }
@@ -2365,6 +2415,10 @@ fn a_taken_boat_is_not_resumed_into() {
     let addr = host(1);
     let (alice, _a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
     let a_boat = a_boat.expect("aboard");
+    // The hull she leaves is the hull Bob walks up to and the spot she is
+    // put back on, and the sea would be moving it under both — see
+    // [`Client::becalm`].
+    alice.becalm();
     let far = alices_spawn + Vec2::new(600.0, 0.0);
     alice.say(ToServer::Helm {
         hull: Underway::lying(far, 1.0),
@@ -2377,17 +2431,22 @@ fn a_taken_boat_is_not_resumed_into() {
     bob.say(ToServer::Disembark {
         position: bobs_spawn,
     });
+    // Bob was not here to hear her go, so what tells him the helm is his to
+    // ask for is the world's own word about the hull — told to him on
+    // arriving, and again if her leaving is filed after he is. Waited for
+    // rather than assumed: see [`Client::helm_fell_free`].
+    let lies = bob.helm_fell_free(a_boat);
     bob.say(ToServer::Move {
-        position: far + Vec2::new(1.0, 0.0),
+        position: lies + Vec2::new(1.0, 0.0),
     });
     bob.say(ToServer::Board { boat: a_boat });
     bob.boat_changed_hands(a_boat, Some(b));
 
-    // Where she was, give or take what the sea did with the hull before Bob
-    // took it — see [`ADRIFT`].
+    // Where she was, to the metre: nothing moved the hull before Bob took
+    // it, and nothing has moved her memory of it since.
     let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
-    assert!(
-        spawn.distance(far) < ADRIFT,
+    assert_eq!(
+        spawn, far,
         "Alice did not return where she was: {spawn} for {far}"
     );
     assert_ne!(aboard, Some(a_boat), "one helm held two players");
@@ -2403,6 +2462,10 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     let addr = host(1);
     let (alice, a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
     let a_boat = a_boat.expect("aboard");
+    // Bob walks up to the hull she leaves, and she is put back down on her
+    // memory of it: the sea would be moving both under him — see
+    // [`Client::becalm`].
+    alice.becalm();
     let (bob, b, bobs_spawn, _t, _b_boat) = Client::join_aboard(addr, None);
 
     // Alice sails out and hangs up at the helm. Bob hearing her leave is
@@ -2450,8 +2513,8 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     let _ = b;
 
     let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
-    assert!(
-        spawn.distance(far) < ADRIFT,
+    assert_eq!(
+        spawn, far,
         "Alice did not return where she was: {spawn} for {far}"
     );
     assert_ne!(
@@ -2471,6 +2534,10 @@ fn a_boat_taken_up_and_left_where_it_lay_is_resumed_into() {
     let addr = host(1);
     let (alice, a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
     let a_boat = a_boat.expect("aboard");
+    // A hull lying free is one the sea would be carrying off, and both a
+    // helm she can be seated back into and the spot she is put down on turn
+    // on its lying where she left it — see [`Client::becalm`].
+    alice.becalm();
     let (bob, b, bobs_spawn, _t, _bobs) = Client::join_aboard(addr, None);
 
     // Alice hangs up at the helm without ever sailing. Bob hearing her leave
@@ -2496,8 +2563,8 @@ fn a_boat_taken_up_and_left_where_it_lay_is_resumed_into() {
     bob.boat_changed_hands(a_boat, None);
 
     let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
-    assert!(
-        spawn.distance(alices_spawn) < ADRIFT,
+    assert_eq!(
+        spawn, alices_spawn,
         "Alice did not return where she was: {spawn} for {alices_spawn}"
     );
     assert_eq!(
@@ -4173,6 +4240,11 @@ fn where_reads_the_helm_the_water_and_the_tow() {
     let addr = host(7);
     let (client, _id, spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
+    // Further down, the ship is stepped off, walked away from and swum back
+    // out to, and the reading at the end is of a helm taken back — which is
+    // granted only alongside. The sea would be carrying the hull off for as
+    // long as the walk took: see [`Client::becalm`].
+    client.becalm();
 
     // Aboard and afloat, which is how every world is entered: the helm names
     // the hull, and the water under it is the open sea the world has there —
@@ -4312,6 +4384,11 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
         world.height(inland.x, inland.y) >= 0.0,
         "the middle of an island should be land for this to be about anything"
     );
+    // The jumps below leave the ship at an anchorage and come back to it on
+    // foot, so it has to still be there — and every word about a boat here
+    // is read as a word a jump caused, which the sea's own tellings about an
+    // empty hull would not be. See [`Client::becalm`].
+    client.becalm();
     // The welcome introduces this player to their own ship among the rest of
     // the joining chatter, and everything after here reads on the
     // understanding that a word about a boat is a word this jump caused.
@@ -4378,10 +4455,8 @@ fn goto_takes_a_player_to_a_place_however_they_are_travelling() {
             break hull.at;
         }
     };
-    // Give or take the sea's hand on a hull nobody anchored — see
-    // [`ADRIFT`].
-    assert!(
-        at.distance(anchorage) < ADRIFT,
+    assert_eq!(
+        at, anchorage,
         "the ship had drifted off its anchorage: {at} for {anchorage}"
     );
 
