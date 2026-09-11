@@ -882,9 +882,12 @@ fn thousands(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use bevy::asset::RenderAssetUsages;
     use bevy::mesh::{Indices, PrimitiveTopology};
+    use bevy::time::TimeUpdateStrategy;
 
     /// A chunk of flat ground, which is all this needs of one: the readout
     /// counts chunks, it does not look at them.
@@ -1186,6 +1189,12 @@ mod tests {
         assert!(!text.starts_with("-- fps"), "FPS never got a value: {text}");
     }
 
+    /// One frame's worth of time, handed to the app rather than waited out —
+    /// see the test below. Deliberately not a divisor of [`REFRESH_SECONDS`],
+    /// so no frame lands on the exact moment the readout is due and nothing
+    /// here rests on two floats coming out equal.
+    const FRAME: Duration = Duration::from_millis(8);
+
     #[test]
     fn the_readout_is_worked_out_four_times_a_second_and_not_every_frame() {
         // The line is printed in whole figures, so a frame rate sitting
@@ -1194,22 +1203,33 @@ mod tests {
         // rate is steady. Working it out also walks every visible mesh and
         // every cascade's, which is a cost the frame should not pay for being
         // told how long it took.
+        //
+        // The app is given its time a fixed step at a time rather than left
+        // to read the wall clock, so which side of the interval a frame falls
+        // on is arithmetic. A readout refreshed four times a second cannot
+        // otherwise be tested in under a second of anybody's patience without
+        // asserting that the machine got through a stretch of frames quickly
+        // enough, which is a claim about the machine and not about the code.
         let mut app = App::new();
         app.add_plugins((
             bevy::time::TimePlugin,
             bevy::diagnostic::FrameCountPlugin,
             DebugOverlayPlugin,
         ))
-        .insert_resource(Assets::<Mesh>::default());
+        .insert_resource(Assets::<Mesh>::default())
+        .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME));
         app.world_mut().resource_mut::<Toggles>().stats = true;
-        app.world_mut().spawn((
-            MapCamera::looking(View {
-                focus: Vec3::ZERO,
-                distance: 100.0,
-                yaw: 0.0,
-            }),
-            VisibleEntities::default(),
-        ));
+        let camera = app
+            .world_mut()
+            .spawn((
+                MapCamera::looking(View {
+                    focus: Vec3::ZERO,
+                    distance: 100.0,
+                    yaw: 0.0,
+                }),
+                VisibleEntities::default(),
+            ))
+            .id();
 
         let printed = |app: &mut App| {
             app.world_mut()
@@ -1221,29 +1241,49 @@ mod tests {
         };
 
         // The first update prints, because a run that has just turned stats
-        // on should not wait a quarter second to see anything.
+        // on should not wait a quarter second to see anything. The frame rate
+        // is not a number yet: the diagnostic's measurements land at the end
+        // of the schedule that took them, so the first frame has none to read.
         app.update();
         let first = printed(&mut app);
-        assert!(!first.is_empty(), "the readout never printed at all");
+        assert_eq!(
+            first,
+            "-- fps / 0 meshes / 0 triangles\ngoto 0 0 / yaw 0 / zoom 100"
+        );
 
-        // Frames inside the interval leave it alone, however many there are
-        // and however much the frame rate moves under them.
-        for _ in 0..30 {
+        // Give the readout something it would say differently, so that the
+        // frames below are silent because the readout waited and not because
+        // there was no news. The view moves, and the frame rate becomes a
+        // number — a steady one, every frame being [`FRAME`] long.
+        app.world_mut()
+            .get_mut::<MapCamera>(camera)
+            .expect("the camera")
+            .focus = Vec3::new(40.0, 0.0, -60.0);
+
+        // Frames inside the interval leave the line alone, however many there
+        // are and however much has changed under them.
+        let interval = Duration::from_secs_f32(REFRESH_SECONDS);
+        let mut since = Duration::ZERO;
+        while since + FRAME < interval {
             app.update();
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            since += FRAME;
+            assert_eq!(
+                printed(&mut app),
+                first,
+                "the readout was rewritten inside its own refresh interval"
+            );
+        }
+
+        // And the frame that carries the clock past the interval prints
+        // again, in the new numbers — a readout that had simply stopped would
+        // pass everything above.
+        while since < interval {
+            app.update();
+            since += FRAME;
         }
         assert_eq!(
             printed(&mut app),
-            first,
-            "the readout was rewritten inside its own refresh interval"
-        );
-
-        // And past it, it prints again — a readout that had simply stopped
-        // would pass everything above.
-        std::thread::sleep(std::time::Duration::from_secs_f32(REFRESH_SECONDS));
-        app.update();
-        assert!(
-            !printed(&mut app).is_empty(),
+            "125 fps / 0 meshes / 0 triangles\ngoto 40 -60 / yaw 0 / zoom 100",
             "the readout stopped rather than slowed"
         );
     }
