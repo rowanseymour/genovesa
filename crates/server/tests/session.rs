@@ -2363,8 +2363,14 @@ fn a_kept_world_reopens_with_its_tows_tied() {
 #[test]
 fn a_taken_boat_is_not_resumed_into() {
     // Alice leaves at a helm; Bob takes the boat while she is away. Her
-    // memory of being aboard is a memory, not a hold: she returns where she
-    // was, in a fresh hull the world provides, and Bob keeps what he took.
+    // memory of being aboard is a memory, not a hold: she returns exactly
+    // where she was and on her own feet, which out here means swimming, and
+    // Bob keeps what he took.
+    //
+    // Nothing is minted to soften that. A world that handed back a hull on
+    // relog would make losing a boat escapable by relogging, which is the
+    // thing the storm fed off world age and the beasts kept in the file are
+    // both there to prevent.
     let addr = host(1);
     let (alice, a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
     alice.orders_a_calm();
@@ -2398,8 +2404,10 @@ fn a_taken_boat_is_not_resumed_into() {
 
     let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
     assert_eq!(spawn, far, "Alice did not return where she was");
-    assert_ne!(aboard, Some(a_boat), "one helm held two players");
-    assert!(aboard.is_some(), "Alice was left standing on open water");
+    assert_eq!(
+        aboard, None,
+        "Alice was put aboard something rather than left where she was"
+    );
 }
 
 #[test]
@@ -2407,7 +2415,9 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     // The same memory, and a boat that is nobody's again by the time she
     // comes back — but lying somewhere else. Being seated back into it would
     // teleport her across the water to wherever a stranger abandoned it, so
-    // the world puts her down where she stood, in a hull of her own.
+    // the world puts her down where she stood and on her own feet. The boat
+    // is still in the world and still free; it is simply no longer under
+    // her, and swimming to it is the way back to it.
     let addr = host(1);
     let (alice, a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
     alice.orders_a_calm();
@@ -2459,13 +2469,14 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     let _ = b;
 
     let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
-    assert_eq!(spawn, far, "Alice did not return where she was");
-    assert_ne!(
-        aboard,
-        Some(a_boat),
+    assert_eq!(
+        spawn, far,
         "Alice was dragged to where her old boat had got to"
     );
-    assert!(aboard.is_some(), "Alice was left standing on open water");
+    assert_eq!(
+        aboard, None,
+        "Alice was put aboard something rather than left where she was"
+    );
 }
 
 #[test]
