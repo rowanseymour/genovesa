@@ -205,8 +205,15 @@ const BOARD_GRANT: f32 = 12.0;
 /// How far a remembered boat may lie from where its returning helmsman left
 /// it and still be the helm they resume at, in metres. After a clean stop
 /// the two agree exactly; a boat found beyond this has been sailed somewhere
-/// by somebody else in the meantime, and the returner enters in a fresh hull
-/// rather than being teleported to wherever their old one was abandoned.
+/// by somebody else in the meantime, and the returner enters on their own
+/// feet where they stood rather than being teleported to wherever their old
+/// one was abandoned.
+///
+/// This is the only distance left in [`seat_the_arrival`]. It asks whether a
+/// hull is still where its helmsman left it, which is a question about the
+/// hull; it was once also asked about a player's distance from any free hull
+/// at all, which is a question about reach and wanted a quite different
+/// number — see there.
 ///
 /// The sea moving the boat is not somebody else sailing it: a sleeper is
 /// carried with their hull, their remembered position moved as the hull
@@ -1915,18 +1922,22 @@ fn welcome_aboard(
 /// Where an arriving player enters, and at whose helm.
 ///
 /// A newcomer's story starts aboard, on a sloop the world mints them with a
-/// rowing boat on its painter. A returner who left at a helm is seated back
-/// into that boat only if it still lies free where they left it; otherwise
-/// somebody has sailed it off in the meantime, and a fresh hull where they
-/// stood is the interim answer until there is any other way to be on open
-/// water. A returner who left ashore enters on their own feet — and is dealt
-/// a hull all the same if nothing free lies within reach of where they stood.
+/// rowing boat on its painter. That is the only hull this mints, and
+/// [`Shared::spawn_for`] puts a newcomer on open water, so it is also the
+/// only one that cannot be minted onto ground.
 ///
-/// Nothing is handed down: a free hull somebody parked is left where they
-/// parked it, and every arrival that needs a boat is minted one. So a client
-/// that joins, steps ashore and hangs up in a loop leaves a hull behind every
-/// time round, and until there is a way for an unused boat to leave the world
-/// that is the rate.
+/// **A returner is dealt nothing.** They go back exactly where the world last
+/// saw them, afoot if they left afoot, and are seated at a helm only when the
+/// hull they left still lies free where they left it. Anything else and they
+/// come back on their own feet, with whatever they left afloat still afloat
+/// wherever it has drifted to.
+///
+/// Minting for a returner was the older answer and was wrong twice: it put a
+/// ship wherever the player was standing, which after a walk up off a beach
+/// is a hillside, and it dealt another on every join-and-step-ashore, faster
+/// than [`retire_the_abandoned`] takes them away. What it was for was
+/// stranding, which takes a second player to bring about and wants a question
+/// about reach rather than a hull conjured underfoot.
 ///
 /// Takes the boats themselves rather than reaching for their lock, so that
 /// the whole of this policy is a question about a map of hulls: what it does
@@ -1980,68 +1991,34 @@ fn seat_the_arrival(
         );
         ship
     };
-    player.aboard = match returning {
+    let aboard = match returning {
         None => Some(fresh_hull(boats, player.position)),
-        Some(record) => match record.aboard {
-            // Left afoot, with something free lying where they stood:
-            // they walk to it, and the world adds nothing.
-            None if boats.values().any(|boat| {
-                boat.occupant.is_none() && boat.hull.at.distance(record.position) <= KEPT_BERTH
-            }) =>
-            {
-                None
+        // Left afoot: back on their own feet where they stood, and the world
+        // adds nothing. No scan for a hull nearby, because there is now no
+        // answer that a nearby hull would change.
+        Some(record) => record.aboard.and_then(|kept| {
+            let boat = boats.get_mut(&kept)?;
+            // Not free, or not where they left it: somebody has taken it or
+            // sailed it off, and the helm is not theirs to resume. They come
+            // back afoot rather than being dealt another — see this
+            // function's doc.
+            if boat.occupant.is_some() || boat.hull.at.distance(record.position) > KEPT_BERTH {
+                return None;
             }
-            // Left afoot with nothing there: a player on an island
-            // with no way off it but a swim, which is a way out of a
-            // bay and not a way across open water — the crossings
-            // between islands are an hour of it and there is nothing
-            // to make for at the far end but more of the same. And
-            // it is reachable without anybody cheating: a boat is
-            // anyone's the moment it is stepped out of, so the dinghy
-            // somebody beached and logged off beside is one another
-            // player may honestly row away while they are gone. So
-            // they are dealt a hull, the same way an arrival is. What
-            // keeps that from repeating on one beach is the arm above
-            // rather than anything here: a player dealt one leaves at
-            // a helm, and a helm is resumed rather than re-dealt.
-            //
-            // Where they stood, which for somebody who rowed ashore is
-            // the waterline, and inland for somebody who walked. A
-            // hull the ground turns up underneath is a case the client
-            // already sails out of — every way down to the sea is
-            // downhill, see `boat::grounding` — so an unlucky mint is
-            // an ungainly launch and not a second strand.
-            None => {
-                let boat = fresh_hull(boats, record.position);
-                bow = boats.get(&boat).map(|state| state.hull.heading);
-                Some(boat)
-            }
-            Some(kept) => match boats.get_mut(&kept) {
-                Some(boat)
-                    if boat.occupant.is_none()
-                        && boat.hull.at.distance(record.position) <= KEPT_BERTH =>
-                {
-                    boat.occupant = Some(id);
-                    // And the painter cut, on [`board`]'s rule: somebody has
-                    // tied this boat astern of their ship while its
-                    // helmsman was away, and a boat is whoever's is in it.
-                    // Left on the rope it would be steered from two
-                    // machines at once — the towing client reports it with
-                    // its own hull, see [`take_the_helm`] — which is the
-                    // one thing the wire cannot answer for.
-                    boat.towed_by = None;
-                    player.position = boat.hull.at;
-                    bow = Some(boat.hull.heading);
-                    Some(kept)
-                }
-                _ => {
-                    let boat = fresh_hull(boats, record.position);
-                    bow = boats.get(&boat).map(|state| state.hull.heading);
-                    Some(boat)
-                }
-            },
-        },
+            boat.occupant = Some(id);
+            // And the painter cut, on [`board`]'s rule: somebody has tied
+            // this boat astern of their ship while its helmsman was away,
+            // and a boat is whoever's is in it. Left on the rope it would be
+            // steered from two machines at once — the towing client reports
+            // it with its own hull, see [`take_the_helm`] — which is the one
+            // thing the wire cannot answer for.
+            boat.towed_by = None;
+            player.position = boat.hull.at;
+            bow = Some(boat.hull.heading);
+            Some(kept)
+        }),
     };
+    player.aboard = aboard;
     bow
 }
 
@@ -3618,6 +3595,69 @@ mod tests {
             anchor: None,
             vacated: -ABANDONED_AFTER,
         }
+    }
+
+    /// A returner who left on their own feet is put back on them, where they
+    /// stood, and the world adds nothing.
+    ///
+    /// This is the shape the rule exists for. Somebody who rows ashore and
+    /// walks up the beach is remembered standing on ground, so a hull minted
+    /// where they stood is a hull on a hillside — which is what the old rule
+    /// did, having read "no free hull within `KEPT_BERTH`" as stranded, and
+    /// for anybody who had walked at all there never was one.
+    #[test]
+    fn a_returner_who_left_afoot_is_dealt_nothing_and_left_where_they_stood() {
+        let server = Server::bind(("127.0.0.1", 0), 7).expect("bind");
+        let shared = &server.shared;
+        // Inland, where a walker is, and where a hull cannot be.
+        let inland = Vec2::new(-839.7, -428.2);
+        let (mut player, _hears) = standing(inland);
+        let record = Some(keeper::PlayerRecord {
+            aboard: None,
+            position: inland,
+            ..keeper::PlayerRecord::default()
+        });
+
+        // Her own ship, lying free off the beach she rowed in from and
+        // further out than `KEPT_BERTH` — the arrangement the old rule read
+        // as stranded and answered with a second ship.
+        let mut boats = HashMap::new();
+        let anchored = inland + Vec2::new(KEPT_BERTH * 3.0, 0.0);
+        boats.insert(BoatId(1), lying(BoatKind::Sloop, anchored, None));
+
+        let bow = seat_the_arrival(shared, PlayerId(1), &mut player, &record, &mut boats, 0.0);
+
+        assert_eq!(player.aboard, None, "a returner afoot was seated at a helm");
+        assert_eq!(player.position, inland, "a returner afoot was moved");
+        assert_eq!(bow, None, "a walker was given a bow to open along");
+        assert_eq!(
+            boats.keys().copied().collect::<Vec<_>>(),
+            vec![BoatId(1)],
+            "the world minted a hull for somebody who already had one"
+        );
+    }
+
+    /// The mint did not go away. It stopped being offered to people who
+    /// already have a world to come back to — an arrival has nothing in it
+    /// yet, and [`Shared::spawn_for`] puts them on open water, so this is
+    /// the one mint that cannot land on ground.
+    #[test]
+    fn a_newcomer_is_still_minted_a_ship_with_its_boat_astern() {
+        let server = Server::bind(("127.0.0.1", 0), 7).expect("bind");
+        let shared = &server.shared;
+        let (mut player, _hears) = standing(shared.spawn_for(PlayerId(1)));
+        let mut boats = HashMap::new();
+
+        seat_the_arrival(shared, PlayerId(1), &mut player, &None, &mut boats, 0.0);
+
+        let ship = player.aboard.expect("a newcomer's story starts aboard");
+        assert_eq!(boats[&ship].kind, BoatKind::Sloop);
+        let tender = boats
+            .iter()
+            .find(|(_, state)| state.towed_by == Some(ship))
+            .expect("a ship without a boat has no way to the shore but a swim");
+        assert_eq!(tender.1.kind, BoatKind::Rowboat);
+        assert_eq!(boats.len(), 2, "more than a ship and its boat was minted");
     }
 
     #[test]

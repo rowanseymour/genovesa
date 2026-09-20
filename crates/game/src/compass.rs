@@ -1541,6 +1541,76 @@ mod tests {
         );
     }
 
+    /// The stream's bearing and the most ink any chevron is carrying, for a
+    /// player aboard or on their own feet under one wind.
+    fn stream(aboard: bool) -> (Rot2, f32) {
+        let mut app = a_player_off_an_island(aboard);
+        app.insert_resource(SeaConditions::blowing(Vec2::new(FULL_WIND, 0.0)));
+        app.update();
+        let bearing = app
+            .world_mut()
+            .query_filtered::<&UiTransform, With<WindStream>>()
+            .single(app.world())
+            .expect("the stream should exist")
+            .rotation;
+        let ink = app
+            .world_mut()
+            .query_filtered::<&BackgroundColor, With<ChevronInk>>()
+            .iter(app.world())
+            .map(|colour| colour.0.alpha())
+            .fold(0.0, f32::max);
+        (bearing, ink)
+    }
+
+    /// Ashore the card keeps its wind and its bow, which is the module doc's
+    /// claim that the ring is the *only* reading a beach makes nonsense of.
+    ///
+    /// Two tests above would fail if the stream were gated on being aboard,
+    /// but only because a player afoot is the cheapest one to stand up — they
+    /// are about which wind is drawn, not about where it is drawn, and either
+    /// could be rewritten around a deck without meaning to give this up.
+    ///
+    /// The wind is the one that matters. A passage is worked out standing on
+    /// the sand, and a card that went blank the moment a player stepped off
+    /// the deck would be asking them to board to find out whether boarding
+    /// was worth it.
+    ///
+    /// The bearing rather than the ink, because the ink is carried along the
+    /// track by a phase the clock drives, and two apps do not run the same
+    /// number of microseconds. The bearing is the wind's own and nothing
+    /// else's — but a hidden stream would keep its bearing too, so the ink is
+    /// asked for as well, which only has to be *there*.
+    #[test]
+    fn the_card_keeps_its_wind_ashore() {
+        let (afloat, afloat_ink) = stream(true);
+        let (ashore, ashore_ink) = stream(false);
+        assert!(afloat_ink > 0.0, "afloat, the stream carried no ink at all");
+        assert!(ashore_ink > 0.0, "ashore, the stream stopped being drawn");
+        assert!(
+            afloat.angle_to(ashore).abs() < 1e-5,
+            "ashore the stream lay {ashore:?} against {afloat:?} afloat"
+        );
+    }
+
+    /// And the bow with it: ashore it points the way the walker is facing,
+    /// which is a heading like any other — see [`point_the_bow`].
+    #[test]
+    fn the_bow_keeps_pointing_ashore() {
+        for aboard in [true, false] {
+            let mut app = a_player_off_an_island(aboard);
+            let shown = *app
+                .world_mut()
+                .query_filtered::<&Visibility, With<Bow>>()
+                .single(app.world())
+                .expect("the bow should exist");
+            assert_ne!(
+                shown,
+                Visibility::Hidden,
+                "the bow went out with aboard = {aboard}"
+            );
+        }
+    }
+
     /// The two answers the sweep must refuse: drowned ground, and land past
     /// the haze.
     #[test]
