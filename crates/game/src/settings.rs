@@ -33,6 +33,15 @@
 //! *unordered* window fullscreen at all: it unwraps the screen AppKit says
 //! that window is on. See [`opening`] and [`dress_the_window`].
 //!
+//! What the hazard turns on is a borderless transition still in flight, rather
+//! than how old the window is — so the one place left that could meet it is a
+//! screen reported in the frame after [`UNSEEN_PATIENCE`] has run out and put
+//! the window into borderless itself. That is a screen arriving in one
+//! particular frame after not arriving for a hundred and twenty, and what it
+//! would cost is the mis-framing above until something asked the window to
+//! change again; a settling count to shut it out would be read for ever by
+//! everyone to buy off a case nobody has hit. Left, and written down.
+//!
 //! None of it happens the moment a switch is thrown. The screen edits
 //! [`Wanted`] and Apply is what makes that [`DisplaySettings`], which is the
 //! only thing [`dress_the_window`] reads — and an applied change is then put
@@ -255,9 +264,11 @@ impl Plugin for SettingsPlugin {
 /// locked session is the ordinary way to have one, and it lasts as long as
 /// somebody is away. Waiting that out would be a game running with no window,
 /// so the wait ends and the window is shown in the borderless it would once
-/// have been born in. A screen arriving later is still read and still taken,
-/// and taken safely: what could not be done in a window's first frames is the
-/// switch to an exclusive mode, and by then it is not in them.
+/// have been born in — see the module header.
+///
+/// Two orders of magnitude over the frame or two it guards, because the frames
+/// it is counting are a starting run's: the first of them wait on shaders, and
+/// a margin that looked generous in frames could be thin in time.
 const UNSEEN_PATIENCE: u32 = 120;
 
 /// Makes the window agree with the settings.
@@ -309,7 +320,7 @@ fn dress_the_window(
         // Out of patience: fall through unseen-no-longer, and let the mode be
         // worked out with no monitor — which is the borderless this window
         // would once have been born in. See [`UNSEEN_PATIENCE`].
-        warn!("no screen was reported, so the window is shown without a mode of its own");
+        info!("no screen was reported in time, so the window comes up borderless");
         window.visible = true;
     }
 
@@ -1053,11 +1064,9 @@ mod tests {
         assert!(the_window(&mut app).visible);
     }
 
-    /// And it does not wait for ever. A machine with no screens to report —
-    /// a locked session is the everyday way to have one — would otherwise
-    /// leave the game running with no window at all, which is what
-    /// [`UNSEEN_PATIENCE`] is the end of. What it falls back to is the
-    /// borderless this window would once have been born in.
+    /// And it does not wait for ever — see [`UNSEEN_PATIENCE`]. What the one
+    /// above leaves open is the machine that reports no screen at all, where
+    /// waiting is a game running with no window.
     #[test]
     fn a_window_born_unseen_is_shown_anyway_when_no_screen_ever_comes() {
         let settings = DisplaySettings {
@@ -1097,8 +1106,8 @@ mod tests {
         );
 
         // And a screen arriving after all of that is still read, and the mode
-        // it offers still taken — on a window that is long past its first
-        // frames, which is the one thing the switch was unsafe in.
+        // it offers still taken: the fallback is not a state the window is
+        // stuck in.
         let screen = app
             .world_mut()
             .spawn((
