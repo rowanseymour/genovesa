@@ -21,6 +21,27 @@
 //! And "the monitor" means one monitor, the one the window is on, for every
 //! question asked of it here and on the display screen — see [`showing_on`].
 //!
+//! An exclusive mode also decides how the window is *born*. Born borderless —
+//! the obvious stand-in for a mode there is no monitor to read yet — a window
+//! switched to an exclusive one in its first frames is still in that
+//! transition, and on macOS winit leaves it framed for the desktop it no
+//! longer has: the picture drawn correctly and placed a strip too high, black
+//! beneath. So a run that wants a mode below native is born windowed and
+//! unseen instead, takes its mode the frame a screen is reported and is shown
+//! the frame after. From windowed the switch is framed right, and a window
+//! nobody has seen can go that way unseen. What it rests on is winit taking an
+//! *unordered* window fullscreen at all: it unwraps the screen AppKit says
+//! that window is on. See [`opening`] and [`dress_the_window`].
+//!
+//! What the hazard turns on is a borderless transition still in flight, rather
+//! than how old the window is — so the one place left that could meet it is a
+//! screen reported in the frame after [`UNSEEN_PATIENCE`] has run out and put
+//! the window into borderless itself. That is a screen arriving in one
+//! particular frame after not arriving for a hundred and twenty, and what it
+//! would cost is the mis-framing above until something asked the window to
+//! change again; a settling count to shut it out would be read for ever by
+//! everyone to buy off a case nobody has hit. Left, and written down.
+//!
 //! None of it happens the moment a switch is thrown. The screen edits
 //! [`Wanted`] and Apply is what makes that [`DisplaySettings`], which is the
 //! only thing [`dress_the_window`] reads — and an applied change is then put
@@ -234,6 +255,22 @@ impl Plugin for SettingsPlugin {
     }
 }
 
+/// How many frames a window born unseen waits for a screen before it is shown
+/// regardless.
+///
+/// There is normally nothing to wait for: winit reports its monitors within a
+/// frame or two of there being a window to report them to. What this is for is
+/// the run that starts when the machine has no screens to report at all — a
+/// locked session is the ordinary way to have one, and it lasts as long as
+/// somebody is away. Waiting that out would be a game running with no window,
+/// so the wait ends and the window is shown in the borderless it would once
+/// have been born in — see the module header.
+///
+/// Two orders of magnitude over the frame or two it guards, because the frames
+/// it is counting are a starting run's: the first of them wait on shaders, and
+/// a margin that looked generous in frames could be thin in time.
+const UNSEEN_PATIENCE: u32 = 120;
+
 /// Makes the window agree with the settings.
 ///
 /// The *mode* is set the way the debug overlay's own apply system sets things:
@@ -244,6 +281,11 @@ impl Plugin for SettingsPlugin {
 /// there is a screen to read one off. Comparing before writing is what keeps
 /// that from marking `Window` changed forever, which the backdrop would answer
 /// by re-ruling its sheet forever.
+///
+/// A window born unseen — see [`opening`] — is the one exception to settling:
+/// it takes no mode at all until there is a screen, and is shown the frame
+/// after it has the one it was waiting for, or out of patience where no screen
+/// ever comes — see [`UNSEEN_PATIENCE`].
 ///
 /// The *size* is compared too, but against the size this system last asked
 /// for rather than against the window's own. That difference is the whole of
@@ -259,6 +301,7 @@ fn dress_the_window(
     mut windows: Query<(Entity, &mut Window), With<PrimaryWindow>>,
     mut resized: MessageWriter<WindowResized>,
     mut asked_for: Local<Option<UVec2>>,
+    mut waited: Local<u32>,
 ) {
     // A windowless run has no window to dress, and asks for the size of its
     // pictures on the command line instead — see [`crate::control`].
@@ -267,6 +310,20 @@ fn dress_the_window(
     };
     let monitor = showing_on(Some(&window), monitors.iter());
 
+    // The only window born unseen is one bound for an exclusive mode, and it
+    // has nothing to read one off yet.
+    if !window.visible && monitor.is_none() {
+        *waited += 1;
+        if *waited < UNSEEN_PATIENCE {
+            return;
+        }
+        // Out of patience: fall through unseen-no-longer, and let the mode be
+        // worked out with no monitor — which is the borderless this window
+        // would once have been born in. See [`UNSEEN_PATIENCE`].
+        info!("no screen was reported in time, so the window comes up borderless");
+        window.visible = true;
+    }
+
     let wanted = if settings.fullscreen {
         fullscreen_mode(settings.resolution, monitor)
     } else {
@@ -274,6 +331,11 @@ fn dress_the_window(
     };
     if window.mode != wanted {
         window.mode = wanted;
+    } else if !window.visible {
+        // A mode already right was asked for a frame ago at the latest, so
+        // winit has acted on it by now. Shown the frame it is asked for, the
+        // window would be seen changing.
+        window.visible = true;
     }
 
     // In a window the resolution is the window's own size, which is the same
@@ -425,19 +487,33 @@ fn overlap(window: IRect, monitor: &Monitor) -> i64 {
     i64::from(shared.width()) * i64::from(shared.height())
 }
 
-/// How the window should first come up, for the binary that builds it before
-/// there is an app at all.
+/// The window the binary builds, before there is an app to dress it.
+pub struct Opening {
+    pub mode: WindowMode,
+    pub size: UVec2,
+    /// Whether it is seen from its first frame, or held back by
+    /// [`dress_the_window`].
+    pub visible: bool,
+}
+
+/// How the window should first come up.
 ///
-/// Neither answer can be the final one. Winit reports no monitors until it has
-/// a window, so the exclusive mode a resolution wants cannot be chosen yet and
-/// borderless stands in for it; the shape of the screen is unknown for the same
-/// reason, so a windowed size is guessed widescreen. [`dress_the_window`] puts
-/// both right on the first frame that has a monitor to ask. What this buys is
-/// the frame *before* that one: a run that came up windowed and went fullscreen
-/// a moment later would flash the desktop at somebody who had already said what
-/// they wanted.
-pub fn opening(settings: &DisplaySettings) -> (WindowMode, UVec2) {
-    let mode = if settings.fullscreen {
+/// No answer here can be the final one. Winit reports no monitors until it has
+/// a window, so the exclusive mode a resolution wants cannot be chosen yet; the
+/// shape of the screen is unknown for the same reason, so a windowed size is
+/// guessed widescreen. [`dress_the_window`] puts both right on the first frame
+/// that has a monitor to ask.
+///
+/// Fullscreen at native is still asked for at birth, so nobody who said
+/// fullscreen is shown the desktop first. Below native the window is born
+/// windowed and unseen — the module header says why.
+pub fn opening(settings: &DisplaySettings) -> Opening {
+    let size = match settings.resolution {
+        Resolution::Native => crate::WINDOW,
+        Resolution::Rows(rows) => UVec2::new(width_for(WIDESCREEN, rows), rows),
+    };
+    let (mode, visible) = match (settings.fullscreen, settings.resolution) {
+        (false, _) => (WindowMode::Windowed, true),
         // `Primary`, because a window being created is not on a monitor yet
         // and there is no other honest answer: naming the one it is on takes
         // a monitor to name. It is the answer [`fullscreen_mode`] gives while
@@ -445,15 +521,17 @@ pub fn opening(settings: &DisplaySettings) -> (WindowMode, UVec2) {
         // window finds the mode already right and writes nothing — a write of
         // a *different* guess would only be asking winit the same unanswerable
         // question a frame later.
-        WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
-    } else {
-        WindowMode::Windowed
+        (true, Resolution::Native) => (
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+            true,
+        ),
+        (true, Resolution::Rows(_)) => (WindowMode::Windowed, false),
     };
-    let size = match settings.resolution {
-        Resolution::Native => crate::WINDOW,
-        Resolution::Rows(rows) => UVec2::new(width_for(WIDESCREEN, rows), rows),
-    };
-    (mode, size)
+    Opening {
+        mode,
+        size,
+        visible,
+    }
 }
 
 /// The fullscreen this resolution asks for, on the screen the window is on.
@@ -524,8 +602,7 @@ fn place() -> Option<PathBuf> {
 /// played on.
 ///
 /// Read before there is an app, because the binary builds its first window out
-/// of the answer: a run that came up windowed and went fullscreen a frame later
-/// would flash the desktop at somebody who had already said what they wanted.
+/// of the answer — see [`opening`].
 pub fn load() -> DisplaySettings {
     let Some(path) = place() else {
         return DisplaySettings::default();
@@ -919,6 +996,164 @@ mod tests {
         app.world_mut().resource_mut::<DisplaySettings>().fullscreen = false;
         app.update();
         assert_eq!(the_window(&mut app).mode, WindowMode::Windowed);
+    }
+
+    /// A resolution below native is born windowed and unseen — the module
+    /// header says why it must not pass through borderless — takes its mode
+    /// the frame a screen is reported, and is shown the frame after that.
+    #[test]
+    fn a_window_born_unseen_is_shown_once_it_has_its_mode() {
+        let settings = DisplaySettings {
+            fullscreen: true,
+            resolution: Resolution::Rows(1440),
+        };
+        let born = opening(&settings);
+        assert_eq!(born.mode, WindowMode::Windowed);
+        assert!(!born.visible);
+
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .add_message::<WindowResized>()
+            .add_systems(Update, dress_the_window);
+        app.world_mut().spawn((
+            Window {
+                mode: born.mode,
+                visible: born.visible,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        // No screen yet, so no mode to take and nothing to show — however
+        // long that lasts.
+        app.update();
+        app.update();
+        let window = the_window(&mut app);
+        assert_eq!(
+            window.mode,
+            WindowMode::Windowed,
+            "went fullscreen with no screen to read a mode off"
+        );
+        assert!(!window.visible, "shown before it had its mode");
+
+        let screen = app
+            .world_mut()
+            .spawn((
+                a_monitor_at(IVec2::ZERO, UVec2::new(5120, 2880), &[(2560, 1440, 60_000)]),
+                PrimaryMonitor,
+            ))
+            .id();
+        app.update();
+        let window = the_window(&mut app);
+        assert_eq!(
+            window.mode,
+            WindowMode::Fullscreen(
+                MonitorSelection::Entity(screen),
+                VideoModeSelection::Specific(VideoMode {
+                    physical_size: UVec2::new(2560, 1440),
+                    bit_depth: 32,
+                    refresh_rate_millihertz: 60_000,
+                }),
+            )
+        );
+        assert!(
+            !window.visible,
+            "shown the frame the mode was asked for, before winit had it"
+        );
+
+        app.update();
+        assert!(the_window(&mut app).visible);
+    }
+
+    /// And it does not wait for ever — see [`UNSEEN_PATIENCE`]. What the one
+    /// above leaves open is the machine that reports no screen at all, where
+    /// waiting is a game running with no window.
+    #[test]
+    fn a_window_born_unseen_is_shown_anyway_when_no_screen_ever_comes() {
+        let settings = DisplaySettings {
+            fullscreen: true,
+            resolution: Resolution::Rows(1440),
+        };
+        let born = opening(&settings);
+
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .add_message::<WindowResized>()
+            .add_systems(Update, dress_the_window);
+        app.world_mut().spawn((
+            Window {
+                mode: born.mode,
+                visible: born.visible,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+
+        // Not a frame early: the wait is worth having, and a window shown on
+        // the second frame of a machine whose monitors are merely slow would
+        // be the flicker this was all for.
+        for _ in 0..UNSEEN_PATIENCE - 1 {
+            app.update();
+        }
+        assert!(!the_window(&mut app).visible, "shown before its patience");
+
+        app.update();
+        let window = the_window(&mut app);
+        assert!(window.visible, "never shown at all");
+        assert_eq!(
+            window.mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+            "left windowed on a machine that said fullscreen"
+        );
+
+        // And a screen arriving after all of that is still read, and the mode
+        // it offers still taken: the fallback is not a state the window is
+        // stuck in.
+        let screen = app
+            .world_mut()
+            .spawn((
+                a_monitor_at(IVec2::ZERO, UVec2::new(5120, 2880), &[(2560, 1440, 60_000)]),
+                PrimaryMonitor,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            the_window(&mut app).mode,
+            WindowMode::Fullscreen(
+                MonitorSelection::Entity(screen),
+                VideoModeSelection::Specific(VideoMode {
+                    physical_size: UVec2::new(2560, 1440),
+                    bit_depth: 32,
+                    refresh_rate_millihertz: 60_000,
+                }),
+            )
+        );
+    }
+
+    /// Every other window is seen from its first frame, and one that said
+    /// fullscreen at native is fullscreen from it too.
+    #[test]
+    fn every_other_window_is_born_seen() {
+        let native_fullscreen = DisplaySettings {
+            fullscreen: true,
+            resolution: Resolution::Native,
+        };
+        let born = opening(&native_fullscreen);
+        assert!(born.visible);
+        assert_eq!(
+            born.mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+        );
+        for settings in [
+            DisplaySettings::default(),
+            DisplaySettings {
+                fullscreen: false,
+                resolution: Resolution::Rows(720),
+            },
+        ] {
+            let born = opening(&settings);
+            assert!(born.visible, "{settings:?}");
+            assert_eq!(born.mode, WindowMode::Windowed, "{settings:?}");
+        }
     }
 
     /// A window dragged to a new size stays that size. The setting says what
