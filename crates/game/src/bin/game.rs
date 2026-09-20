@@ -298,12 +298,13 @@ fn window_plugin(args: &Args, display: &DisplaySettings) -> WindowPlugin {
         };
     }
 
-    let (mode, size) = settings::opening(display);
+    let born = settings::opening(display);
     WindowPlugin {
         primary_window: Some(Window {
             title: "Genovesa".into(),
-            mode,
-            resolution: WindowResolution::new(size.x, size.y),
+            mode: born.mode,
+            visible: born.visible,
+            resolution: WindowResolution::new(born.size.x, born.size.y),
             ..default()
         }),
         ..default()
