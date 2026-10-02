@@ -51,6 +51,7 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use protocol::ground::anchor_holds;
+use protocol::hull::keel_of;
 use protocol::{swing_to, BoatId, BoatKind, PlayerId, Underway};
 
 use crate::bindings::{Action, KeyBindings};
@@ -248,13 +249,10 @@ struct Mast {
 /// carry their reasoning where they are picked, on [`SHIP`].
 #[derive(Clone, Copy)]
 struct Hull {
-    /// Length overall, in metres.
+    /// Length overall and beam, in metres — the keel's, see
+    /// [`protocol::hull::Keel`], since the ground stops the same footprint
+    /// another hull meets.
     length: f32,
-    /// Beam, in metres — how far apart the water is sampled athwartships to
-    /// read the roll the waves ask of the hull. Close to the model's planking
-    /// but not held to it the way `length` is: the samples are reading the
-    /// surface's slope, and a slope read a few centimetres wide of the hull
-    /// is the same slope.
     beam: f32,
     /// Where somebody aboard stands: metres above the waterline, and the
     /// station on the keel's axis. A player is put down here rather than at
@@ -471,12 +469,8 @@ impl Hull {
 
 /// The ship: the boat a world is entered aboard, and [`MODEL`]'s subject.
 const SHIP: Hull = Hull {
-    // A small sailing boat: at the default zoom the visible ground is some
-    // tens of metres across, so this length reads as a boat rather than as a
-    // speck, and at the far end of the zoom range it is still a mark on the
-    // water rather than gone.
-    length: 7.0,
-    beam: 2.4,
+    length: keel_of(BoatKind::Sloop).length,
+    beam: keel_of(BoatKind::Sloop).beam,
     // The quarterdeck's step up aft and the spot on it just forward of the
     // tiller's grip — the model's numbers. The station keeps the helmsman
     // clear of the boom, which sweeps the main deck and nothing abaft the
@@ -538,8 +532,8 @@ const ROWBOAT: Hull = Hull {
     // A dinghy rather than a skiff: the model was recut smaller and
     // shallower the day the sea learned to cut a hole around an open hull —
     // its NOTES carry the story.
-    length: 3.2,
-    beam: 1.3,
+    length: keel_of(BoatKind::Rowboat).length,
+    beam: keel_of(BoatKind::Rowboat).beam,
     // Standing on the sole, abaft the rowing thwart — an open boat is stood
     // in wherever the thwarts are not, and this keeps the figure clear of
     // the middle one until somebody is seated at it. The sole is *below*
