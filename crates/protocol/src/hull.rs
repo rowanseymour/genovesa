@@ -229,10 +229,9 @@ pub fn aground_by(
 /// ground — swinging an end or a side into a cliff it was lying off. A hull
 /// with nothing known under it was not clear, only unjudged, and ground
 /// arriving under it is not its doing. A hull already aground turns whatever
-/// the turn reads: a yaw sweeps the bottom
-/// over different ground, so nearly every turn of a hull on a beach reads
-/// deeper, and holding it to "no deeper" left one driven ashore unable to
-/// come round at all.
+/// the turn reads: a yaw sweeps the bottom over different ground, so nearly
+/// every turn of a hull on a beach reads deeper, and holding it to "no
+/// deeper" left one driven ashore unable to come round at all.
 pub fn may_turn(was: f32, would: f32) -> bool {
     was > 0.0 || was == f32::NEG_INFINITY || would <= 0.0
 }

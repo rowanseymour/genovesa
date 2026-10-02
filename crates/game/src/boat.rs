@@ -1971,6 +1971,7 @@ pub(crate) fn spawn_hull(
     // decides its way: see [`Ours`].
     let dimensions = hull_of(kind);
     let laid = waterline::on_the_plane(pose.translation);
+    let (place, heading) = waterline::laid_at(laid, yaw_of(&pose));
     let hull = commands
         .spawn((
             Name::new("Boat"),
@@ -1978,11 +1979,12 @@ pub(crate) fn spawn_hull(
             DespawnOnExit(AppState::InWorld),
             pose,
             waterline::afloat(dimensions.length, dimensions.beam, dimensions.displacement),
-            waterline::laid_at(laid, yaw_of(&pose)),
+            place,
+            heading,
             Drawn(pose),
             Sounding {
                 at: laid,
-                heading: waterline::laid_at(laid, yaw_of(&pose)).1,
+                heading,
                 // Nothing is known about the ground yet, and a hull put
                 // down where there is none is in water it is allowed to be
                 // in until a chunk says otherwise — the same benefit of the
@@ -3265,10 +3267,11 @@ type Sounded<'w, 's> = Query<
 /// What is held is the hull's *place*, and its heading only where
 /// [`protocol::hull::may_turn`] refuses the turn — a clear hull swinging an
 /// end or a side into the ground. A hull aground comes round whatever is
-/// under it, which is [`steer`]'s promise. So the depth is read afresh at
-/// the pose the hull is left in rather than remembered from the one it was
-/// refused: the heading may have moved on, and a baseline taken at some
-/// earlier bearing would hold the hull off water it could now float in.
+/// under it, which is [`steer`]'s promise. So both sides of the turn are
+/// read afresh, and the depth recorded is the pose the hull is left in: a
+/// baseline taken at some earlier bearing, or before ground streamed in
+/// under it, would hold the hull off water it could now float in, or judge
+/// a grounded hull clear and refuse it every turn.
 fn hold_the_ground(ground: Option<Res<Ground>>, mut hulls: Sounded) {
     let ground = ground.as_deref();
     for (rigged, mut at, mut angle, mut way, mut spin, mut sounding, told, shoving) in &mut hulls {
@@ -3302,12 +3305,15 @@ fn hold_the_ground(ground: Option<Res<Ground>>, mut hulls: Sounded) {
         // Put back, and stopped where it touched.
         at.0 = sounding.at;
         way.0 = Vec2::ZERO;
+        let was = sounded(sounding.at, &sounding.heading);
         let turned = sounded(sounding.at, &angle);
-        if protocol::hull::may_turn(sounding.aground, turned) {
+        if protocol::hull::may_turn(was, turned) {
+            sounding.heading = *angle;
             sounding.aground = turned;
         } else {
             *angle = sounding.heading;
             spin.0 = 0.0;
+            sounding.aground = was;
         }
     }
 }
@@ -3697,9 +3703,10 @@ pub(crate) fn ride_at_anchor(mut hulls: Query<&mut Boat, With<Anchored>>) {
 ///
 /// The ground is not the solver's business and the helm is not stopped by
 /// it here: a hull driven onto a beach is put back by [`hold_the_ground`]
-/// afterwards. That is what lets the helm answer with no way on and
-/// aground, a turn refused alongside an advance being a hull wedged
-/// bow-first with nothing left to free it.
+/// afterwards, and a turn is refused there only where
+/// [`protocol::hull::may_turn`] says. That is what lets the helm answer with
+/// no way on and aground, a turn refused alongside an advance being a hull
+/// wedged bow-first with nothing left to free it.
 ///
 /// Heel is wholly a thing the eye gets. It is settled here against the way
 /// this frame is making and hung on the hull by [`float`], the keel lying
@@ -7089,6 +7096,53 @@ mod tests {
         }
     }
 
+    /// Ground streaming in under a hull lying clear puts it aground through
+    /// no turn of its own, so the turns after are a grounded hull's: the bow
+    /// still comes round. Judged against the depth it was last recorded at,
+    /// the clear reading from before the land arrived, every turn read as
+    /// one into the ground and the hull froze where it lay.
+    #[test]
+    fn a_hull_ground_arrives_under_still_answers_the_helm() {
+        use protocol::ground::{
+            quantize, ChunkPayload, Material, CELL_COUNT, CORNERS, LIT_ALL_DAY,
+        };
+
+        let chunks = || (-1..=1).flat_map(|cz| (-1..=1).map(move |cx| IVec2::new(cx, cz)));
+        let mut ocean = Ground::default();
+        for chunk in chunks() {
+            ocean.deliver(chunk, None, None);
+        }
+        let mut app = test_app();
+        app.insert_resource(ocean);
+        set_wind(&mut app, Vec2::ZERO);
+        place(&mut app, Vec2::splat(64.0), Vec2::X);
+        run_frames(&mut app, 1);
+        assert!(bite(&mut app) < 0.0, "the boat was meant to start clear");
+
+        let mut ground = app.world_mut().resource_mut::<Ground>();
+        for chunk in chunks() {
+            let land = ChunkPayload {
+                heights: vec![quantize(1.0); CORNERS * CORNERS],
+                materials: vec![Material::Sand; CELL_COUNT],
+                lit: vec![LIT_ALL_DAY; CORNERS * CORNERS],
+                water: None,
+                plants: Vec::new(),
+            };
+            ground.deliver(chunk, None, Some(land));
+        }
+        run_frames(&mut app, 1);
+        assert!(bite(&mut app) > 0.0, "the land was meant to put it aground");
+
+        let before = heading_yaw(&mut app);
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, 120);
+        let round = swing_to(heading_yaw(&mut app), before).abs();
+        assert!(
+            round > 0.5,
+            "two seconds of helm brought the bow round {round} rad"
+        );
+    }
+
     #[test]
     fn the_helm_answers_while_aground() {
         // A refused turn on top of a refused advance is a hull wedged against
@@ -7100,9 +7154,10 @@ mod tests {
         // for a while, which is where a rule that reads the ground under a
         // *pose* can pin one. This asked for a bare `rotation != before`
         // once, and a version of [`hold_the_ground`] that put the heading
-        // back along with the place passed it on the one frame of swing it
-        // got before pinning, then held the bow at exactly nothing for as
-        // long as anybody cared to hold the key.
+        // back along with the place, whatever the hull was lying in, passed
+        // it on the one frame of swing it got before pinning, then held the
+        // bow at exactly nothing for as long as anybody cared to hold the
+        // key.
         let mut app = island_app();
         place(
             &mut app,
