@@ -84,9 +84,10 @@ use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, Tex
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
 use protocol::ground::{
-    chunk_at, dequantize, lit_across, material_index, shelter_across, ChunkPayload, Exposure,
-    Material, Plant, CELLS, CELL_METRES, CHUNK_METRES, CORNERS, HEIGHT_STEP, LAKE_WATER,
-    LIT_ALL_DAY, NO_WATER, OCEAN_DEPTH, SEA_WATER, SHELTER_CELLS, SHELTER_CORNERS, SHELTER_METRES,
+    cell_height, chunk_at, dequantize, lit_across, material_index, shelter_across, split,
+    ChunkPayload, Exposure, Material, Plant, CELLS, CELL_METRES, CHUNK_METRES, CORNERS,
+    HEIGHT_STEP, LAKE_WATER, LIT_ALL_DAY, NO_WATER, OCEAN_DEPTH, SEA_WATER, SHELTER_CELLS,
+    SHELTER_CORNERS, SHELTER_METRES,
 };
 
 use crate::camera::{MapCamera, View};
@@ -480,6 +481,21 @@ impl Ground {
         }
     }
 
+    /// The height of one lattice corner as it was sent — what
+    /// [`protocol::ground::lattice_height`] and the keel reading built on it
+    /// ask of this machine, the server answering the same question of its own
+    /// world. `None` where the chunk that owns the corner has not arrived.
+    pub fn corner(&self, corner: IVec2) -> Option<f32> {
+        let cells = IVec2::splat(CELLS as i32);
+        match self.chunks.get(&corner.div_euclid(cells))? {
+            Chunk::Ocean { .. } => Some(-OCEAN_DEPTH),
+            Chunk::Land { heights, .. } => {
+                let local = corner.rem_euclid(cells).as_uvec2();
+                Some(heights[local.y as usize * CORNERS + local.x as usize])
+            }
+        }
+    }
+
     /// When the surface at a world point sees the sun, read between the four
     /// corners around it — see [`protocol::ground::ChunkPayload::lit`].
     ///
@@ -639,25 +655,6 @@ impl Ground {
     }
 }
 
-/// A cell's four corners, in the order everything here names them.
-///
-/// Not an enum: these are indices into the four-corner arrays either side of
-/// this, and into the four vertices [`chunk_mesh`] pushes per cell, so what
-/// they have to be is small numbers that agree.
-const SW: usize = 0;
-const SE: usize = 1;
-const NW: usize = 2;
-const NE: usize = 3;
-
-/// Where a cell's corners sit inside it, in cell widths from its own lower
-/// corner — the frame [`height_at`] does its arithmetic in.
-const CORNER_AT: [Vec2; 4] = [
-    Vec2::new(0.0, 0.0),
-    Vec2::new(1.0, 0.0),
-    Vec2::new(0.0, 1.0),
-    Vec2::new(1.0, 1.0),
-];
-
 /// How coarsely a chunk is drawn: a halving of the payload's own grid at each
 /// level, so [`Detail::FINEST`] draws every cell the wire sent and level two
 /// lays one drawn cell over sixteen of them. See the module header for what a
@@ -704,49 +701,6 @@ impl Detail {
     }
 }
 
-/// The two triangles cell `(ix, iz)` is drawn as, each named by three of the
-/// cell's own four corners and wound counter-clockwise seen from above.
-///
-/// **The one place the cut is decided**, in the indices of whichever grid is
-/// being drawn: a quad is not planar, so [`chunk_mesh`] and [`height_at`]
-/// reading different diagonals is a hull stepping where the picture slopes.
-///
-/// Which diagonal alternates like a checkerboard, one cut everywhere lining
-/// cells into a herringbone. The parity runs off the drawn cell's index, and
-/// every [`Detail`] leaves an even number of them, so it carries across a
-/// chunk boundary without a phase step.
-const fn split(ix: usize, iz: usize) -> [[usize; 3]; 2] {
-    if (ix + iz).is_multiple_of(2) {
-        [[SW, NW, SE], [SE, NW, NE]]
-    } else {
-        [[SW, NW, NE], [SW, NE, SE]]
-    }
-}
-
-/// Where the plane of `tri` stands over `at`, and whether `at` is on it —
-/// `None` for a point outside the triangle.
-///
-/// Barycentric rather than a case for each diagonal: the weights are what say
-/// *both* whether the point is inside and what the height there is, so the
-/// two answers cannot disagree about which triangle is being talked about.
-/// The triangles are half unit squares, so the determinant is ±1 and there is
-/// no degenerate case to guard.
-fn on_triangle(tri: [usize; 3], heights: [f32; 4], at: Vec2) -> Option<f32> {
-    let [a, b, c] = tri.map(|corner| CORNER_AT[corner]);
-    let cross = |p: Vec2, q: Vec2| p.x * q.y - p.y * q.x;
-
-    let area = cross(b - a, c - a);
-    let v = cross(at - a, c - a) / area;
-    let w = cross(b - a, at - a) / area;
-    let u = 1.0 - v - w;
-
-    // A point on the shared edge belongs to both, and both answer the same —
-    // the plane is continuous across the cut — so the tolerance only decides
-    // which of two equal answers is given, never whether one is given.
-    (u >= -1.0e-6 && v >= -1.0e-6 && w >= -1.0e-6)
-        .then(|| u * heights[tri[0]] + v * heights[tri[1]] + w * heights[tri[2]])
-}
-
 /// The height of one point inside a chunk, interpolated across the triangle
 /// the payload's own grid puts there.
 ///
@@ -761,26 +715,17 @@ fn height_at(heights: &[f32], local: Vec2) -> f32 {
     // is entitled to land on the boundary itself.
     let ix = (cell.x.floor().max(0.0) as usize).min(CELLS - 1);
     let iz = (cell.y.floor().max(0.0) as usize).min(CELLS - 1);
-    let at = Vec2::new(
-        (cell.x - ix as f32).clamp(0.0, 1.0),
-        (cell.y - iz as f32).clamp(0.0, 1.0),
-    );
-
     let corner = |cx: usize, cz: usize| heights[cz * CORNERS + cx];
-    let corners = [
-        corner(ix, iz),
-        corner(ix + 1, iz),
-        corner(ix, iz + 1),
-        corner(ix + 1, iz + 1),
-    ];
-
-    let [first, second] = split(ix, iz);
-    on_triangle(first, corners, at)
-        .or_else(|| on_triangle(second, corners, at))
-        // The two triangles cover the cell and `at` is clamped inside it, so
-        // this is unreachable by anything but arithmetic that has already gone
-        // wrong. Answering with the cell's mean beats a panic under a boat.
-        .unwrap_or_else(|| corners.iter().sum::<f32>() / 4.0)
+    cell_height(
+        IVec2::new(ix as i32, iz as i32),
+        [
+            corner(ix, iz),
+            corner(ix + 1, iz),
+            corner(ix, iz + 1),
+            corner(ix + 1, iz + 1),
+        ],
+        cell - Vec2::new(ix as f32, iz as f32),
+    )
 }
 
 /// Marks a terrain chunk entity, and records which world chunk it is.
@@ -1908,6 +1853,37 @@ mod tests {
             lit: vec![protocol::ground::LIT_ALL_DAY; CORNERS * CORNERS],
             water: None,
             plants: Vec::new(),
+        }
+    }
+
+    /// The keel reading goes through [`Ground::corner`] and the shared
+    /// lattice rather than through [`Ground::height`], so the two have to be
+    /// the same ground — on ground whose cells are no plane, where the cut
+    /// shows, and in a chunk on the negative side of both axes, where a
+    /// truncating division would read the neighbour's corners.
+    #[test]
+    fn the_corners_read_the_same_ground_the_height_does() {
+        let crumpled = ChunkPayload {
+            heights: (0..CORNERS * CORNERS)
+                .map(|i| quantize(((i % CORNERS) % 3) as f32 * ((i / CORNERS) % 5) as f32))
+                .collect(),
+            ..a_slope()
+        };
+        let chunk = IVec2::new(-1, -1);
+        let mut ground = Ground::default();
+        ground.deliver(chunk, None, Some(crumpled));
+
+        let origin = chunk.as_vec2() * CHUNK_METRES;
+        for (x, z) in [
+            (0.3, 0.6),
+            (0.6, 0.3),
+            (5.5, 7.25),
+            (40.1, 2.9),
+            (126.2, 126.7),
+        ] {
+            let at = origin + Vec2::new(x, z);
+            let lattice = protocol::ground::lattice_height(|c| ground.corner(c), at);
+            assert_eq!(lattice, ground.height(at.x, at.y), "at {at}");
         }
     }
 

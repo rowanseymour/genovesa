@@ -22,9 +22,9 @@
 //! displacement, a turning circle and a dozen other numbers that only the
 //! machine drawing it and sailing it has any use for. Those stay there. What
 //! crosses is the keel, because the keel is what the ground stops.
-use glam::Vec2;
+use glam::{IVec2, Vec2};
 
-use crate::ground::CELL_METRES;
+use crate::ground::{lattice_height, CELL_METRES};
 use crate::BoatKind;
 
 /// How far a keel is let bite into the bed before the hull counts as stopped,
@@ -136,8 +136,10 @@ pub fn astern(at: Vec2, heading: f32, metres: f32) -> Vec2 {
 /// its sign and its ordering against itself, both of which the offset leaves
 /// alone.
 ///
-/// `bed` gives the height of the bed at a point, or `None` where this machine
-/// does not know — a chunk that has not arrived. An unknown probe says nothing
+/// `corner` gives the height of one lattice corner, or `None` where this
+/// machine does not know — a chunk that has not arrived. The bed between
+/// corners is [`lattice_height`]'s, the same on both machines because the
+/// corners are the ones the wire carries. An unknown probe says nothing
 /// rather than objecting, so a hull over ground still on its way is not stopped
 /// by ignorance; and a hull with nothing known under any of it answers
 /// [`f32::NEG_INFINITY`], which is "no reason to stop it" and not "clear".
@@ -145,8 +147,9 @@ pub fn aground_by(
     kind: BoatKind,
     at: Vec2,
     heading: f32,
-    bed: impl Fn(Vec2) -> Option<f32>,
+    corner: impl Fn(IVec2) -> Option<f32>,
 ) -> f32 {
+    let bed = |at: Vec2| lattice_height(&corner, at);
     let keel = keel_of(kind);
     let probes = keel.probes();
     debug_assert!(probes > 1, "a keel with no run has no line to probe");
@@ -161,7 +164,20 @@ pub fn aground_by(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ground::corner_point;
     use std::f32::consts::FRAC_PI_2;
+
+    /// A lattice standing at `deep` everywhere but the corners within
+    /// `radius` of `rock`, which stand at the waterline.
+    fn rock_at(rock: Vec2, radius: f32, deep: f32) -> impl Fn(IVec2) -> Option<f32> {
+        move |corner| {
+            Some(if corner_point(corner).distance(rock) < radius {
+                0.0
+            } else {
+                deep
+            })
+        }
+    }
 
     /// Every kind's keel has to be a keel: run the right way along the hull,
     /// draw something, and leave the probes a line to be spread along.
@@ -226,7 +242,7 @@ mod tests {
         let deep = -20.0;
         // A bed that is deep everywhere but right at the forefoot.
         let bow = astern(Vec2::ZERO, 0.0, keel.forefoot);
-        let bed = |at: Vec2| Some(if at.distance(bow) < 0.5 { 0.0 } else { deep });
+        let bed = rock_at(bow, 0.6, deep);
 
         assert!(
             aground_by(BoatKind::Sloop, Vec2::ZERO, 0.0, bed) >= 0.0,
@@ -246,9 +262,9 @@ mod tests {
     fn sounding_the_middle_alone_misses_what_the_keel_finds() {
         let keel = keel_of(BoatKind::Sloop);
         let bow = astern(Vec2::ZERO, 0.0, keel.forefoot);
-        let bed = |at: Vec2| Some(if at.distance(bow) < 0.5 { 0.0 } else { -20.0 });
+        let bed = rock_at(bow, 0.6, -20.0);
 
-        let underfoot = bed(Vec2::ZERO).expect("a bed") + keel.grounding_draft();
+        let underfoot = lattice_height(&bed, Vec2::ZERO).expect("a bed") + keel.grounding_draft();
         assert!(underfoot < 0.0, "the middle was not in clear water");
         assert!(
             aground_by(BoatKind::Sloop, Vec2::ZERO, 0.0, bed) > underfoot,
@@ -269,7 +285,8 @@ mod tests {
         // rather than clear.
         let keel = keel_of(BoatKind::Sloop);
         let bow = astern(Vec2::ZERO, 0.0, keel.forefoot);
-        let only_the_bow = |at: Vec2| (at.distance(bow) < 0.5).then_some(0.0);
+        let only_the_bow =
+            |corner: IVec2| (corner_point(corner).distance(bow) < 1.5).then_some(0.0);
         assert!(
             aground_by(BoatKind::Sloop, Vec2::ZERO, 0.0, only_the_bow) >= 0.0,
             "the one probe that answered was thrown away"

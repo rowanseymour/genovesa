@@ -173,12 +173,121 @@ pub const CORNERS: usize = CELLS + 1;
 /// Cells in one chunk, each of which carries a [`Material`].
 ///
 /// The wire says what a square metre of ground *is* and stops there. How that
-/// square is drawn — two triangles split one way or the other, a textured
-/// quad, nothing at all at distance — is the drawing end's own business, and
-/// the format deliberately holds no opinion about it. That is what lets one
+/// square is drawn — a textured quad, nothing at all at distance — is the
+/// drawing end's own business, and the format deliberately holds no opinion
+/// about it; only how a keel is stopped by it is shared, in [`split`]. That is what lets one
 /// client flat-shade the ground and another paint it while both draw the same
 /// world.
 pub const CELL_COUNT: usize = CELLS * CELLS;
+
+// --- Between the corners ----------------------------------------------------
+
+/// A cell's four corners, in the order everything that reads one names them:
+/// indices into a cell's four-corner arrays, and into the four vertices a
+/// mesh pushes per cell.
+pub const SW: usize = 0;
+pub const SE: usize = 1;
+pub const NW: usize = 2;
+pub const NE: usize = 3;
+
+/// Where a cell's corners sit inside it, in cell widths from its own lower
+/// corner — the frame [`cell_height`] does its arithmetic in.
+const CORNER_AT: [Vec2; 4] = [
+    Vec2::new(0.0, 0.0),
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.0, 1.0),
+    Vec2::new(1.0, 1.0),
+];
+
+/// The two triangles cell `(ix, iz)` is cut into, each named by three of the
+/// cell's own four corners and wound counter-clockwise seen from above.
+///
+/// **The one place the cut is decided.** A quad is not planar, so a client
+/// drawing one diagonal while a keel is stopped by the other is a hull
+/// standing off ground the picture shows it on — and the server stops keels
+/// too, so the cut is here rather than in the drawing. The payload itself
+/// stays opinion-free: only what is *stopped* by the ground reads this.
+///
+/// Which diagonal alternates like a checkerboard, one cut everywhere lining
+/// cells into a herringbone. A chunk is an even number of cells across, so
+/// the parity of a chunk's own index is the parity of the world's, and it
+/// carries across a chunk boundary without a phase step.
+pub const fn split(ix: usize, iz: usize) -> [[usize; 3]; 2] {
+    if (ix + iz).is_multiple_of(2) {
+        [[SW, NW, SE], [SE, NW, NE]]
+    } else {
+        [[SW, NW, NE], [SW, NE, SE]]
+    }
+}
+
+const _: () = assert!(
+    CELLS.is_multiple_of(2),
+    "the cut would step phase at a chunk's edge"
+);
+
+/// Where the plane of `tri` stands over `at`, and whether `at` is on it —
+/// `None` for a point outside the triangle.
+///
+/// Barycentric rather than a case for each diagonal: the weights are what say
+/// *both* whether the point is inside and what the height there is, so the
+/// two answers cannot disagree about which triangle is being talked about.
+/// The triangles are half unit squares, so the determinant is ±1 and there is
+/// no degenerate case to guard.
+fn on_triangle(tri: [usize; 3], heights: [f32; 4], at: Vec2) -> Option<f32> {
+    let [a, b, c] = tri.map(|corner| CORNER_AT[corner]);
+    let cross = |p: Vec2, q: Vec2| p.x * q.y - p.y * q.x;
+
+    let area = cross(b - a, c - a);
+    let v = cross(at - a, c - a) / area;
+    let w = cross(b - a, at - a) / area;
+    let u = 1.0 - v - w;
+
+    // A point on the shared edge belongs to both, and both answer the same —
+    // the plane is continuous across the cut — so the tolerance only decides
+    // which of two equal answers is given, never whether one is given.
+    (u >= -1.0e-6 && v >= -1.0e-6 && w >= -1.0e-6)
+        .then(|| u * heights[tri[0]] + v * heights[tri[1]] + w * heights[tri[2]])
+}
+
+/// The height at `at`, in cell widths from the lower corner of `cell`, across
+/// the triangle [`split`] puts there. `corners` are the cell's own, in
+/// [`SW`]..[`NE`] order; `cell` is only asked its parity, so a chunk's own
+/// index and the world's give the same answer.
+pub fn cell_height(cell: IVec2, corners: [f32; 4], at: Vec2) -> f32 {
+    let at = at.clamp(Vec2::ZERO, Vec2::ONE);
+    let [first, second] = split(cell.x.rem_euclid(2) as usize, cell.y.rem_euclid(2) as usize);
+    on_triangle(first, corners, at)
+        .or_else(|| on_triangle(second, corners, at))
+        // The two triangles cover the cell and `at` is clamped inside it, so
+        // this is unreachable by anything but arithmetic that has already gone
+        // wrong. Answering with the cell's mean beats a panic under a boat.
+        .unwrap_or_else(|| corners.iter().sum::<f32>() / 4.0)
+}
+
+/// The world corner a lattice index names, in metres.
+pub fn corner_point(corner: IVec2) -> Vec2 {
+    corner.as_vec2() * CELL_METRES
+}
+
+/// The height of the ground at a world point, read off whatever corner
+/// heights a machine holds — `None` where `corner` does not know one of the
+/// four, which is a chunk that has not arrived.
+///
+/// `corner` takes a lattice index — [`corner_point`] says where it stands —
+/// and answers the height the wire carries there, dequantised. That is the
+/// whole of what two machines must agree on for a keel to be stopped in the
+/// same place on both.
+pub fn lattice_height(corner: impl Fn(IVec2) -> Option<f32>, at: Vec2) -> Option<f32> {
+    let scaled = at / CELL_METRES;
+    let cell = scaled.floor().as_ivec2();
+    let corners = [
+        corner(cell)?,
+        corner(cell + IVec2::X)?,
+        corner(cell + IVec2::Y)?,
+        corner(cell + IVec2::ONE)?,
+    ];
+    Some(cell_height(cell, corners, scaled - cell.as_vec2()))
+}
 
 // --- Shelter ----------------------------------------------------------------
 

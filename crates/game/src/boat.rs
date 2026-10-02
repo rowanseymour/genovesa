@@ -2960,9 +2960,9 @@ fn eased_to(current: f32, target: f32, rate: f32, dt: f32, within: f32) -> f32 {
 /// field sampled every [`protocol::ground::CELL_METRES`] and the boat is a
 /// keel line above it,
 /// so "is there water enough here" is a handful of lookups rather than
-/// triangle intersection — [`Ground::height`] answers on exactly the facets
-/// the mesh was built from, which is what makes the ground a boat is stopped
-/// by the ground the player can see. The physics engine is not in it: it is
+/// triangle intersection — read on the facets the mesh is cut into, which is
+/// what makes the ground a boat is stopped by the ground the player can see.
+/// The physics engine is not in it: it is
 /// two-dimensional and knows only hulls about each other.
 ///
 /// A probe over a chunk that has not arrived says nothing rather than
@@ -2972,7 +2972,7 @@ fn grounding(kind: BoatKind, ground: Option<&Ground>, at: Vec2, heading: f32) ->
     let Some(ground) = ground else {
         return f32::NEG_INFINITY;
     };
-    protocol::hull::aground_by(kind, at, heading, |on| ground.height(on.x, on.y))
+    protocol::hull::aground_by(kind, at, heading, |corner| ground.corner(corner))
 }
 
 /// Where a hull last stood in water it was allowed to be in, and how deep
