@@ -121,8 +121,8 @@ not a long one.
 ## The build outweighs the checkout
 
 The source is 43M. A single `target/` is 2.7G, and there is one per worktree.
-Left alone this reached 243G across the project, so the shape of a build is
-worth as much care here as the shape of the code.
+Left alone that multiplies quickly, so the shape of a build is worth as much
+care here as the shape of the code.
 
 Two rules keep it down, and both are load-bearing in ways that are easy to
 undo by accident:
@@ -145,15 +145,12 @@ undo by accident:
 Cargo also never reclaims an artifact whose fingerprint has stopped matching,
 so a `target/` grows without bound across rebuilds even when nothing changes.
 Reaping those is a property of the machine rather than of this repo — one
-sweep covers every checkout on it — so it lives outside, in
-`~/code/rust-cleanup.sh`, weekly under a launchd agent.
+sweep covers every checkout on it — so it belongs outside, not in here.
 
-Deleting a `target/` is cheap because sccache sits between cargo and rustc —
-see `~/.cargo/config.toml`. Cheap for a worktree that has been built before,
-which is the case that matters after a sweep; a *new* worktree still pays for
-the third of the tree that bakes its own path into the artifact, so cutting one
-per feature branch is not free and the branches are worth retiring. Removing a
-worktree takes its `target/` with it.
+A worktree's first build pays for the whole tree, and a compiler cache only
+spares part of it, since a third of the tree bakes its own path into the
+artifact. So cutting one per feature branch is not free and the branches are
+worth retiring. Removing a worktree takes its `target/` with it.
 
 ## Odds and ends
 

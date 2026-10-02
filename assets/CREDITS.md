@@ -16,6 +16,15 @@ triangles and a spar — and was moved into a model file unchanged, so that the
 first thing through the pipeline could be checked against a picture of the last
 thing before it. It is meant to be taken further.
 
+## rowboat
+
+Original to this project, and under the same licence as the rest of it. An open
+dinghy, rowed rather than sailed, built as two shells and a gunwale because it
+is looked into rather than at.
+
+`assets-src/models/rowboat/` holds the Blender master and the notes, which say
+how its outline is tied to the footprint the sea is cut away from.
+
 ## palm
 
 Original to this project, and under the same licence as the rest of it. A
@@ -26,6 +35,39 @@ does about which way a face points.
 `assets-src/models/palm/` holds the Blender master. Where palms *stand* is not
 here at all — that is the world's business, and is decided in `world`'s
 `palms` module and sent to clients with the ground.
+
+## banana
+
+Original to this project, and under the same licence as the rest of it. A clump
+of three pseudostems under leaves too big to be believed, with the bunch a
+single red-purple pixel.
+
+`assets-src/models/banana/` holds the Blender master and the notes. Where
+bananas grow is decided in `world`'s `bananas` module.
+
+## cactus
+
+Original to this project, and under the same licence as the rest of it. A six-
+sided candelabra, the one thing in the world with a vertical edge.
+
+`assets-src/models/cactus/` holds the Blender master and the notes. Where cacti
+stand is decided in `world`'s `cacti` module.
+
+## mangrove
+
+Original to this project, and under the same licence as the rest of it. A crown
+on an arch of prop roots, the one thing in the world that stands on legs.
+
+`assets-src/models/mangrove/` holds the Blender master and the notes. Where
+mangroves stand is decided in `world`'s `mangroves` module.
+
+## scalesia
+
+Original to this project, and under the same licence as the rest of it. A tall,
+leaning trunk under one rounded crown — a daisy that grew into a tree.
+
+`assets-src/models/scalesia/` holds the Blender master and the notes. Where
+scalesia stand is decided in `world`'s `scalesia` module.
 
 ## eagle
 
@@ -44,8 +86,9 @@ Original to this project, and under the same licence as the rest of it. A
 lofted hex-ring body with dorsal fin, horizontal flukes and pectorals as thin
 closed sheets.
 
-`assets-src/models/dolphin/` holds the Blender master and the notes. Like the
-eagle, where pods swim is decided client-side in `game`'s `wildlife` module.
+`assets-src/models/dolphin/` holds the Blender master and the notes. A pod is
+a beast, owned by the server, so where pods swim is decided in `server`'s
+`beasts` module.
 
 ## seabird
 
@@ -53,9 +96,8 @@ Original to this project, and under the same licence as the rest of it. A
 gliding silhouette with drooped wingtips and a long bill, seen only as one of
 a line skimming the shallows.
 
-`assets-src/models/seabird/` holds the Blender master and the notes. Like all
-wildlife, where lines fly is decided client-side in `game`'s `wildlife`
-module.
+`assets-src/models/seabird/` holds the Blender master and the notes. Like the
+eagle, where lines fly is decided client-side in `game`'s `wildlife` module.
 
 ## whale
 
@@ -63,9 +105,17 @@ Original to this project, and under the same licence as the rest of it. A
 rorqual — lofted hex-ring body, small dorsal fin far aft, broad horizontal
 flukes — built for the one view a whale gets: a back through the surface.
 
-`assets-src/models/whale/` holds the Blender master and the notes. Like all
-wildlife, where whales swim is decided client-side in `game`'s `wildlife`
-module.
+`assets-src/models/whale/` holds the Blender master and the notes. Like the
+dolphin, where whales swim is decided in `server`'s `beasts` module.
+
+## shark
+
+Original to this project, and under the same licence as the rest of it. A reef
+shark, a touch over life size, with a dorsal fin taller than a real one's
+because the fin is most of what is seen.
+
+`assets-src/models/shark/` holds the Blender master and the notes. Like the
+dolphin, where sharks swim is decided in `server`'s `beasts` module.
 
 ## player
 
