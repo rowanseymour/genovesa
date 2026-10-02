@@ -1982,6 +1982,7 @@ pub(crate) fn spawn_hull(
             Drawn(pose),
             Sounding {
                 at: laid,
+                heading: waterline::laid_at(laid, yaw_of(&pose)).1,
                 // Nothing is known about the ground yet, and a hull put
                 // down where there is none is in water it is allowed to be
                 // in until a chunk says otherwise — the same benefit of the
@@ -2977,9 +2978,10 @@ fn grounding(kind: BoatKind, ground: Option<&Ground>, at: Vec2, heading: f32) ->
     protocol::hull::aground_by(kind, at, heading, |corner| ground.corner(corner))
 }
 
-/// Where a hull last stood in water it was allowed to be in, and how deep
-/// its keel was in the ground there — what [`hold_the_ground`] puts a hull
-/// back to when the solver has pushed it somewhere it may not be.
+/// Where a hull last stood in water it was allowed to be in, which way it
+/// pointed there, and how deep its keel was in the ground — what
+/// [`hold_the_ground`] puts a hull back to when the solver has pushed it
+/// somewhere it may not be.
 ///
 /// On the hull rather than worked out afresh because the rule is a
 /// comparison against the pose *before*: a hull already aground may be
@@ -2988,6 +2990,7 @@ fn grounding(kind: BoatKind, ground: Option<&Ground>, at: Vec2, heading: f32) ->
 #[derive(Component)]
 pub(crate) struct Sounding {
     at: Vec2,
+    heading: Rotation,
     aground: f32,
 }
 
@@ -3119,6 +3122,7 @@ fn take_the_placing(
         way.0 = Vec2::ZERO;
         spin.0 = 0.0;
         sounding.at = at.0;
+        sounding.heading = *angle;
         sounding.aground = f32::INFINITY;
         ships.push((hull, at.0, *angle));
         commands.entity(hull).remove::<Placing>();
@@ -3133,6 +3137,7 @@ fn take_the_placing(
         way.0 = Vec2::ZERO;
         spin.0 = 0.0;
         sounding.at = at.0;
+        sounding.heading = *angle;
         sounding.aground = f32::INFINITY;
     }
 }
@@ -3202,6 +3207,7 @@ fn take_the_plane(mut hulls: Placed) {
         // afresh here: an infinity accepts the next pose whatever it is,
         // and the depth it records then is the truth of the new spot.
         sounding.at = at.0;
+        sounding.heading = *angle;
         sounding.aground = f32::INFINITY;
     }
 }
@@ -3218,6 +3224,25 @@ fn remember_the_drawing(mut hulls: Query<(&Transform, &mut Drawn), With<Vessel>>
         drawn.0 = *place;
     }
 }
+
+/// Every hull, as [`hold_the_ground`] sounds one: what it takes to judge a
+/// pose, to undo it, and to know whether undoing it is this client's
+/// business at all.
+type Sounded<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Rigged,
+        &'static mut Position,
+        &'static mut Rotation,
+        &'static mut LinearVelocity,
+        &'static mut AngularVelocity,
+        &'static mut Sounding,
+        Has<Telling>,
+        Has<Shoving>,
+    ),
+    With<Vessel>,
+>;
 
 /// Keeps a keel out of the ground, which is the one collision on this water
 /// the solver knows nothing about — see [`crate::waterline`] on why the
@@ -3237,40 +3262,16 @@ fn remember_the_drawing(mut hulls: Query<(&Transform, &mut Drawn), With<Vessel>>
 /// hull that finds itself aground through no fault of its own: a `goto` on
 /// to a shoal, or ground streaming in underneath one already sitting there.
 ///
-/// What is held is the hull's *place*, and never the way it is pointing. A
-/// bow comes round whatever is under it — see [`steer`], whose promise that
-/// is — and putting the heading back along with the place breaks it
-/// completely: a yaw sweeps the keel over different ground, so almost any
-/// turn reads as deeper aground and is undone, and a hull driven onto a
-/// beach cannot be turned at all. Measured, on a hull run up the test
-/// island: five seconds of helm either way came round exactly nothing.
-///
-/// Which is why the depth is read afresh at the pose the hull is left in
-/// rather than remembered from the one it was refused. The heading has
-/// moved on, the keel is over different ground, and a baseline taken at
-/// some earlier bearing would hold the hull off water it could now float
-/// in.
-/// Every hull, as [`hold_the_ground`] sounds one: what it takes to judge a
-/// pose, to undo it, and to know whether undoing it is this client's
-/// business at all.
-type Sounded<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static Rigged,
-        &'static mut Position,
-        &'static Rotation,
-        &'static mut LinearVelocity,
-        &'static mut Sounding,
-        Has<Telling>,
-        Has<Shoving>,
-    ),
-    With<Vessel>,
->;
-
+/// What is held is the hull's *place*, and its heading only where
+/// [`protocol::hull::may_turn`] refuses the turn — a clear hull swinging an
+/// end or a side into the ground. A hull aground comes round whatever is
+/// under it, which is [`steer`]'s promise. So the depth is read afresh at
+/// the pose the hull is left in rather than remembered from the one it was
+/// refused: the heading may have moved on, and a baseline taken at some
+/// earlier bearing would hold the hull off water it could now float in.
 fn hold_the_ground(ground: Option<Res<Ground>>, mut hulls: Sounded) {
     let ground = ground.as_deref();
-    for (rigged, mut at, angle, mut way, mut sounding, told, shoving) in &mut hulls {
+    for (rigged, mut at, mut angle, mut way, mut spin, mut sounding, told, shoving) in &mut hulls {
         // Every hull is *sounded*, and only the ones this client answers for
         // are put back — which is [`Ours`] spelled out, this being the one
         // reader that needs both halves rather than the filter.
@@ -3283,20 +3284,31 @@ fn hold_the_ground(ground: Option<Res<Ground>>, mut hulls: Sounded) {
         // judged against a baseline from wherever it was first seen, and
         // put back *there* the first time it grazed a shoal.
         let ours = !told || shoving;
-        // Every reading is taken at the heading the hull is pointing now,
-        // that never being this system's to alter.
-        let heading = waterline::across(angle.as_radians());
-        let sounded = |where_: Vec2| grounding(rigged.0, ground, where_, heading);
-        let aground = sounded(at.0);
+        let sounded = |where_: Vec2, pointing: &Rotation| {
+            grounding(
+                rigged.0,
+                ground,
+                where_,
+                waterline::across(pointing.as_radians()),
+            )
+        };
+        let aground = sounded(at.0, &angle);
         if !ours || aground <= 0.0 || aground <= sounding.aground {
             sounding.at = at.0;
+            sounding.heading = *angle;
             sounding.aground = aground;
             continue;
         }
         // Put back, and stopped where it touched.
         at.0 = sounding.at;
         way.0 = Vec2::ZERO;
-        sounding.aground = sounded(sounding.at);
+        let turned = sounded(sounding.at, &angle);
+        if protocol::hull::may_turn(sounding.aground, turned) {
+            sounding.aground = turned;
+        } else {
+            *angle = sounding.heading;
+            spin.0 = 0.0;
+        }
     }
 }
 
@@ -7030,6 +7042,51 @@ mod tests {
             ended,
             "the boat went on creeping up the beach after it had come to rest"
         );
+    }
+
+    #[test]
+    fn a_hull_lying_off_a_shore_is_not_turned_into_it() {
+        // Lying close alongside the island in a calm, clear of it by a
+        // metre, with seven metres of hull: a quarter turn either way puts
+        // one end of it into the rim. Full helm each way comes round as far
+        // as the shore allows and no further — and never with any of the
+        // hull in the ground on the way.
+        let mut app = island_app();
+        set_wind(&mut app, Vec2::ZERO);
+        for (key, way) in [
+            (KeyCode::ArrowLeft, "port"),
+            (KeyCode::ArrowRight, "starboard"),
+        ] {
+            place(
+                &mut app,
+                Vec2::new(TEST_ISLAND_REACH + 2.5, 0.0),
+                Vec2::new(0.0, 1.0),
+            );
+            run_frames(&mut app, 1);
+            assert!(bite(&mut app) < 0.0, "the boat was meant to start clear");
+            let before = heading_yaw(&mut app);
+            hold(&mut app, key);
+            for frame in 0..300 {
+                run_frames(&mut app, 1);
+                let into = bite(&mut app);
+                assert!(
+                    into <= 0.0,
+                    "frame {frame} of {way} helm: {into} m into the shore"
+                );
+            }
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release_all();
+            let round = swing_to(heading_yaw(&mut app), before).abs();
+            assert!(
+                round > 0.05,
+                "{way} helm never brought the bow round at all"
+            );
+            assert!(
+                round < std::f32::consts::FRAC_PI_2,
+                "{way} helm came round {round} rad, so the shore was never in reach"
+            );
+        }
     }
 
     #[test]

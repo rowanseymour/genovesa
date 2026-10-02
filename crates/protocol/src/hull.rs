@@ -222,6 +222,21 @@ pub fn aground_by(
         .fold(f32::NEG_INFINITY, f32::max)
 }
 
+/// Whether a hull may come round from a heading it reads `was` at to one it
+/// would read `would` at, both [`aground_by`] at the same place.
+///
+/// Refused only where the turn is what puts a hull that was clear into the
+/// ground — swinging an end or a side into a cliff it was lying off. A hull
+/// with nothing known under it was not clear, only unjudged, and ground
+/// arriving under it is not its doing. A hull already aground turns whatever
+/// the turn reads: a yaw sweeps the bottom
+/// over different ground, so nearly every turn of a hull on a beach reads
+/// deeper, and holding it to "no deeper" left one driven ashore unable to
+/// come round at all.
+pub fn may_turn(was: f32, would: f32) -> bool {
+    was > 0.0 || was == f32::NEG_INFINITY || would <= 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +436,20 @@ mod tests {
         assert!(
             aground_by(BoatKind::Sloop, Vec2::new(0.5, 0.0), 0.0, |_| Some(shelf)) >= 0.0,
             "a keel over a shelf shoaler than its draft was not stopped"
+        );
+    }
+
+    /// A clear hull is refused only the turn that grounds it, and a hull
+    /// aground is refused nothing.
+    #[test]
+    fn only_a_turn_that_grounds_a_clear_hull_is_refused() {
+        assert!(may_turn(-0.3, -0.1), "a turn in clear water was refused");
+        assert!(!may_turn(-0.3, 0.1), "a turn into the ground was allowed");
+        assert!(may_turn(0.2, 0.5), "a hull aground was held from turning");
+        assert!(may_turn(-0.3, 0.0), "touching is not aground");
+        assert!(
+            may_turn(f32::NEG_INFINITY, 0.5),
+            "a hull with nothing known under it was held as though clear"
         );
     }
 
