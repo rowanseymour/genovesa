@@ -2841,6 +2841,13 @@ fn row(
 /// but turning a shape that long takes time the height does not need. A beached
 /// hull eases level instead, the ground holding it.
 ///
+/// In the shallows the bed holds a hull up through a trough, by the keel
+/// reading [`hold_the_ground`] left on its [`Sounding`]: the swell is drawing
+/// only, so the keel is kept off the bed at still water, and a trough deeper
+/// than the water it has to spare would draw it into the sand. Held up level,
+/// not pivoted on whatever it touched, and never above still water — a hull
+/// actually aground is the half-buried one above.
+///
 /// The tilt goes on and comes off as a factor of its own: the rotation holds
 /// heading, then the water's pitch, then a single roll factor the wave roll
 /// shares with the turn's heel — so this strips the tilt it applied last frame
@@ -2850,11 +2857,11 @@ pub(crate) fn float(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
     sea: Res<sea::SeaConditions>,
-    mut boats: Query<(&mut Transform, &mut Boat)>,
+    mut boats: Query<(&mut Transform, &mut Boat, Option<&Sounding>)>,
 ) {
     let elapsed = time.elapsed_secs_wrapped();
 
-    for (mut transform, mut boat) in &mut boats {
+    for (mut transform, mut boat, sounding) in &mut boats {
         let hull = boat.hull;
         let dt = time.delta_secs();
         let at = transform.translation;
@@ -2867,8 +2874,9 @@ pub(crate) fn float(
             // differ by at most a texel of interpolation, in water where the
             // swell is smallest.
             let water = sea.water_over(ground.as_deref(), at.xz(), elapsed);
-            transform.translation.y = height.max(water);
-            afloat = water >= height;
+            let bed = sounding.map_or(f32::NEG_INFINITY, |sounding| sounding.aground.min(0.0));
+            transform.translation.y = height.max(water).max(bed);
+            afloat = water >= height && water >= bed;
         }
 
         let (target_pitch, target_roll) = if afloat {
@@ -2978,7 +2986,7 @@ fn grounding(kind: BoatKind, ground: Option<&Ground>, at: Vec2, heading: f32) ->
 /// driven off but never further on, and that needs the pose it is being
 /// judged against to have survived the frame.
 #[derive(Component)]
-struct Sounding {
+pub(crate) struct Sounding {
     at: Vec2,
     aground: f32,
 }
@@ -6188,6 +6196,57 @@ mod tests {
             (floated - water).abs() < AFLOAT_HAIR,
             "the boat floats at {floated} m, the swell there stands at {water} m"
         );
+    }
+
+    /// A keel with a little water to spare over a flat shoal, where the
+    /// shore wave's trough is deeper than what it spares: the hull is held
+    /// up by the bed rather than drawn into it — and the swell does go below
+    /// where it is held, or this would pass with nothing to hold.
+    #[test]
+    fn the_bed_holds_a_hull_up_through_a_trough() {
+        use protocol::ground::{
+            quantize, ChunkPayload, Material, CELL_COUNT, CORNERS, LIT_ALL_DAY,
+        };
+
+        let shoal = -(keel_of(BoatKind::Sloop).grounding_draft() + 0.1);
+        let mut ground = Ground::default();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let flat = ChunkPayload {
+                    heights: vec![quantize(shoal); CORNERS * CORNERS],
+                    materials: vec![Material::Sand; CELL_COUNT],
+                    lit: vec![LIT_ALL_DAY; CORNERS * CORNERS],
+                    water: None,
+                    plants: Vec::new(),
+                };
+                ground.deliver(IVec2::new(cx, cz), None, Some(flat));
+            }
+        }
+        let mut app = test_app();
+        app.insert_resource(ground);
+        place(&mut app, Vec2::splat(64.0), Vec2::X);
+        run_frames(&mut app, 1);
+
+        let mut held = false;
+        for frame in 0..600 {
+            run_frames(&mut app, 1);
+            let hull = helmed_hull(&mut app);
+            let floor = app.world().get::<Sounding>(hull).expect("a hull").aground;
+            assert!(floor < 0.0, "the keel is not clear at still water");
+            let at = boat(&mut app).translation;
+            assert!(
+                at.y >= floor,
+                "frame {frame}: drawn at {} m, the bed holds it at {floor} m",
+                at.y
+            );
+            let water = app.world().resource::<sea::SeaConditions>().water_over(
+                Some(app.world().resource::<Ground>()),
+                at.xz(),
+                elapsed(&app),
+            );
+            held |= water < floor;
+        }
+        assert!(held, "the swell never fell below the bed's hold");
     }
 
     #[test]
