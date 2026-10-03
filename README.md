@@ -1,4 +1,4 @@
-# Genovesa
+![Genovesa](docs/banner.png)
 
 An experiment in procedural 3D terrain, Rust, [Bevy](https://bevy.org) and [Avian](https://github.com/avianphysics/avian).
 Where it goes is undecided. Like the wind.
