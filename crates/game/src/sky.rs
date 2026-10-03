@@ -23,6 +23,12 @@
 //! while everything here goes on being about which way it faces and what
 //! colour it burns.
 //!
+//! Rain is the other weather drawn here, as what it does to the hour: the
+//! light dims and greys, the sky goes to slate, and the haze closes in round
+//! the eye until an island a few hundred metres off is gone — see
+//! [`rained_on`] and [`haze_under`]. The rain itself is the drawn one,
+//! [`SeaConditions::rain`].
+//!
 //! The night is dark on purpose — dark enough that sailing on through it is a
 //! bad idea, which is what makes anchoring for it a decision rather than a
 //! formality. What it costs the player is a few real minutes, so a boat with
@@ -32,14 +38,16 @@
 
 use bevy::color::Mix;
 use bevy::light::{DirectionalLight, DirectionalLightShadowMap};
-use bevy::pbr::DistanceFog;
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::boat::Boat;
+use crate::camera::MapCamera;
 use crate::clouds::{Clouds, CloudsPlugin};
 use crate::net::Online;
+use crate::sea::SeaConditions;
 use crate::{eased, AppState, Helm};
 
 /// The hour a world is drawn at until a server says otherwise: a morning,
@@ -80,6 +88,26 @@ const NO_HOUR: f32 = 0.5;
 /// The lowest the light is allowed to come from, as the sine of its
 /// altitude: a degree or so above the horizon — see [`light_from`].
 const GRAZE: f32 = 0.02;
+
+/// Under the heaviest rain: how much of the sun's light gets through, over
+/// and above what the cloud shadows take, and how much of the sky's own.
+/// The sun loses most, being the light the cloud stands in front of; the
+/// fill is the cloud, and keeps most of itself so a squall at noon is dim
+/// rather than dusk.
+const RAIN_SUN: f32 = 0.4;
+const RAIN_FILL: f32 = 0.6;
+
+/// How far the heaviest rain takes every colour of the hour towards a slate
+/// grey of its own brightness, and how much darker the sky's slate is than
+/// the clear sky it replaced.
+const RAIN_GREY: f32 = 0.8;
+const RAIN_SKY: f32 = 0.45;
+
+/// How far past the camera's focus the ground can still be made out, in
+/// metres, under the heaviest rain — the haze's far edge, measured from the
+/// player rather than from the eye, so that zooming out does not fog over the
+/// boat. Short enough that an island being steered for goes in a squall.
+const RAIN_SIGHT: f32 = 120.0;
 
 /// How often a client waiting for dawn says so, in seconds. Comfortably
 /// inside the server's `WAIT_LAPSE`, so a held key reads as one unbroken
@@ -576,12 +604,14 @@ pub(crate) fn advance_the_day(time: Res<Time>, mut sky: ResMut<Sky>) {
 fn light_the_world(
     sky: Res<Sky>,
     clouds: Res<Clouds>,
+    conditions: Res<SeaConditions>,
     mut lights: Query<(&mut Transform, &mut DirectionalLight), With<SkyLight>>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut clear: ResMut<ClearColor>,
-    mut haze: Query<&mut DistanceFog>,
+    mut haze: Query<(&mut DistanceFog, Option<&MapCamera>)>,
 ) {
-    let hour = light_at(sky.phase());
+    let rain = conditions.rain();
+    let hour = rained_on(light_at(sky.phase()), rain);
     let from = light_from(hour.at);
 
     for (mut transform, mut light) in &mut lights {
@@ -600,9 +630,46 @@ fn light_the_world(
     clear.0 = hour.sky;
     // The haze has to be the sky's own colour at every hour, or the far
     // ground fades into a daylight horizon under a night sky.
-    for mut fog in &mut haze {
+    for (mut fog, camera) in &mut haze {
         fog.color = hour.sky;
+        if let Some(camera) = camera {
+            fog.falloff = haze_under(rain, camera.distance);
+        }
     }
+}
+
+/// An hour as it looks through rain: the lights dimmed, everything greyed
+/// towards a slate of its own brightness — so a squall at dusk is a dark
+/// one, not a grey noon — and the sky a darker slate still. See
+/// [`RAIN_SUN`] and the constants after it.
+fn rained_on(hour: Hour, rain: f32) -> Hour {
+    let slate = |colour: Color, dims: f32| {
+        let grey = colour.luminance() * dims;
+        colour.mix(
+            &Color::linear_rgb(grey * 0.94, grey * 0.98, grey * 1.04),
+            rain * RAIN_GREY,
+        )
+    };
+    Hour {
+        light: slate(hour.light, 1.0),
+        lux: hour.lux * (1.0 - (1.0 - RAIN_SUN) * rain),
+        fill: slate(hour.fill, 1.0),
+        brightness: hour.brightness * (1.0 - (1.0 - RAIN_FILL) * rain),
+        sky: slate(hour.sky, 1.0 - (1.0 - RAIN_SKY) * rain),
+        ..hour
+    }
+}
+
+/// The haze under rain, for an eye `distance` from what it is looking at.
+///
+/// Closed in by the root of the rain rather than the rain, so garúa — a
+/// quarter of a squall's rain — is already half its mist. The start comes in
+/// to just short of the player, and the end to [`RAIN_SIGHT`] beyond them.
+fn haze_under(rain: f32, distance: f32) -> FogFalloff {
+    let thick = rain.sqrt();
+    let start = crate::HAZE_START + (distance * 0.8 - crate::HAZE_START) * thick;
+    let end = crate::HAZE_END + (distance + RAIN_SIGHT - crate::HAZE_END) * thick;
+    FogFalloff::Linear { start, end }
 }
 
 /// Tells the server this player would like the night over with, while they
@@ -769,6 +836,7 @@ fn leave_the_world(
     clear.0 = day.sky;
     for mut fog in &mut haze {
         fog.color = day.sky;
+        fog.falloff = crate::camera::haze().falloff;
     }
 }
 
@@ -1069,6 +1137,54 @@ mod tests {
             assert!(
                 light.xz().dot(side.xz()) > 0.0,
                 "the light at {phase} comes from {light}, not from {side}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_squall_darkens_the_hour_it_falls_in() {
+        // The light and the sky both go down under rain, at noon and at dusk
+        // alike, and a dry sky is the hour exactly as it was.
+        for phase in [0.5, 0.72] {
+            let dry = light_at(phase);
+            assert_eq!(rained_on(dry, 0.0).sky, dry.sky);
+            let squall = rained_on(dry, 1.0);
+            assert!(
+                squall.lux < dry.lux * 0.5,
+                "{phase}: the sun kept {}",
+                squall.lux
+            );
+            assert!(
+                squall.sky.luminance() < dry.sky.luminance(),
+                "{phase}: the sky brightened under rain"
+            );
+        }
+    }
+
+    #[test]
+    fn rain_closes_the_haze_in_round_the_player_and_no_further() {
+        // Dry, the haze is the camera's own; under a squall its far edge is
+        // a couple of hundred metres past the player at any zoom — never
+        // short of them, which would fog over the boat being sailed.
+        for distance in [
+            crate::camera::MIN_DISTANCE,
+            120.0,
+            crate::camera::MAX_DISTANCE,
+        ] {
+            let FogFalloff::Linear { start, end } = haze_under(0.0, distance) else {
+                panic!("the haze is linear");
+            };
+            assert_eq!((start, end), (crate::HAZE_START, crate::HAZE_END));
+            let FogFalloff::Linear { start, end } = haze_under(1.0, distance) else {
+                panic!("the haze is linear");
+            };
+            assert!(
+                start < distance && end > distance + 100.0,
+                "{distance}: {start}..{end}"
+            );
+            assert!(
+                end < distance + 300.0,
+                "{distance}: a squall's haze ends at {end}"
             );
         }
     }

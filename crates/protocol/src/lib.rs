@@ -791,6 +791,12 @@ pub enum ToClient {
     /// sky, say — should read it as air that drives nothing and draws
     /// nothing, not as licence to sail any heading.
     ///
+    /// `rain` is how hard it is raining, from nothing at `0.0` to the heart
+    /// of a squall at `1.0`. It travels rather than being read off the wind
+    /// because the two are not one thing — a squall's gusts and a dry blow
+    /// can be the same vector — and a client that guessed would be deciding
+    /// the weather.
+    ///
     /// Sent once directly after [`ToClient::Welcome`], and again to everyone
     /// whenever it has changed enough to matter. The server is the one
     /// authority on it, exactly as with the ground: weather moves over a
@@ -799,6 +805,7 @@ pub enum ToClient {
     /// not simulation.
     Weather {
         wind: Vec2,
+        rain: f32,
     },
     /// Where the world's day stands: the fraction of it since midnight, so
     /// 0.0 is midnight, 0.25 sunrise, 0.5 noon and 0.75 sunset. Always in
@@ -1243,9 +1250,10 @@ impl ToClient {
                 payload.push(4);
                 put_u32(&mut payload, id.0);
             }
-            Self::Weather { wind } => {
+            Self::Weather { wind, rain } => {
                 payload.push(6);
                 put_vec2(&mut payload, *wind);
+                put_f32(&mut payload, *rain);
             }
             Self::Daylight { phase } => {
                 payload.push(7);
@@ -1454,6 +1462,7 @@ impl ToClient {
             }
             6 => Self::Weather {
                 wind: payload.vec2()?,
+                rain: payload.f32()?,
             },
             7 => Self::Daylight {
                 phase: payload.f32()?,
@@ -2011,6 +2020,7 @@ mod tests {
             ToClient::Left { id: PlayerId(4) },
             ToClient::Weather {
                 wind: Vec2::new(-3.25, 8.5),
+                rain: 0.625,
             },
             ToClient::Daylight { phase: 0.125 },
             ToClient::Beast {
@@ -2581,12 +2591,14 @@ mod tests {
         assert_eq!(
             bytes_of_server(&ToClient::Weather {
                 wind: Vec2::new(1.5, -2.0),
+                rain: 0.75,
             }),
             [
-                9, 0, 0, 0, // length
+                13, 0, 0, 0, // length
                 6, // tag
                 0, 0, 0xC0, 0x3F, // x = 1.5
                 0, 0, 0, 0xC0, // y = -2.0
+                0, 0, 0x40, 0x3F, // rain = 0.75
             ],
         );
         assert_eq!(
