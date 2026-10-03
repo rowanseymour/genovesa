@@ -143,7 +143,6 @@ pub(crate) fn mind_the_hulls(shared: &Arc<Shared>) {
 /// worked out from a picture that has stopped being true, and the next beat
 /// works from the new one.
 fn beat(shared: &Shared, dt: f32) {
-    let wind = shared.wind();
     // Where everyone is, taken and let go before the boats are looked at:
     // the roster's lock nests over the boats', never under it.
     let near: Vec<Vec2> = {
@@ -162,6 +161,10 @@ fn beat(shared: &Shared, dt: f32) {
             .map(|(id, state)| (*id, state.kind, state.hull, state.anchor))
             .collect()
     };
+    // Read once the hulls are, not before: a hull found free was let go
+    // under whatever wind stood then, and a reading older than the letting
+    // go would move it on a wind it was never left in.
+    let wind = shared.wind();
     let moves: Vec<(BoatId, Underway, Underway)> = free
         .into_iter()
         .filter_map(|(id, kind, hull, anchor)| {

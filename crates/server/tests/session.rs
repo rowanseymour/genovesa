@@ -4743,9 +4743,14 @@ fn a_ship_stepped_off_unanchored_is_left_adrift_with_its_boat_astern() {
 
 #[test]
 fn an_anchored_hull_swings_to_lie_downwind_of_its_hook() {
-    // Anchored in a breeze and left; then the wind veers a right angle. The
-    // hull is drawn round to lie downwind of its hook on the new wind, and
-    // at no point is it further from the hook than its cable.
+    // Anchored in a breeze; the wind veers a right angle, and the hull is
+    // left. It is drawn round to lie downwind of its hook on the new wind,
+    // and at no point is it further from the hook than its cable.
+    //
+    // Veered before the hull is left, not after: the sea moves only a hull
+    // nobody is aboard, so every move told is a move under the gale. Left
+    // first, a beat under the breeze could be told after the gale's reply,
+    // and the breeze's lie is square across the gale's.
     let addr = host(7);
     let (client, _id, _spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
@@ -4762,10 +4767,10 @@ fn an_anchored_hull_swings_to_lie_downwind_of_its_hook() {
     let (_, _, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the anchor");
     let hook = anchor.expect("an anchor refused over the shelf");
     let cable = protocol::ground::ANCHOR_SWING;
+    client.order("world weather gale");
     client.say(ToServer::Disembark {
         position: anchorage + Vec2::new(3.0, 0.0),
     });
-    client.order("world weather gale");
 
     let lie = hook + GALE.normalize() * cable;
     let deadline = Instant::now() + PATIENCE;
