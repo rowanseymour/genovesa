@@ -20,14 +20,14 @@
 //! what it would have ended with is a menu drawing a preview by sampling the
 //! generator, which is the arrangement the whole split exists to undo.
 //!
-//! No re-export appearing below is the checkable half — the README greps for
+//! No re-export appearing below is the checkable half — CLAUDE.md greps for
 //! one, anchored to the start of a line so that this paragraph is not itself
 //! a hit — and it is worth more than the `cargo tree` line that guard used to
 //! be: that one only ever read the *direct* dependencies, so it could not
 //! have failed however much came through here.
 //!
-//! The other half is not checkable and is written here rather than in the
-//! README because here is where it would be broken. A public signature that
+//! The other half is not checkable and is written here rather than in
+//! CLAUDE.md because here is where it would be broken. A public signature that
 //! *names* a `world` type hands the generator over exactly as a re-export
 //! does — a caller need never name the crate to call a method on something it
 //! was given — and no grep and no dependency graph will say so. So: nothing

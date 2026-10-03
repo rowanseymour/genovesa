@@ -1,160 +1,84 @@
 # Working in this repo
 
-[README.md](README.md) says what this is and how to run it.
+[README.md](README.md) says what this is.
 
-## Backwards compatibility is not a goal
+## Nobody is playing this yet
 
-Nothing here has users to keep faith with. Make the change that leaves the code
-as though the old shape had never existed: rename freely, change signatures in
-place, delete rather than gate off. No aliases, no shims, no `#[deprecated]`.
-If something is worth changing, change it everywhere in the same commit.
+One client runs over the loopback; the client/server split is a bet on company
+later. So:
 
-## But machines must agree with each other
+- **No backwards compatibility.** Rename freely, change signatures in place,
+  delete rather than gate off — no aliases, shims or `#[deprecated]`.
+- **Load is not an argument.** Justify a shape by what it lets a client do or
+  what it stops the two ends disagreeing about, never by bytes.
+- **Leave `PROTOCOL_VERSION` alone** unless you want old builds turned away.
 
-The ground crosses the wire now — a server generates the world and hands out
-chunks — so no client is betting on its own arithmetic. Two things still have
-to agree across machines, and neither pin is legacy baggage to be filed off:
+What must hold is the shape of the split: the server owns the world, the client
+draws what it is told, and nothing consequential is decided at the client.
 
-- **A seed must survive being re-hosted.** Hand seed 20040112 to a different
-  machine to serve and it has to raise the same islands, or a shared seed and a
-  server moved between hosts quietly mean somewhere else. That is what **the
-  digest tests** in `world` are for. If you meant to change the generator,
-  re-record them — `--nocapture` prints the new values. If you didn't touch it
-  and they go red, a platform has stopped agreeing about what a seed means,
-  which is a real bug. Never answer a red digest by loosening the assertion.
-- **The wire is a format, and changing it should be deliberate.** That is what
-  `the_wire_is_a_format` pins. The wire is wider than it looks — the chunk
-  grid, the height quantisation and the palette are all part of it, because a
-  client draws the ground out of them, so a change that only looks like a
-  palette tidy is a change to what a client receives. Re-record the test when
-  you meant it; the point is that it cannot happen by accident.
+## Machines must agree with each other
 
-  **`PROTOCOL_VERSION` does not have to move with it.** Nobody is playing
-  this, and the only client is the one in this repo, built from the checkout
-  that built the server — so bumping buys a refusal nobody was going to hit,
-  at the cost of touching the constant in every encoding commit. Leave it
-  alone unless you actually want old builds turned away.
+- **A seed must survive being re-hosted** — pinned by the digest tests in
+  `world`. Changed the generator on purpose? Re-record (`--nocapture` prints
+  the values). Didn't, and they're red? A platform disagrees about a seed; fix
+  that, never loosen the assertion.
+- **The wire is a format** — pinned by `the_wire_is_a_format`. It includes the
+  chunk grid, height quantisation and palette. Re-record only when you meant it.
 
 So inside `world`: no `f32::powf` (use `terrain::pow`), and nothing may depend
 on time, addresses or `HashMap` order.
 
 ## The client stays thin
 
-`game` generates nothing and knows nothing about how the world is made: it asks
-for chunks and draws the answers. Keep it that way — `game` must not depend on
-`world`, and anything a client needs in order to *draw* belongs in `protocol`
-rather than being recomputed either side.
+`game` generates nothing: it asks for chunks and draws the answers. It must not
+depend on `world`; what a client needs to *draw* belongs in `protocol`. Only
+`game` may see Bevy. After moving things between crates:
 
-This is not a porting plan. There was one — the client rewritten in another
-language, three.js — and it is abandoned: the one Rust client here runs on
-macOS, Windows and whatever else, built from the checkout that built the
-server. So the drift the section above guards against is what one codebase
-does on two operating systems — the libms `terrain::pow` shuts out — never a
-second implementation to be kept in step.
+```bash
+cargo tree --workspace --invert bevy
+cargo tree -p game --depth 1
+grep -rn '^pub use world' crates/server/src/
+```
 
-## Nobody is playing this yet
+The head of [`crates/server/src/lib.rs`](crates/server/src/lib.rs) covers the
+half no command catches.
 
-Every world is served and the server can hold a roster, but what runs is one
-client over the loopback. The split is a bet on company later — it is not a
-response to traffic.
+## Running and debugging
 
-So the wire's size is not an argument, and neither is anything else about
-load. Justify a shape by what it lets a client do, or by what it stops the two
-ends disagreeing about, never by the bytes. Drawing the ground at some coarser
-density — level of detail — is the client discarding samples it already holds,
-and costs the format nothing.
+- `cargo run --features dev` hot-reloads `assets/`.
+- `--debug <port>` takes console lines on a socket; send `help` for the verbs.
+  Each line answers only once its work is done, so a pipe is a script, not a
+  race:
 
-What stays is the *shape* of the split, which costs nothing today and is what
-a second player would need: the server owns the world, the client draws what
-it is told, and nothing consequential is decided at the client.
+  ```bash
+  cargo run -- --seed 7 --debug 7777 --headless
+  printf 'goto 98 -317\nshot near.png\nquit\n' | nc 127.0.0.1 7777
+  ```
 
-## The vocabularies answer for themselves
+- Measuring tests are `#[ignore]`d, e.g.
+  `cargo test --release island_shape -- --ignored --nocapture`.
+- Judge a generator change on nine seeds, never one favourite map:
+  `cargo run --release --bin mapgen -- grid` (`--help` for other views).
+- Models are exported from `assets-src/` by `assets-src/models/export.sh <name>`.
+  They carry flat per-facet vertex colours (glTF materials are ignored), and
+  skins must be rigid — one bone per vertex.
 
-Three binaries answer `--help`, and the debug socket answers `help` with its
-own words and the server's together, the second half fetched over the wire
-rather than guessed at. All of it is built from the code that implements it —
-the defaults interpolated from the constants they come from — so the way to
-learn what a run takes, or what can be said down the socket, is to ask it.
+## Docs and comments
 
-Nothing in `docs/` is hand-written prose. `models.md` is generated by
-`tools/model-catalog.sh` and the collage by `mapgen`, and both show what
-nothing else can show. A list of options or verbs kept there would be the one
-file in the repo that says what the code already says, and that no change to
-the code has to touch — so it would go stale silently, which is the failure a
-generated catalogue and a runtime `help` are both shaped to avoid.
+- Nothing in `docs/` is hand-written; `--help` and the socket's `help` are
+  built from the code. Don't keep a list of options or verbs anywhere else.
+- Commands are rows of a table that `help` and completion fold over. Prose in a
+  `help` line, and hand-kept indexes like `MenuButton::EVERY`, need a test
+  holding them to what they advertise.
+- Comments say why, not what. A fact is written once, at its definition;
+  link to it elsewhere. Long rationale goes in the module's `//!` header; an
+  item's doc stays under about ten lines.
 
-This is not a claim that comments cannot rot; they do. It is that a comment
-rots *in the diff of the change that caused it*, where a reviewer is already
-looking, and a second copy in another directory rots where nobody is.
+## The build
 
-Which leaves the listings that stand in for a grammar. The answer preferred
-here is not to have one: a command is a row of a table — its word, its `help`
-lines, what may follow it, and one function from the words to what the asker
-is told — and `help` and the completion a client is taught are folds over that
-table. Two listings went that way, and what they used to need a test for
-became a thing that cannot be written.
+A `target/` is ~2.7G per worktree.
 
-What the tables cannot generate is the prose inside a `help` line, and
-`MenuButton::EVERY` is an index still. Each of those needs a test holding it to
-what it advertises, and a new one wants a test the day it is written: `HELP`
-went without for a while and nothing showed, which is the whole argument.
-
-## Comments explain why, and stop
-
-A comment earns its place by saying what the code cannot: why this shape and
-not the obvious one, what was tried and failed, what a later edit would break.
-Prose that restates the line below it earns nothing by being about *why*.
-
-Two rules that have an answer rather than asking for judgement:
-
-- **A fact is written once, at the definition it belongs to.** Don't restate
-  at a call site what the callee's own doc already says — link to it. This is
-  where long blocks come from: half of a caller's doc is usually its callees',
-  said again and further from the code that would correct them.
-- **Long rationale goes in the module's `//!` header.** An item's own doc
-  stays under about ten lines. Past that, the design note is in the wrong
-  place and drifting out of reach of the diff that would catch it.
-
-Match the kind of the surrounding language. A worthy subject earns a comment,
-not a long one.
-
-## The build outweighs the checkout
-
-The source is 43M. A single `target/` is 2.7G, and there is one per worktree.
-Left alone that multiplies quickly, so the shape of a build is worth as much
-care here as the shape of the code.
-
-Two rules keep it down, and both are load-bearing in ways that are easy to
-undo by accident:
-
-- **The dev profile is tuned for size** — dependencies carry no debug info at
-  all, workspace members carry line tables only. `Cargo.toml` says why. This is
-  most of the difference between 2.7G and 7.9G, and it costs nothing: the
-  builds are marginally *faster*, and a panic still points at the line in our
-  own code that caused it. What it gives up is stepping into Bevy, which
-  nothing here does.
-
-- **Never point two worktrees at one `CARGO_TARGET_DIR`.** It is the obvious
-  way to stop paying for the ground twice and it is silently wrong: worktrees
-  get separate library artifacts but collide on the binary, so whichever built
-  last wins and the others' `cargo build` reports success while leaving the
-  wrong binary in place. A `mapgen` run in one worktree then draws another
-  worktree's world — the exact disagreement the digest tests exist to catch,
-  arriving somewhere they cannot see it. Each worktree gets its own `target/`.
-
-Cargo also never reclaims an artifact whose fingerprint has stopped matching,
-so a `target/` grows without bound across rebuilds even when nothing changes.
-Reaping those is a property of the machine rather than of this repo — one
-sweep covers every checkout on it — so it belongs outside, not in here.
-
-A worktree's first build pays for the whole tree, and a compiler cache only
-spares part of it, since a third of the tree bakes its own path into the
-artifact. So cutting one per feature branch is not free and the branches are
-worth retiring. Removing a worktree takes its `target/` with it.
-
-## Odds and ends
-
-- Only `game` may see Bevy. After moving things between crates, check both that
-  and "The client stays thin" (README has the two commands).
-- Judge a change to the generator on nine seeds (`mapgen grid`), never on one
-  favourite map.
+- The dev profile is tuned for size (`Cargo.toml` says why) — keep it.
+- Never share a `CARGO_TARGET_DIR` between worktrees: they collide on the
+  binary, and one worktree's `mapgen` silently draws another's world.
+- Retire branches; removing a worktree takes its `target/` with it.
