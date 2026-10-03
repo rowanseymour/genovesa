@@ -221,16 +221,6 @@ fn beat(shared: &Shared, dt: f32) {
     }
 }
 
-/// Where the sea takes one empty hull in `dt` seconds of this wind, over a
-/// bed whose lattice corners `corner` gives the heights of — the ones a
-/// client is sent, so the two stop a keel on the same ground — or `None` for
-/// a hull it leaves lying
-/// as it is, which is what makes such a hull telling-quiet.
-///
-/// The hull is asked about twice at most: where it lies, and where it would
-/// go. A hull aground where it lies is not the sea's to move at all, anchor
-/// or no anchor. One that would go aground fetches up instead, still afloat
-/// and still turning, and lies there until the wind takes it off again.
 /// Whether a hull is resting on the bottom, and so not the sea's to move at
 /// all — anchor or no anchor.
 ///
@@ -275,6 +265,16 @@ fn coming_round(hull: Underway, anchor: Option<Vec2>, downwind: Vec2, dt: f32) -
     }
 }
 
+/// Where the sea takes one empty hull in `dt` seconds of this wind, over a
+/// bed whose lattice corners `corner` gives the heights of — the ones a
+/// client is sent, so the two stop a keel on the same ground — or `None` for
+/// a hull it leaves lying as it is, which is what makes such a hull
+/// telling-quiet.
+///
+/// The hull is asked about twice at most: where it lies, and where it would
+/// go. A hull aground where it lies is not the sea's to move at all, anchor
+/// or no anchor. One that would go aground fetches up instead, still afloat
+/// and still turning, and lies there until the wind takes it off again.
 fn moved(
     kind: BoatKind,
     hull: Underway,
