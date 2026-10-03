@@ -302,8 +302,19 @@ fn moved(
 
     // Worked out before the hull is moved, and not after: what the keel has
     // to clear is the pose the beat ends in, heading and all, and a hull at
-    // anchor does most of its travelling by swinging round.
+    // anchor does most of its travelling by swinging round. And refused
+    // where the swing is what would ground it — see
+    // [`protocol::hull::may_turn`].
+    let reading = |to: Vec2, heading: f32| protocol::hull::aground_by(kind, to, heading, corner);
     let turned = coming_round(hull, anchor, downwind, dt);
+    let turned = if protocol::hull::may_turn(
+        reading(hull.at, hull.heading),
+        reading(hull.at, hull.heading + turned),
+    ) {
+        turned
+    } else {
+        0.0
+    };
     let facing = hull.heading + turned;
 
     let at = match anchor {
@@ -322,7 +333,7 @@ fn moved(
         None => hull.at + wind * LEEWAY * dt,
     };
     // A hull that would put its keel in the ground fetches up instead —
-    // afloat where it was, and still coming round.
+    // afloat where it was, and still coming round where it may.
     //
     // The keel and not the point underfoot, which is the whole of what this
     // is for: a hull is metres long, and a bed that leaves its middle in a
@@ -336,7 +347,7 @@ fn moved(
     // off: a bed that shelves in a step lets a hull slide along it at one
     // unchanging reading, and "no worse" would carry it the length of the
     // shelf a beat at a time without the number ever moving.
-    let clearance = |to: Vec2| protocol::hull::aground_by(kind, to, facing, corner);
+    let clearance = |to: Vec2| reading(to, facing);
     let here = clearance(hull.at);
     let at = if at == hull.at || clearance(at) <= 0.0 || clearance(at) < here {
         at
@@ -536,6 +547,46 @@ mod tests {
             hull.at.x < 0.0,
             "the hull never went downwind at all, to {}",
             hull.at
+        );
+    }
+
+    /// A hull adrift lies across the wind, and one drifting along a cliff it
+    /// is lying off is asked to come round with its stern towards it. It
+    /// comes round as far as the cliff lets it and no further: the swing is
+    /// refused where it would put an end in the rock, though the drift that
+    /// carries it along the shore goes on.
+    #[test]
+    fn a_hull_adrift_alongside_a_cliff_is_not_swung_into_it() {
+        let keel = protocol::hull::keel_of(BoatKind::Sloop);
+        let face = -(keel.beam / 2.0).ceil() - 1.0;
+        let cliff = on_lattice(move |at| if at.x <= face { 1.0 } else { -6.0 });
+        // Blowing along the shore, so lying across it means lying across the
+        // cliff's face.
+        let wind = Vec2::new(0.0, 8.0);
+
+        let start = Underway::lying(Vec2::ZERO, 0.0);
+        let mut hull = start;
+        for beat in 0..400 {
+            let Some(on) = moved(BoatKind::Sloop, hull, None, wind, 0.25, &cliff) else {
+                break;
+            };
+            hull = on;
+            let into = protocol::hull::aground_by(BoatKind::Sloop, hull.at, hull.heading, |on| {
+                Some(cliff(on))
+            });
+            assert!(
+                into <= 0.0,
+                "beat {beat}: swung {into} m into the cliff, heading {}",
+                hull.heading
+            );
+        }
+        // And it did come round some, or this passes with the sea switched
+        // off; and did not come all the way, or the cliff was never in reach.
+        let round = swing_to(hull.heading, start.heading).abs();
+        assert!(round > 0.1, "the hull never came round at all");
+        assert!(
+            round < std::f32::consts::FRAC_PI_2 - 0.1,
+            "the hull came all the way round, {round} rad, so the cliff was never in its way"
         );
     }
 
