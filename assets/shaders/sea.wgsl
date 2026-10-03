@@ -68,7 +68,7 @@ struct SeaParams {
     breaking: vec4<f32>,
     // The facets' tones — `sea::TONE`: x the slope one step takes, y what a
     // step is as a fraction of the sun's share, z how many steps either side
-    // of flat. w padding.
+    // of flat. w the rain — `sea::SeaConditions::rain` — which pocks them.
     tone: vec4<f32>,
     // The depth window: xy the world coordinates of its corner, z one over
     // its extent, w the depth a full texel encodes.
@@ -299,6 +299,29 @@ fn gustiness(at: vec2<f32>) -> f32 {
     field += 0.33 * value_noise(at / (cell * 0.4) + 31.7);
     field += 0.22 * value_noise(at / (cell * 0.15) + 78.3);
     return field * 2.0 - 1.0;
+}
+
+// Rain on the water: whether a drop has just pocked the cell this point is
+// in, and which way it tipped it — -1, 0 or 1. The twin of nothing, no hull
+// riding it. A quarter-metre cell is a few pixels at the nearest zoom; each
+// keeps its own beat, so the pocks flicker across the water rather than
+// blinking in unison, and the share of cells pocked at once rises with the
+// rain. Sparse, because a dense pock is a mosaic rather than rain; and only
+// near the eye, `POCK_SEEN` being where they fade from and to, because
+// further out a cell is under a pixel and the stipple is static.
+const POCK: f32 = 0.25;
+const POCK_BEAT: f32 = 6.0;
+const POCKED_AT_MOST: f32 = 0.15;
+const POCK_SEEN: vec2<f32> = vec2(30.0, 110.0);
+
+fn pock(world: vec3<f32>, time: f32) -> f32 {
+    let near = 1.0 - smoothstep(POCK_SEEN.x, POCK_SEEN.y, distance(world, view.world_position));
+    let at = world.xz;
+    let cell = vec2<i32>(floor(at / POCK));
+    let beat = i32(floor(time * POCK_BEAT + lattice(cell + vec2(913, 271))));
+    let drawn = cell + vec2(beat * 37, beat * 101);
+    let falls = step(1.0 - sea.tone.w * POCKED_AT_MOST * near, lattice(drawn));
+    return falls * sign(lattice(drawn + vec2(5003, 7919)) - 0.5);
 }
 
 // The white the boats' wakes lay down here — the twin of nothing, this being
@@ -587,10 +610,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // they are the same water doing the same thing, and three whites would
     // read as three materials. Not quite white, and nearly opaque — foam
     // hides what is under it.
+    // A drop's splash is a fleck of the same white, faint: the pocks are
+    // mostly the tone they tip the water to, below, but under a squall the
+    // sun those tones are steps of has nearly gone.
+    let pocked = pock(in.world_position.xyz, globals.time);
     pbr_input.material.base_color = mix(
         pbr_input.material.base_color,
         vec4(0.82, 0.87, 0.88, 0.97),
-        max(max(foam, cap), wake_foam(at)),
+        max(max(max(foam, cap), wake_foam(at)), 0.15 * abs(pocked)),
     );
 
     pbr_input.material.base_color =
@@ -604,7 +631,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Leaning towards the light's bearing is positive. Snapped to the nearest
     // step and held to the last step either side of flat.
     let slope = cross(dpdy(in.world_position.xyz), dpdx(in.world_position.xyz));
-    let lean = dot(slope.xz, sea.daylight.zw) * sign(slope.y) / max(abs(slope.y), 1e-6);
+    let lean = dot(slope.xz, sea.daylight.zw) * sign(slope.y) / max(abs(slope.y), 1e-6)
+        + pocked * sea.tone.x;
     let steps = clamp(round(lean / sea.tone.x), -sea.tone.z, sea.tone.z);
     let tone = 1.0 + steps * sea.tone.y;
 
