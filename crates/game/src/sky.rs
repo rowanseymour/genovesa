@@ -662,14 +662,30 @@ fn rained_on(hour: Hour, rain: f32) -> Hour {
 
 /// The haze under rain, for an eye `distance` from what it is looking at.
 ///
-/// Closed in by the root of the rain rather than the rain, so garúa — a
-/// quarter of a squall's rain — is already half its mist. The start comes in
-/// to just short of the player, and the end to [`RAIN_SIGHT`] beyond them.
+/// The start comes in to just short of the player, and the end to [`sight`]
+/// beyond them — struck from the player rather than the eye as the rain
+/// thickens, since a clear day's haze is the eye's and a squall's is the
+/// boat's.
 fn haze_under(rain: f32, distance: f32) -> FogFalloff {
-    let thick = rain.sqrt();
+    let thick = thickness(rain);
     let start = crate::HAZE_START + (distance * 0.8 - crate::HAZE_START) * thick;
-    let end = crate::HAZE_END + (distance + RAIN_SIGHT - crate::HAZE_END) * thick;
+    let end = sight(rain) + distance * thick;
     FogFalloff::Linear { start, end }
+}
+
+/// How far ground can be made out under this much rain, in metres:
+/// [`crate::HAZE_END`] in a dry sky, [`RAIN_SIGHT`] in the heaviest rain.
+/// What the compass's ring reaches, so it never marks land the haze has
+/// taken.
+pub fn sight(rain: f32) -> f32 {
+    crate::HAZE_END + (RAIN_SIGHT - crate::HAZE_END) * thickness(rain)
+}
+
+/// How far rain has closed the haze in, from none to all the way: by the root
+/// of the rain rather than the rain, so garúa — a quarter of a squall's rain
+/// — is already half its mist.
+fn thickness(rain: f32) -> f32 {
+    rain.sqrt()
 }
 
 /// Tells the server this player would like the night over with, while they
