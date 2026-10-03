@@ -21,6 +21,7 @@ use game::beasts::BeastsPlugin;
 use game::boat::BoatPlugin;
 use game::cairn::CairnPlugin;
 use game::camera::MapCameraPlugin;
+use game::caret::CaretPlugin;
 use game::chart::ChartPlugin;
 use game::cli::{self, Args};
 use game::compass::CompassPlugin;
@@ -229,6 +230,7 @@ impl PluginGroup for GamePlugins {
             // The sheet the menus stand on, and the menus.
             .add(BackdropPlugin)
             .add(MenuPlugin)
+            .add(CaretPlugin)
             .add(SettingsPlugin)
             // Harmless offline, its systems conditioning on a joined world.
             .add(NetPlugin)
