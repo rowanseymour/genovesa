@@ -21,12 +21,14 @@ use super::display::{DisplayText, Dropped};
 use super::join::MAX_ADDRESS;
 use super::kit::ON_PAPER;
 use super::kit::{ScrollingPanel, SCROLL_NOTCH};
-use super::new_world::{Field, MAX_SEED_DIGITS};
+use super::new_world::{Field, FieldText, MAX_SEED_DIGITS};
 use super::set_sail::{sailed_when, world_title, MOST_KEPT_WORLDS};
 use super::*;
 use crate::net;
 use crate::net::fake_server;
 use crate::testing::run_until;
+use bevy::input_focus::{InputDispatchPlugin, InputFocus, InputFocusPlugin};
+use bevy::text::{EditableText, EditableTextGeneration, EditableTextSystems, TextEdit};
 use protocol::NAME_LETTERS;
 use server::random_seed;
 use server::KeptWorld;
@@ -48,6 +50,22 @@ fn test_app(state: AppState) -> App {
     crate::testing::quarantine_data_dir();
     let mut app = App::new();
     app.add_plugins((StatesPlugin, MenuPlugin))
+        // The text fields are Bevy's, and are typed into the way a window
+        // types into them: a key goes to whatever has the focus.
+        .add_plugins((
+            AssetPlugin::default(),
+            WindowPlugin::default(),
+            bevy::text::TextPlugin,
+            InputFocusPlugin,
+            InputDispatchPlugin,
+            bevy::ui_widgets::EditableTextInputPlugin,
+        ))
+        .init_resource::<ButtonInput<Key>>()
+        .add_message::<bevy::input::mouse::MouseWheel>()
+        .add_message::<bevy::input::gamepad::GamepadButtonChangedEvent>()
+        .add_message::<Pointer<Release>>()
+        .init_resource::<UiScale>()
+        .add_systems(PostUpdate, draw_the_fields.after(EditableTextSystems))
         .insert_state(state)
         .add_sub_state::<Helm>()
         .init_resource::<ButtonInput<KeyCode>>()
@@ -66,15 +84,31 @@ fn test_app(state: AppState) -> App {
     app
 }
 
+/// Normally the UI layout's, which these tests have none of: a field drawn
+/// is a field whose edits have been seen, and one that never is reports a
+/// change on every frame.
+fn draw_the_fields(mut fields: Query<(&EditableText, &mut EditableTextGeneration)>) {
+    for (text, mut drawn) in &mut fields {
+        **drawn = text.editor.generation();
+    }
+}
+
 /// A keypress as the controls screen reads it: a real one carries both the
 /// position pressed and what that position typed, and the screen wants
 /// each for a different purpose.
 fn a_press(key: KeyCode, typed: &str) -> KeyboardInput {
+    let logical_key = match typed {
+        "\u{8}" => Key::Backspace,
+        "\r" => Key::Enter,
+        "\u{1b}" => Key::Escape,
+        " " => Key::Space,
+        _ => Key::Character(typed.into()),
+    };
     KeyboardInput {
         key_code: key,
-        logical_key: Key::Character(typed.into()),
+        text: matches!(logical_key, Key::Character(_) | Key::Space).then(|| typed.into()),
+        logical_key,
         state: ButtonState::Pressed,
-        text: None,
         repeat: false,
         window: Entity::PLACEHOLDER,
     }
@@ -575,14 +609,13 @@ fn entering_a_served_world_afoot_stands_the_player_on_the_spawn() {
     // telling would arrive as meshes.
     app.add_plugins((
         TaskPoolPlugin::default(),
-        AssetPlugin::default(),
         bevy::time::TimePlugin,
         crate::net::NetPlugin,
     ))
     .init_asset::<Mesh>()
     .init_resource::<Assets<StandardMaterial>>();
 
-    app.world_mut().resource_mut::<JoinSettings>().address = address;
+    fill(&mut app, &address);
     click(&mut app, MenuButton::Connect);
     run_until(&mut app, "the world is entered", |app| {
         *app.world().resource::<State<AppState>>().get() == AppState::InWorld
@@ -667,7 +700,7 @@ fn a_dial_that_lands_enters_the_served_world() {
     // match must open where the server said, not where the menu was
     // looking.
     app.world_mut().resource_mut::<View>().focus = Vec3::new(4_000.0, 0.0, -2_500.0);
-    app.world_mut().resource_mut::<JoinSettings>().address = address;
+    fill(&mut app, &address);
     click(&mut app, MenuButton::Connect);
 
     run_until(&mut app, "the world is entered", |app| {
@@ -695,7 +728,7 @@ fn a_dial_that_lands_enters_the_served_world() {
 fn a_dial_that_fails_says_so_and_stays_put() {
     let mut app = test_app(AppState::JoinWorld);
     // Port 1, where nothing has ever listened.
-    app.world_mut().resource_mut::<JoinSettings>().address = "127.0.0.1:1".to_string();
+    fill(&mut app, "127.0.0.1:1");
     click(&mut app, MenuButton::Connect);
 
     run_until(&mut app, "the failure is reported", |app| {
@@ -720,7 +753,7 @@ fn leaving_a_screen_abandons_the_dial_it_started() {
     // already landed would be testing a different moment.
     let (silent, address) = silent_server();
     let mut app = test_app(AppState::JoinWorld);
-    app.world_mut().resource_mut::<JoinSettings>().address = address;
+    fill(&mut app, &address);
     click(&mut app, MenuButton::Connect);
     assert!(app.world().contains_resource::<Dialing>());
 
@@ -741,7 +774,7 @@ fn leaving_a_screen_abandons_the_dial_it_started() {
 #[test]
 fn typing_edits_the_address() {
     let mut app = test_app(AppState::JoinWorld);
-    app.world_mut().resource_mut::<JoinSettings>().address = String::new();
+    fill(&mut app, "");
 
     for (key, typed) in [
         (KeyCode::KeyA, "a"),
@@ -761,7 +794,7 @@ fn typing_edits_the_address() {
 #[test]
 fn the_address_field_takes_only_what_could_be_an_address() {
     let mut app = test_app(AppState::JoinWorld);
-    app.world_mut().resource_mut::<JoinSettings>().address = String::new();
+    fill(&mut app, "");
 
     // A space, and a character no host name has ever contained.
     type_key(&mut app, KeyCode::Space, " ");
@@ -780,7 +813,7 @@ fn the_address_field_takes_only_what_could_be_an_address() {
 #[test]
 fn enter_joins_and_escape_leaves_the_join_screen() {
     let mut app = test_app(AppState::JoinWorld);
-    app.world_mut().resource_mut::<JoinSettings>().address = "127.0.0.1:1".to_string();
+    fill(&mut app, "127.0.0.1:1");
 
     type_key(&mut app, KeyCode::Enter, "\r");
     assert!(
@@ -809,9 +842,33 @@ fn keys_pressed_before_the_join_screen_opened_are_not_typed_into_it() {
     );
 }
 
+/// Which of the dialog's fields has the keyboard.
+fn focused(app: &mut App) -> Option<Field> {
+    let focus = app.world().resource::<InputFocus>().get()?;
+    app.world().get::<FieldText>(focus).map(|field| field.0)
+}
+
+/// Replaces whatever the focused field holds, the way selecting it all and
+/// typing over it would.
+fn fill(app: &mut App, text: &str) {
+    let focus = app
+        .world()
+        .resource::<InputFocus>()
+        .get()
+        .expect("nothing has the keyboard");
+    let mut field = app.world_mut().get_mut::<EditableText>(focus).unwrap();
+    field.queue_edit(TextEdit::SelectAll);
+    field.queue_edit(if text.is_empty() {
+        TextEdit::Delete
+    } else {
+        TextEdit::Insert(text.into())
+    });
+    app.update();
+}
+
 /// Gives the dialog the one thing it will not start without.
 fn name_the_world(app: &mut App) {
-    app.world_mut().resource_mut::<NewWorldSettings>().name = "Windward Reach".to_string();
+    fill(app, "Windward Reach");
 }
 
 fn settings(app: &App) -> &NewWorldSettings {
@@ -830,7 +887,7 @@ fn a_world_is_not_started_without_a_name() {
     assert!(text.contains("needs a name"), "nothing said why: {text}");
 
     // Spaces are not a name either.
-    app.world_mut().resource_mut::<NewWorldSettings>().name = "   ".to_string();
+    fill(&mut app, "   ");
     click(&mut app, MenuButton::Start);
     assert!(!app.world().contains_resource::<Dialing>());
 }
@@ -838,7 +895,7 @@ fn a_world_is_not_started_without_a_name() {
 #[test]
 fn typing_names_the_world_and_the_keyboard_starts_in_the_name() {
     let mut app = test_app(AppState::NewWorld);
-    assert_eq!(settings(&app).editing, Field::Name);
+    assert_eq!(focused(&mut app), Some(Field::Name));
 
     type_key(&mut app, KeyCode::KeyH, "H");
     type_key(&mut app, KeyCode::KeyI, "i");
@@ -858,19 +915,13 @@ fn typing_names_the_world_and_the_keyboard_starts_in_the_name() {
         type_key(&mut app, KeyCode::KeyA, "é");
     }
     assert_eq!(settings(&app).name.chars().count(), NAME_LETTERS);
-    // And the readout wears what was typed, with the caret.
-    let text = screen_text(&mut app);
-    assert!(
-        text.contains(&format!("{}_", settings(&app).name)),
-        "{text}"
-    );
 }
 
 #[test]
 fn clicking_a_field_moves_the_keyboard_to_it() {
     let mut app = test_app(AppState::NewWorld);
     click(&mut app, MenuButton::Edit(Field::Seed));
-    assert_eq!(settings(&app).editing, Field::Seed);
+    assert_eq!(focused(&mut app), Some(Field::Seed));
     let before = settings(&app).seed.clone();
     type_key(&mut app, KeyCode::KeyA, "a");
     assert_eq!(
@@ -890,7 +941,7 @@ fn clicking_a_field_moves_the_keyboard_to_it() {
 fn typing_edits_the_seed() {
     let mut app = test_app(AppState::NewWorld);
     click(&mut app, MenuButton::Edit(Field::Seed));
-    app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
+    fill(&mut app, "");
 
     type_key(&mut app, KeyCode::Digit4, "4");
     // The number pad types the same digit from a different position,
@@ -903,10 +954,26 @@ fn typing_edits_the_seed() {
 }
 
 #[test]
+fn an_emptied_seed_reads_as_zero_once_the_keyboard_leaves_it() {
+    let mut app = test_app(AppState::NewWorld);
+    click(&mut app, MenuButton::Edit(Field::Seed));
+    fill(&mut app, "");
+    assert_eq!(
+        settings(&app).seed,
+        "",
+        "the field was refilled under the keyboard"
+    );
+
+    click(&mut app, MenuButton::Edit(Field::Name));
+    app.update();
+    assert_eq!(settings(&app).seed, "0");
+}
+
+#[test]
 fn the_seed_field_takes_only_digits() {
     let mut app = test_app(AppState::NewWorld);
     click(&mut app, MenuButton::Edit(Field::Seed));
-    app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
+    fill(&mut app, "");
 
     // A letter, a symbol and a space: a seed is a number, and anything
     // else would only fail to parse back out of the field.
@@ -921,10 +988,8 @@ fn the_seed_field_takes_only_digits() {
 
 #[test]
 fn keys_pressed_before_the_new_world_dialog_opened_are_not_typed_into_it() {
-    // The same backlog the join and controls screens have to ignore: the
-    // reader runs on every screen so its cursor keeps up, which means it
-    // has to refuse everything pressed before this screen was the one on
-    // it.
+    // The same backlog the join and controls screens have to ignore: a key
+    // pressed before a field existed must not arrive in it once it does.
     // Held against the seed the dialog already had rather than against a
     // fresh default, which would be a different world every time it was
     // asked for — that being the point of `NewWorldSettings::default`.
@@ -949,7 +1014,7 @@ fn keys_pressed_before_the_new_world_dialog_opened_are_not_typed_into_it() {
 fn seed_field_is_length_capped() {
     let mut app = test_app(AppState::NewWorld);
     click(&mut app, MenuButton::Edit(Field::Seed));
-    app.world_mut().resource_mut::<NewWorldSettings>().seed = String::new();
+    fill(&mut app, "");
 
     for _ in 0..MAX_SEED_DIGITS + 5 {
         type_key(&mut app, KeyCode::Digit9, "9");

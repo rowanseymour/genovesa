@@ -9,16 +9,18 @@
 //! has to admit an IPv6 literal in brackets and a port after a colon, and it
 //! must not admit a space.
 
-use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
+use bevy::input_focus::AutoFocus;
 use bevy::prelude::*;
+use bevy::text::{EditableText, TextEditChange};
 
 use crate::net::Dialing;
 use crate::AppState;
 use protocol::DEFAULT_PORT;
 
 use super::kit::{
-    cartouche_rule, heading, label, panel, screen, spawn_button, status_line, ON_PAPER,
+    cartouche_rule, heading, label, panel, screen, spawn_button, status_line, text_field, ON_PAPER,
     PANEL_PADDING,
 };
 use super::{MenuButton, Status};
@@ -45,7 +47,7 @@ impl Default for JoinSettings {
     }
 }
 
-/// Marks the address readout on the join screen.
+/// Marks the address field on the join screen.
 #[derive(Component)]
 pub(super) struct AddressText;
 
@@ -71,12 +73,14 @@ pub(super) fn spawn_join_dialog(
                     label(panel, &ink, "Server");
                     panel.spawn((
                         AddressText,
-                        Text::new(settings.address.clone()),
-                        TextFont {
-                            font_size: FontSize::Px(26.0),
-                            ..default()
-                        },
-                        TextColor(ink.text),
+                        AutoFocus,
+                        text_field(
+                            &ink,
+                            &settings.address,
+                            26.0,
+                            MAX_ADDRESS,
+                            is_address_character,
+                        ),
                     ));
                     label(panel, &ink, "type an address, backspace to edit");
                     label(
@@ -123,8 +127,8 @@ pub(super) fn join_actions(
     }
 }
 
-/// Typing an address, and the two keys the screen answers to: enter joins,
-/// escape leaves.
+/// The two keys the screen answers to: enter joins, escape leaves. The
+/// address itself is typed into its field — see [`read_address`].
 ///
 /// Runs on every screen rather than only this one, for the reason
 /// [`super::controls::settings_keys`] does: a reader left to lag would deliver
@@ -135,41 +139,23 @@ pub(super) fn join_keys(
     state: Res<State<AppState>>,
     mut presses: MessageReader<KeyboardInput>,
     dialing: Option<Res<Dialing>>,
-    mut settings: ResMut<JoinSettings>,
+    settings: Res<JoinSettings>,
     mut status: ResMut<Status>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let on_screen = *state.get() == AppState::JoinWorld;
 
     for press in presses.read() {
-        // A held key repeats, which is what a text field wants: holding
-        // backspace should clear the address rather than one character of it.
         if !on_screen || press.state != ButtonState::Pressed {
             continue;
         }
 
         match press.key_code {
             KeyCode::Escape => next.set(AppState::MainMenu),
-            KeyCode::Backspace => {
-                settings.address.pop();
+            KeyCode::Enter | KeyCode::NumpadEnter if dialing.is_none() => {
+                dial(&mut commands, &mut status, &settings.address);
             }
-            KeyCode::Enter | KeyCode::NumpadEnter => {
-                if dialing.is_none() {
-                    dial(&mut commands, &mut status, &settings.address);
-                }
-            }
-            // Whatever this keyboard types, rather than what a US one would
-            // have typed at the same position — the same reason the controls
-            // screen names keys by [`typed_label`].
-            _ => {
-                if let Key::Character(typed) = &press.logical_key {
-                    for character in typed.chars().filter(|c| is_address_character(*c)) {
-                        if settings.address.len() < MAX_ADDRESS {
-                            settings.address.push(character);
-                        }
-                    }
-                }
-            }
+            _ => {}
         }
     }
 }
@@ -188,21 +174,17 @@ pub(super) fn dial(commands: &mut Commands, status: &mut Status, address: &str) 
     commands.insert_resource(Dialing::to(address));
 }
 
-/// Keeps the address readout in step with what has been typed.
-pub(super) fn refresh_join(
-    settings: Res<JoinSettings>,
-    mut address: Query<&mut Text, With<AddressText>>,
+/// Takes what the field now holds into the settings, which are what the
+/// screen dials and what it reopens showing.
+pub(super) fn read_address(
+    change: On<TextEditChange>,
+    fields: Query<&EditableText, With<AddressText>>,
+    mut settings: ResMut<JoinSettings>,
 ) {
-    if !settings.is_changed() {
-        return;
-    }
-    for mut text in &mut address {
-        // An empty field would render as nothing at all, and a field that
-        // looks like no field is one nobody can tell they are typing into.
-        text.0 = if settings.address.is_empty() {
-            "_".to_string()
-        } else {
-            settings.address.clone()
-        };
+    if let Ok(text) = fields.get(change.event_target()) {
+        let value = text.value().to_string();
+        if settings.address != value {
+            settings.address = value;
+        }
     }
 }
