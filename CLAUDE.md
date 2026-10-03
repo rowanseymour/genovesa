@@ -28,11 +28,18 @@ draws what it is told, and nothing consequential is decided at the client.
 So inside `world`: no `f32::powf` (use `terrain::pow`), and nothing may depend
 on time, addresses or `HashMap` order.
 
-## The client stays thin
+## The crates
 
-`game` generates nothing: it asks for chunks and draws the answers. It must not
-depend on `world`; what a client needs to *draw* belongs in `protocol`. Only
-`game` may see Bevy. After moving things between crates:
+- `world` — the generator, and the only crate that knows what a seed means.
+- `protocol` — the wire: what a client needs to *draw* belongs here rather than
+  being recomputed either side.
+- `server` — holds the world, hands out chunks, and settles anything two
+  clients would otherwise disagree about.
+- `game` — the Bevy client, and the only crate that sees Bevy. Generates
+  nothing: it asks for chunks and draws the answers, and must not depend on
+  `world`.
+
+After moving things between crates:
 
 ```bash
 cargo tree --workspace --invert bevy

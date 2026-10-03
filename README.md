@@ -29,13 +29,6 @@ shown in [`docs/models.md`](docs/models.md).
 Every world is served, including a solitary one — the game hosts a server and
 joins it over the loopback, so there is one kind of session rather than two.
 
-- `world` — the generator, and the only crate that knows what a seed means.
-- `protocol` — the wire between the two ends.
-- `server` — holds the world, hands out chunks, and settles anything two
-  clients would otherwise disagree about.
-- `game` — the Bevy client. Generates nothing: asks for chunks and draws the
-  answers.
-
 ## The chart
 
 Pressing M lays a chart over the world, carrying only the coast the player has
