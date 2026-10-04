@@ -14,6 +14,7 @@ pub mod bindings;
 pub mod boat;
 pub mod cairn;
 pub mod camera;
+pub mod caret;
 pub mod chart;
 pub mod cli;
 pub mod clouds;

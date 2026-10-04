@@ -4,17 +4,15 @@
 //! A seed is the whole of what a world *is*, and a name is what the player
 //! will know it by on the screen that lists them — see [`NewWorldSettings`].
 //! Two fields means one of them has the keyboard: clicking a field takes it,
-//! and the one that has it wears the caret. Both are edited by what the
-//! keyboard typed rather than by which positions were pressed, so the number
-//! pad and whatever a layout puts the letters on both simply work.
+//! and the one that has it wears the caret.
 //!
 //! [`share_label`] is the one thing here the kept-worlds screen borrows: both
 //! screens offer the same choice about who may reach the world, and they say
 //! it in the same words.
 
-use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::input::ButtonState;
+use bevy::input_focus::{AutoFocus, FocusCause, FocusLost, InputFocus};
 use bevy::prelude::*;
+use bevy::text::{EditableText, TextEdit, TextEditChange};
 
 use crate::net::{Dialing, Reach};
 use crate::AppState;
@@ -23,7 +21,7 @@ use server::{random_seed, MAX_SEED};
 
 use super::kit::{
     button, button_label, cartouche_rule, heading, label, panel, screen, spawn_button, status_line,
-    Palette, ON_PAPER, PANEL_PADDING,
+    text_field, Palette, ON_PAPER, PANEL_PADDING,
 };
 use super::{MenuButton, Status};
 
@@ -65,8 +63,6 @@ pub(super) struct NewWorldSettings {
     /// Whether to host the world rather than keep it to ourselves — the whole
     /// of what [`Reach`] decides, and nothing about the session either way.
     pub(super) share: bool,
-    /// Which field the keyboard is in.
-    pub(super) editing: Field,
 }
 
 impl Default for NewWorldSettings {
@@ -82,7 +78,6 @@ impl Default for NewWorldSettings {
             // is there for another.
             seed: random_seed().to_string(),
             share: false,
-            editing: Field::default(),
         }
     }
 }
@@ -91,42 +86,22 @@ impl NewWorldSettings {
     fn seed_value(&self) -> u32 {
         self.seed.parse().unwrap_or(0)
     }
-
-    fn field(&mut self, field: Field) -> &mut String {
-        match field {
-            Field::Name => &mut self.name,
-            Field::Seed => &mut self.seed,
-        }
-    }
-
-    /// What a field reads on the screen: what is in it, and a caret on the
-    /// one the keyboard is in — the whole of how a player can tell which
-    /// field their next key lands in. An empty seed reads as the zero it will
-    /// be read as; an empty name reads as nothing, which is what it is.
-    fn field_text(&self, field: Field) -> String {
-        let text = match field {
-            Field::Name => self.name.clone(),
-            Field::Seed if self.seed.is_empty() && self.editing != field => "0".to_string(),
-            Field::Seed => self.seed.clone(),
-        };
-        if self.editing == field {
-            format!("{text}_")
-        } else {
-            text
-        }
-    }
 }
 
-/// Marks a field's readout so it can be refreshed as the player types.
+/// Marks which of the dialog's text fields an `EditableText` is.
 #[derive(Component)]
-pub(super) struct FieldText(Field);
+pub(super) struct FieldText(pub(super) Field);
 
 /// How wide the fields are: the dialog's widest thing, and wide enough that
 /// the longest name the field takes sits in it with the caret.
 const FIELD_WIDTH: f32 = 340.0;
 
-/// A field: a button, so that clicking it is how the keyboard gets there,
-/// wearing its own text.
+/// A field, inside a button so that the whole box takes the click that puts
+/// the keyboard there, and not only the letters. The name field has the
+/// keyboard to begin with: it is the one the dialog will not start without.
+///
+/// The seed takes digits and the name anything printable, to the length the
+/// file and the row that shows it have room for.
 fn spawn_field(
     parent: &mut ChildSpawnerCommands,
     ink: &Palette,
@@ -136,10 +111,24 @@ fn spawn_field(
     parent
         .spawn(button(ink, MenuButton::Edit(field), FIELD_WIDTH))
         .with_children(|button| {
-            button.spawn((
-                FieldText(field),
-                button_label(ink, &settings.field_text(field)),
-            ));
+            let mut text = match field {
+                Field::Name => {
+                    button.spawn(text_field(ink, &settings.name, 19.0, NAME_LETTERS, |c| {
+                        !c.is_control()
+                    }))
+                }
+                Field::Seed => button.spawn(text_field(
+                    ink,
+                    &settings.seed,
+                    19.0,
+                    MAX_SEED_DIGITS,
+                    |c| c.is_ascii_digit(),
+                )),
+            };
+            text.insert(FieldText(field));
+            if field == Field::Name {
+                text.insert(AutoFocus);
+            }
         });
 }
 
@@ -236,6 +225,8 @@ pub(super) fn share_label(share: bool) -> &'static str {
 /// handler that decides anything on the spot.
 pub(super) fn dialog_actions(
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    mut fields: Query<(Entity, &FieldText, &mut EditableText)>,
+    mut focus: ResMut<InputFocus>,
     mut settings: ResMut<NewWorldSettings>,
     mut next: ResMut<NextState<AppState>>,
 ) {
@@ -244,8 +235,21 @@ pub(super) fn dialog_actions(
             continue;
         }
         match button {
-            MenuButton::Edit(field) => settings.editing = *field,
-            MenuButton::RandomSeed => settings.seed = random_seed().to_string(),
+            MenuButton::Edit(field) => {
+                if let Some((entity, _, _)) = fields.iter().find(|(_, f, _)| f.0 == *field) {
+                    focus.set(entity, FocusCause::Pressed);
+                }
+            }
+            // Typed in over what was there, so it lands the way a typed seed
+            // does and is read back by [`read_field`] like one.
+            MenuButton::RandomSeed => {
+                for (_, field, mut text) in &mut fields {
+                    if field.0 == Field::Seed {
+                        text.queue_edit(TextEdit::SelectAll);
+                        text.queue_edit(TextEdit::Insert(random_seed().to_string().into()));
+                    }
+                }
+            }
             MenuButton::ToggleShare => settings.share = !settings.share,
             // One step back is the screen this one opens from, which is where
             // the worlds are — not the front of the game.
@@ -309,75 +313,45 @@ pub(super) fn open_world(
     }
 }
 
-/// Key-by-key editing of whichever field the keyboard is in.
-///
-/// Asks what the keyboard *typed* rather than which positions were pressed,
-/// exactly as the address field does — so the game's text fields are edited
-/// by one mechanism instead of two. It also spares this a table of every key
-/// that produces a digit: the main row and the number pad both simply type
-/// one, and so does whatever a layout puts them on.
-///
-/// The seed takes digits and the name takes anything typed, to the length
-/// the file and the row that shows it have room for. A space is not a
-/// character to the keyboard — it is a key of its own — and a name with a
-/// space in it is most names.
-///
-/// Runs on every screen rather than only this one, for the reason
-/// [`super::join::join_keys`] does: a reader left to lag would deliver whatever was
-/// pressed on the way here the instant the dialog opened — and on this
-/// screen that would land in a field.
-pub(super) fn type_into_field(
-    state: Res<State<AppState>>,
-    mut presses: MessageReader<KeyboardInput>,
+/// Takes what a field now holds into the settings, which are what the
+/// dialog starts a world from and what it reopens showing.
+pub(super) fn read_field(
+    change: On<TextEditChange>,
+    fields: Query<(&FieldText, &EditableText)>,
     mut settings: ResMut<NewWorldSettings>,
 ) {
-    let on_screen = *state.get() == AppState::NewWorld;
+    let Ok((field, text)) = fields.get(change.event_target()) else {
+        return;
+    };
+    let value = text.value().to_string();
+    let held = match field.0 {
+        Field::Name => &mut settings.name,
+        Field::Seed => &mut settings.seed,
+    };
+    if *held != value {
+        *held = value;
+    }
+}
 
-    for press in presses.read() {
-        // A held key repeats, which is what a text field wants: holding
-        // backspace should clear the field rather than one letter of it.
-        if !on_screen || press.state != ButtonState::Pressed {
-            continue;
-        }
-
-        let editing = settings.editing;
-        let field = settings.field(editing);
-        match (press.key_code, &press.logical_key) {
-            (KeyCode::Backspace, _) => {
-                field.pop();
-            }
-            (_, Key::Space) if editing == Field::Name && field.chars().count() < NAME_LETTERS => {
-                field.push(' ');
-            }
-            (_, Key::Character(typed)) => {
-                for letter in typed.chars() {
-                    let fits = match editing {
-                        Field::Name => !letter.is_control() && field.chars().count() < NAME_LETTERS,
-                        Field::Seed => letter.is_ascii_digit() && field.len() < MAX_SEED_DIGITS,
-                    };
-                    if fits {
-                        field.push(letter);
-                    }
-                }
-            }
-            _ => {}
+/// An emptied seed, once the keyboard leaves it, reads as the zero it will be
+/// read as.
+pub(super) fn settle_seed(lost: On<FocusLost>, mut fields: Query<(&FieldText, &mut EditableText)>) {
+    if let Ok((field, mut text)) = fields.get_mut(lost.event_target()) {
+        if field.0 == Field::Seed && text.value().to_string().is_empty() {
+            text.queue_edit(TextEdit::Insert("0".into()));
         }
     }
 }
 
-/// Keeps the dialog's readouts in step with the settings behind them.
+/// Keeps the sharing button in step with the setting behind it.
 pub(super) fn refresh_dialog(
     settings: Res<NewWorldSettings>,
-    mut fields: Query<(&FieldText, &mut Text), Without<ShareText>>,
     mut share_text: Query<&mut Text, With<ShareText>>,
 ) {
     if !settings.is_changed() {
         return;
     }
 
-    for (field, mut text) in &mut fields {
-        text.0 = settings.field_text(field.0);
-    }
     for mut text in &mut share_text {
         text.0 = share_label(settings.share).to_string();
     }
