@@ -205,7 +205,7 @@ impl Plugin for TerrainPlugin {
             MaterialPlugin::<ShadedMaterial>::default(),
         ))
         .add_message::<crate::net::GroundArrived>()
-        .add_message::<crate::net::WindChanged>()
+        .add_message::<crate::net::WeatherTold>()
         .init_resource::<sea::Forecast>()
         .init_resource::<sea::SeaConditions>()
         .add_systems(OnEnter(AppState::InWorld), enter_world)
@@ -223,7 +223,7 @@ impl Plugin for TerrainPlugin {
                 follow_camera,
                 refresh_materials,
                 sea::refresh_depth,
-                // The wind heard, then worn: the sea this module draws is the
+                // The weather heard, then worn: the sea this module draws is the
                 // sea `sea` keeps, so its two plugins are one.
                 sea::take_the_weather.in_set(crate::net::Wire::Read),
                 sea::settle_conditions,

@@ -170,6 +170,11 @@ fn lee_scale(exposure: f32) -> f32 {
 /// quantised updates arriving as weather rather than as steps.
 const SEA_RESPONSE: f32 = 12.0;
 
+/// How long the drawn rain takes to follow the forecast's, in seconds. Far
+/// quicker than the sea: rain is the air, and a squall line arriving is the
+/// sky going dark in the time it takes to reef, not over a minute.
+const RAIN_RESPONSE: f32 = 4.0;
+
 /// Below this, in metres per second, a wind is too slack to name a
 /// direction, and everything drawn off the true wind says so together:
 /// the wave trains hold the heading they had (see [`settle_conditions`]),
@@ -491,7 +496,8 @@ pub struct SeaExtension {
     /// `xy` is [`BREAKING_FIELD`]; `z` is [`LEE_SEA`]; `w` is padding.
     #[uniform(100)]
     breaking: Vec4,
-    /// `xyz` is [`TONE`]; `w` padding.
+    /// `xyz` is [`TONE`]; `w` the rain, which stipples the tones — see
+    /// [`SeaConditions::rain`].
     #[uniform(100)]
     tone: Vec4,
     /// The depth window's place in the world: `xy` the world coordinates of
@@ -638,7 +644,7 @@ fn stagger_vector() -> Vec2 {
 
 /// The weather as last told by the server: the wind over the whole world,
 /// as a velocity in metres per second, or `None` before the first word of
-/// it arrives. A target, not a picture — the drawn sea is
+/// it arrives, and the rain that came with it. A target, not a picture — the drawn sea is
 /// [`SeaConditions`], which [`settle_conditions`] eases towards this
 /// whenever a [`protocol::ToClient::Weather`] moves it. The very first
 /// forecast is taken as a snap instead: until it lands the client is
@@ -647,6 +653,7 @@ fn stagger_vector() -> Vec2 {
 #[derive(Resource, Default)]
 pub struct Forecast {
     pub wind: Option<Vec2>,
+    pub rain: f32,
 }
 
 impl Forecast {
@@ -677,6 +684,7 @@ struct Slot {
 #[derive(Resource)]
 pub struct SeaConditions {
     wind: Vec2,
+    rain: f32,
     slots: [Slot; WAVES.len()],
     /// Still the assumed day — no forecast has ever landed. What lets the
     /// first one snap rather than ease.
@@ -687,6 +695,7 @@ impl Default for SeaConditions {
     fn default() -> Self {
         Self {
             wind: ASSUMED_WIND,
+            rain: 0.0,
             slots: WAVES.map(|(bearing, ..)| Slot {
                 heading: Vec2::from_angle(bearing).rotate(ASSUMED_WIND.normalize()),
                 dim: 1.0,
@@ -706,6 +715,7 @@ impl SeaConditions {
     pub(crate) fn blowing(wind: Vec2) -> Self {
         Self {
             wind,
+            rain: 0.0,
             slots: WAVES.map(|(bearing, ..)| Slot {
                 // A calm names no bearing, so like the settle system the
                 // slots fall back to *a* heading rather than a NaN one.
@@ -746,6 +756,21 @@ impl SeaConditions {
     /// taken off.
     pub fn wind(&self) -> Vec2 {
         self.wind
+    }
+
+    /// How hard it is raining as drawn — the forecast's rain, eased the way
+    /// the wind is and for the same reason. What the sky darkens and the
+    /// haze closes in by, as well as what pocks the water.
+    pub fn rain(&self) -> f32 {
+        self.rain
+    }
+
+    /// The same sea with the rain set outright, for the tests of what the
+    /// sky makes of it.
+    #[cfg(test)]
+    pub(crate) fn raining(mut self, rain: f32) -> Self {
+        self.rain = rain;
+        self
     }
 
     /// How big the *open* sea is running, as a factor on the reference
@@ -901,10 +926,11 @@ impl SeaConditions {
 /// is weather that has already happened.
 pub(crate) fn take_the_weather(
     mut forecast: ResMut<Forecast>,
-    mut told: MessageReader<crate::net::WindChanged>,
+    mut told: MessageReader<crate::net::WeatherTold>,
 ) {
-    for changed in told.read() {
-        forecast.wind = Some(changed.wind);
+    for weather in told.read() {
+        forecast.wind = Some(weather.wind);
+        forecast.rain = weather.rain;
     }
 }
 
@@ -926,6 +952,7 @@ pub(crate) fn settle_conditions(
         // already at one, and there is nothing on screen worth easing from.
         conditions.assumed = false;
         conditions.wind = told;
+        conditions.rain = forecast.rain;
         if told.length() > WIND_NAMED {
             let bearing = told.normalize();
             for (i, slot) in conditions.slots.iter_mut().enumerate() {
@@ -937,6 +964,8 @@ pub(crate) fn settle_conditions(
     let follow = crate::eased(1.0 / SEA_RESPONSE, time.delta_secs());
     let fade = crate::eased(1.0 / REAIM.1, time.delta_secs());
     conditions.wind = veered(conditions.wind, told, follow);
+    conditions.rain +=
+        (forecast.rain - conditions.rain) * crate::eased(1.0 / RAIN_RESPONSE, time.delta_secs());
 
     // A dying wind names no bearing — see [`WIND_NAMED`]: below the bar the
     // slots hold the heading they had, and the lull is carried by the
@@ -969,6 +998,7 @@ pub(crate) fn settle_conditions(
     let shore_amplitude = conditions.shore_amplitude();
     let stale = materials.get(&window.material).is_some_and(|material| {
         (material.extension.shore.z - shore_amplitude).abs() > 1e-4
+            || (material.extension.tone.w - conditions.rain).abs() > 1e-3
             || material
                 .extension
                 .waves
@@ -980,6 +1010,7 @@ pub(crate) fn settle_conditions(
         if let Some(mut material) = materials.get_mut(&window.material) {
             material.extension.waves = waves;
             material.extension.shore.z = shore_amplitude;
+            material.extension.tone.w = conditions.rain;
         }
     }
 }
@@ -1588,6 +1619,28 @@ mod tests {
     fn drawn(app: &App) -> (Vec2, [Slot; WAVES.len()]) {
         let conditions = app.world().resource::<SeaConditions>();
         (conditions.wind, conditions.slots)
+    }
+
+    #[test]
+    fn rain_lands_with_the_first_forecast_and_eases_after() {
+        // A session opened under a squall opens in it, rather than watching
+        // one gather that was already there; after that the rain eases in,
+        // and goes as it came.
+        let mut app = settle_app();
+        app.world_mut().resource_mut::<Forecast>().rain = 1.0;
+        tell(&mut app, Vec2::new(0.0, 12.0));
+        app.update();
+        let rain = |app: &App| app.world().resource::<SeaConditions>().rain();
+        assert_eq!(rain(&app), 1.0, "the first rain was eased, not snapped");
+
+        app.world_mut().resource_mut::<Forecast>().rain = 0.0;
+        app.update();
+        let easing = rain(&app);
+        assert!(easing < 1.0 && easing > 0.9, "the rain stopped as {easing}");
+        for _ in 0..2_000 {
+            app.update();
+        }
+        assert!(rain(&app) < 1e-3, "the rain never stopped: {}", rain(&app));
     }
 
     #[test]

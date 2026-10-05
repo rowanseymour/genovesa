@@ -66,6 +66,7 @@ use protocol::{
     PROTOCOL_VERSION, SURVEY_BATCH_BYTES, TENDER_ASTERN,
 };
 use world::archipelago::{Archipelago, IslandSpec, WorldConfig, ENTRY};
+use world::weather::Weather;
 
 pub use keeper::{data_dir, discard, keep_data_in, kept_worlds, KeptWorld};
 
@@ -375,6 +376,11 @@ const KEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// before it is worth telling everyone about.
 const WIND_STEP: f32 = 0.25;
 
+/// How much the rain must have moved, as a share of a squall's, before it is
+/// worth telling everyone about — fine enough that a squall arriving over
+/// half a minute is told as a dozen steps a client eases across.
+const RAIN_STEP: f32 = 0.05;
+
 /// Where session news goes. Boxed rather than a type parameter so that a
 /// `Server` is one type however it reports, and defaulted to silence: what a
 /// library does to somebody's stdout is not the library's decision.
@@ -519,15 +525,15 @@ pub(crate) struct Shared {
     /// only state the day has beyond the clock, which is what keeps two
     /// askers from disagreeing about the time — see [`Shared::phase`].
     skipped: Mutex<f32>,
-    /// A wind ordered from the console, outranking the world's own weather
-    /// for as long as it is set — see [`console`], where the ordering
-    /// happens, and [`Shared::wind`], which is where it takes effect.
+    /// Weather ordered from the console, outranking the world's own for as
+    /// long as it is set — see [`console`], where the ordering happens, and
+    /// [`Shared::weather`], which is where it takes effect.
     ///
-    /// The name it was ordered by is kept with the vector because the console
-    /// can be *asked* what stands, and a wind that only knew its own two
-    /// components could answer that with arithmetic rather than with the word
-    /// somebody typed.
-    commanded_wind: Mutex<Option<(&'static str, Vec2)>>,
+    /// The name it was ordered by is kept with the weather because the
+    /// console can be *asked* what stands, and weather that only knew its
+    /// own numbers could answer that with arithmetic rather than with the
+    /// word somebody typed.
+    commanded_weather: Mutex<Option<(&'static str, Weather)>>,
     /// Beasts the console has summoned and the warden has not yet raised:
     /// each with the spot the command already found water at, absorbed into
     /// the flock on the next beat — see [`beasts::mind_the_beasts`].
@@ -864,7 +870,7 @@ impl Server {
                 // so the hour and the weather carry on from where the last
                 // session left them — see [`Shared::age`].
                 skipped: Mutex::new(record.age),
-                commanded_wind: Mutex::new(None),
+                commanded_weather: Mutex::new(None),
                 summoned: Mutex::new(Vec::new()),
                 beasts: Mutex::new(record.beasts),
                 report: Box::new(|_| {}),
@@ -1185,10 +1191,11 @@ fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
 ///
 /// Neither the weather nor the clock needs ticking — both are functions of
 /// how long the world has been open — so most of what this does is notice
-/// that an answer has moved and pass it on. The wind is told when it has
-/// meaningfully changed, [`WIND_STEP`] of vector change covering a shift in
-/// strength and one in bearing with a single test; the time is told on a beat
-/// instead, being always changing. The one thing here that does more than
+/// that an answer has moved and pass it on. The weather is told when the wind
+/// or the rain has meaningfully changed — [`WIND_STEP`] of vector change
+/// covering a shift in strength and one in bearing with a single test, and
+/// [`RAIN_STEP`] apart — and told whole, the two being one word on the wire;
+/// the time is told on a beat instead, being always changing. The one thing here that does more than
 /// watch is the night — see [`Shared::run_off_the_night`].
 ///
 /// The thread ends with the session and is deliberately not joined: unlike a
@@ -1198,7 +1205,7 @@ fn make_ground(shared: &Arc<Shared>, requests: mpsc::Receiver<ChunkRequest>) {
 fn watch_the_sky(shared: &Arc<Shared>) {
     let shared = shared.clone();
     thread::spawn(move || {
-        let mut told_wind = shared.wind();
+        let mut told = shared.weather();
         let mut told_time = Instant::now();
         loop {
             if shared.stopping.load(Ordering::Relaxed) {
@@ -1207,16 +1214,21 @@ fn watch_the_sky(shared: &Arc<Shared>) {
             thread::sleep(SKY_TICK);
 
             let wound = shared.run_off_the_night(SKY_TICK);
-            let wind = shared.wind();
+            let weather = shared.weather();
 
             // Gathered before the roster is locked, as every path into the
             // clock does: the day's lock is never taken by a thread already
             // holding the roster's, so the two have no order to disagree
             // about.
             let mut news = Vec::new();
-            if (wind - told_wind).length() > WIND_STEP {
-                told_wind = wind;
-                news.push(ToClient::Weather { wind });
+            if (weather.wind - told.wind).length() > WIND_STEP
+                || (weather.rain - told.rain).abs() > RAIN_STEP
+                // The last of a squall is told, however small the step to
+                // it, or a client is left drawing a drizzle nobody is under.
+                || (weather.rain == 0.0) != (told.rain == 0.0)
+            {
+                told = weather;
+                news.push(told_the(weather));
             }
             // A wound clock is told at once, whatever the beat: it is the
             // one thing that moves the day other than the day passing, and
@@ -1238,6 +1250,14 @@ fn watch_the_sky(shared: &Arc<Shared>) {
     });
 }
 
+/// The weather as the wire says it.
+fn told_the(weather: Weather) -> ToClient {
+    ToClient::Weather {
+        wind: weather.wind,
+        rain: weather.rain,
+    }
+}
+
 impl Shared {
     /// World-seconds lived: the session's own clock plus [`Shared::skipped`]
     /// — which a reopened world starts with its whole past in, so age spans
@@ -1250,7 +1270,7 @@ impl Shared {
         self.started.elapsed().as_secs_f32() + skipped
     }
 
-    /// The wind over this world right now. Asked rather than kept: the
+    /// The weather over this world right now. Asked rather than kept: the
     /// weather is a pure function of the seed and the world's age, so there
     /// is no cached state for two askers to disagree over — unless the
     /// console has taken the weather in hand, which *is* state, and then its
@@ -1259,19 +1279,24 @@ impl Shared {
     /// The age rather than the session's own clock on both counts: a kept
     /// world resumes the sky it closed under, and a crew at anchor till dawn
     /// has sat out some of the blow.
-    fn wind(&self) -> Vec2 {
-        let commanded = *self.commanded_wind.held();
+    fn weather(&self) -> Weather {
+        let commanded = *self.commanded_weather.held();
         commanded.map_or_else(
-            || world::weather::wind(self.world.seed(), self.age()),
-            |(_, wind)| wind,
+            || world::weather::weather(self.world.seed(), self.age()),
+            |(_, weather)| weather,
         )
     }
 
-    /// Orders the wind, or — with `None` — gives the weather back to the
-    /// world. The sky thread notices the answer to [`Shared::wind`] moving
-    /// and tells everyone, exactly as it does when the real weather turns.
-    fn command_wind(&self, wind: Option<(&'static str, Vec2)>) {
-        *self.commanded_wind.held() = wind;
+    /// The wind alone, for the hulls, which sail on nothing else.
+    fn wind(&self) -> Vec2 {
+        self.weather().wind
+    }
+
+    /// Orders the weather, or — with `None` — gives it back to the world.
+    /// The sky thread notices the answer to [`Shared::weather`] moving and
+    /// tells everyone, exactly as it does when the real weather turns.
+    fn command_weather(&self, weather: Option<(&'static str, Weather)>) {
+        *self.commanded_weather.held() = weather;
     }
 
     /// Runs the world's clock forward to the next time it reads `target`,
@@ -1788,7 +1813,7 @@ fn welcome_aboard(
     // see [`Shared::skipped`] — and asking with the roster held would be the
     // one path in the process that nested the two. A sky a few microseconds
     // old is the same sky.
-    let wind = shared.wind();
+    let weather = shared.weather();
     let phase = shared.phase();
     let now = shared.age();
     let mut players = shared.players.held();
@@ -1862,7 +1887,7 @@ fn welcome_aboard(
     // assume a day nobody promised. Inside the same hold of the lock as
     // the welcome, so the watcher's broadcasts cannot slip in front of it
     // and arrive before the client knows who it is.
-    post(newcomer, ToClient::Weather { wind });
+    post(newcomer, told_the(weather));
     // And what hour it is, for the same reason: a client with no word on
     // the time can only draw an assumed one, and an arrival that snapped
     // from midday to a night already half gone would be a worse opening

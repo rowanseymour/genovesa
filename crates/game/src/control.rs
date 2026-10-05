@@ -1793,11 +1793,11 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<Control>()
-            .answered("the wind is ordered gale");
+            .answered("the weather is ordered gale");
 
         assert_eq!(
             answered.try_recv(),
-            Ok("the wind is ordered gale".to_string())
+            Ok("the weather is ordered gale".to_string())
         );
         assert!(app.world().resource::<Control>().doing.is_none());
     }
