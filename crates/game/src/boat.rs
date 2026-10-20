@@ -3850,6 +3850,55 @@ mod tests {
     /// over eight time constants, a remainder of a few parts in ten thousand.
     const SETTLED: usize = 800;
 
+    /// A dinghy taken in tow from alongside, touching the ship, must leave
+    /// the solver's books straight: under Avian 0.7 the painter's collision
+    /// marker half-removed the contact, and a third hull coming alongside
+    /// afterwards panicked inside the solver —
+    /// <https://github.com/avianphysics/avian/issues/1076>.
+    #[test]
+    fn a_boat_taken_in_tow_from_alongside_leaves_the_solver_whole() {
+        let mut app = test_app();
+        set_wind(&mut app, Vec2::ZERO);
+        let ship = helmed_hull(&mut app);
+        let pose = *app
+            .world()
+            .get::<Transform>(ship)
+            .expect("a hull has a transform");
+        let ship_kind = app.world().get::<Rigged>(ship).expect("a rigged ship").0;
+        let abeam = (hull_of(ship_kind).beam + ROWBOAT.beam) / 2.0 - 0.02;
+        let alongside = |app: &mut App| {
+            a_free_rowboat(
+                app,
+                pose.with_translation(pose.translation + pose.right() * abeam),
+            )
+        };
+
+        // Touching, for long enough that the solver has linked the contact.
+        let tender = alongside(&mut app);
+        run_frames(&mut app, 30);
+        let touching = app
+            .world()
+            .resource::<ContactGraph>()
+            .get(ship, tender)
+            .is_some_and(|(_, pair)| pair.is_touching());
+        assert!(touching, "the dinghy never lay against the ship");
+
+        app.world_mut()
+            .entity_mut(tender)
+            .insert(Towed::behind(ship));
+        run_frames(&mut app, 30);
+        let rope = app.world().get::<Painter>(tender).expect("made fast").0;
+        assert!(
+            app.world().get::<JointCollisionDisabled>(rope).is_some(),
+            "the painter still takes the contact with the ship"
+        );
+
+        // And a stranger brought alongside the same ship, which is a new
+        // contact in the island the old one was in.
+        alongside(&mut app);
+        run_frames(&mut app, 30);
+    }
+
     #[test]
     fn the_wires_astern_is_where_the_painter_puts_the_boat() {
         // [`protocol::TENDER_ASTERN`] is where a server mints a sloop's boat
