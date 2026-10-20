@@ -9,7 +9,9 @@
 //! and from the pause menu over a world that must not be taken down to get to
 //! them. See [`ladder`], which is where that doubling lives.
 
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui::Pressed;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
@@ -34,7 +36,7 @@ use display::{
     close_display, display_actions, open_display, refresh_display, refresh_picker, run_trial,
     spawn_display, spawn_paused_display, Picking,
 };
-use join::{join_actions, join_keys, refresh_join, spawn_join_dialog, JoinSettings};
+use join::{join_actions, join_keys, read_address, spawn_join_dialog, JoinSettings};
 use kit::{scroll_the_panel, Highlight};
 use ladder::{
     back_to_options, helm_keys, options_actions, options_keys, over_a_world, pause_actions,
@@ -42,8 +44,8 @@ use ladder::{
 };
 use main_menu::{main_menu_actions, spawn_main_menu};
 use new_world::{
-    dialog_actions, open_world, refresh_dialog, share_label, spawn_new_world_dialog,
-    type_into_field, Field, NewWorldSettings,
+    dialog_actions, open_world, read_field, refresh_dialog, settle_seed, share_label,
+    spawn_new_world_dialog, Field, NewWorldSettings,
 };
 use set_sail::{read_the_harbour, set_sail_actions, show_set_sail, Harbour};
 
@@ -51,12 +53,15 @@ fn highlight_buttons(
     rebinding: Res<Rebinding>,
     picking: Res<Picking>,
     wanted: Res<Wanted>,
-    mut buttons: Query<
-        (&Interaction, &MenuButton, &Highlight, &mut BackgroundColor),
-        Changed<Interaction>,
-    >,
+    mut buttons: Query<(
+        Has<Pressed>,
+        &Hovered,
+        &MenuButton,
+        &Highlight,
+        &mut BackgroundColor,
+    )>,
 ) {
-    for (interaction, button, ink, mut color) in &mut buttons {
+    for (pressed, hovered, button, ink, mut color) in &mut buttons {
         let idle = match button {
             MenuButton::Rebind(action) if rebinding.0 == Some(*action) => ink.armed,
             // The two things an open list has to say: that it is open, and
@@ -68,11 +73,16 @@ fn highlight_buttons(
             _ => ink.idle,
         };
 
-        *color = BackgroundColor(match interaction {
-            Interaction::Pressed => ink.press,
-            Interaction::Hovered => ink.hover,
-            Interaction::None => idle,
-        });
+        let tone = if pressed {
+            ink.press
+        } else if hovered.get() {
+            ink.hover
+        } else {
+            idle
+        };
+        if color.0 != tone {
+            color.0 = tone;
+        }
     }
 }
 
@@ -96,6 +106,10 @@ impl Plugin for MenuPlugin {
             .init_resource::<Wanted>()
             .init_resource::<OnTrial>()
             .init_resource::<Picking>()
+            // The text fields are Bevy's, and tell what they hold by event.
+            .add_observer(read_field)
+            .add_observer(settle_seed)
+            .add_observer(read_address)
             .add_systems(OnEnter(AppState::MainMenu), spawn_main_menu)
             .add_systems(OnEnter(AppState::Options), spawn_options)
             // Set from the machine before the screen is built out of it.
@@ -163,9 +177,6 @@ impl Plugin for MenuPlugin {
                         .run_if(in_state(AppState::SetSail)),
                     (dialog_actions, open_world, refresh_dialog)
                         .run_if(in_state(AppState::NewWorld)),
-                    // `type_into_field` carries no run condition of its own,
-                    // for the reason `join_keys` and `settings_keys` carry none.
-                    type_into_field,
                     // `join_keys` carries no run condition of its own, for the
                     // reason `settings_keys` below carries none.
                     (
@@ -173,7 +184,6 @@ impl Plugin for MenuPlugin {
                         join_keys,
                     )
                         .chain(),
-                    refresh_join.run_if(in_state(AppState::JoinWorld)),
                     // Both dialogs have a line for how a dial is going, so
                     // whichever is on screen owns the only ones that exist.
                     refresh_status,

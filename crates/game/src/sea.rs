@@ -75,7 +75,7 @@
 //! shader displacing the sea mesh, the boat riding on it, and the markers other
 //! players stand as. The parameters live once here and reach the shader through
 //! a uniform; the *formula* — [`SeaConditions::swell`] — is written twice,
-//! here and in `assets/shaders/sea.wgsl`, and the two must be kept the same.
+//! here and in `assets/shaders/sea.wesl`, and the two must be kept the same.
 //! So is time: the shader reads `globals.time`, which Bevy fills from
 //! `Time::elapsed_secs_wrapped`, so that is what every Rust caller must pass.
 //! Depth is deliberately loose — the shader reads the windowed texture and the
@@ -104,7 +104,7 @@ use crate::terrain::Ground;
 
 /// Displaces the sea's vertices and shades the result — see the module doc,
 /// and the file itself, which carries the other copy of [`SeaConditions::swell`].
-const SHADER: &str = "shaders/sea.wgsl";
+const SHADER: &str = "shaders/sea.wesl";
 
 /// The open sea's swell, as components: bearing off the wind in radians,
 /// wavelength in metres, amplitude in metres under [`REFERENCE_WIND`]. Three
@@ -330,7 +330,7 @@ const BREAKING_FIELD: (f32, f32) = (220.0, 2.5);
 /// while the place where the water is doing that stays put the way a current
 /// would.
 ///
-/// This is the other copy of `bend` in `assets/shaders/sea.wgsl` and the two
+/// This is the other copy of `bend` in `assets/shaders/sea.wesl` and the two
 /// must agree, exactly as [`SeaConditions::swell`] and its twin must.
 fn bend(at: Vec2) -> Vec2 {
     let component = |sines: &[(Vec2, f32)]| -> f32 {
@@ -806,7 +806,7 @@ impl SeaConditions {
     /// with anything unknown counting as deep — and `exposure` is how much
     /// of the wind reaches it, `1.0` in the open; see [`lee_scale`].
     ///
-    /// This is the Rust copy of the formula in `assets/shaders/sea.wgsl`;
+    /// This is the Rust copy of the formula in `assets/shaders/sea.wesl`;
     /// the two must agree or the boat stops sitting on the water it is
     /// drawn in.
     pub fn swell(&self, at: Vec2, elapsed: f32, depth: f32, exposure: f32) -> f32 {
@@ -1933,7 +1933,7 @@ mod tests {
 
     #[test]
     fn a_texel_carries_the_lee_in_the_channel_the_shader_reads() {
-        // The seam between this file and `sea.wgsl`, and the one part of the
+        // The seam between this file and `sea.wesl`, and the one part of the
         // shelter no other test can reach: the shader is not compiled here,
         // so what is pinned is the half of the contract that is — the byte
         // goes in the *fourth* channel, which is the `.a` the shader samples,
@@ -2011,7 +2011,7 @@ mod tests {
         // needles are assembled at runtime so this test's own source, which
         // `include_str!` sweeps up too, cannot satisfy them.
         let shader = std::fs::read_to_string(format!(
-            "{}/../../assets/shaders/sea.wgsl",
+            "{}/../../assets/shaders/sea.wesl",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("the sea's shader under assets/shaders/");
@@ -2038,7 +2038,7 @@ mod tests {
         // so this holds them to each other rather than to a third copy that
         // could go stale on its own.
         let shader = std::fs::read_to_string(format!(
-            "{}/../../assets/shaders/sea.wgsl",
+            "{}/../../assets/shaders/sea.wesl",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("the sea's shader under assets/shaders/");

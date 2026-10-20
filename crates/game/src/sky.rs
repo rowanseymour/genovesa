@@ -760,7 +760,7 @@ fn offer_spawn(mut commands: Commands) {
             OfferLine,
             Text::default(),
             TextFont {
-                font: FontSource::Serif,
+                font: FontSource::serif(),
                 font_size: FontSize::Px(OFFER_SIZE),
                 ..default()
             },

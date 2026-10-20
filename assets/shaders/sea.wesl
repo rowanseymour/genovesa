@@ -15,15 +15,15 @@
 // in Rust — the boat rides what this draws, so the two must be kept the
 // same.
 
-#import bevy_pbr::{
-    ambient,
+import bevy_pbr::render::{
     forward_io::{Vertex, VertexOutput, FragmentOutput},
     mesh_functions,
     mesh_view_bindings::{globals, view},
+    pbr_ambient as ambient,
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     view_transformations::position_world_to_clip,
-}
+};
 
 // How many points of track a wake arrives as, and how many hulls' wakes
 // arrive — the twins of `wake::TRAIL` and `wake::WAKES`, which
@@ -109,9 +109,9 @@ struct SeaParams {
     hole_shape: array<vec4<f32>, HOLES>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> sea: SeaParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var sea_depth: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var sea_depth_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> sea: SeaParams;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var sea_depth: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var sea_depth_sampler: sampler;
 
 // How much water stands under a point, in metres. Beyond the window's edge
 // the sampler clamps to whatever the rim texel says — and everything out
@@ -135,7 +135,7 @@ fn phase_of(channel: f32) -> f32 {
 // crossings softened so a headland's shadow sweeps over the water rather
 // than snapping across it.
 //
-// This is the sea's half of what `ground.wgsl` does with the same intervals.
+// This is the sea's half of what `ground.wesl` does with the same intervals.
 // It reads them from the window rather than from its own vertices because
 // the sea is one plane that follows the camera and never met a chunk's
 // corners — see `sea::refresh_depth`, which fills the window's other two
@@ -507,9 +507,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // Up, and what the standard lighting lights: a facet's own slope reaches
     // the picture as a step of tone in the fragment half, not as a normal.
     out.world_normal = vec3(0.0, 1.0, 0.0);
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    @if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = vertex.instance_index;
-#endif
 
     return out;
 }
@@ -620,8 +619,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         max(max(max(foam, cap), wake_foam(at)), 0.15 * abs(pocked)),
     );
 
-    pbr_input.material.base_color =
-        alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color,
+    );
 
     // The tone this facet is drawn in — see `sea::TONE`. The cross product of
     // the position's screen-space derivatives is the facet's normal, constant

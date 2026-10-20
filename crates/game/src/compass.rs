@@ -676,7 +676,7 @@ fn spawn_letter(
             // is a piece of chart furniture, and the machine's serif is the
             // hand charts are lettered in.
             TextFont {
-                font: FontSource::Serif,
+                font: FontSource::serif(),
                 font_size: FontSize::Px(LETTER_SIZE),
                 ..default()
             },

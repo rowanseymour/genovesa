@@ -11,7 +11,10 @@
 //! builders that take one so a screen can be stood up on either side.
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::text::{EditableText, EditableTextFilter, TextCursorStyle};
+use bevy::ui_widgets::{Button, TextInput};
 
 use crate::chart::{INK, INK_DIM, PAPER};
 
@@ -294,6 +297,7 @@ pub(super) fn padded_button(
 ) -> impl Bundle {
     (
         Button,
+        Hovered::default(),
         action,
         ink.button,
         Node {
@@ -306,6 +310,47 @@ pub(super) fn padded_button(
         },
         BackgroundColor(ink.button.idle),
         BorderColor::all(ink.edge),
+    )
+}
+
+/// A line of text the player types into: Bevy's own field, which draws and
+/// blinks its caret where the letters actually end, in the menu's inks.
+///
+/// `takes` is the characters it accepts, and `longest` how many of them.
+/// What it holds is read back by whoever spawned it, off
+/// [`TextEditChange`](bevy::text::TextEditChange).
+pub(super) fn text_field(
+    ink: &Palette,
+    text: &str,
+    size: f32,
+    longest: usize,
+    takes: impl Fn(char) -> bool + Send + Sync + 'static,
+) -> impl Bundle {
+    let mut field = EditableText::new(text);
+    field.max_characters = Some(longest);
+    field.cursor_width = 0.08;
+    (
+        field,
+        TextInput,
+        EditableTextFilter::new(takes),
+        TextFont {
+            font_size: FontSize::Px(size),
+            ..default()
+        },
+        TextColor(ink.text),
+        TextLayout::justify(Justify::Center),
+        TextCursorStyle {
+            color: ink.text,
+            selection_color: ink.button.press,
+            // A field the keyboard has left is only text.
+            unfocused_selection_color: Color::NONE,
+            selected_text_color: None,
+            selection_radius: 0.0,
+        },
+        Node {
+            width: Val::Percent(100.0),
+            ..default()
+        },
     )
 }
 

@@ -101,8 +101,8 @@ pub fn on_the_plane(at: Vec3) -> Vec2 {
 /// *vectors* alone and touches only the angle that spins them. That is why
 /// this can be handed straight to the sail and oar polars in `boat`, which
 /// were written against a transform's forward and have not had to change.
-pub fn bow(rotation: &Rotation) -> Vec2 {
-    let (sin, cos) = rotation.as_radians().sin_cos();
+pub fn bow(rotation: impl Into<Rot2>) -> Vec2 {
+    let (sin, cos) = rotation.into().as_radians().sin_cos();
     Vec2::new(sin, -cos)
 }
 

@@ -56,9 +56,8 @@ png = "0.18"
 # optional in practice: the engine's own systems ask for their diagnostics
 # resources whether or not the feature that inserts them is on, and a build
 # without it panics on the first step.
-avian2d = { version = "0.7.0", default-features = false, features = [
+avian2d = { version = "0.8.0", default-features = false, features = [
     "2d",
-    "f32",
     "parry-f32",
     "default-collider",
     # The painter between a ship and the boat it tows is a distance joint,
