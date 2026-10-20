@@ -228,7 +228,7 @@ fn lay_the_sheet(engraver: &mut Engraver, target: RenderTarget) {
         commands.spawn((
             Text2d::new(letter),
             TextFont {
-                font: FontSource::Serif,
+                font: FontSource::serif(),
                 font_size: FontSize::Px(chart::ROSE_LETTER_SIZE),
                 ..default()
             },
@@ -442,7 +442,7 @@ mod tests {
             .resource::<Assets<Mesh>>()
             .get(&drawn)
             .expect("the edge was drawn out of something")
-            .compute_aabb()
+            .get_aabb()
             .map(|drawn| drawn.half_extents.truncate() * 2.0)
             .unwrap_or_default()
     }

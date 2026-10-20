@@ -818,7 +818,7 @@ struct BedMaterial(Handle<ShadedMaterial>);
 
 /// What the ground and the lakes are drawn in: the standard matte underneath,
 /// with the terrain's own baked shadows applied on top by
-/// `assets/shaders/ground.wgsl` — see [`Shading`].
+/// `assets/shaders/ground.wesl` — see [`Shading`].
 type ShadedMaterial = ExtendedMaterial<StandardMaterial, Shading>;
 
 /// How wide the moment of gaining or losing the sun is drawn, in phase either
@@ -828,7 +828,7 @@ type ShadedMaterial = ExtendedMaterial<StandardMaterial, Shading>;
 /// unreadable; narrow enough that a shadow's edge is still an edge.
 const SHADE_EDGE: f32 = 1.5 / 256.0;
 
-/// The ground's grain — the speckle `assets/shaders/ground.wgsl` hashes from
+/// The ground's grain — the speckle `assets/shaders/ground.wesl` hashes from
 /// world position, which is what stands in for a texture: the full swing one
 /// cell may pull the palette colour, as a fraction of it. The cell's width
 /// lives shader-side as its `CELL`, nothing varying it per material.
@@ -940,7 +940,7 @@ pub(crate) const DAYLIGHT_AT_NOON: Vec4 = Vec4::new(0.5, SHADE_EDGE, 0.0, 0.0);
 
 impl MaterialExtension for Shading {
     fn fragment_shader() -> bevy::shader::ShaderRef {
-        "shaders/ground.wgsl".into()
+        "shaders/ground.wesl".into()
     }
 }
 
@@ -1012,7 +1012,7 @@ const WINDOW_EXTENT: f32 = WINDOW_TEXELS as f32 * CELL_METRES;
 /// standoff of half a grain cell plus one. Below that the fade would run
 /// backwards, and a `smoothstep` whose edges cross has no answer by spec —
 /// so the assertion below is what keeps the ground off the same footing the
-/// waters are deliberately gated onto; see `assets/shaders/ground.wgsl`.
+/// waters are deliberately gated onto; see `assets/shaders/ground.wesl`.
 const WINDOW_MARGIN: f32 = 64.0;
 
 /// Half a grain cell plus one — the shader's `0.5 + CELL`, in the metres this
@@ -1299,7 +1299,7 @@ fn chunk_mesh(heights: &[f32], materials: &[Material], lit: &[[u8; 2]], detail: 
             // everything else; the ground is drawn at [`Detail::FINEST`],
             // where that grid is the wire's. What stays smooth is time: the
             // shader eases each cell over the hour — see
-            // `assets/shaders/ground.wgsl`.
+            // `assets/shaders/ground.wesl`.
             // Pushed in [`SW`], [`SE`], [`NW`], [`NE`] order, which is what
             // [`split`]'s corner numbers index, and which is the order
             // `lit_across` weighs its corners in.
@@ -1758,7 +1758,7 @@ fn spawn_arrivals(
                     // twice by two methods that disagree at their edges — and
                     // it is the whole of what made that pass expensive. Nor
                     // does it receive through the standard path: the cast
-                    // shadows land through `ground.wgsl`'s own read of the
+                    // shadows land through `ground.wesl`'s own read of the
                     // map, which owns the why.
                     NotShadowCaster,
                     NotShadowReceiver,
@@ -1813,7 +1813,7 @@ fn receive_chunks(
                 // as though it were solid, so a lake would otherwise throw
                 // its own shadow down onto its own bed. The sea plane is kept
                 // out of the pass for exactly this reason. And it receives
-                // the way the ground does, through `ground.wgsl`'s own read.
+                // the way the ground does, through `ground.wesl`'s own read.
                 NotShadowCaster,
                 NotShadowReceiver,
                 Mesh3d(meshes.add(surface)),
@@ -2667,7 +2667,7 @@ mod tests {
         // needles are assembled at runtime so this test's own source, which
         // `include_str!` sweeps up too, cannot satisfy them.
         let shader = std::fs::read_to_string(format!(
-            "{}/../../assets/shaders/ground.wgsl",
+            "{}/../../assets/shaders/ground.wesl",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("the ground's shader under assets/shaders/");
@@ -2691,7 +2691,7 @@ mod tests {
         // of how the console's `shadows off` reaches ground the standard
         // path no longer shades. Needles assembled at runtime, as above.
         let shader = std::fs::read_to_string(format!(
-            "{}/../../assets/shaders/ground.wgsl",
+            "{}/../../assets/shaders/ground.wesl",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("the ground's shader under assets/shaders/");
@@ -2717,10 +2717,10 @@ mod tests {
     fn the_shader_reads_the_uniform_in_the_order_it_is_written() {
         // The order of `Shading`'s uniform fields *is* the uniform's layout,
         // and only one side of it is compiled here — the same hazard the
-        // sea's test of this name holds `sea.wgsl` against. Both orders are
+        // sea's test of this name holds `sea.wesl` against. Both orders are
         // read out of the sources rather than written out a third time.
         let shader = std::fs::read_to_string(format!(
-            "{}/../../assets/shaders/ground.wgsl",
+            "{}/../../assets/shaders/ground.wesl",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("the ground's shader under assets/shaders/");
@@ -2734,9 +2734,9 @@ mod tests {
                 .0
                 .to_string()
         };
-        let wgsl = body(&shader, "struct Shading {");
+        let wesl = body(&shader, "struct Shading {");
         let rust = body(include_str!("terrain.rs"), "struct Shading {");
-        for fields in [&wgsl, &rust] {
+        for fields in [&wesl, &rust] {
             let hour = fields.find("hour:").expect("the hour field");
             let window = fields.find("window:").expect("the window field");
             let palette = fields.find("palette:").expect("the palette field");
@@ -2746,7 +2746,7 @@ mod tests {
             );
         }
         // And the palette's length, which the split above cannot reach — the
-        // wgsl array is sized by a literal, and a bind group refuses a
+        // wesl array is sized by a literal, and a bind group refuses a
         // buffer of the wrong size only at runtime, on a machine drawing.
         assert!(
             shader.contains(&format!("array<vec4<f32>, {}>", Material::KINDS)),

@@ -12,6 +12,7 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
+use bevy::ui::Pressed;
 
 use crate::net::Dialing;
 use crate::AppState;
@@ -102,16 +103,13 @@ pub(super) fn spawn_join_dialog(
 
 pub(super) fn join_actions(
     mut commands: Commands,
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     dialing: Option<Res<Dialing>>,
     settings: Res<JoinSettings>,
     mut status: ResMut<Status>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for button in &buttons {
         match button {
             MenuButton::Back => next.set(AppState::MainMenu),
             // Already ringing. A second dial would leave the first to arrive

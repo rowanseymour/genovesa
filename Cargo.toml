@@ -10,16 +10,14 @@ members = [
 ]
 resolver = "2"
 
-# Bevy, the one piece of it the world crate uses directly, and the maths library
-# the two of them meet on. None of the three can be bumped on its own: bevy_ecs
-# is part of Bevy and glam is what bevy_math wraps, so a version that missed one
-# of them would put two copies of it in the tree and the types the crates hand
-# each other would quietly stop being the same types. Pinned together here so
-# that moving Bevy is one edit rather than three that have to agree.
+# Bevy and the maths library it re-exports. Neither can be bumped on its own:
+# glam is what bevy_math wraps, so a version that missed one of them would put
+# two copies of it in the tree and the types the crates hand each other would
+# quietly stop being the same types. Pinned together here so that moving Bevy
+# is one edit rather than two that have to agree.
 [workspace.dependencies]
-bevy = "0.19"
-bevy_ecs = "0.19"
-glam = "0.32"
+bevy = "0.20"
+glam = "0.33"
 
 # Optimise dependencies even in debug builds, otherwise terrain generation and
 # rendering crawl. They carry no debug info: 567 crates get compiled here and

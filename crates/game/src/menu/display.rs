@@ -12,6 +12,8 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::ui::Pressed;
+use bevy::ui_widgets::Button;
 use bevy::window::{Monitor, PrimaryMonitor, PrimaryWindow};
 
 use crate::settings::{self, DisplaySettings, OnTrial, Trial, Wanted};
@@ -325,8 +327,8 @@ pub(super) const THE_LIST: i32 = 2;
 /// anybody is looking at it or not. Commands queued here are applied before
 /// the frame is laid out, so it appears on the frame it was asked for rather
 /// than the one after — which is also why the rung already taken is coloured
-/// here rather than left to [`super::highlight_buttons`], whose `Changed<Interaction>`
-/// cannot fire until the frame after these commands land.
+/// here rather than left to [`super::highlight_buttons`], which does not
+/// see these rows until the frame after these commands land.
 ///
 /// Nothing but the list going up or down is worth watching: what is *wanted*
 /// cannot change underneath an open list. Every control that writes it either
@@ -430,7 +432,7 @@ pub(super) struct Editing<'w> {
 }
 
 pub(super) fn display_actions(
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     helm: Option<Res<State<Helm>>>,
     mut editing: Editing,
     mut picking: ResMut<Picking>,
@@ -439,10 +441,7 @@ pub(super) fn display_actions(
 ) {
     let over_a_world = over_a_world(&helm);
 
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for button in &buttons {
         match button {
             // A trial is one question, and the three rows are not it. There is
             // nowhere on the screen for a fresh edit to show while one runs —

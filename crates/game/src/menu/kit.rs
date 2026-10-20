@@ -11,7 +11,9 @@
 //! builders that take one so a screen can be stood up on either side.
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui_widgets::Button;
 
 use crate::chart::{INK, INK_DIM, PAPER};
 
@@ -294,6 +296,7 @@ pub(super) fn padded_button(
 ) -> impl Bundle {
     (
         Button,
+        Hovered::default(),
         action,
         ink.button,
         Node {

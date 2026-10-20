@@ -51,16 +51,16 @@
 // collapses to the cell the fragment stands in, which is the mesh's own
 // colour, so the dither hands back to exactly what the vertices already say.
 
-#import bevy_pbr::{
-    ambient,
+import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     mesh_view_bindings::{view, lights},
     mesh_view_types,
+    pbr_ambient as ambient,
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     shadows,
     view_transformations,
-}
+};
 
 struct Shading {
     // x: the phase of the day to hold the lit intervals against. y: half the
@@ -80,12 +80,12 @@ struct Shading {
     palette: array<vec4<f32>, 23>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> shading: Shading;
+@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> shading: Shading;
 
 // A material's number plus one per metre cell around the camera, zero for a
 // cell the client has not been told about — see `terrain::MaterialWindow`,
 // which owns the scroll and the sweep that keep it current.
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var materials: texture_2d<u32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var materials: texture_2d<u32>;
 
 // Metres to a grain cell's edge. A constant here rather than a lane of the
 // uniform: nothing varies it per material, and a divisor that lives in a
@@ -233,8 +233,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         );
     }
 
-    pbr_input.material.base_color =
-        alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color,
+    );
 
     let full = apply_pbr_lighting(pbr_input);
 

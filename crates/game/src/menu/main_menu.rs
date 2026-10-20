@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontSource, FontStyle};
+use bevy::ui::Pressed;
 
 use crate::AppState;
 
@@ -105,7 +106,7 @@ pub(super) fn spawn_subtitle(parent: &mut ChildSpawnerCommands, ink: &Palette) {
 /// them has the strokes the engraving is drawn from.
 pub(super) fn title_font() -> TextFont {
     TextFont {
-        font: FontSource::Serif,
+        font: FontSource::serif(),
         font_size: FontSize::Px(TITLE_SIZE),
         ..default()
     }
@@ -150,14 +151,11 @@ pub(super) fn spaced(word: &str) -> String {
 }
 
 pub(super) fn main_menu_actions(
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     mut next: ResMut<NextState<AppState>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for button in &buttons {
         match button {
             MenuButton::SetSail => next.set(AppState::SetSail),
             MenuButton::JoinWorld => next.set(AppState::JoinWorld),

@@ -333,7 +333,7 @@ fn spawn_figure(lead: &mut ChildSpawnerCommands) {
         },
         Text::new(String::new()),
         TextFont {
-            font: FontSource::Serif,
+            font: FontSource::serif(),
             font_size: FontSize::Px(FIGURE_SIZE),
             ..default()
         },

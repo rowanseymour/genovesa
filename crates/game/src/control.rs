@@ -72,6 +72,7 @@ use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::Screenshot;
+use bevy::ui::Pressed;
 
 use crate::bindings::{self, Action, KeyBindings};
 use crate::camera::MapCamera;
@@ -903,14 +904,12 @@ fn begin(
         Ok(Begun::Working(work)) => Some(Doing { answer, work }),
         Ok(Begun::Clicking(button)) => {
             // A stand-in rather than the button itself. Every menu system
-            // asks for `(&Interaction, &MenuButton)` and none of them cares
-            // which entity carries it, so this goes through the same code a
-            // click does — and the real button cannot be used for it:
-            // `ui_focus_system` sets every *node* it finds pressed back to
-            // `None` the moment the mouse is not down, which in a run with no
-            // mouse is always. A bare entity is no node, so nothing takes the
-            // press away but us.
-            let stand_in = commands.spawn((button, Interaction::Pressed)).id();
+            // asks for a `MenuButton` that has just gained `Pressed` and none
+            // of them cares which entity carries it, so this goes through the
+            // same code a click does — and the real button is left alone: a
+            // press put on it would sit there until a pointer release nobody
+            // is going to make, so nothing takes it away but us.
+            let stand_in = commands.spawn((button, Pressed)).id();
             Some(Doing {
                 answer,
                 work: Work::Settling {
@@ -1443,17 +1442,15 @@ mod tests {
     fn a_click_presses_a_button_the_screen_is_showing() {
         let (mut app, orders) = driven_app();
         // A screen with one button on it, as a spawned menu leaves things.
-        app.world_mut()
-            .spawn((MenuButton::Options, Interaction::None));
+        app.world_mut().spawn(MenuButton::Options);
         let answered = say(&orders, "click options");
 
         app.update();
         let pressed: Vec<MenuButton> = app
             .world_mut()
-            .query::<(&MenuButton, &Interaction)>()
+            .query_filtered::<&MenuButton, With<Pressed>>()
             .iter(app.world())
-            .filter(|(_, interaction)| **interaction == Interaction::Pressed)
-            .map(|(button, _)| *button)
+            .copied()
             .collect();
         assert_eq!(
             pressed,
@@ -1475,7 +1472,7 @@ mod tests {
     #[test]
     fn the_press_is_taken_away_before_the_next_screen_could_read_it() {
         let (mut app, orders) = driven_app();
-        app.world_mut().spawn((MenuButton::Back, Interaction::None));
+        app.world_mut().spawn(MenuButton::Back);
         let _answered = say(&orders, "click back");
 
         app.update();
@@ -1505,8 +1502,7 @@ mod tests {
     #[test]
     fn a_click_at_a_button_that_is_not_there_is_refused() {
         let (mut app, orders) = driven_app();
-        app.world_mut()
-            .spawn((MenuButton::Options, Interaction::None));
+        app.world_mut().spawn(MenuButton::Options);
 
         let answered = say(&orders, "click start");
         app.update();

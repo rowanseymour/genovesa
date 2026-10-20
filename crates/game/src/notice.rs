@@ -132,7 +132,7 @@ fn speak(
                 NoticeLine,
                 Text::new(notice.text.clone()),
                 TextFont {
-                    font: FontSource::Serif,
+                    font: FontSource::serif(),
                     font_size: FontSize::Px(NOTICE_SIZE),
                     style: FontStyle::Italic,
                     ..default()
