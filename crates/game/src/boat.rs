@@ -3382,23 +3382,7 @@ fn make_fast(
         Without<Painter>,
     >,
     cast_off: Query<(Entity, &Painter), Without<Towed>>,
-    tied: Query<&Painter>,
-    taking_the_contact: Query<&DistanceJoint, Without<JointCollisionDisabled>>,
-    contacts: Res<ContactGraph>,
 ) {
-    // Each rope's collision turned off only once the solver has the two
-    // hulls apart — see the marker's place below for why.
-    for painter in &tied {
-        let Ok(rope) = taking_the_contact.get(painter.0) else {
-            continue;
-        };
-        let linked = contacts
-            .get(rope.body1, rope.body2)
-            .is_some_and(|(edge, _)| edge.island.is_some());
-        if !linked {
-            commands.entity(painter.0).insert(JointCollisionDisabled);
-        }
-    }
     for (tender, towed, rigged, mut at, mut angle, mut way, mut spin) in &mut towed {
         let Ok((ship, ship_at, ship_angle)) = ships.get(towed.by) else {
             continue;
@@ -3447,16 +3431,11 @@ fn make_fast(
                     linear: PAINTER_GIVE,
                     angular: PAINTER_GIVE,
                 },
-                // No `JointCollisionDisabled` yet, though the rope wants one:
-                // the tender lies against the transom whenever the ship
-                // stops, and a joint that also took the contact would jitter
-                // there. Added by the loop above once the haul has the hulls
-                // apart, because Avian 0.7 adding it between hulls that touch
-                // leaves the contact half-removed, and the next hull to touch
-                // either panics the solver —
-                // <https://github.com/avianphysics/avian/issues/1076>, fixed
-                // on Avian's main and in no release. A boat is boarded from
-                // alongside, so that was every tow but an arrival's.
+                // Two hulls on one rope are two hulls that touch: the
+                // tender lies against the transom whenever the ship stops,
+                // and a joint that also refused the contact would jitter
+                // there. The planking still holds them apart.
+                JointCollisionDisabled,
             ))
             .id();
         commands.entity(tender).insert(Painter(rope));
@@ -3872,9 +3851,10 @@ mod tests {
     const SETTLED: usize = 800;
 
     /// A dinghy taken in tow from alongside, touching the ship, must leave
-    /// the solver's books straight — see [`make_fast`] for the rope going
-    /// slack on the planking first. Crossed, a third hull coming alongside
-    /// afterwards panicked inside the solver.
+    /// the solver's books straight: under Avian 0.7 the painter's collision
+    /// marker half-removed the contact, and a third hull coming alongside
+    /// afterwards panicked inside the solver —
+    /// <https://github.com/avianphysics/avian/issues/1076>.
     #[test]
     fn a_boat_taken_in_tow_from_alongside_leaves_the_solver_whole() {
         let mut app = test_app();
@@ -3886,21 +3866,21 @@ mod tests {
             .expect("a hull has a transform");
         let ship_kind = app.world().get::<Rigged>(ship).expect("a rigged ship").0;
         let abeam = (hull_of(ship_kind).beam + ROWBOAT.beam) / 2.0 - 0.02;
-        let alongside = |app: &mut App, beyond: f32| {
+        let alongside = |app: &mut App| {
             a_free_rowboat(
                 app,
-                pose.with_translation(pose.translation + pose.right() * (abeam + beyond)),
+                pose.with_translation(pose.translation + pose.right() * abeam),
             )
         };
 
         // Touching, for long enough that the solver has linked the contact.
-        let tender = alongside(&mut app, 0.0);
+        let tender = alongside(&mut app);
         run_frames(&mut app, 30);
         let touching = app
             .world()
             .resource::<ContactGraph>()
             .get(ship, tender)
-            .is_some_and(|(edge, _)| edge.island.is_some());
+            .is_some_and(|(_, pair)| pair.is_touching());
         assert!(touching, "the dinghy never lay against the ship");
 
         app.world_mut()
@@ -3915,7 +3895,7 @@ mod tests {
 
         // And a stranger brought alongside the same ship, which is a new
         // contact in the island the old one was in.
-        alongside(&mut app, 0.0);
+        alongside(&mut app);
         run_frames(&mut app, 30);
     }
 
