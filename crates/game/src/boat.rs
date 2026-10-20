@@ -50,7 +50,8 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use protocol::ground::{anchor_holds, CELL_METRES};
+use protocol::ground::anchor_holds;
+use protocol::hull::keel_of;
 use protocol::{swing_to, BoatId, BoatKind, PlayerId, Underway};
 
 use crate::bindings::{Action, KeyBindings};
@@ -248,17 +249,11 @@ struct Mast {
 /// carry their reasoning where they are picked, on [`SHIP`].
 #[derive(Clone, Copy)]
 struct Hull {
-    /// Length overall, in metres.
+    /// Length overall and beam, in metres — the keel's, see
+    /// [`protocol::hull::Keel`], since the ground stops the same footprint
+    /// another hull meets.
     length: f32,
-    /// Beam, in metres — how far apart the water is sampled athwartships to
-    /// read the roll the waves ask of the hull. Close to the model's planking
-    /// but not held to it the way `length` is: the samples are reading the
-    /// surface's slope, and a slope read a few centimetres wide of the hull
-    /// is the same slope.
     beam: f32,
-    /// Keel depth below the waterline. What makes it the game's business
-    /// rather than the model's is [`Hull::grounding_draft`], measured from it.
-    draft: f32,
     /// Where somebody aboard stands: metres above the waterline, and the
     /// station on the keel's axis. A player is put down here rather than at
     /// the hull's origin, which is the waterline and so is knee-deep in the
@@ -274,11 +269,6 @@ struct Hull {
     /// numbers, like the deck's, held to the file by the same tests.
     stemhead: f32,
     taffrail: f32,
-    /// Where the keel begins and ends, in metres from amidships — negative
-    /// forward, the same axis the hull is modelled on. [`grounding`] probes
-    /// along these, so what runs aground is the line that is drawn.
-    forefoot_station: f32,
-    heel_station: f32,
     /// The masthead, where there is a mast: the pennant is tied on at its head,
     /// so like the deck and the draft its numbers are the model's — a mast
     /// re-cut in Blender and not re-measured here would fly its pennant in mid
@@ -363,42 +353,12 @@ struct Hull {
 }
 
 impl Hull {
-    /// How little water the hull is held in: ground standing higher than this
-    /// far below the waterline stops it.
-    ///
-    /// On the coasts the generator draws this puts the hull within a metre or
-    /// two of the waterline; further out it is off a shelf too thin to float
-    /// one, which the palette has been painting as shallows for a while — so a
-    /// boat held out is held out of water it can be seen to be held out of.
-    fn grounding_draft(&self) -> f32 {
-        self.draft - KEEL_BITE
-    }
-
-    /// How many points along this keel are asked about the bottom. Spread
-    /// from the forefoot to the heel inclusive, derived so the gap between
-    /// them never exceeds [`CELL_METRES`]: no facet of the height field can
-    /// lie wholly between two probes, so ground that rises across a facet is
-    /// read on the way up rather than stepped over. Derived rather than
-    /// picked, because the constant this used to be was tuned to a 2 m facet
-    /// and quietly stopped holding when the mesh went to 1 m.
-    ///
-    /// That is less than "nothing gets past". A crest only one lattice line
-    /// wide is *not* seen — the field is linear between its corners, so two
-    /// probes either side read its flanks and the hull sails through a rock
-    /// at the waterline. Coasts are safe by being coasts: the bottom
-    /// shelves, so the ground under the keel is near enough monotone. What
-    /// is exposed is the isolated skerry, and sailing through one is the
-    /// smaller wrong, paid off from the other end by giving skerries width.
-    ///
-    /// The sides are not probed: a hull here is a shallow V, drawing its
-    /// full draft on the centreline and nothing at the beam. That is a
-    /// standing condition on the model — a hull remodelled with a flat
-    /// bottom carried out to the beam would need probes out there too.
-    fn keel_probes(&self) -> usize {
-        let keel = self.heel_station - self.forefoot_station;
-        (keel / CELL_METRES).ceil() as usize + 1
-    }
-
+    /// The sides are not probed: a hull here is a shallow V, drawing its full
+    /// draft on the centreline and nothing at the beam. That is a standing
+    /// condition on the model — a hull remodelled with a flat bottom carried
+    /// out to the beam would need probes out there too, in
+    /// [`protocol::hull`], which is where the keel and everything read off it
+    /// now live.
     /// Where somebody aboard stands, in the hull's own frame — see
     /// [`Hull::helm_deck`].
     fn helm(&self) -> Vec3 {
@@ -509,13 +469,8 @@ impl Hull {
 
 /// The ship: the boat a world is entered aboard, and [`MODEL`]'s subject.
 const SHIP: Hull = Hull {
-    // A small sailing boat: at the default zoom the visible ground is some
-    // tens of metres across, so this length reads as a boat rather than as a
-    // speck, and at the far end of the zoom range it is still a mark on the
-    // water rather than gone.
-    length: 7.0,
-    beam: 2.4,
-    draft: 0.8,
+    length: keel_of(BoatKind::Sloop).length,
+    beam: keel_of(BoatKind::Sloop).beam,
     // The quarterdeck's step up aft and the spot on it just forward of the
     // tiller's grip — the model's numbers. The station keeps the helmsman
     // clear of the boom, which sweeps the main deck and nothing abaft the
@@ -524,10 +479,6 @@ const SHIP: Hull = Hull {
     helm_station: 2.6,
     stemhead: 1.15,
     taffrail: 1.2,
-    // The forefoot stops short of the bow, which is what gives the stem its
-    // rake; the heel runs right aft to the transom.
-    forefoot_station: -7.0 * 0.5 * 0.7,
-    heel_station: 7.0 * 0.5,
     // Six metres of mast, stepped forward of amidships — the model's, not a
     // choice made here.
     mast: Some(Mast {
@@ -581,9 +532,8 @@ const ROWBOAT: Hull = Hull {
     // A dinghy rather than a skiff: the model was recut smaller and
     // shallower the day the sea learned to cut a hole around an open hull —
     // its NOTES carry the story.
-    length: 3.2,
-    beam: 1.3,
-    draft: 0.25,
+    length: keel_of(BoatKind::Rowboat).length,
+    beam: keel_of(BoatKind::Rowboat).beam,
     // Standing on the sole, abaft the rowing thwart — an open boat is stood
     // in wherever the thwarts are not, and this keeps the figure clear of
     // the middle one until somebody is seated at it. The sole is *below*
@@ -593,12 +543,6 @@ const ROWBOAT: Hull = Hull {
     helm_station: 0.65,
     stemhead: 0.42,
     taffrail: 0.2945,
-    // The keel is rockered: deepest a little abaft amidships, rising to the
-    // forefoot forward and carried aft to the transom's skeg. The probes
-    // read the full draft along all of it, which errs a few centimetres
-    // shy at the rockered ends — the right side to miss on.
-    forefoot_station: -1.1,
-    heel_station: 1.6,
     // An open boat: nothing stands in it, so nothing flies from it and no
     // sail drives it. The wind is not done with it for that — see
     // [`row_drive`] — it simply pushes the hull instead of driving it.
@@ -644,15 +588,6 @@ const ROWBOAT: Hull = Hull {
     // Light enough to follow the chop closer than the ship does.
     sway_response: 0.5,
 };
-
-/// How much of the keel the ground is allowed to take before a hull is
-/// stopped. Stopping a boat the instant the ground rises to meet the keel is
-/// an invisible wall a boat's length offshore, whereas a fifth of a metre of
-/// bite is a boat *beaching*: the keel is seen to touch, and then it stops.
-/// Well clear of the two centimetres the heights are quantised to, so the
-/// threshold cannot chatter. One constant for every hull — what it answers to
-/// is the quantisation, not the boat.
-const KEEL_BITE: f32 = 0.2;
 
 /// Way below this, with no drive asked for, is stopped, and [`steer`] snaps
 /// it to exactly zero. The ease only ever halves the remainder — left alone
@@ -2036,6 +1971,7 @@ pub(crate) fn spawn_hull(
     // decides its way: see [`Ours`].
     let dimensions = hull_of(kind);
     let laid = waterline::on_the_plane(pose.translation);
+    let (place, heading) = waterline::laid_at(laid, yaw_of(&pose));
     let hull = commands
         .spawn((
             Name::new("Boat"),
@@ -2043,10 +1979,12 @@ pub(crate) fn spawn_hull(
             DespawnOnExit(AppState::InWorld),
             pose,
             waterline::afloat(dimensions.length, dimensions.beam, dimensions.displacement),
-            waterline::laid_at(laid, yaw_of(&pose)),
+            place,
+            heading,
             Drawn(pose),
             Sounding {
                 at: laid,
+                heading,
                 // Nothing is known about the ground yet, and a hull put
                 // down where there is none is in water it is allowed to be
                 // in until a chunk says otherwise — the same benefit of the
@@ -2906,6 +2844,13 @@ fn row(
 /// but turning a shape that long takes time the height does not need. A beached
 /// hull eases level instead, the ground holding it.
 ///
+/// In the shallows the bed holds a hull up through a trough, by the keel
+/// reading [`hold_the_ground`] left on its [`Sounding`]: the swell is drawing
+/// only, so the keel is kept off the bed at still water, and a trough deeper
+/// than the water it has to spare would draw it into the sand. Held up level,
+/// not pivoted on whatever it touched, and never above still water — a hull
+/// actually aground is the half-buried one above.
+///
 /// The tilt goes on and comes off as a factor of its own: the rotation holds
 /// heading, then the water's pitch, then a single roll factor the wave roll
 /// shares with the turn's heel — so this strips the tilt it applied last frame
@@ -2915,11 +2860,11 @@ pub(crate) fn float(
     ground: Option<Res<Ground>>,
     time: Res<Time>,
     sea: Res<sea::SeaConditions>,
-    mut boats: Query<(&mut Transform, &mut Boat)>,
+    mut boats: Query<(&mut Transform, &mut Boat, Option<&Sounding>)>,
 ) {
     let elapsed = time.elapsed_secs_wrapped();
 
-    for (mut transform, mut boat) in &mut boats {
+    for (mut transform, mut boat, sounding) in &mut boats {
         let hull = boat.hull;
         let dt = time.delta_secs();
         let at = transform.translation;
@@ -2932,8 +2877,9 @@ pub(crate) fn float(
             // differ by at most a texel of interpolation, in water where the
             // swell is smallest.
             let water = sea.water_over(ground.as_deref(), at.xz(), elapsed);
-            transform.translation.y = height.max(water);
-            afloat = water >= height;
+            let bed = sounding.map_or(f32::NEG_INFINITY, |sounding| sounding.aground.min(0.0));
+            transform.translation.y = height.max(water).max(bed);
+            afloat = water >= height && water >= bed;
         }
 
         let (target_pitch, target_roll) = if afloat {
@@ -3010,52 +2956,43 @@ fn eased_to(current: f32, target: f32, rate: f32, dt: f32, within: f32) -> f32 {
     )
 }
 
-/// How far the bottom stands above the depth the hull is held at, in metres,
-/// taken at the worst-placed point of the keel — negative for as long as there
-/// is water enough under all of it, zero where the hull is about to be stopped.
-/// Not the keel's own penetration, which is this plus [`KEEL_BITE`] — the gap
-/// between the hull's draft and its [`Hull::grounding_draft`]: the rule wants
-/// one number that rises as the ground does, and nothing ever reads it but
-/// its sign and its ordering against itself, both of which the offset leaves
-/// alone.
+/// This client's reading of [`protocol::hull::aground_by`] — the shared keel,
+/// over the chunks this machine holds. See there for what the number means
+/// and how the probes are spread; the server asks the same question of the
+/// same keel, which is the point of its living on the wire's side.
 ///
-/// This is the whole of collision. The ground is a height field sampled every
-/// [`CELL_METRES`] and the boat is a keel line above it, so "is there water enough
-/// here" is a handful of lookups rather than triangle intersection —
-/// [`Ground::height`] answers on exactly the facets the mesh was built from,
-/// which is what makes the ground the boat is stopped by the ground the player
-/// can see.
+/// This is the whole of collision against the ground. The ground is a height
+/// field sampled every [`protocol::ground::CELL_METRES`] and the boat is a
+/// keel line above it,
+/// so "is there water enough here" is a handful of lookups rather than
+/// triangle intersection — read on the facets the mesh is cut into, which is
+/// what makes the ground a boat is stopped by the ground the player can see.
+/// The physics engine is not in it: it is
+/// two-dimensional and knows only hulls about each other.
 ///
 /// A probe over a chunk that has not arrived says nothing rather than
 /// objecting, the same choice [`float`] makes. If land does turn up under the
 /// hull, backing off still works — see [`steer`].
-fn grounding(hull: &Hull, ground: Option<&Ground>, transform: &Transform) -> f32 {
+fn grounding(kind: BoatKind, ground: Option<&Ground>, at: Vec2, heading: f32) -> f32 {
     let Some(ground) = ground else {
         return f32::NEG_INFINITY;
     };
-
-    let keel = hull.heel_station - hull.forefoot_station;
-    let probes = hull.keel_probes();
-    (0..probes)
-        .filter_map(|i| {
-            let station = hull.forefoot_station + keel * i as f32 / (probes - 1) as f32;
-            let at = transform.transform_point(Vec3::new(0.0, 0.0, station));
-            Some(ground.height(at.x, at.z)? + hull.grounding_draft())
-        })
-        .fold(f32::NEG_INFINITY, f32::max)
+    protocol::hull::aground_by(kind, at, heading, |corner| ground.corner(corner))
 }
 
-/// Where a hull last stood in water it was allowed to be in, and how deep
-/// its keel was in the ground there — what [`hold_the_ground`] puts a hull
-/// back to when the solver has pushed it somewhere it may not be.
+/// Where a hull last stood in water it was allowed to be in, which way it
+/// pointed there, and how deep its keel was in the ground — what
+/// [`hold_the_ground`] puts a hull back to when the solver has pushed it
+/// somewhere it may not be.
 ///
 /// On the hull rather than worked out afresh because the rule is a
 /// comparison against the pose *before*: a hull already aground may be
 /// driven off but never further on, and that needs the pose it is being
 /// judged against to have survived the frame.
 #[derive(Component)]
-struct Sounding {
+pub(crate) struct Sounding {
     at: Vec2,
+    heading: Rotation,
     aground: f32,
 }
 
@@ -3187,6 +3124,7 @@ fn take_the_placing(
         way.0 = Vec2::ZERO;
         spin.0 = 0.0;
         sounding.at = at.0;
+        sounding.heading = *angle;
         sounding.aground = f32::INFINITY;
         ships.push((hull, at.0, *angle));
         commands.entity(hull).remove::<Placing>();
@@ -3201,6 +3139,7 @@ fn take_the_placing(
         way.0 = Vec2::ZERO;
         spin.0 = 0.0;
         sounding.at = at.0;
+        sounding.heading = *angle;
         sounding.aground = f32::INFINITY;
     }
 }
@@ -3270,6 +3209,7 @@ fn take_the_plane(mut hulls: Placed) {
         // afresh here: an infinity accepts the next pose whatever it is,
         // and the depth it records then is the truth of the new spot.
         sounding.at = at.0;
+        sounding.heading = *angle;
         sounding.aground = f32::INFINITY;
     }
 }
@@ -3286,6 +3226,25 @@ fn remember_the_drawing(mut hulls: Query<(&Transform, &mut Drawn), With<Vessel>>
         drawn.0 = *place;
     }
 }
+
+/// Every hull, as [`hold_the_ground`] sounds one: what it takes to judge a
+/// pose, to undo it, and to know whether undoing it is this client's
+/// business at all.
+type Sounded<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Rigged,
+        &'static mut Position,
+        &'static mut Rotation,
+        &'static mut LinearVelocity,
+        &'static mut AngularVelocity,
+        &'static mut Sounding,
+        Has<Telling>,
+        Has<Shoving>,
+    ),
+    With<Vessel>,
+>;
 
 /// Keeps a keel out of the ground, which is the one collision on this water
 /// the solver knows nothing about — see [`crate::waterline`] on why the
@@ -3305,41 +3264,17 @@ fn remember_the_drawing(mut hulls: Query<(&Transform, &mut Drawn), With<Vessel>>
 /// hull that finds itself aground through no fault of its own: a `goto` on
 /// to a shoal, or ground streaming in underneath one already sitting there.
 ///
-/// What is held is the hull's *place*, and never the way it is pointing. A
-/// bow comes round whatever is under it — see [`steer`], whose promise that
-/// is — and putting the heading back along with the place breaks it
-/// completely: a yaw sweeps the keel over different ground, so almost any
-/// turn reads as deeper aground and is undone, and a hull driven onto a
-/// beach cannot be turned at all. Measured, on a hull run up the test
-/// island: five seconds of helm either way came round exactly nothing.
-///
-/// Which is why the depth is read afresh at the pose the hull is left in
-/// rather than remembered from the one it was refused. The heading has
-/// moved on, the keel is over different ground, and a baseline taken at
-/// some earlier bearing would hold the hull off water it could now float
-/// in.
-/// Every hull, as [`hold_the_ground`] sounds one: what it takes to judge a
-/// pose, to undo it, and to know whether undoing it is this client's
-/// business at all.
-type Sounded<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static Rigged,
-        &'static mut Position,
-        &'static Rotation,
-        &'static mut LinearVelocity,
-        &'static mut Sounding,
-        Has<Telling>,
-        Has<Shoving>,
-    ),
-    With<Vessel>,
->;
-
+/// What is held is the hull's *place*, and its heading only where
+/// [`protocol::hull::may_turn`] refuses the turn — a clear hull swinging an
+/// end or a side into the ground. A hull aground comes round whatever is
+/// under it, which is [`steer`]'s promise. So both sides of the turn are
+/// read afresh, and the depth recorded is the pose the hull is left in: a
+/// baseline taken at some earlier bearing, or before ground streamed in
+/// under it, would hold the hull off water it could now float in, or judge
+/// a grounded hull clear and refuse it every turn.
 fn hold_the_ground(ground: Option<Res<Ground>>, mut hulls: Sounded) {
     let ground = ground.as_deref();
-    for (rigged, mut at, angle, mut way, mut sounding, told, shoving) in &mut hulls {
-        let hull = hull_of(rigged.0);
+    for (rigged, mut at, mut angle, mut way, mut spin, mut sounding, told, shoving) in &mut hulls {
         // Every hull is *sounded*, and only the ones this client answers for
         // are put back — which is [`Ours`] spelled out, this being the one
         // reader that needs both halves rather than the filter.
@@ -3352,26 +3287,34 @@ fn hold_the_ground(ground: Option<Res<Ground>>, mut hulls: Sounded) {
         // judged against a baseline from wherever it was first seen, and
         // put back *there* the first time it grazed a shoal.
         let ours = !told || shoving;
-        // Every reading is taken at the heading the hull is pointing now,
-        // that never being this system's to alter.
-        let facing = Quat::from_rotation_y(waterline::across(angle.as_radians()));
-        let sounded = |where_: Vec2| {
+        let sounded = |where_: Vec2, pointing: &Rotation| {
             grounding(
-                hull,
+                rigged.0,
                 ground,
-                &Transform::from_xyz(where_.x, 0.0, where_.y).with_rotation(facing),
+                where_,
+                waterline::across(pointing.as_radians()),
             )
         };
-        let aground = sounded(at.0);
+        let aground = sounded(at.0, &angle);
         if !ours || aground <= 0.0 || aground <= sounding.aground {
             sounding.at = at.0;
+            sounding.heading = *angle;
             sounding.aground = aground;
             continue;
         }
         // Put back, and stopped where it touched.
         at.0 = sounding.at;
         way.0 = Vec2::ZERO;
-        sounding.aground = sounded(sounding.at);
+        let was = sounded(sounding.at, &sounding.heading);
+        let turned = sounded(sounding.at, &angle);
+        if protocol::hull::may_turn(was, turned) {
+            sounding.heading = *angle;
+            sounding.aground = turned;
+        } else {
+            *angle = sounding.heading;
+            spin.0 = 0.0;
+            sounding.aground = was;
+        }
     }
 }
 
@@ -3760,9 +3703,10 @@ pub(crate) fn ride_at_anchor(mut hulls: Query<&mut Boat, With<Anchored>>) {
 ///
 /// The ground is not the solver's business and the helm is not stopped by
 /// it here: a hull driven onto a beach is put back by [`hold_the_ground`]
-/// afterwards. That is what lets the helm answer with no way on and
-/// aground, a turn refused alongside an advance being a hull wedged
-/// bow-first with nothing left to free it.
+/// afterwards, and a turn is refused there only where
+/// [`protocol::hull::may_turn`] says. That is what lets the helm answer with
+/// no way on and aground, a turn refused alongside an advance being a hull
+/// wedged bow-first with nothing left to free it.
 ///
 /// Heel is wholly a thing the eye gets. It is settled here against the way
 /// this frame is making and hung on the hull by [`float`], the keel lying
@@ -3894,7 +3838,6 @@ pub(crate) fn steer(
 
 #[cfg(test)]
 mod tests {
-    use protocol::ground::CELL_METRES;
 
     use super::*;
     use crate::bindings::Action;
@@ -4121,10 +4064,11 @@ mod tests {
             .iter()
             .fold((f32::MAX, f32::MIN), |(f, a), c| (f.min(c.z), a.max(c.z)));
 
+        let shape = protocol::hull::keel_of(BoatKind::Sloop);
         assert!(
-            (lowest + SHIP.draft).abs() < 1e-4,
+            (lowest + shape.draft).abs() < 1e-4,
             "the model's keel is {lowest} below the waterline, not {}",
-            -SHIP.draft
+            -shape.draft
         );
         let half = SHIP.length * 0.5;
         assert!(
@@ -4138,16 +4082,15 @@ mod tests {
         // the water ahead of a forefoot that has crept aft.
         let keel: Vec<&Vec3> = corners
             .iter()
-            .filter(|c| (c.y + SHIP.draft).abs() < 1e-4)
+            .filter(|c| (c.y + shape.draft).abs() < 1e-4)
             .collect();
         let forefoot = keel.iter().map(|c| c.z).fold(f32::MAX, f32::min);
         let heel = keel.iter().map(|c| c.z).fold(f32::MIN, f32::max);
         assert!(
-            (forefoot - SHIP.forefoot_station).abs() < 1e-4
-                && (heel - SHIP.heel_station).abs() < 1e-4,
+            (forefoot - shape.forefoot).abs() < 1e-4 && (heel - shape.heel).abs() < 1e-4,
             "the keel runs {forefoot}..{heel}, not {}..{}",
-            SHIP.forefoot_station,
-            SHIP.heel_station
+            shape.forefoot,
+            shape.heel
         );
 
         // The quarterdeck, the same way as the keel: a plane of corners at
@@ -4266,10 +4209,11 @@ mod tests {
             .collect();
 
         let lowest = corners.iter().map(|c| c.y).fold(f32::MAX, f32::min);
+        let shape = protocol::hull::keel_of(BoatKind::Rowboat);
         assert!(
-            (lowest + ROWBOAT.draft).abs() < 1e-3,
+            (lowest + shape.draft).abs() < 1e-3,
             "the model's keel is {lowest} below the waterline, not {}",
-            -ROWBOAT.draft
+            -shape.draft
         );
 
         let half = ROWBOAT.length * 0.5;
@@ -6273,6 +6217,57 @@ mod tests {
         );
     }
 
+    /// A keel with a little water to spare over a flat shoal, where the
+    /// shore wave's trough is deeper than what it spares: the hull is held
+    /// up by the bed rather than drawn into it — and the swell does go below
+    /// where it is held, or this would pass with nothing to hold.
+    #[test]
+    fn the_bed_holds_a_hull_up_through_a_trough() {
+        use protocol::ground::{
+            quantize, ChunkPayload, Material, CELL_COUNT, CORNERS, LIT_ALL_DAY,
+        };
+
+        let shoal = -(keel_of(BoatKind::Sloop).grounding_draft() + 0.1);
+        let mut ground = Ground::default();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let flat = ChunkPayload {
+                    heights: vec![quantize(shoal); CORNERS * CORNERS],
+                    materials: vec![Material::Sand; CELL_COUNT],
+                    lit: vec![LIT_ALL_DAY; CORNERS * CORNERS],
+                    water: None,
+                    plants: Vec::new(),
+                };
+                ground.deliver(IVec2::new(cx, cz), None, Some(flat));
+            }
+        }
+        let mut app = test_app();
+        app.insert_resource(ground);
+        place(&mut app, Vec2::splat(64.0), Vec2::X);
+        run_frames(&mut app, 1);
+
+        let mut held = false;
+        for frame in 0..600 {
+            run_frames(&mut app, 1);
+            let hull = helmed_hull(&mut app);
+            let floor = app.world().get::<Sounding>(hull).expect("a hull").aground;
+            assert!(floor < 0.0, "the keel is not clear at still water");
+            let at = boat(&mut app).translation;
+            assert!(
+                at.y >= floor,
+                "frame {frame}: drawn at {} m, the bed holds it at {floor} m",
+                at.y
+            );
+            let water = app.world().resource::<sea::SeaConditions>().water_over(
+                Some(app.world().resource::<Ground>()),
+                at.xz(),
+                elapsed(&app),
+            );
+            held |= water < floor;
+        }
+        assert!(held, "the swell never fell below the bed's hold");
+    }
+
     #[test]
     fn an_anchored_boat_bobs_on_the_swell() {
         // Not sailing, not steering — just afloat, and still never quite
@@ -6434,29 +6429,12 @@ mod tests {
             .get::<Rotation>(hull)
             .expect("a hull floats")
             .as_radians();
-        let pose = Transform::from_xyz(at.x, 0.0, at.y)
-            .with_rotation(Quat::from_rotation_y(waterline::across(angle)));
-        grounding(&SHIP, Some(app.world().resource::<Ground>()), &pose)
-    }
-
-    #[test]
-    fn the_keel_is_probed_as_closely_as_the_ground_is_sampled() {
-        // What a handful of points along the keel buys: no facet of the
-        // height field fits between two probes, so ground rising across a
-        // facet is read on the way up. Not the same as seeing everything the
-        // field can draw — a crest narrower than a facet is read off its
-        // flanks and missed, which no spacing at this scale fixes;
-        // [`Hull::keel_probes`] carries the argument for wearing that rather
-        // than probing the keel to death. The count is derived from the facet
-        // now, so what this pins is the derivation staying honest.
-        for hull in [&SHIP, &ROWBOAT] {
-            let spacing =
-                (hull.heel_station - hull.forefoot_station) / (hull.keel_probes() - 1) as f32;
-            assert!(
-                spacing <= CELL_METRES,
-                "{spacing} m between probes leaves room for a {CELL_METRES} m facet to hide in"
-            );
-        }
+        grounding(
+            BoatKind::Sloop,
+            Some(app.world().resource::<Ground>()),
+            at,
+            waterline::across(angle),
+        )
     }
 
     #[test]
@@ -7074,6 +7052,98 @@ mod tests {
     }
 
     #[test]
+    fn a_hull_lying_off_a_shore_is_not_turned_into_it() {
+        // Lying close alongside the island in a calm, clear of it by a
+        // metre, with seven metres of hull: a quarter turn either way puts
+        // one end of it into the rim. Full helm each way comes round as far
+        // as the shore allows and no further — and never with any of the
+        // hull in the ground on the way.
+        let mut app = island_app();
+        set_wind(&mut app, Vec2::ZERO);
+        for (key, way) in [
+            (KeyCode::ArrowLeft, "port"),
+            (KeyCode::ArrowRight, "starboard"),
+        ] {
+            place(
+                &mut app,
+                Vec2::new(TEST_ISLAND_REACH + 2.5, 0.0),
+                Vec2::new(0.0, 1.0),
+            );
+            run_frames(&mut app, 1);
+            assert!(bite(&mut app) < 0.0, "the boat was meant to start clear");
+            let before = heading_yaw(&mut app);
+            hold(&mut app, key);
+            for frame in 0..300 {
+                run_frames(&mut app, 1);
+                let into = bite(&mut app);
+                assert!(
+                    into <= 0.0,
+                    "frame {frame} of {way} helm: {into} m into the shore"
+                );
+            }
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release_all();
+            let round = swing_to(heading_yaw(&mut app), before).abs();
+            assert!(
+                round > 0.05,
+                "{way} helm never brought the bow round at all"
+            );
+            assert!(
+                round < std::f32::consts::FRAC_PI_2,
+                "{way} helm came round {round} rad, so the shore was never in reach"
+            );
+        }
+    }
+
+    /// Ground streaming in under a hull lying clear puts it aground through
+    /// no turn of its own, so the turns after are a grounded hull's: the bow
+    /// still comes round. Judged against the depth it was last recorded at,
+    /// the clear reading from before the land arrived, every turn read as
+    /// one into the ground and the hull froze where it lay.
+    #[test]
+    fn a_hull_ground_arrives_under_still_answers_the_helm() {
+        use protocol::ground::{
+            quantize, ChunkPayload, Material, CELL_COUNT, CORNERS, LIT_ALL_DAY,
+        };
+
+        let chunks = || (-1..=1).flat_map(|cz| (-1..=1).map(move |cx| IVec2::new(cx, cz)));
+        let mut ocean = Ground::default();
+        for chunk in chunks() {
+            ocean.deliver(chunk, None, None);
+        }
+        let mut app = test_app();
+        app.insert_resource(ocean);
+        set_wind(&mut app, Vec2::ZERO);
+        place(&mut app, Vec2::splat(64.0), Vec2::X);
+        run_frames(&mut app, 1);
+        assert!(bite(&mut app) < 0.0, "the boat was meant to start clear");
+
+        let mut ground = app.world_mut().resource_mut::<Ground>();
+        for chunk in chunks() {
+            let land = ChunkPayload {
+                heights: vec![quantize(1.0); CORNERS * CORNERS],
+                materials: vec![Material::Sand; CELL_COUNT],
+                lit: vec![LIT_ALL_DAY; CORNERS * CORNERS],
+                water: None,
+                plants: Vec::new(),
+            };
+            ground.deliver(chunk, None, Some(land));
+        }
+        run_frames(&mut app, 1);
+        assert!(bite(&mut app) > 0.0, "the land was meant to put it aground");
+
+        let before = heading_yaw(&mut app);
+        hold(&mut app, KeyCode::ArrowLeft);
+        run_frames(&mut app, 120);
+        let round = swing_to(heading_yaw(&mut app), before).abs();
+        assert!(
+            round > 0.5,
+            "two seconds of helm brought the bow round {round} rad"
+        );
+    }
+
+    #[test]
     fn the_helm_answers_while_aground() {
         // A refused turn on top of a refused advance is a hull wedged against
         // a shore for good, so the bow comes round whatever is under it.
@@ -7084,9 +7154,10 @@ mod tests {
         // for a while, which is where a rule that reads the ground under a
         // *pose* can pin one. This asked for a bare `rotation != before`
         // once, and a version of [`hold_the_ground`] that put the heading
-        // back along with the place passed it on the one frame of swing it
-        // got before pinning, then held the bow at exactly nothing for as
-        // long as anybody cared to hold the key.
+        // back along with the place, whatever the hull was lying in, passed
+        // it on the one frame of swing it got before pinning, then held the
+        // bow at exactly nothing for as long as anybody cared to hold the
+        // key.
         let mut app = island_app();
         place(
             &mut app,

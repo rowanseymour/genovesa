@@ -21,6 +21,7 @@ use game::beasts::BeastsPlugin;
 use game::boat::BoatPlugin;
 use game::cairn::CairnPlugin;
 use game::camera::MapCameraPlugin;
+use game::caret::CaretPlugin;
 use game::chart::ChartPlugin;
 use game::cli::{self, Args};
 use game::compass::CompassPlugin;
@@ -229,6 +230,7 @@ impl PluginGroup for GamePlugins {
             // The sheet the menus stand on, and the menus.
             .add(BackdropPlugin)
             .add(MenuPlugin)
+            .add(CaretPlugin)
             .add(SettingsPlugin)
             // Harmless offline, its systems conditioning on a joined world.
             .add(NetPlugin)
@@ -298,12 +300,13 @@ fn window_plugin(args: &Args, display: &DisplaySettings) -> WindowPlugin {
         };
     }
 
-    let (mode, size) = settings::opening(display);
+    let born = settings::opening(display);
     WindowPlugin {
         primary_window: Some(Window {
             title: "Genovesa".into(),
-            mode,
-            resolution: WindowResolution::new(size.x, size.y),
+            mode: born.mode,
+            visible: born.visible,
+            resolution: WindowResolution::new(born.size.x, born.size.y),
             ..default()
         }),
         ..default()

@@ -48,6 +48,7 @@ use protocol::survey::{Soundings, Standing, Survey, SurveyTally};
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::MapCamera;
+use crate::caret::caret;
 use crate::player::PlayerPlace;
 use crate::{AppState, Helm};
 
@@ -1092,9 +1093,9 @@ fn engrave(
     // The names, over the ink — see [`lettering`], which is where the whole of
     // what goes on the paper is decided. Only what lands on this window's worth
     // of it is spawned.
-    for (text, at) in lettering(&chart, naming.as_deref(), metres_per_pixel) {
+    for (text, at, pen) in lettering(&chart, naming.as_deref(), metres_per_pixel) {
         if on_paper.contains(at) {
-            letter(&mut engraver, text, at, metres_per_pixel);
+            letter(&mut engraver, text, at, pen, metres_per_pixel);
         }
     }
 
@@ -1104,8 +1105,8 @@ fn engrave(
     });
 }
 
-/// Every name that goes on the paper and where on it, in the sheet's own
-/// coordinates.
+/// Every name that goes on the paper, where on it in the sheet's own
+/// coordinates, and whether it is the one under the pen.
 ///
 /// Two kinds of lettering, and which one a name gets is the whole of what this
 /// decides. A landmass **this survey has closed** is lettered across its own
@@ -1119,20 +1120,24 @@ fn engrave(
 /// unlettered rather than each repeating the word: the twins are one holding,
 /// and a sheet that wrote the name on both would be saying there are two. A
 /// claim lettered on a landmass is skipped in the cairn pass, or its name
-/// would be on the sheet twice. The claim under the pen shows the draft with
-/// its caret, the lettering *being* the text field.
+/// would be on the sheet twice. The claim under the pen shows the draft, which
+/// wears the caret, the lettering *being* the text field.
 ///
 /// The walk is over the whole chart rather than a window of it — a chain can
 /// cross any number of chunks — and the caller drops whatever falls off the
 /// paper.
-fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> Vec<(String, Vec2)> {
+fn lettering(
+    chart: &Chart,
+    naming: Option<&Naming>,
+    metres_per_pixel: f32,
+) -> Vec<(String, Vec2, bool)> {
     // Biggest first, so the landmass a claim's name lands on is its main
     // shore and not an islet that happened to sort earlier.
     let mut landmasses = chart.landmasses();
     landmasses.sort_by(|a, b| b.extent.total_cmp(&a.extent));
 
     let mut lettered: HashSet<IVec2> = HashSet::new();
-    let mut written: Vec<(String, Vec2)> = Vec::new();
+    let mut written: Vec<(String, Vec2, bool)> = Vec::new();
     for landmass in &landmasses {
         if let Some(claim) = landmass.claim {
             if !lettered.insert(claim) {
@@ -1141,7 +1146,8 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
         }
         let text = match (naming, landmass.claim) {
             (Some(naming), Some(claim)) if naming.claim == claim => {
-                format!("{}|", naming.draft)
+                written.push((naming.draft.clone(), landmass.centre, true));
+                continue;
             }
             // One fallback for claimed-but-unnamed and never-claimed alike:
             // from the paper those are the same sight, and the words must be
@@ -1151,7 +1157,7 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
                 .clone()
                 .unwrap_or_else(|| "Unnamed island".to_string()),
         };
-        written.push((text, landmass.centre));
+        written.push((text, landmass.centre, false));
     }
 
     // Half a line on top of the gap, `Text2d` hanging its lettering off the
@@ -1167,6 +1173,7 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
                 (
                     claimed.name.clone(),
                     on_the_sheet(claimed.at) + Vec2::new(0.0, above),
+                    false,
                 )
             }),
     );
@@ -1178,8 +1185,8 @@ fn lettering(chart: &Chart, naming: Option<&Naming>, metres_per_pixel: f32) -> V
 /// Its own entity per name rather than one text mesh, because that is what
 /// `Text2d` is: the alternative is laying out glyphs here, which is a font
 /// engine and not a chart.
-fn letter(engraver: &mut Engraver, text: String, at: Vec2, metres_per_pixel: f32) {
-    engraver.commands.spawn((
+fn letter(engraver: &mut Engraver, text: String, at: Vec2, pen: bool, metres_per_pixel: f32) {
+    let mut name = engraver.commands.spawn((
         Name::new("Chart lettering"),
         Engraving,
         ChartSheet,
@@ -1195,6 +1202,9 @@ fn letter(engraver: &mut Engraver, text: String, at: Vec2, metres_per_pixel: f32
         Transform::from_translation(at.extend(1.5)).with_scale(Vec3::splat(metres_per_pixel)),
         DespawnOnExit(Helm::Chart),
     ));
+    if pen {
+        name.with_child(caret(INK));
+    }
 }
 
 /// A cairn on the paper: a pillar of stone, tapering as it rises.

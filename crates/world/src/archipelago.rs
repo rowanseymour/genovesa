@@ -908,6 +908,24 @@ impl Archipelago {
         Some(heights.iter().copied().map(quantize).collect())
     }
 
+    /// The height of one lattice corner exactly as a client holds it — the
+    /// answer [`Archipelago::chunk_heights`] would put there, round trip and
+    /// all, from the island that owns the corner's chunk. What the server
+    /// stops a keel by, so that it is stopped by the ground the client was
+    /// sent rather than by the field that ground was sampled from: the two
+    /// part company over any crest narrower than a cell.
+    ///
+    /// Open water answers the ocean floor without generating anything, which
+    /// is what a client makes of a chunk it was sent nothing for.
+    pub fn corner_height(&self, corner: IVec2) -> f32 {
+        let chunk = corner.div_euclid(IVec2::splat(protocol::ground::CELLS as i32));
+        let Some(spec) = self.island_at_chunk(chunk) else {
+            return -protocol::ground::OCEAN_DEPTH;
+        };
+        let at = protocol::ground::corner_point(corner);
+        protocol::ground::dequantize(quantize(self.island(spec).height(at.x, at.y)))
+    }
+
     /// Drops every cached island whose frame lies entirely beyond `radius` of
     /// every one of `foci`. The cache is only a cache — anything dropped
     /// regenerates, identical to the bit, if it is ever wanted again.
@@ -1293,6 +1311,43 @@ mod tests {
         assert!(
             world.chunk_payload(chunk_at(land)).is_some(),
             "the chunk holding the island's summit sent nothing"
+        );
+    }
+
+    /// What the server stops a keel on is what the client was sent: every
+    /// corner of an island's middle chunk, and of the open water off its
+    /// frame, read one at a time the way the sea reads them.
+    #[test]
+    fn a_corner_is_the_height_the_chunk_sends() {
+        let world = world(1);
+        let spec = specs(&world)[0];
+        let middle = chunk_at(spec.centre());
+        let sent = world
+            .chunk_heights(middle)
+            .expect("an island's middle is ground");
+        let first = middle * protocol::ground::CELLS as i32;
+        for (i, stored) in sent.iter().enumerate() {
+            let corner = first
+                + IVec2::new(
+                    (i % protocol::ground::CORNERS) as i32,
+                    (i / protocol::ground::CORNERS) as i32,
+                );
+            assert_eq!(
+                world.corner_height(corner),
+                protocol::ground::dequantize(*stored),
+                "corner {corner}"
+            );
+        }
+
+        // And a chunk with no island answerable for it reads as the floor a
+        // client puts under a chunk it was sent nothing for.
+        let open = (1..)
+            .map(|step| spec.origin - IVec2::new(step, 0))
+            .find(|chunk| world.island_at_chunk(*chunk).is_none())
+            .expect("open water somewhere west of the island");
+        assert_eq!(
+            world.corner_height(open * protocol::ground::CELLS as i32),
+            -protocol::ground::OCEAN_DEPTH
         );
     }
 

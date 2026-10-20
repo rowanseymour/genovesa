@@ -50,8 +50,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use glam::Vec2;
-use protocol::ground::ANCHOR_SWING;
+use glam::{IVec2, Vec2};
+use protocol::ground::{lattice_height, ANCHOR_SWING};
+use protocol::BoatKind;
 use protocol::{swing_to, BoatId, Underway, TENDER_ASTERN};
 
 use crate::{aimed, astern, broadcast_all, carry_the_sleepers, Held, Shared};
@@ -142,7 +143,6 @@ pub(crate) fn mind_the_hulls(shared: &Arc<Shared>) {
 /// worked out from a picture that has stopped being true, and the next beat
 /// works from the new one.
 fn beat(shared: &Shared, dt: f32) {
-    let wind = shared.wind();
     // Where everyone is, taken and let go before the boats are looked at:
     // the roster's lock nests over the boats', never under it.
     let near: Vec<Vec2> = {
@@ -152,19 +152,25 @@ fn beat(shared: &Shared, dt: f32) {
     if near.is_empty() {
         return;
     }
-    let free: Vec<(BoatId, Underway, Option<Vec2>)> = {
+    let free: Vec<(BoatId, BoatKind, Underway, Option<Vec2>)> = {
         let boats = shared.boats.held();
         boats
             .iter()
             .filter(|(_, state)| state.occupant.is_none() && state.towed_by.is_none())
             .filter(|(_, state)| near.iter().any(|at| at.distance(state.hull.at) <= MINDED))
-            .map(|(id, state)| (*id, state.hull, state.anchor))
+            .map(|(id, state)| (*id, state.kind, state.hull, state.anchor))
             .collect()
     };
+    // Read once the hulls are, not before: a hull found free was let go
+    // under whatever wind stood then, and a reading older than the letting
+    // go would move it on a wind it was never left in.
+    let wind = shared.wind();
     let moves: Vec<(BoatId, Underway, Underway)> = free
         .into_iter()
-        .filter_map(|(id, hull, anchor)| {
-            let to = moved(hull, anchor, wind, dt, |at| shared.world.height(at.x, at.y))?;
+        .filter_map(|(id, kind, hull, anchor)| {
+            let to = moved(kind, hull, anchor, wind, dt, |corner| {
+                shared.world.corner_height(corner)
+            })?;
             Some((id, hull, to))
         })
         .collect();
@@ -215,26 +221,101 @@ fn beat(shared: &Shared, dt: f32) {
     }
 }
 
+/// Whether a hull is resting on the bottom, and so not the sea's to move at
+/// all — anchor or no anchor.
+///
+/// A depth under one point rather than the keel's own reading, and the same
+/// generous number for both kinds: see [`AGROUND`]. This asks whether a hull
+/// is *not adrift*, which a dinghy pulled up a beach is however little of its
+/// keel the sand has. Where its keel may go is a different question and a
+/// sharper one — see [`moved`].
+fn settled(sounded: &impl Fn(Vec2) -> f32, at: Vec2) -> bool {
+    sounded(at) >= -AGROUND
+}
+
+/// How far a hull comes round in `dt`: bow to the wind at anchor, and across
+/// it adrift, whichever beam is nearer.
+///
+/// The sky never goes slack, but the console can order a flat calm, and a
+/// calm names no bearing: the hull keeps the one it has.
+fn coming_round(hull: Underway, anchor: Option<Vec2>, downwind: Vec2, dt: f32) -> f32 {
+    if downwind == Vec2::ZERO {
+        return 0.0;
+    }
+    // The yaw that points a bow into the wind — the client's own convention,
+    // see [`aimed`].
+    let upwind = aimed(hull.at, hull.at - downwind);
+    let turn = match anchor {
+        Some(_) => swing_to(upwind, hull.heading),
+        None => {
+            let half = std::f32::consts::FRAC_PI_2;
+            let port = swing_to(upwind + half, hull.heading);
+            let starboard = swing_to(upwind - half, hull.heading);
+            if port.abs() <= starboard.abs() {
+                port
+            } else {
+                starboard
+            }
+        }
+    };
+    if turn.abs() > SETTLED_BEARING {
+        turn.clamp(-COMING_ROUND * dt, COMING_ROUND * dt)
+    } else {
+        0.0
+    }
+}
+
 /// Where the sea takes one empty hull in `dt` seconds of this wind, over a
-/// bed `sounded` gives the height of — or `None` for a hull it leaves lying
-/// as it is, which is what makes such a hull telling-quiet.
+/// bed whose lattice corners `corner` gives the heights of — the ones a
+/// client is sent, so the two stop a keel on the same ground — or `None` for
+/// a hull it leaves lying as it is, which is what makes such a hull
+/// telling-quiet.
 ///
 /// The hull is asked about twice at most: where it lies, and where it would
 /// go. A hull aground where it lies is not the sea's to move at all, anchor
 /// or no anchor. One that would go aground fetches up instead, still afloat
 /// and still turning, and lies there until the wind takes it off again.
 fn moved(
+    kind: BoatKind,
     hull: Underway,
     anchor: Option<Vec2>,
     wind: Vec2,
     dt: f32,
-    sounded: impl Fn(Vec2) -> f32,
+    corner: impl Fn(IVec2) -> f32,
 ) -> Option<Underway> {
-    let aground = |at: Vec2| sounded(at) >= -AGROUND;
-    if aground(hull.at) {
-        return None;
+    let corner = |at: IVec2| Some(corner(at));
+    let sounded = |at: Vec2| lattice_height(corner, at).expect("every corner is known");
+    if settled(&sounded, hull.at) {
+        // Not moved, but told it has stopped if the last telling carried a
+        // way: [`AGROUND`] is deeper than a keel, so a hull drifting up a
+        // shelving bed comes to rest here, under way, before the keel
+        // reading below ever fetches it up — and a client goes on carrying
+        // a hull forward by the last way it was told.
+        let stopped = Underway {
+            way: Vec2::ZERO,
+            swinging: 0.0,
+            ..hull
+        };
+        return (stopped != hull).then_some(stopped);
     }
     let downwind = wind.normalize_or_zero();
+
+    // Worked out before the hull is moved, and not after: what the keel has
+    // to clear is the pose the beat ends in, heading and all, and a hull at
+    // anchor does most of its travelling by swinging round. And refused
+    // where the swing is what would ground it — see
+    // [`protocol::hull::may_turn`].
+    let reading = |to: Vec2, heading: f32| protocol::hull::aground_by(kind, to, heading, corner);
+    let turned = coming_round(hull, anchor, downwind, dt);
+    let turned = if protocol::hull::may_turn(
+        reading(hull.at, hull.heading),
+        reading(hull.at, hull.heading + turned),
+    ) {
+        turned
+    } else {
+        0.0
+    };
+    let facing = hull.heading + turned;
 
     let at = match anchor {
         // Riding to the anchor: drawn to the end of its cable downwind of
@@ -251,42 +332,27 @@ fn moved(
         // Adrift: carried down the wind.
         None => hull.at + wind * LEEWAY * dt,
     };
-    // A hull that would go aground fetches up instead — afloat where it
-    // was, and still coming round. Sounded only where it would move.
-    let at = if at == hull.at || !aground(at) {
+    // A hull that would put its keel in the ground fetches up instead —
+    // afloat where it was, and still coming round where it may.
+    //
+    // The keel and not the point underfoot, which is the whole of what this
+    // is for: a hull is metres long, and a bed that leaves its middle in a
+    // fathom can have its forefoot in rock. Sounded through
+    // [`protocol::hull::aground_by`], the same reading the client holds its
+    // own hulls off the ground by, so a boat handed between the two is not
+    // swung into a cliff by one and drawn standing in it by the other.
+    //
+    // A hull already touching may be worked *off* and never further on,
+    // rather than being refused outright and stranded in the rock. Strictly
+    // off: a bed that shelves in a step lets a hull slide along it at one
+    // unchanging reading, and "no worse" would carry it the length of the
+    // shelf a beat at a time without the number ever moving.
+    let clearance = |to: Vec2| reading(to, facing);
+    let here = clearance(hull.at);
+    let at = if at == hull.at || clearance(at) <= 0.0 || clearance(at) < here {
         at
     } else {
         hull.at
-    };
-
-    // How far the hull has to come round: bow to the wind at anchor, and
-    // across it adrift, whichever beam is nearer. The sky never goes slack,
-    // but the console can order a flat calm, and a calm names no bearing:
-    // the hull keeps the one it has.
-    let turn = if downwind == Vec2::ZERO {
-        0.0
-    } else {
-        // The yaw that points a bow into the wind — the client's own
-        // convention, see [`aimed`].
-        let upwind = aimed(hull.at, hull.at - downwind);
-        match anchor {
-            Some(_) => swing_to(upwind, hull.heading),
-            None => {
-                let half = std::f32::consts::FRAC_PI_2;
-                let port = swing_to(upwind + half, hull.heading);
-                let starboard = swing_to(upwind - half, hull.heading);
-                if port.abs() <= starboard.abs() {
-                    port
-                } else {
-                    starboard
-                }
-            }
-        }
-    };
-    let turned = if turn.abs() > SETTLED_BEARING {
-        turn.clamp(-COMING_ROUND * dt, COMING_ROUND * dt)
-    } else {
-        0.0
     };
 
     if at == hull.at && turned == 0.0 && hull.way == Vec2::ZERO && hull.swinging == 0.0 {
@@ -297,7 +363,7 @@ fn moved(
     // whole turn a second on the wire.
     Some(Underway {
         at,
-        heading: (hull.heading + turned).rem_euclid(std::f32::consts::TAU),
+        heading: facing.rem_euclid(std::f32::consts::TAU),
         way: (at - hull.at) / dt,
         swinging: turned / dt,
     })
@@ -308,8 +374,14 @@ mod tests {
     use super::*;
 
     /// A bed flat at the ocean's floor everywhere: open water.
-    fn open_sea(_: Vec2) -> f32 {
+    fn open_sea(_: IVec2) -> f32 {
         -protocol::ground::OCEAN_DEPTH
+    }
+
+    /// A bed given as a field, sampled at the lattice corners the way a
+    /// world is.
+    fn on_lattice(bed: impl Fn(Vec2) -> f32) -> impl Fn(IVec2) -> f32 {
+        move |corner| bed(protocol::ground::corner_point(corner))
     }
 
     /// Where a hull pointed `heading` is pointing, as a unit vector — the
@@ -323,7 +395,7 @@ mod tests {
         let wind = Vec2::new(8.0, 0.0);
         let mut hull = Underway::lying(Vec2::ZERO, 0.0);
         for _ in 0..40 {
-            hull = moved(hull, None, wind, 0.25, open_sea).expect("adrift");
+            hull = moved(BoatKind::Sloop, hull, None, wind, 0.25, open_sea).expect("adrift");
         }
         // Ten seconds of a fresh breeze: carried down the wind at the
         // leeway's share of it, and told the way it is making.
@@ -355,7 +427,7 @@ mod tests {
         // out to the end of its cable and round to face the wind.
         let mut hull = Underway::lying(hook, std::f32::consts::FRAC_PI_2);
         let mut beats = 0;
-        while let Some(on) = moved(hull, Some(hook), wind, 0.25, open_sea) {
+        while let Some(on) = moved(BoatKind::Sloop, hull, Some(hook), wind, 0.25, open_sea) {
             hull = on;
             beats += 1;
             assert!(beats < 400, "the hull never settled at its anchor");
@@ -372,7 +444,7 @@ mod tests {
             "the hull rides {into} to the wind rather than bow-on"
         );
         // And, settled, is the sea's to leave alone.
-        assert!(moved(hull, Some(hook), wind, 0.25, open_sea).is_none());
+        assert!(moved(BoatKind::Sloop, hull, Some(hook), wind, 0.25, open_sea).is_none());
     }
 
     #[test]
@@ -383,7 +455,7 @@ mod tests {
         for beat in 0..240 {
             let angle = beat as f32 * 0.03;
             let wind = Vec2::new(angle.cos(), angle.sin()) * 9.0;
-            if let Some(on) = moved(hull, Some(hook), wind, 0.25, open_sea) {
+            if let Some(on) = moved(BoatKind::Sloop, hull, Some(hook), wind, 0.25, open_sea) {
                 hull = on;
             }
             assert!(
@@ -396,15 +468,15 @@ mod tests {
 
     #[test]
     fn a_hull_aground_is_not_the_seas_to_move() {
-        let beach = |_: Vec2| -0.3;
+        let beach = |_: IVec2| -0.3;
         let wind = Vec2::new(12.0, 0.0);
         let hull = Underway::lying(Vec2::new(5.0, 5.0), 1.0);
         assert!(
-            moved(hull, None, wind, 0.25, beach).is_none(),
+            moved(BoatKind::Sloop, hull, None, wind, 0.25, beach).is_none(),
             "a beached hull drifted"
         );
         assert!(
-            moved(hull, Some(Vec2::ZERO), wind, 0.25, beach).is_none(),
+            moved(BoatKind::Sloop, hull, Some(Vec2::ZERO), wind, 0.25, beach).is_none(),
             "a beached hull swung to its anchor"
         );
     }
@@ -414,11 +486,11 @@ mod tests {
         // The bed shelves up to the east of x = 10: a hull blown that way
         // stops afloat at the edge of the shallows, still coming round,
         // and once it lies across the wind is told nothing more.
-        let shelf = |at: Vec2| if at.x > 10.0 { -0.5 } else { -9.0 };
+        let shelf = on_lattice(|at| if at.x >= 10.0 { -0.5 } else { -9.0 });
         let wind = Vec2::new(8.0, 0.0);
         let mut hull = Underway::lying(Vec2::new(9.0, 0.0), std::f32::consts::FRAC_PI_2);
         let mut beats = 0;
-        while let Some(on) = moved(hull, None, wind, 0.25, shelf) {
+        while let Some(on) = moved(BoatKind::Sloop, hull, None, wind, 0.25, &shelf) {
             hull = on;
             beats += 1;
             assert!(beats < 400, "the hull never fetched up");
@@ -431,6 +503,93 @@ mod tests {
         assert_eq!(hull.way, Vec2::ZERO, "fetched up and still told a way");
     }
 
+    /// The shape this was found in, and the whole reason the reading is the
+    /// keel's rather than a point's.
+    ///
+    /// A hook set in five fathoms with a rock inside its swinging room is a
+    /// perfectly ordinary thing to do, and paying for it is the player's
+    /// business. What is not is the hull ending up *inside* the rock. Sounded
+    /// under its middle alone, a seven-metre hull can read a clear fathom
+    /// while the end that is leading has already gone in: the bed here is
+    /// deep where the hull's centre sits and dry where its heel is, which is
+    /// exactly the arrangement a single probe cannot see.
+    #[test]
+    fn a_hull_swinging_to_its_anchor_does_not_swing_an_end_into_a_cliff() {
+        let hook = Vec2::ZERO;
+        // Deep water, and a shore standing out of it to the west — inside
+        // the swing, since the hull lies `ANCHOR_SWING` downwind of the hook.
+        // Inside the swing, or this would not be about swinging at all: a
+        // hull lies `ANCHOR_SWING` downwind of its hook.
+        const SHORE: f32 = -11.0;
+        const _: () = assert!(ANCHOR_SWING > -SHORE);
+        let cliff = on_lattice(|at| if at.x < SHORE { 0.5 } else { -6.0 });
+        let wind = Vec2::new(-9.0, 0.0);
+
+        let mut hull = Underway::lying(Vec2::new(2.0, 0.0), 0.0);
+        for beat in 0..400 {
+            let Some(on) = moved(BoatKind::Sloop, hull, Some(hook), wind, 0.25, &cliff) else {
+                break;
+            };
+            hull = on;
+            let into = protocol::hull::aground_by(BoatKind::Sloop, hull.at, hull.heading, |on| {
+                Some(cliff(on))
+            });
+            assert!(
+                into <= 0.0,
+                "beat {beat}: the hull is {into} m into the ground at {}",
+                hull.at
+            );
+        }
+        // And it did fetch up short of the shore rather than never setting
+        // off: a test that passed by the hull staying put would pass with
+        // the sea switched off.
+        assert!(
+            hull.at.x < 0.0,
+            "the hull never went downwind at all, to {}",
+            hull.at
+        );
+    }
+
+    /// A hull adrift lies across the wind, and one drifting along a cliff it
+    /// is lying off is asked to come round with its stern towards it. It
+    /// comes round as far as the cliff lets it and no further: the swing is
+    /// refused where it would put an end in the rock, though the drift that
+    /// carries it along the shore goes on.
+    #[test]
+    fn a_hull_adrift_alongside_a_cliff_is_not_swung_into_it() {
+        let keel = protocol::hull::keel_of(BoatKind::Sloop);
+        let face = -(keel.beam / 2.0).ceil() - 1.0;
+        let cliff = on_lattice(move |at| if at.x <= face { 1.0 } else { -6.0 });
+        // Blowing along the shore, so lying across it means lying across the
+        // cliff's face.
+        let wind = Vec2::new(0.0, 8.0);
+
+        let start = Underway::lying(Vec2::ZERO, 0.0);
+        let mut hull = start;
+        for beat in 0..400 {
+            let Some(on) = moved(BoatKind::Sloop, hull, None, wind, 0.25, &cliff) else {
+                break;
+            };
+            hull = on;
+            let into = protocol::hull::aground_by(BoatKind::Sloop, hull.at, hull.heading, |on| {
+                Some(cliff(on))
+            });
+            assert!(
+                into <= 0.0,
+                "beat {beat}: swung {into} m into the cliff, heading {}",
+                hull.heading
+            );
+        }
+        // And it did come round some, or this passes with the sea switched
+        // off; and did not come all the way, or the cliff was never in reach.
+        let round = swing_to(hull.heading, start.heading).abs();
+        assert!(round > 0.1, "the hull never came round at all");
+        assert!(
+            round < std::f32::consts::FRAC_PI_2 - 0.1,
+            "the hull came all the way round, {round} rad, so the cliff was never in its way"
+        );
+    }
+
     #[test]
     fn a_hull_lying_still_where_it_should_is_telling_quiet() {
         let wind = Vec2::new(0.0, 6.0);
@@ -439,7 +598,7 @@ mod tests {
             hook + wind.normalize() * ANCHOR_SWING,
             aimed(Vec2::ZERO, -wind),
         );
-        assert!(moved(riding, Some(hook), wind, 0.25, open_sea).is_none());
+        assert!(moved(BoatKind::Sloop, riding, Some(hook), wind, 0.25, open_sea).is_none());
     }
 
     #[test]
@@ -450,14 +609,14 @@ mod tests {
         let calm = Vec2::ZERO;
         let still = Underway::lying(Vec2::new(3.0, 4.0), -0.5);
         assert!(
-            moved(still, None, calm, 0.25, open_sea).is_none(),
+            moved(BoatKind::Sloop, still, None, calm, 0.25, open_sea).is_none(),
             "a calm turned a drifting hull"
         );
         let hook = Vec2::ZERO;
         let out = Underway::lying(Vec2::new(0.0, ANCHOR_SWING), 0.0);
         let mut hull = out;
         let mut beats = 0;
-        while let Some(on) = moved(hull, Some(hook), calm, 0.25, open_sea) {
+        while let Some(on) = moved(BoatKind::Sloop, hull, Some(hook), calm, 0.25, open_sea) {
             assert_eq!(on.heading, hull.heading, "a calm turned a hull at anchor");
             hull = on;
             beats += 1;
@@ -474,7 +633,14 @@ mod tests {
         let wind = Vec2::new(0.0, -6.0);
         let mut hull = Underway::lying(Vec2::ZERO, -0.5);
         for _ in 0..200 {
-            let Some(on) = moved(hull, Some(Vec2::ZERO), wind, 0.25, open_sea) else {
+            let Some(on) = moved(
+                BoatKind::Sloop,
+                hull,
+                Some(Vec2::ZERO),
+                wind,
+                0.25,
+                open_sea,
+            ) else {
                 break;
             };
             assert!(

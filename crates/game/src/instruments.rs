@@ -22,6 +22,17 @@
 //! the client is told nothing — see [`protocol::ground::OCEAN_DEPTH`] — so
 //! that is also the reading over every open sea.
 //!
+//! Once the hook is down the mark on the end of the line is the anchor itself
+//! and the line is the cable, so the sounding is taken at the hook rather than
+//! under the hull — a hull swings its scope and can lie over water its own
+//! anchor would never have held in. The three readings are then one
+//! progression with no mark to learn: nothing on the line, you cannot lie
+//! here; the plummet, you could; the anchor, you are.
+//!
+//! Which leaves the lead the one instrument in this corner that answers for
+//! the *vehicle*, and so the only one that goes out ashore. The card and the
+//! arc read the same on a beach, a passage being worth planning from one.
+//!
 //! **The day's arc** is the sky seen side-on, with whichever body is up riding
 //! across it — see [`crate::sky::aloft`]. It is a clock and not a bearing: the
 //! body crosses from left to right whatever way the view is spun, because the
@@ -29,7 +40,7 @@
 //! itself is drawn faint under it for the reason the compass gives its wind a
 //! whole track to fly down: a lone glyph with nothing to be read against says
 //! *the sun is up*, which the picture already said.
-use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_PI_2, TAU};
 
 use bevy::image::Image;
 use bevy::prelude::*;
@@ -37,6 +48,7 @@ use bevy::text::{FontSize, FontSource};
 
 use protocol::ground::{anchor_holds, ANCHOR_DEPTH};
 
+use crate::boat::Anchored;
 use crate::camera::PITCH;
 use crate::compass::{FACE_SIZE, MARGIN};
 use crate::glyph::raster;
@@ -96,12 +108,59 @@ const WAVE_CRESTS: f32 = 2.0;
 const WAVE_AMP: f32 = 1.6;
 const WAVE_STROKE: f32 = 1.2;
 
-/// The weight on the end of the line: the box it is drawn in, and how wide it
-/// is at the shoulder and at the toe — a plummet, tapering downwards, which is
-/// what makes it read as hanging rather than as a tick that got fat.
-const PLUMMET: Vec2 = Vec2::new(7.0, 11.0);
+/// The box whatever is bent to the end of the line is drawn in. One box for
+/// both marks, so bending on the anchor swaps a texture and moves nothing:
+/// dropping the hook must not shift the reading. Wide enough for the anchor's
+/// arms, which is wider than the plummet wants — it is drawn at its own width
+/// inside and carries the air.
+const WEIGHT: Vec2 = Vec2::new(11.0, 12.0);
+
+/// The plummet: how wide it is at the shoulder and at the toe — tapering
+/// downwards, which is what makes it read as hanging rather than as a tick
+/// that got fat.
 const PLUMMET_SHOULDER: f32 = 5.4;
 const PLUMMET_TOE: f32 = 3.0;
+
+/// The anchor: the bar its shank and stock are drawn with, how long the stock
+/// is and how far down the box it lies, where the arms are centred, how far
+/// they reach, and how thick they have swelled by the time they get round.
+///
+/// No ring at the head. At this size a drawn one closes into a blob — see
+/// [`on_the_sun`] — and the line coming down to the shank is already doing
+/// what a ring is for.
+///
+/// Two of these are set against the instrument's own furniture rather than
+/// against an anchor, the mark having to be told from the scale it hangs on
+/// at a glance. The bar is heavier than the line it ends, so the shank stands
+/// proud of it rather than disappearing into it; and the stock is markedly
+/// shorter than a graduation, having first been drawn about a graduation's
+/// length, at which it read as one more mark on the scale and the rest of the
+/// anchor as a cup hanging under it.
+const SHANK: f32 = 2.2;
+const STOCK: f32 = 6.0;
+const STOCK_AT: f32 = 2.6;
+const CROWN: f32 = 7.0;
+const ARMS: f32 = 3.9;
+const FLUKE: f32 = 2.8;
+/// How far round the arms sweep from under the crown, in quarter turns, so
+/// that a whole one would leave the flukes pointing level. Past that on
+/// purpose: upturned flukes are what a fisherman's anchor has, and they are
+/// also what stops a pair of arms reading as a bowl.
+const SWEEP: f32 = 4.0 / 3.0;
+
+/// The arms must not be drawn through the side of the box, nor the crown
+/// through its bottom. Bounded by the whole arm's outermost reach rather than
+/// by where it actually falls, the box being set by hand and a mark clipped
+/// by it looking like a badly drawn glyph rather than like a bug.
+const _: () = assert!(ARMS + FLUKE / 2.0 <= WEIGHT.x / 2.0);
+const _: () = assert!(CROWN + ARMS + SHANK / 2.0 <= WEIGHT.y);
+
+/// And the two the anchor is told from the furniture by, which is the rest of
+/// what [`SHANK`] and [`STOCK`] were set for: a bar no heavier than the line
+/// leaves the shank invisible, and a stock as long as a graduation is read as
+/// one. Neither shows in a test that only asks what the mark looks like.
+const _: () = assert!(SHANK > LINE_STROKE);
+const _: () = assert!(STOCK < 2.0 * TICK);
 
 /// The figure beside the weight: its type size, how far right of the line it
 /// stands, and how far up from the weight's shoulder its own top sits, so the
@@ -136,7 +195,7 @@ const BODY: f32 = 17.0;
 /// generous for the size they are laid out at, the UI scaling with the window.
 const BODY_TEXELS: u32 = 96;
 const WAVE_TEXELS: u32 = 128;
-const PLUMMET_TEXELS: u32 = 48;
+const WEIGHT_TEXELS: u32 = 96;
 const ARC_TEXELS: u32 = 512;
 
 /// Marks the lead's column, which carries the whole instrument's visibility.
@@ -156,6 +215,15 @@ enum LeadPart {
     Figure,
 }
 
+/// Holds the two marks the end of the line swaps between, so neither has to
+/// be built again when the hook goes down. On the weight, which
+/// [`LeadPart::Weight`] already marks.
+#[derive(Component)]
+struct BentOn {
+    plummet: Handle<Image>,
+    anchor: Handle<Image>,
+}
+
 /// Marks the body riding the day's arc, and holds the two glyphs it swaps
 /// between so neither has to be built again when the light changes hands.
 #[derive(Component)]
@@ -163,6 +231,22 @@ struct DayBody {
     sun: Handle<Image>,
     moon: Handle<Image>,
 }
+
+/// The lead's moving pieces, as a query: what each one is, where it is drawn,
+/// and the two a sounding writes into — the figure's text, and the mark on
+/// the end of the line with the pair it swaps between.
+type LeadParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static LeadPart,
+        &'static mut Node,
+        &'static mut Visibility,
+        Option<&'static mut Text>,
+        Option<&'static BentOn>,
+        Option<&'static mut ImageNode>,
+    ),
+>;
 
 /// What the lead found.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -215,7 +299,7 @@ fn spawn_lead(commands: &mut Commands, images: &mut Assets<Image>) {
                 right: Val::Px(lead_right()),
                 bottom: Val::Px(MARGIN),
                 width: Val::Px(COLUMN),
-                height: Val::Px(SCALE + PLUMMET.y),
+                height: Val::Px(SCALE + WEIGHT.y),
                 ..default()
             },
             // Blank until the first sounding, which may be the frame after
@@ -298,22 +382,25 @@ fn spawn_line(lead: &mut ChildSpawnerCommands) {
 }
 
 fn spawn_weight(lead: &mut ChildSpawnerCommands, images: &mut Assets<Image>) {
+    let tall = weight_texels_tall();
+    let plummet = images.add(raster(WEIGHT_TEXELS, tall, on_the_plummet));
+    let anchor = images.add(raster(WEIGHT_TEXELS, tall, on_the_anchor));
     lead.spawn((
         LeadPart::Weight,
+        BentOn {
+            plummet: plummet.clone(),
+            anchor,
+        },
         Node {
             position_type: PositionType::Absolute,
-            left: Val::Px(LINE_X - PLUMMET.x / 2.0),
+            left: Val::Px(LINE_X - WEIGHT.x / 2.0),
             top: Val::Px(0.0),
-            width: Val::Px(PLUMMET.x),
-            height: Val::Px(PLUMMET.y),
+            width: Val::Px(WEIGHT.x),
+            height: Val::Px(WEIGHT.y),
             ..default()
         },
         ImageNode {
-            image: images.add(raster(
-                PLUMMET_TEXELS,
-                plummet_texels_tall(),
-                on_the_plummet,
-            )),
+            image: plummet,
             color: INK,
             ..default()
         },
@@ -425,7 +512,8 @@ fn arc_bottom() -> f32 {
     MARGIN + FACE_SIZE / 2.0 * (1.0 + PITCH.sin()) + ARC_CLEAR
 }
 
-/// What the lead finds under a boat at `at`.
+/// What the lead finds at `at` — under the hull, or at the hook once there
+/// is one; see [`heave_the_lead`].
 fn sound(ground: &Ground, at: Vec2) -> Sounding {
     let Some(height) = ground.height(at.x, at.y) else {
         return Sounding::Nothing;
@@ -463,10 +551,20 @@ fn figure(metres: f32) -> String {
 fn heave_the_lead(
     ground: Res<Ground>,
     player: PlayerPlace,
+    hooks: Query<&Anchored>,
     mut column: Query<&mut Visibility, (With<Lead>, Without<LeadPart>)>,
-    mut parts: Query<(&LeadPart, &mut Node, &mut Visibility, Option<&mut Text>)>,
+    mut parts: LeadParts,
 ) {
-    let sounding = match (player.aboard(), player.on_the_map()) {
+    // With the hook down the line is the cable, so it is sounded at the hook
+    // and not underfoot: a hull swings [`protocol::ground::ANCHOR_SWING`] on
+    // its cable and can lie over water deeper than its own anchor reaches,
+    // where a sounding taken under the hull would read *no bottom* with the
+    // anchor holding.
+    let hook = player
+        .carrier()
+        .and_then(|carrier| hooks.get(carrier).ok())
+        .map(|anchored| anchored.0);
+    let sounding = match (player.aboard(), hook.or(player.on_the_map())) {
         (true, Some(at)) => sound(&ground, at),
         _ => Sounding::Nothing,
     };
@@ -497,16 +595,16 @@ fn heave_the_lead(
         // stopping it at the last mark, which would read as a sounding of
         // exactly that mark: what says *no bottom* is that there is nothing
         // resting on the end of it.
-        Sounding::NoBottom => SCALE + PLUMMET.y,
+        Sounding::NoBottom => SCALE + WEIGHT.y,
         Sounding::Nothing => 0.0,
     };
-    for (part, mut node, mut visibility, text) in &mut parts {
+    for (part, mut node, mut visibility, text, bent, image) in &mut parts {
         let (top, height, shown) = match part {
             // The line itself is always drawn: past the return above there is
             // a sounding, and a sounding is a line in the water.
             LeadPart::Run => (0.0, down, true),
             LeadPart::Slack => (down, (SCALE - down).max(0.0), true),
-            LeadPart::Weight => (down, PLUMMET.y, matches!(sounding, Sounding::Bottom(_))),
+            LeadPart::Weight => (down, WEIGHT.y, matches!(sounding, Sounding::Bottom(_))),
             LeadPart::Figure => (
                 down - FIGURE_RISE,
                 0.0,
@@ -533,6 +631,18 @@ fn heave_the_lead(
         };
         if *visibility != showing {
             *visibility = showing;
+        }
+        // What is bent to the end of the line is the reading for whether the
+        // hook is down — the module doc says why there is no other mark.
+        if let (LeadPart::Weight, Some(bent), Some(mut image)) = (part, bent, image) {
+            let wanted = if hook.is_some() {
+                &bent.anchor
+            } else {
+                &bent.plummet
+            };
+            if image.image != *wanted {
+                image.image = wanted.clone();
+            }
         }
         if let (LeadPart::Figure, Some(mut text), Sounding::Bottom(depth)) = (part, text, sounding)
         {
@@ -632,10 +742,40 @@ fn on_the_wave(at: Vec2) -> bool {
     (at.y - crest).abs() <= WAVE_STROKE / 2.0
 }
 
-/// The weight: a bar tapering from its shoulder to its toe.
+/// The plummet: a bar tapering from its shoulder to its toe.
 fn on_the_plummet(at: Vec2) -> bool {
     let half = (PLUMMET_SHOULDER + (PLUMMET_TOE - PLUMMET_SHOULDER) * at.y) / 2.0;
-    ((at.x - 0.5) * PLUMMET.x).abs() <= half
+    ((at.x - 0.5) * WEIGHT.x).abs() <= half
+}
+
+/// The anchor, standing upright: a shank down the middle with the stock laid
+/// across its head, and arms curving out from the crown at its foot.
+///
+/// Upright, and not lying over as [`crate::tackle`] lays one on the bottom.
+/// This is the mark on the end of a line hung down the screen, and the
+/// silhouette everyone knows is the one that still reads at a dozen pixels.
+fn on_the_anchor(at: Vec2) -> bool {
+    let at = at * WEIGHT;
+    let across = at.x - WEIGHT.x / 2.0;
+    let shank = across.abs() <= SHANK / 2.0;
+    let stock = (at.y - STOCK_AT).abs() <= SHANK / 2.0 && across.abs() <= STOCK / 2.0;
+    shank || stock || on_the_arms(Vec2::new(across, at.y - CROWN))
+}
+
+/// Whether a point measured from the crown lies on an arm: an arc of [`ARMS`]
+/// running [`SWEEP`] round from under the shank, stroked at the shank's own
+/// bar where it leaves and swelling to [`FLUKE`] by the time it gets there.
+///
+/// The swell is the fluke. A blade drawn as its own shape at this size is a
+/// few texels arguing with the arm they sit on; a stroke that thickens is the
+/// same silhouette and cannot come adrift from the arm.
+fn on_the_arms(from_crown: Vec2) -> bool {
+    let round = f32::atan2(from_crown.x.abs(), from_crown.y) / FRAC_PI_2;
+    if round > SWEEP {
+        return false;
+    }
+    let blade = SHANK + (FLUKE - SHANK) * (round / SWEEP) * (round / SWEEP);
+    (from_crown.length() - ARMS).abs() <= blade / 2.0
 }
 
 /// How tall each glyph's texture is: its box's own proportions at the width it
@@ -643,8 +783,8 @@ fn on_the_plummet(at: Vec2) -> bool {
 fn wave_texels_tall() -> u32 {
     (WAVE_TEXELS as f32 * WAVE.y / WAVE.x).round() as u32
 }
-fn plummet_texels_tall() -> u32 {
-    (PLUMMET_TEXELS as f32 * PLUMMET.y / PLUMMET.x).round() as u32
+fn weight_texels_tall() -> u32 {
+    (WEIGHT_TEXELS as f32 * WEIGHT.y / WEIGHT.x).round() as u32
 }
 fn arc_texels_tall() -> u32 {
     (ARC_TEXELS as f32 * ARC_BOX.y / ARC_BOX.x).round() as u32
@@ -655,8 +795,8 @@ mod tests {
     use super::*;
     use crate::terrain::Ground;
     use protocol::ground::{
-        quantize, ChunkPayload, Material, CELL_COUNT, CELL_METRES, CORNERS, LIT_ALL_DAY,
-        OCEAN_DEPTH,
+        quantize, ChunkPayload, Material, CELL_COUNT, CELL_METRES, CHUNK_METRES, CORNERS,
+        LIT_ALL_DAY, OCEAN_DEPTH,
     };
 
     /// A chunk of sea bed at one depth all over. Open to the sun everywhere:
@@ -677,6 +817,20 @@ mod tests {
         let mut ground = Ground::default();
         ground.deliver(IVec2::ZERO, None, Some(bed_at(height)));
         (ground, Vec2::splat(CELL_METRES))
+    }
+
+    /// Ground in two chunks at two depths, with a point standing on each —
+    /// the shape a hull swung out over deep water on a hook laid in the
+    /// shallows needs, which one bed at one depth cannot show.
+    fn over_two_beds(shallow: f32, deep: f32) -> (Ground, Vec2, Vec2) {
+        let mut ground = Ground::default();
+        ground.deliver(IVec2::ZERO, None, Some(bed_at(shallow)));
+        ground.deliver(IVec2::X, None, Some(bed_at(deep)));
+        (
+            ground,
+            Vec2::splat(CELL_METRES),
+            Vec2::new(CHUNK_METRES + CELL_METRES, CELL_METRES),
+        )
     }
 
     /// A headless app with the instruments in it, already dropped into a
@@ -705,14 +859,13 @@ mod tests {
         app
     }
 
-    /// Stands a player over a bed at some depth, aboard a hull or on their own
-    /// feet, and runs a frame — being aboard is being somebody's child, which
-    /// is what [`PlayerPlace`] resolves a carrier through.
-    fn a_player_over(height: f32, aboard: bool) -> App {
+    /// Stands a player at a point on some ground, aboard a hull or on their
+    /// own feet, and runs a frame — being aboard is being somebody's child,
+    /// which is what [`PlayerPlace`] resolves a carrier through.
+    fn a_player_at(ground: Ground, at: Vec2, aboard: bool) -> App {
         use crate::player::Player;
 
         let mut app = test_app();
-        let (ground, at) = over_a_bed(height);
         app.insert_resource(ground);
 
         let stood = Transform::from_xyz(at.x, 0.0, at.y);
@@ -723,6 +876,46 @@ mod tests {
         }
         app.update();
         app
+    }
+
+    /// The same over a bed at one depth all over.
+    fn a_player_over(height: f32, aboard: bool) -> App {
+        let (ground, at) = over_a_bed(height);
+        a_player_at(ground, at, aboard)
+    }
+
+    /// Lays the hull's hook at a point on the map and runs a frame.
+    fn drop_the_hook(app: &mut App, at: Vec2) {
+        let hull = app
+            .world_mut()
+            .query_filtered::<&ChildOf, With<crate::player::Player>>()
+            .single(app.world())
+            .expect("the player should be aboard something")
+            .parent();
+        app.world_mut().entity_mut(hull).insert(Anchored(at));
+        app.update();
+    }
+
+    /// How far down the line the weight is hanging, and which mark is on it.
+    fn hangs_at(app: &mut App) -> f32 {
+        let top = weight(app).0;
+        let Val::Px(top) = top else {
+            panic!("the weight hung at {top:?} rather than at a depth");
+        };
+        top
+    }
+
+    fn bent_on(app: &mut App) -> Handle<Image> {
+        weight(app).1
+    }
+
+    fn weight(app: &mut App) -> (Val, Handle<Image>) {
+        app.world_mut()
+            .query::<(&LeadPart, &Node, &ImageNode)>()
+            .iter(app.world())
+            .find(|(part, _, _)| **part == LeadPart::Weight)
+            .map(|(_, node, image)| (node.top, image.image.clone()))
+            .expect("the weight should exist")
     }
 
     /// What the lead is showing: whether the column is drawn at all, and the
@@ -790,24 +983,10 @@ mod tests {
     fn the_weight_rides_up_as_the_bottom_does() {
         // Within a pixel, the bed's height having been through the wire's own
         // two-centimetre steps on the way here.
-        let plummet = |app: &mut App| {
-            let top = app
-                .world_mut()
-                .query::<(&LeadPart, &Node)>()
-                .iter(app.world())
-                .find(|(part, _)| **part == LeadPart::Weight)
-                .map(|(_, node)| node.top)
-                .expect("the weight should exist");
-            let Val::Px(top) = top else {
-                panic!("the weight hung at {top:?} rather than at a depth");
-            };
-            top
-        };
-
         let mut deep = a_player_over(-6.0, true);
         let mut shoal = a_player_over(-2.0, true);
-        assert!((plummet(&mut deep) - 6.0 * METRE_PIXELS).abs() < 1.0);
-        assert!((plummet(&mut shoal) - 2.0 * METRE_PIXELS).abs() < 1.0);
+        assert!((hangs_at(&mut deep) - 6.0 * METRE_PIXELS).abs() < 1.0);
+        assert!((hangs_at(&mut shoal) - 2.0 * METRE_PIXELS).abs() < 1.0);
         assert_eq!(reading(&mut shoal).1, "2 m");
     }
 
@@ -981,9 +1160,75 @@ mod tests {
         // Narrower at the toe than at the shoulder, which is what makes it
         // read as hanging: a point just inside the shoulder's width is off
         // the glyph by the time it reaches the toe.
-        let off_middle = 0.5 + PLUMMET_TOE / 2.0 / PLUMMET.x + 0.02;
+        let off_middle = 0.5 + PLUMMET_TOE / 2.0 / WEIGHT.x + 0.02;
         assert!(on_the_plummet(Vec2::new(off_middle, 0.05)));
         assert!(!on_the_plummet(Vec2::new(off_middle, 0.95)));
+    }
+
+    /// With the hook down the line is the cable, so the reading is where the
+    /// hook lies. A hull swings its scope, so the water under it can be
+    /// deeper than the anchor ever held in — a sounding taken underfoot would
+    /// then read no bottom with the anchor holding.
+    #[test]
+    fn a_hull_at_anchor_sounds_at_its_hook() {
+        let (ground, shoal, deep) = over_two_beds(-3.0, -6.0);
+        let mut app = a_player_at(ground, deep, true);
+        assert_eq!(
+            reading(&mut app).1,
+            "6 m",
+            "adrift, the lead did not read the water under the hull"
+        );
+        drop_the_hook(&mut app, shoal);
+        assert_eq!(
+            reading(&mut app).1,
+            "3 m",
+            "at anchor, the lead did not read the water at the hook"
+        );
+    }
+
+    /// Whether the hook is down is told by what is bent to the end of the
+    /// line and by nothing else, so the mark has to change — and the reading
+    /// has to not, or dropping the anchor would look like the bottom moving.
+    #[test]
+    fn dropping_the_hook_bends_on_the_anchor_without_moving_the_reading() {
+        let mut app = a_player_over(-4.0, true);
+        let (plummet, hung) = (bent_on(&mut app), hangs_at(&mut app));
+
+        drop_the_hook(&mut app, Vec2::splat(CELL_METRES));
+        assert_ne!(
+            plummet,
+            bent_on(&mut app),
+            "the hook went down and the line's end did not change"
+        );
+        assert_eq!(
+            hung,
+            hangs_at(&mut app),
+            "bending on the anchor moved the reading"
+        );
+    }
+
+    /// The anchor has to be an anchor at a dozen pixels, which is a stock
+    /// across its head and arms reaching out at its foot — and it has to be
+    /// told from the plummet by more than the eye's charity, the two being
+    /// the same size in the same place.
+    #[test]
+    fn the_anchor_stands_on_its_arms_under_its_stock() {
+        assert!(
+            on_the_anchor(Vec2::new(0.5, 0.5)),
+            "no shank down the middle"
+        );
+        let stock_end = Vec2::new(0.5 + STOCK / 2.0 / WEIGHT.x, STOCK_AT / WEIGHT.y);
+        assert!(on_the_anchor(stock_end), "no stock across the head");
+        assert!(
+            !on_the_anchor(Vec2::new(0.98, 0.02)),
+            "the anchor filled the corner of its box"
+        );
+
+        // The arms reach where a taper never does, which is the whole of the
+        // difference a player reads.
+        let fluke = Vec2::new(0.5 + ARMS / WEIGHT.x, CROWN / WEIGHT.y);
+        assert!(on_the_anchor(fluke), "no arm out to the fluke");
+        assert!(!on_the_plummet(fluke), "the plummet reached the fluke too");
     }
 
     #[test]
@@ -1004,7 +1249,7 @@ mod tests {
     fn every_glyph_is_rastered_at_the_shape_of_its_mark() {
         for (wide, tall, mark) in [
             (WAVE_TEXELS, wave_texels_tall(), WAVE),
-            (PLUMMET_TEXELS, plummet_texels_tall(), PLUMMET),
+            (WEIGHT_TEXELS, weight_texels_tall(), WEIGHT),
             (ARC_TEXELS, arc_texels_tall(), ARC_BOX),
         ] {
             assert!(tall > 0, "a glyph was rastered into no rows at all");

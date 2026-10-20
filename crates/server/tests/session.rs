@@ -2363,8 +2363,14 @@ fn a_kept_world_reopens_with_its_tows_tied() {
 #[test]
 fn a_taken_boat_is_not_resumed_into() {
     // Alice leaves at a helm; Bob takes the boat while she is away. Her
-    // memory of being aboard is a memory, not a hold: she returns where she
-    // was, in a fresh hull the world provides, and Bob keeps what he took.
+    // memory of being aboard is a memory, not a hold: she returns exactly
+    // where she was and on her own feet, which out here means swimming, and
+    // Bob keeps what he took.
+    //
+    // Nothing is minted to soften that. A world that handed back a hull on
+    // relog would make losing a boat escapable by relogging, which is the
+    // thing the storm fed off world age and the beasts kept in the file are
+    // both there to prevent.
     let addr = host(1);
     let (alice, a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
     alice.orders_a_calm();
@@ -2398,8 +2404,10 @@ fn a_taken_boat_is_not_resumed_into() {
 
     let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
     assert_eq!(spawn, far, "Alice did not return where she was");
-    assert_ne!(aboard, Some(a_boat), "one helm held two players");
-    assert!(aboard.is_some(), "Alice was left standing on open water");
+    assert_eq!(
+        aboard, None,
+        "Alice was put aboard something rather than left where she was"
+    );
 }
 
 #[test]
@@ -2407,7 +2415,9 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     // The same memory, and a boat that is nobody's again by the time she
     // comes back — but lying somewhere else. Being seated back into it would
     // teleport her across the water to wherever a stranger abandoned it, so
-    // the world puts her down where she stood, in a hull of her own.
+    // the world puts her down where she stood and on her own feet. The boat
+    // is still in the world and still free; it is simply no longer under
+    // her, and swimming to it is the way back to it.
     let addr = host(1);
     let (alice, a, alices_spawn, alices_token, a_boat) = Client::join_aboard(addr, None);
     alice.orders_a_calm();
@@ -2459,13 +2469,14 @@ fn a_boat_sailed_away_and_left_free_is_not_resumed_into_either() {
     let _ = b;
 
     let (_alice, _id, spawn, _t, aboard) = Client::join_aboard(addr, Some(alices_token));
-    assert_eq!(spawn, far, "Alice did not return where she was");
-    assert_ne!(
-        aboard,
-        Some(a_boat),
+    assert_eq!(
+        spawn, far,
         "Alice was dragged to where her old boat had got to"
     );
-    assert!(aboard.is_some(), "Alice was left standing on open water");
+    assert_eq!(
+        aboard, None,
+        "Alice was put aboard something rather than left where she was"
+    );
 }
 
 #[test]
@@ -4732,9 +4743,14 @@ fn a_ship_stepped_off_unanchored_is_left_adrift_with_its_boat_astern() {
 
 #[test]
 fn an_anchored_hull_swings_to_lie_downwind_of_its_hook() {
-    // Anchored in a breeze and left; then the wind veers a right angle. The
-    // hull is drawn round to lie downwind of its hook on the new wind, and
-    // at no point is it further from the hook than its cable.
+    // Anchored in a breeze; the wind veers a right angle, and the hull is
+    // left. It is drawn round to lie downwind of its hook on the new wind,
+    // and at no point is it further from the hook than its cable.
+    //
+    // Veered before the hull is left, not after: the sea moves only a hull
+    // nobody is aboard, so every move told is a move under the gale. Left
+    // first, a beat under the breeze could be told after the gale's reply,
+    // and the breeze's lie is square across the gale's.
     let addr = host(7);
     let (client, _id, _spawn, _token, aboard) = Client::join_aboard(addr, None);
     let ship = aboard.expect("a newcomer's story starts aboard");
@@ -4751,10 +4767,10 @@ fn an_anchored_hull_swings_to_lie_downwind_of_its_hook() {
     let (_, _, _, anchor) = client.hear_of(ship, Instant::now() + PATIENCE, "the anchor");
     let hook = anchor.expect("an anchor refused over the shelf");
     let cable = protocol::ground::ANCHOR_SWING;
+    client.order("world weather gale");
     client.say(ToServer::Disembark {
         position: anchorage + Vec2::new(3.0, 0.0),
     });
-    client.order("world weather gale");
 
     let lie = hook + GALE.normalize() * cable;
     let deadline = Instant::now() + PATIENCE;
