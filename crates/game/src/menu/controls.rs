@@ -12,7 +12,9 @@
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui::Pressed;
 
 use crate::bindings::{is_bindable, typed_label, Action, KeyBindings};
 use crate::{AppState, Helm};
@@ -142,7 +144,7 @@ pub(super) fn spawn_key_row(
 }
 
 pub(super) fn settings_actions(
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     helm: Option<Res<State<Helm>>>,
     mut rebinding: ResMut<Rebinding>,
     mut bindings: ResMut<KeyBindings>,
@@ -151,10 +153,7 @@ pub(super) fn settings_actions(
 ) {
     let over_a_world = over_a_world(&helm);
 
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for button in &buttons {
         match button {
             MenuButton::Rebind(action) => rebinding.0 = Some(*action),
             MenuButton::ResetKeys => {
@@ -226,7 +225,13 @@ pub(super) fn refresh_settings(
     bindings: Res<KeyBindings>,
     rebinding: Res<Rebinding>,
     mut keys: Query<(&KeyText, &mut Text)>,
-    mut buttons: Query<(&MenuButton, &Highlight, &mut BackgroundColor, &Interaction)>,
+    mut buttons: Query<(
+        &MenuButton,
+        &Highlight,
+        &mut BackgroundColor,
+        Has<Pressed>,
+        &Hovered,
+    )>,
 ) {
     if !bindings.is_changed() && !rebinding.is_changed() {
         return;
@@ -241,9 +246,9 @@ pub(super) fn refresh_settings(
     }
 
     // The armed row stays lit, so it's clear which key is about to change.
-    for (button, ink, mut color, interaction) in &mut buttons {
+    for (button, ink, mut color, pressed, hovered) in &mut buttons {
         if let MenuButton::Rebind(action) = button {
-            if *interaction == Interaction::None {
+            if !pressed && !hovered.get() {
                 *color = BackgroundColor(if rebinding.0 == Some(*action) {
                     ink.armed
                 } else {

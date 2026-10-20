@@ -12,6 +12,7 @@
 //! step with which door was used.
 
 use bevy::prelude::*;
+use bevy::ui::Pressed;
 
 use crate::net::Hosting;
 use crate::{AppState, Helm};
@@ -105,17 +106,14 @@ pub(super) fn back_to_options(
 }
 
 pub(super) fn options_actions(
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     helm: Option<Res<State<Helm>>>,
     mut next_app: ResMut<NextState<AppState>>,
     mut next_helm: ResMut<NextState<Helm>>,
 ) {
     let over_a_world = over_a_world(&helm);
 
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for button in &buttons {
         match button {
             MenuButton::Display if over_a_world => next_helm.set(Helm::Display),
             MenuButton::Display => next_app.set(AppState::Display),
@@ -217,14 +215,11 @@ pub(super) fn spawn_pause_menu(mut commands: Commands, hosting: Option<Res<Hosti
 }
 
 pub(super) fn pause_actions(
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     mut next_app: ResMut<NextState<AppState>>,
     mut next_helm: ResMut<NextState<Helm>>,
 ) {
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for button in &buttons {
         match button {
             MenuButton::Resume => next_helm.set(Helm::Sailing),
             MenuButton::Options => next_helm.set(Helm::Options),

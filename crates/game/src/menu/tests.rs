@@ -15,6 +15,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::input::ButtonState;
 use bevy::state::app::StatesPlugin;
+use bevy::ui::Pressed;
 
 use super::controls::KeyText;
 use super::display::{DisplayText, Dropped};
@@ -58,12 +59,17 @@ fn test_app(state: AppState) -> App {
             bevy::text::TextPlugin,
             InputFocusPlugin,
             InputDispatchPlugin,
-            bevy::ui_widgets::EditableTextInputPlugin,
+            bevy::ui_widgets::TextInputPlugin,
         ))
         .init_resource::<ButtonInput<Key>>()
         .add_message::<bevy::input::mouse::MouseWheel>()
         .add_message::<bevy::input::gamepad::GamepadButtonChangedEvent>()
-        .add_message::<Pointer<Release>>()
+        // What the text input's own systems ask for, normally the picking
+        // and window plugins' to provide.
+        .add_message::<bevy::picking::events::PointerRelease>()
+        .add_message::<bevy::window::Ime>()
+        .init_resource::<bevy::picking::events::PointerState>()
+        .init_resource::<Time<Real>>()
         .init_resource::<UiScale>()
         .add_systems(PostUpdate, draw_the_fields.after(EditableTextSystems))
         .insert_state(state)
@@ -137,8 +143,8 @@ fn go_to(app: &mut App, state: AppState) {
     app.update();
 }
 
-/// Simulates a click by spawning a pressed button; `Changed<Interaction>`
-/// fires for a freshly inserted component.
+/// Simulates a click by spawning a pressed button; `Added<Pressed>` fires
+/// for a freshly inserted component.
 ///
 /// Taken away again before the frame the transition lands on, and that
 /// matters rather than being tidiness. A button left lying in the world
@@ -161,7 +167,7 @@ fn click(app: &mut App, button: MenuButton) {
 /// is visible; what may come of it later is not. The button is handed back
 /// so a caller that runs on can clear it up — see [`click`].
 fn click_once(app: &mut App, button: MenuButton) -> Entity {
-    let pressed = app.world_mut().spawn((button, Interaction::Pressed)).id();
+    let pressed = app.world_mut().spawn((button, Pressed)).id();
     app.update();
     pressed
 }
@@ -1170,9 +1176,7 @@ fn click_the_sheet(app: &mut App) {
         .iter(app.world())
         .next()
         .expect("nothing behind the list to click");
-    *app.world_mut()
-        .get_mut::<Interaction>(sheet)
-        .expect("the sheet catches nothing") = Interaction::Pressed;
+    app.world_mut().entity_mut(sheet).insert(Pressed);
     app.update();
 }
 
@@ -1321,7 +1325,7 @@ fn a_list_shuts_without_taking_anything_from_it() {
 
 /// The rung already taken is drawn as the taken one from the moment the
 /// list exists. [`highlight_buttons`] cannot do that job — its
-/// `Changed<Interaction>` cannot fire until the frame after the spawn — and
+/// run over the rows does not come until the frame after the spawn — and
 /// a list that spends its first frame claiming nothing is picked is the
 /// flicker the whole screen is built out of [`Wanted`] to avoid.
 #[test]

@@ -9,7 +9,9 @@
 //! and from the pause menu over a world that must not be taken down to get to
 //! them. See [`ladder`], which is where that doubling lives.
 
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui::Pressed;
 
 use crate::bindings::{Action, KeyBindings};
 use crate::camera::View;
@@ -51,12 +53,15 @@ fn highlight_buttons(
     rebinding: Res<Rebinding>,
     picking: Res<Picking>,
     wanted: Res<Wanted>,
-    mut buttons: Query<
-        (&Interaction, &MenuButton, &Highlight, &mut BackgroundColor),
-        Changed<Interaction>,
-    >,
+    mut buttons: Query<(
+        Has<Pressed>,
+        &Hovered,
+        &MenuButton,
+        &Highlight,
+        &mut BackgroundColor,
+    )>,
 ) {
-    for (interaction, button, ink, mut color) in &mut buttons {
+    for (pressed, hovered, button, ink, mut color) in &mut buttons {
         let idle = match button {
             MenuButton::Rebind(action) if rebinding.0 == Some(*action) => ink.armed,
             // The two things an open list has to say: that it is open, and
@@ -68,11 +73,16 @@ fn highlight_buttons(
             _ => ink.idle,
         };
 
-        *color = BackgroundColor(match interaction {
-            Interaction::Pressed => ink.press,
-            Interaction::Hovered => ink.hover,
-            Interaction::None => idle,
-        });
+        let tone = if pressed {
+            ink.press
+        } else if hovered.get() {
+            ink.hover
+        } else {
+            idle
+        };
+        if color.0 != tone {
+            color.0 = tone;
+        }
     }
 }
 

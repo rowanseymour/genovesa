@@ -11,8 +11,10 @@
 //! builders that take one so a screen can be stood up on either side.
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::{EditableText, EditableTextFilter, TextCursorStyle};
+use bevy::ui_widgets::{Button, TextInput};
 
 use crate::chart::{INK, INK_DIM, PAPER};
 
@@ -295,6 +297,7 @@ pub(super) fn padded_button(
 ) -> impl Bundle {
     (
         Button,
+        Hovered::default(),
         action,
         ink.button,
         Node {
@@ -328,6 +331,7 @@ pub(super) fn text_field(
     field.cursor_width = 0.08;
     (
         field,
+        TextInput,
         EditableTextFilter::new(takes),
         TextFont {
             font_size: FontSize::Px(size),
@@ -341,6 +345,7 @@ pub(super) fn text_field(
             // A field the keyboard has left is only text.
             unfocused_selection_color: Color::NONE,
             selected_text_color: None,
+            selection_radius: 0.0,
         },
         Node {
             width: Val::Percent(100.0),

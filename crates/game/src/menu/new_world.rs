@@ -13,6 +13,7 @@
 use bevy::input_focus::{AutoFocus, FocusCause, FocusLost, InputFocus};
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextEdit, TextEditChange};
+use bevy::ui::Pressed;
 
 use crate::net::{Dialing, Reach};
 use crate::AppState;
@@ -224,16 +225,13 @@ pub(super) fn share_label(share: bool) -> &'static str {
 /// [`open_world`], which has to wait for a server and so cannot be a button
 /// handler that decides anything on the spot.
 pub(super) fn dialog_actions(
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     mut fields: Query<(Entity, &FieldText, &mut EditableText)>,
     mut focus: ResMut<InputFocus>,
     mut settings: ResMut<NewWorldSettings>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for button in &buttons {
         match button {
             MenuButton::Edit(field) => {
                 if let Some((entity, _, _)) = fields.iter().find(|(_, f, _)| f.0 == *field) {
@@ -270,7 +268,7 @@ pub(super) fn dialog_actions(
 /// even by the machine that is about to serve it.
 pub(super) fn open_world(
     mut commands: Commands,
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     dialing: Option<Res<Dialing>>,
     settings: Res<NewWorldSettings>,
     mut status: ResMut<Status>,
@@ -281,8 +279,8 @@ pub(super) fn open_world(
         return;
     }
 
-    for (interaction, button) in &buttons {
-        if *interaction == Interaction::Pressed && *button == MenuButton::Start {
+    for button in &buttons {
+        if *button == MenuButton::Start {
             // The one thing the dialog insists on. Said on the status line
             // rather than by refusing silently: a press that does nothing is
             // a press the player repeats.

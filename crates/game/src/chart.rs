@@ -2158,7 +2158,8 @@ fn furniture(commands: &mut Commands, sheet: Entity) {
                         // the machine's serif is the hand charts are
                         // lettered in.
                         TextFont {
-                            font: FontSource::Serif,
+                            font: FontSource::serif(),
+                            font_size: FontSize::Px(20.0),
                             ..default()
                         },
                         TextColor(INK),
@@ -2214,7 +2215,7 @@ fn corner_rose(commands: &mut Commands, meshes: &mut Assets<Mesh>, inks: &Inks) 
             // hand charts are lettered in. Not the islands' italic, which is a
             // hand writing *on* the paper.
             TextFont {
-                font: FontSource::Serif,
+                font: FontSource::serif(),
                 font_size: FontSize::Px(ROSE_LETTER_SIZE),
                 ..default()
             },

@@ -55,7 +55,7 @@ use crate::AppState;
 /// water near the boat. The box is what keeps that from being paid over the
 /// whole ocean — see [`Track::packed`].
 ///
-/// The twin of the array length in `assets/shaders/sea.wgsl`, which
+/// The twin of the array length in `assets/shaders/sea.wesl`, which
 /// `the_shader_walks_the_whole_track` holds it to.
 pub(crate) const TRAIL: usize = 34;
 
@@ -748,7 +748,7 @@ mod tests {
         // points than are sent draws a wake that ends early for no reason
         // anything at runtime could explain.
         let shader = std::fs::read_to_string(format!(
-            "{}/../../assets/shaders/sea.wgsl",
+            "{}/../../assets/shaders/sea.wesl",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("the sea's shader under assets/shaders/");

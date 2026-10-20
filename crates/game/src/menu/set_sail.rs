@@ -13,6 +13,7 @@
 use std::time::SystemTime;
 
 use bevy::prelude::*;
+use bevy::ui::Pressed;
 
 use crate::net::{self, Dialing, Reach};
 use crate::AppState;
@@ -333,16 +334,13 @@ pub(super) fn sailed_when(kept: SystemTime) -> String {
 
 pub(super) fn set_sail_actions(
     mut commands: Commands,
-    buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
+    buttons: Query<&MenuButton, Added<Pressed>>,
     dialing: Option<Res<Dialing>>,
     mut harbour: ResMut<Harbour>,
     mut status: ResMut<Status>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for button in &buttons {
         match button {
             MenuButton::Back => next.set(AppState::MainMenu),
             // The one door the cap closes, and the only place it is enforced:

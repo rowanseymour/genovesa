@@ -3134,7 +3134,7 @@ fn take_the_placing(
         else {
             continue;
         };
-        at.0 = *ship_at - waterline::bow(ship_angle) * protocol::TENDER_ASTERN;
+        at.0 = *ship_at - waterline::bow(*ship_angle) * protocol::TENDER_ASTERN;
         *angle = *ship_angle;
         way.0 = Vec2::ZERO;
         spin.0 = 0.0;
@@ -3402,7 +3402,7 @@ fn make_fast(
         // shifted a metre by the rope being tied behind it.
         let dimensions = hull_of(rigged.0);
         let ship_hull = hull_of(ship.0);
-        let bow = waterline::bow(ship_angle);
+        let bow = waterline::bow(*ship_angle);
         let transom = ship_at.0 - bow * (ship_hull.length / 2.0);
         at.0 = transom - bow * (PAINTER + dimensions.length / 2.0);
         *angle = *ship_angle;
@@ -3753,7 +3753,7 @@ pub(crate) fn steer(
     // sail's drive and the boom laid on it must not be answering different
     // winds.
     let bow = waterline::bow(forces.rotation());
-    let wind = conditions.wind_at(ground.as_deref(), forces.position().0);
+    let wind = conditions.wind_at(ground.as_deref(), forces.position());
 
     // What the rig is pulling with this frame, in newtons — the polar as a
     // share of the hull's full [`Hull::thrust`]. It names a *drive* and not
@@ -4501,7 +4501,7 @@ mod tests {
         // fewer slots than are sent leaves boats standing in water for no
         // reason anything at runtime could explain.
         let shader = std::fs::read_to_string(format!(
-            "{}/../../assets/shaders/sea.wgsl",
+            "{}/../../assets/shaders/sea.wesl",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("the sea's shader under assets/shaders/");
