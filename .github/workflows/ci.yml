@@ -2,47 +2,36 @@
 # digest, the archipelago layout, the pinned bytes of every protocol message —
 # each exists to catch a build that has quietly stopped agreeing with every
 # other build about what a seed means, and a test like that run on one laptop
-# is a test that has never once done its job. Here the second machine is a
-# Linux runner; the first is the arm64 macOS this is developed on, which runs
-# every test before a branch is ever pushed.
+# is a test that has never once done its job. So the workspace is tested on
+# x86-64 Linux, and the crates that hold those pins are tested again on arm64
+# macOS and x86-64 Windows: three operating systems and two processor
+# architectures, all asked whether a seed still makes the same island and
+# whether the wire is still the same format.
 #
-# What that costs decides the shape of this file more than taste does. A
-# private repository gets 2,000 Actions minutes a month, every job bills as a
-# whole minute however few seconds it took, a Windows minute counts as two and
-# a macOS minute as ten. Against a hundred-odd merges a month that budget buys
-# about six billed minutes a run, and the arithmetic answers three questions:
-#
-#   - macOS is gone, and its absence is not a gap: it is the machine the
-#     comparison is made against, covered before a push. Anyone developing
-#     this somewhere else should put it back.
-#   - Windows is gone too, and its absence *is* a gap — it was the platform
-#     nobody here can run. What it cost was the whole argument: an engine
-#     built from cold on a Windows runner is most of an hour, billed double,
-#     and a weekly one was a tenth of the month before a branch had spent a
-#     minute. A platform disagreement is a once-a-year thing, a toolchain or
-#     libm shift rather than a bad branch, and the day this has a player on
-#     Windows is the day that comparison is worth its price again.
-#   - Pushes to main build only when they move the dependency graph, because
-#     that is now the only thing main is for: leaving a cache warm enough that
-#     a branch never compiles Bevy from cold. What that gives up is catching a
-#     bad interaction between two green branches at the merge itself — but the
-#     next PR branches from the new main and builds it, so that arrives within
-#     a PR rather than within a week.
+# The repository is public, so standard runners cost nothing, and what shapes
+# this file is the clock rather than a budget: a pull request waits for its
+# slowest job. Bevy is the whole of that wait — from cold it is most of an
+# hour — so the engine is built on one runner, Linux, where the cache below
+# keeps it warm; the other two platforms build only the crates that hold the
+# pins, which have no engine in them and take minutes from nothing.
 name: CI
 
 on:
+  # Documentation is generated here rather than written, and neither it nor a
+  # README can fail a test. Assets are not on this list: the game's tests read
+  # assets/models/boat.glb.
   pull_request:
-    # Documentation is generated here rather than written, and neither it nor
-    # a README can fail a test. Assets are not on this list: the game's tests
-    # read assets/models/boat.glb.
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
+  # Main is built again after a merge, so that a bad interaction between two
+  # green branches cannot sit there unnoticed — and because only main writes
+  # the dependency cache, so a green main is what a branch restores.
   push:
     branches: [main]
-    paths:
-      - 'Cargo.lock'
-      - '.github/workflows/ci.yml'
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   # Monday morning: a rebuild of main's cache against whatever rustc stable
   # has become in the meantime, so that a toolchain bump costs one run here
   # rather than a cold build on every branch that week.
@@ -111,12 +100,11 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             libasound2-dev libudev-dev libwayland-dev libfontconfig1-dev
 
-      # Only main writes a cache, and that is the whole reason main still
-      # builds. Caches are scoped to the branch that saved them and a branch
-      # can read only its own and the default branch's, so a pull request that
-      # saved its own would be spending the repository's ten gigabytes on
-      # something no other branch can ever restore — and evicting main's copy,
-      # the one every branch does restore, to do it.
+      # Only main writes a cache. Caches are scoped to the branch that saved
+      # them and a branch can read only its own and the default branch's, so a
+      # pull request that saved its own would be spending the repository's ten
+      # gigabytes on something no other branch can ever restore — and evicting
+      # main's copy, the one every branch does restore, to do it.
       #
       # Restoring and saving are two steps rather than one action because the
       # one action this used saved only when the restore had matched nothing
@@ -228,3 +216,28 @@ jobs:
           gh cache list --key rust-${{ runner.os }}- --limit 100 --json id,key \
             --jq '.[] | select(.key != "${{ steps.cache.outputs.cache-primary-key }}") | .id' \
             | xargs -rn1 gh cache delete
+
+  # The pinned things again, somewhere that isn't x86-64 Linux: the world's
+  # digests and the protocol's exact bytes, with the server that sits on both.
+  # These crates hold no Bevy and need nothing from the system, so a cold
+  # build is a few minutes and there is no cache to get wrong. Only the
+  # library tests: that is where every value that must match across machines
+  # is written down, and the server's socket suite beside them pins nothing
+  # while being the slowest thing a runner is asked to do. Anything new that
+  # pins bytes or digests belongs in one of these three libraries.
+  determinism:
+    name: Determinism (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Let both finish. Which platforms disagree is the interesting part, and
+      # a cancelled sibling job doesn't say.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Library tests
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --locked --lib -p world -p protocol -p server
