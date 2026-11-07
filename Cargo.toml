@@ -35,3 +35,12 @@ debug = false
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
+
+# For CI's tests. -O1 builds the dependencies a fifth quicker than -O3 and runs
+# the tests as fast; -O0 builds quicker still, but makes the world and session
+# tests several times slower.
+[profile.ci]
+inherits = "dev"
+
+[profile.ci.package."*"]
+opt-level = 1
