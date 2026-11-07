@@ -80,7 +80,7 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
 
-      # What Bevy 0.19 asks for on a Linux builder — alsa and udev are what its
+      # What Bevy asks for on a Linux builder — alsa and udev are what its
       # -sys crates go looking for through pkg-config, and wayland matches the
       # defaults of Bevy's own CI action. No window is ever opened here; these
       # are needed to link, not to run.
@@ -94,7 +94,7 @@ jobs:
       # dead stop before the workspace is even checked. A feature that only
       # shows on one screen is easy to add without thinking about the builder;
       # this list is where that gets paid for.
-      - name: Install Bevy's Linux dependencies
+      - name: Install Bevy dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
@@ -150,16 +150,16 @@ jobs:
         # and a green run pays nothing for it.
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --profile ci
 
       # A doc link is how a comment stays true about code in another module —
       # rename the target and the link breaks where a reviewer is looking. But
       # a link rustdoc cannot *resolve* is only prose in brackets: it checks
       # nothing, and two of them here had already rotted into naming things
       # that no longer existed. This is what makes the difference visible. The
-      # crates are already built by the step above, so it documents them and
-      # stops; `--document-private-items` because most of what one module's doc
-      # names in another is private to the crate.
+      # dependencies are already checked by clippy, so it documents the crates
+      # and stops; `--document-private-items` because most of what one
+      # module's doc names in another is private to the crate.
       - name: Doc links
         run: cargo doc --workspace --no-deps --locked --document-private-items
         env:
@@ -240,4 +240,4 @@ jobs:
       - name: Library tests
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --locked --lib -p world -p protocol -p server
+        run: cargo test --locked --profile ci --lib -p world -p protocol -p server
