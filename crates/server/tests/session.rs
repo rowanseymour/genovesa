@@ -1737,6 +1737,14 @@ fn a_kept_world_reopens_where_it_left_off() {
 
     let (client, _id, _spawn, _facing, token) = Client::join_presenting(addr, None);
     client.orders_a_calm();
+    // Evening, a quarter of a day from the opening hour: a reopened world
+    // that forgot its clock would read the afternoon it was first opened at,
+    // however quickly or slowly this machine runs.
+    let wound = Instant::now();
+    client.say(ToServer::Command {
+        line: "world time 18:00".to_string(),
+    });
+    assert_eq!(client.hear_reply(), "the day has run on to 18:00");
     let out = Vec2::new(2_048.0, -512.0);
     client.say(ToServer::Helm {
         hull: Underway::lying(out, 0.0),
@@ -1750,7 +1758,12 @@ fn a_kept_world_reopens_where_it_left_off() {
     // Dropping the host is leaving the world: the closing save has happened
     // by the time the drop returns.
     drop(host);
+    let closed = Instant::now();
+    // Long enough that a clock run on while closed shows above the slack
+    // below; how long is otherwise nothing to the assertion.
+    std::thread::sleep(Duration::from_millis(250));
 
+    let reopening = Instant::now();
     let again = Server::reopen(("127.0.0.1", 0), &path).expect("reopen");
     assert_eq!(again.seed(), 7, "the file forgot which world it keeps");
     let addr = again.local_addr().expect("addr");
@@ -1765,14 +1778,22 @@ fn a_kept_world_reopens_where_it_left_off() {
     assert_eq!(spawn, out, "the world forgot where it last saw its player");
     assert_eq!(dealt, token, "kept papers were re-dealt");
 
-    // ...and the same afternoon: the clock stands where it stood, moved only
+    // ...and the same evening: the clock stands where it stood, moved only
     // by the seconds the world was actually open. While it was closed, no
     // time passed at all — which is what makes quitting mid-storm and
     // reloading land back in the storm.
+    //
+    // Bounded by the open seconds as this thread saw them on either side of
+    // the gap, which bracket the server's own: however loaded the machine,
+    // the hour can only be later than that by time spent closed. The slack
+    // is float rounding, a few milliseconds of day.
     let hour = client.hear_the_time();
+    let open = (closed - wound) + reopening.elapsed();
+    let latest = 0.75 + open.as_secs_f32() / protocol::DAY_SECONDS;
     assert!(
-        (0.5..0.53).contains(&hour),
-        "the world reopened at {hour} rather than the afternoon it closed on"
+        (0.75..=latest + 1e-5).contains(&hour),
+        "the world reopened at {hour} rather than the evening it closed on, \
+         which {open:?} of being open would have run on to {latest} at most"
     );
 }
 
