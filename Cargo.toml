@@ -16,7 +16,7 @@ resolver = "2"
 # quietly stop being the same types. Pinned together here so that moving Bevy
 # is one edit rather than two that have to agree.
 [workspace.dependencies]
-bevy = "0.20"
+bevy = "0.20.1"
 glam = "0.33"
 
 # Optimise dependencies even in debug builds, otherwise terrain generation and
