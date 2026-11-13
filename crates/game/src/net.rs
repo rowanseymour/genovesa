@@ -618,7 +618,7 @@ impl Plugin for NetPlugin {
         // module's own lean tests want.
         app.add_message::<GroundArrived>()
             .add_message::<CoastSurveyed>()
-            .add_message::<WindChanged>()
+            .add_message::<WeatherTold>()
             .add_message::<HourTold>()
             .add_message::<BeastSeen>()
             .add_message::<BeastGone>()
@@ -758,10 +758,11 @@ pub struct CoastSurveyed {
     pub found: Vec<(IVec2, Soundings)>,
 }
 
-/// The wind over the whole world. Read by [`crate::sea`], which wears it.
+/// The weather over the whole world. Read by [`crate::sea`], which wears it.
 #[derive(Message)]
-pub struct WindChanged {
+pub struct WeatherTold {
     pub wind: Vec2,
+    pub rain: f32,
 }
 
 /// Where the world's day stands, as a phase. Read by [`crate::sky`], which
@@ -967,14 +968,14 @@ fn receive(
                 // could disagree about.
                 said.coast.write(CoastSurveyed { found });
             }
-            ToClient::Weather { wind } => {
+            ToClient::Weather { wind, rain } => {
                 // A target, not an order: the drawn sea eases towards it —
                 // see [`crate::sea::settle_conditions`] — so the server's
                 // occasional quantised updates arrive as weather rather than
                 // as steps. Which is also why it is vetted: a non-finite
                 // wind, once eased into the conditions, is NaN for good.
-                if wind.is_finite() && wind.length() < 100.0 {
-                    said.wind.write(WindChanged { wind });
+                if wind.is_finite() && wind.length() < 100.0 && (0.0..=1.0).contains(&rain) {
+                    said.weather.write(WeatherTold { wind, rain });
                 }
             }
             ToClient::Daylight { phase } => {
@@ -1084,7 +1085,7 @@ fn receive(
 struct Words<'w> {
     ground: MessageWriter<'w, GroundArrived>,
     coast: MessageWriter<'w, CoastSurveyed>,
-    wind: MessageWriter<'w, WindChanged>,
+    weather: MessageWriter<'w, WeatherTold>,
     hour: MessageWriter<'w, HourTold>,
     beast: MessageWriter<'w, BeastSeen>,
     beast_gone: MessageWriter<'w, BeastGone>,

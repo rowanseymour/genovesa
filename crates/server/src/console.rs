@@ -43,6 +43,7 @@
 use glam::Vec2;
 use protocol::{clock, BeastKind, BoatId, BoatKind, PlayerId, ToClient, Underway};
 use world::archipelago::{berth_off, Archipelago, BERTH_OFFING, SOUNDING};
+use world::weather::Weather;
 
 use crate::{
     aimed, astern, beasts, broadcast, broadcast_all, keeper, post, reachable, BoatState, Held,
@@ -124,7 +125,7 @@ const COMMANDS: [Command; 7] = [
         usage: &[
             "— every dial as it stands; a dial alone reads that one",
             "time <hh:mm> — run the clock forward to that hour",
-            "weather calm|breeze|gale|natural — order the wind, or give it back",
+            "weather calm|breeze|gale|squall|natural — order the sky, or give it back",
             "seed — the number this world was raised on",
         ],
         tails: dials,
@@ -155,7 +156,7 @@ fn help() -> String {
 /// Whole phrases and not first words alone, because `world` is a shelf and a
 /// client that knew only the shelf would complete a player into a dead end.
 /// The same argument runs one word further out wherever the argument is a
-/// fixed few — the hulls, the beasts, the winds — and stops at the ones that
+/// fixed few — the hulls, the beasts, the skies — and stops at the ones that
 /// are the asker's own: there is no completing an hour or a place, and a tab
 /// that guessed at one would be inventing rather than teaching.
 pub(crate) fn phrases() -> Vec<String> {
@@ -252,13 +253,13 @@ const DIALS: [Dial; 3] = [
     },
     Dial {
         name: "weather",
-        read: |shared| match *shared.commanded_wind.held() {
+        read: |shared| match *shared.commanded_weather.held() {
             Some((name, _)) => ordered(name),
             None => "the weather is the world's own".to_string(),
         },
         turn: Some(weather),
         values: || {
-            names(&WINDS)
+            names(&SKIES)
                 .into_iter()
                 .chain([NATURAL.to_string()])
                 .collect()
@@ -287,23 +288,37 @@ fn dials() -> Vec<String> {
         .collect()
 }
 
-/// The word that gives the sky back to the world, which is not a wind and so
-/// is not in [`WINDS`] — named once because the turn and the completion both
+/// The word that gives the sky back to the world, which is not a sky and so
+/// is not in [`SKIES`] — named once because the turn and the completion both
 /// want it.
 const NATURAL: &str = "natural";
 
-/// The winds the console can order up. The strengths are the sea's landmarks
+/// The skies the console can order up. The strengths are the sea's landmarks
 /// rather than round numbers: a flat calm, the reference breeze the wave
-/// amplitudes are written for, and the hardest gale an honest sky can blow.
-/// The bearings swing wide between neighbours on purpose, so ordering one
-/// after another marches every wave train through its re-aim dance — half of
-/// what the command exists to watch, the other half being how the sea wears
-/// each strength without waiting for the real sky to happen to visit it.
-const WINDS: [(&str, Vec2); 3] = [
-    ("calm", Vec2::ZERO),
-    ("breeze", Vec2::new(-4.95, -4.95)),
-    ("gale", Vec2::new(11.31, -11.31)),
+/// amplitudes are written for, and the hardest gale an honest sky can blow —
+/// dry, so that a blow and a squall can be told apart, the squall being a
+/// hard wind under the heaviest rain there is. The bearings swing wide
+/// between neighbours on purpose, so ordering one after another marches
+/// every wave train through its re-aim dance — half of what the command
+/// exists to watch, the other half being how the sea and sky wear each
+/// weather without waiting for the real one to happen to visit it.
+const SKIES: [(&str, Weather); 4] = [
+    ("calm", dry(Vec2::ZERO)),
+    ("breeze", dry(Vec2::new(-4.95, -4.95))),
+    ("gale", dry(Vec2::new(11.31, -11.31))),
+    (
+        "squall",
+        Weather {
+            wind: Vec2::new(9.9, 9.9),
+            rain: 1.0,
+        },
+    ),
 ];
+
+/// A wind with no rain under it.
+const fn dry(wind: Vec2) -> Weather {
+    Weather { wind, rain: 0.0 }
+}
 
 /// What serving a line came to: the text the asker is owed, and — for the one
 /// command that moves them — where the world has put them down.
@@ -1006,27 +1021,27 @@ fn time(shared: &Shared, given: &str) -> Result<String, String> {
     Ok(format!("the day has run on to {}", clock(phase)))
 }
 
-/// `world weather <wind>`: the sky taken in hand for everyone, or —
+/// `world weather <sky>`: the sky taken in hand for everyone, or —
 /// `natural` — given back to the world. No word is sent from here: the sky
-/// thread notices the wind moving and tells the roster, exactly as it does
-/// when the real weather turns, so an ordered gale arrives the way any gale
-/// does.
+/// thread notices the weather moving and tells the roster, exactly as it
+/// does when the real weather turns, so an ordered gale arrives the way any
+/// gale does.
 fn weather(shared: &Shared, given: &str) -> Result<String, String> {
     if given == NATURAL {
-        shared.command_wind(None);
+        shared.command_weather(None);
         return Ok("the weather is the world's own again".to_string());
     }
-    match WINDS.iter().find(|(name, _)| *name == given) {
-        Some(&(name, wind)) => {
-            shared.command_wind(Some((name, wind)));
+    match SKIES.iter().find(|(name, _)| *name == given) {
+        Some(&(name, sky)) => {
+            shared.command_weather(Some((name, sky)));
             Ok(ordered(name))
         }
         None => {
-            let every: Vec<String> = names(&WINDS)
+            let every: Vec<String> = names(&SKIES)
                 .into_iter()
                 .chain([NATURAL.to_string()])
                 .collect();
-            Err(format!("no wind called `{given}` — {}", listed(&every)))
+            Err(format!("no weather called `{given}` — {}", listed(&every)))
         }
     }
 }
@@ -1034,7 +1049,7 @@ fn weather(shared: &Shared, given: &str) -> Result<String, String> {
 /// How a standing order reads, said in one place because the write and the
 /// read both say it.
 fn ordered(name: &str) -> String {
-    format!("the wind is ordered {name}")
+    format!("the weather is ordered {name}")
 }
 
 /// `hh:mm` on a 24-hour clock as a phase of the day, or a bare hour — `world
@@ -1123,15 +1138,23 @@ mod tests {
         let shared = a_world(0.5);
 
         answer(&shared, PlayerId(1), "world weather gale");
-        assert_eq!(shared.wind(), Vec2::new(11.31, -11.31));
+        assert_eq!(shared.weather(), dry(Vec2::new(11.31, -11.31)));
+
+        // A squall is the rain as well as the wind, and a gale is not.
+        answer(&shared, PlayerId(1), "world weather squall");
+        let squall = shared.weather();
+        assert!(
+            squall.wind.length() > 12.0 && squall.rain == 1.0,
+            "{squall:?}"
+        );
 
         answer(&shared, PlayerId(1), "world weather calm");
-        assert_eq!(shared.wind(), Vec2::ZERO);
+        assert_eq!(shared.weather(), dry(Vec2::ZERO));
 
-        // Given back, the wind is the world's own function of the clock
+        // Given back, the weather is the world's own function of the clock
         // again — whatever that is right now, it is not held anywhere.
         answer(&shared, PlayerId(1), "world weather natural");
-        assert_eq!(*shared.commanded_wind.held(), None);
+        assert_eq!(*shared.commanded_weather.held(), None);
 
         let refused = answer(&shared, PlayerId(1), "world weather sirocco");
         assert!(refused.contains("sirocco"), "unhelpful: {refused}");
@@ -1413,7 +1436,7 @@ mod tests {
         assert_eq!(advertised("spawn"), names(&BEASTS));
         assert_eq!(
             advertised("world weather"),
-            names(&WINDS)
+            names(&SKIES)
                 .into_iter()
                 .chain([NATURAL.to_string()])
                 .collect::<Vec<_>>()
@@ -1467,6 +1490,7 @@ mod tests {
             "spawn dolphins",
             "world seed",
             "world weather gale",
+            "world weather squall",
             "world weather natural",
         ] {
             assert!(taught.iter().any(|it| it == wanted), "`{wanted}` untaught");
@@ -1495,7 +1519,7 @@ mod tests {
                     && !reply.contains("no dial called")
                     && !reply.contains("no boat called")
                     && !reply.contains("no beast called")
-                    && !reply.contains("no wind called"),
+                    && !reply.contains("no weather called"),
                 "`{phrase}` is advertised but not served: {reply}"
             );
         }

@@ -36,8 +36,8 @@
 //! a few hundred metres off can be outside the frame while the player is close
 //! enough to walk up its beach. It marks the uncharted louder than the charted,
 //! the problem being finding *new* islands; it reaches exactly as far as the
-//! haze does (see [`SIGHT`]), saying what the player could have noticed and
-//! not what is over the horizon; and it goes out ashore, where everything it
+//! haze does, rain and all (see [`SIGHT`]), saying what the player could have
+//! noticed and not what is over the horizon; and it goes out ashore, where everything it
 //! could mark is either the island underfoot or in plain view across it.
 //! Nothing about it crosses the wire — the sweep reads the chunks this machine
 //! was already sent.
@@ -160,11 +160,14 @@ const END_FADE: f32 = 12.0;
 /// than either ink.
 const CROSS: Color = Color::srgba(0.60, 0.60, 0.55, 0.45);
 
-/// How far out land is marked, in metres.
+/// How far out land is marked under a dry sky, in metres — rain closes it in
+/// with the haze, to [`crate::sky::sight`].
 ///
 /// The haze closes the picture at [`crate::HAZE_END`], so this is exactly
 /// what is out there to be seen: the ring says what the player *could* have
-/// noticed and did not, rather than seeing past the edge of the world. It has
+/// noticed and did not, rather than seeing past the edge of the world. In a
+/// squall that is a couple of hundred metres, and an island being steered
+/// for goes off the ring as it goes from the picture. It has
 /// to stay inside [`crate::terrain::STREAM_RADIUS`] or the sweep would be
 /// asking about ground this machine was never sent — which is the assertion
 /// below, since the two constants are set for different reasons and nothing
@@ -179,6 +182,11 @@ const CROSS: Color = Color::srgba(0.60, 0.60, 0.55, 0.45);
 /// an un-streamed chunk reads as open water rather than as an error.
 const SIGHT: f32 = crate::HAZE_END;
 const _: () = assert!(SIGHT + CHUNK_METRES / 2.0 <= crate::terrain::STREAM_RADIUS);
+
+/// How far the sight must have moved, in metres, before the ring is swept
+/// again for it — a rain coming on closes it by most of a kilometre in a few
+/// seconds, which is not a sweep a frame.
+const SIGHT_STEP: f32 = 16.0;
 
 /// How many sectors the horizon is cut into.
 ///
@@ -249,6 +257,8 @@ struct Swept {
     /// How many chunks the chart had surveyed at the time, for the same
     /// reason and read the same way.
     surveyed: usize,
+    /// How far the haze let the player see — see [`crate::sky::sight`].
+    sight: f32,
 }
 
 /// What the sweep found in one sector: how far off the nearest land in it is,
@@ -363,9 +373,15 @@ fn subtends(at: Vec2, chunk: IVec2) -> (f32, f32) {
 /// behind it. The near shore is what a player looking that way would find, so
 /// the ring says so — the same thing the eye would, if the camera let it see
 /// that far.
-fn land_in_sight(ground: &Ground, chart: &Chart, at: Vec2) -> [Option<Sighting>; SECTORS] {
+fn land_in_sight(
+    ground: &Ground,
+    chart: &Chart,
+    at: Vec2,
+    sight: f32,
+) -> [Option<Sighting>; SECTORS] {
     let mut found = [None; SECTORS];
-    let reach = (SIGHT / CHUNK_METRES).ceil() as i32;
+    let sight = sight.min(SIGHT);
+    let reach = (sight / CHUNK_METRES).ceil() as i32;
     let home = (at / CHUNK_METRES).floor().as_ivec2();
     for dz in -reach..=reach {
         for dx in -reach..=reach {
@@ -375,7 +391,7 @@ fn land_in_sight(ground: &Ground, chart: &Chart, at: Vec2) -> [Option<Sighting>;
             }
             let corner = chunk.as_vec2() * CHUNK_METRES;
             let distance = at.clamp(corner, corner + CHUNK_METRES).distance(at);
-            if distance > SIGHT {
+            if distance > sight {
                 continue;
             }
             // The square the player is standing inside is skipped, not
@@ -442,6 +458,7 @@ fn mark_drawn(sighting: Option<Sighting>) -> (Color, f32) {
 fn mark_the_land(
     ground: Res<Ground>,
     chart: Res<Chart>,
+    conditions: Res<SeaConditions>,
     player: PlayerPlace,
     mut swept: ResMut<Swept>,
     mut marks: Query<(&LandMark, &mut Node, &mut BackgroundColor)>,
@@ -467,17 +484,23 @@ fn mark_the_land(
     }
     let held = ground.land_held();
     let surveyed = chart.surveys();
+    let sight = crate::sky::sight(conditions.rain());
     let stood_still = swept
         .at
         .is_some_and(|last| last.distance_squared(at) < STEP * STEP);
-    if stood_still && held == swept.held && surveyed == swept.surveyed {
+    if stood_still
+        && held == swept.held
+        && surveyed == swept.surveyed
+        && (sight - swept.sight).abs() < SIGHT_STEP
+    {
         return;
     }
     swept.at = Some(at);
     swept.held = held;
     swept.surveyed = surveyed;
+    swept.sight = sight;
 
-    let sightings = land_in_sight(&ground, &chart, at);
+    let sightings = land_in_sight(&ground, &chart, at, sight);
     for (mark, mut node, mut colour) in &mut marks {
         let (ink, band) = mark_drawn(sightings[mark.0]);
         // Written only where they differ: a `Mut` counts as changed the
@@ -1410,7 +1433,12 @@ mod tests {
         let island = IVec2::new(3, 0);
         ground.deliver(island, None, Some(a_hill()));
 
-        let found = land_in_sight(&ground, &Chart::default(), Vec2::splat(CHUNK_METRES / 2.0));
+        let found = land_in_sight(
+            &ground,
+            &Chart::default(),
+            Vec2::splat(CHUNK_METRES / 2.0),
+            SIGHT,
+        );
         let lit: Vec<usize> = (0..SECTORS).filter(|s| found[*s].is_some()).collect();
         assert!(!lit.is_empty(), "land due east lit nothing");
         assert!(
@@ -1437,7 +1465,12 @@ mod tests {
         let mut ground = Ground::default();
         ground.deliver(IVec2::ZERO, None, Some(a_hill()));
 
-        let found = land_in_sight(&ground, &Chart::default(), Vec2::splat(CHUNK_METRES / 2.0));
+        let found = land_in_sight(
+            &ground,
+            &Chart::default(),
+            Vec2::splat(CHUNK_METRES / 2.0),
+            SIGHT,
+        );
         assert!(
             found.iter().all(Option::is_none),
             "the chunk the player stands on claimed a bearing"
@@ -1611,6 +1644,22 @@ mod tests {
         }
     }
 
+    /// The ring reaches as far as the haze lets the player see, so an island
+    /// a dry day shows goes off the ring in a squall and comes back after it.
+    #[test]
+    fn a_squall_takes_the_land_off_the_ring() {
+        let mut app = a_player_off_an_island(true);
+        assert!(marks_lit(&mut app) > 0, "a dry day marked no island");
+
+        app.insert_resource(SeaConditions::default().raining(1.0));
+        app.update();
+        assert_eq!(marks_lit(&mut app), 0, "the ring saw through the squall");
+
+        app.insert_resource(SeaConditions::default());
+        app.update();
+        assert!(marks_lit(&mut app) > 0, "the island never came back");
+    }
+
     /// The two answers the sweep must refuse: drowned ground, and land past
     /// the haze.
     #[test]
@@ -1623,7 +1672,7 @@ mod tests {
         let mut shelf = Ground::default();
         shelf.deliver(IVec2::new(3, 0), None, Some(a_shoal()));
         assert!(
-            land_in_sight(&shelf, &chart, at)
+            land_in_sight(&shelf, &chart, at, SIGHT)
                 .iter()
                 .all(Option::is_none),
             "drowned ground was marked as coast"
@@ -1638,7 +1687,9 @@ mod tests {
         let mut far = Ground::default();
         far.deliver(IVec2::new(beyond, 0), None, Some(a_hill()));
         assert!(
-            land_in_sight(&far, &chart, at).iter().all(Option::is_none),
+            land_in_sight(&far, &chart, at, SIGHT)
+                .iter()
+                .all(Option::is_none),
             "land past the haze was marked"
         );
     }

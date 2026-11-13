@@ -29,6 +29,12 @@
 //! - At night the light is the moon, and the mask would ride round with it.
 //!   The clouds are taken off it instead — see [`clouds_by_day`], which also
 //!   says why the moment of taking them off cannot be seen.
+//!
+//! Rain thickens them. The mask is woven again at a lower threshold as the
+//! rain comes on — see [`OVERCAST`] — so the shadows swell and join into a
+//! sky nearly all shade; and because the mask is being carried downwind as
+//! it thickens, what a player sees is the shade arriving from windward, which
+//! is how a squall line comes.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
@@ -36,7 +42,7 @@ use bevy::light::DirectionalLightTexture;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use crate::sea::Forecast;
+use crate::sea::{Forecast, SeaConditions};
 use crate::sky::{Sky, SkyLight};
 use crate::{scramble, unit, AppState};
 
@@ -89,6 +95,17 @@ const OCTAVES: usize = 3;
 /// would be the one soft thing in the picture.
 const COVER: f32 = 0.52;
 const EDGE: f32 = 0.05;
+
+/// Where [`COVER`] stands under the heaviest rain: low enough that only a
+/// tenth of the tile is left clear, in rags, so a squall is a sky of shade
+/// with the odd gap in it rather than a uniform grey nothing moves across.
+const OVERCAST: f32 = 0.24;
+
+/// How far the threshold must have moved before the mask is woven again.
+/// Each weave is the whole tile, so this is a few dozen through a squall's
+/// arrival rather than one a frame; the step it leaves is a fifth of the
+/// edge's own width, far finer than the shade's edge can show.
+const RE_WEAVE: f32 = 0.01;
 
 /// How much of the sun still reaches the ground under a cloud.
 ///
@@ -155,10 +172,14 @@ const NO_DEPTH: f32 = 1e-6;
 /// to remember to do.
 #[derive(Resource, Default)]
 pub struct Clouds {
-    /// Woven once, at startup by [`weave_the_mask`], and never written to
-    /// again — the weather is all in where the mask is put, not in what it
-    /// says.
+    /// Woven at startup by [`weave_the_mask`], and again whenever the rain
+    /// has moved [`COVER`] by [`RE_WEAVE`] — see [`thicken`].
     mask: Handle<Image>,
+    /// How much cloud stands over each texel, before any threshold: the slow
+    /// part of a weave, done once, so that thickening is only the threshold.
+    field: Vec<f32>,
+    /// The threshold the mask was last woven at.
+    cover: f32,
     /// Where the pattern has got to, in metres of world, since the app opened.
     /// Only ever added to, so a session leaves it tens of kilometres from
     /// zero; that is fine to a hair at `f32` for far longer than anyone plays
@@ -211,11 +232,12 @@ impl Plugin for CloudsPlugin {
         // network fills in — initialising a resource twice is free, and each
         // plugin's tests run it alone.
         app.init_resource::<Forecast>()
+            .init_resource::<SeaConditions>()
             .init_resource::<Clouds>()
             .add_systems(Startup, weave_the_mask)
             .add_systems(
                 Update,
-                (drift_downwind, clouds_by_day).run_if(in_state(AppState::InWorld)),
+                (drift_downwind, thicken, clouds_by_day).run_if(in_state(AppState::InWorld)),
             );
     }
 }
@@ -226,7 +248,31 @@ impl Plugin for CloudsPlugin {
 /// lets [`crate::sky`] bring it along without either of them minding the
 /// order.
 fn weave_the_mask(mut clouds: ResMut<Clouds>, mut images: ResMut<Assets<Image>>) {
-    clouds.mask = images.add(mask_image());
+    clouds.field = (0..TEXELS)
+        .flat_map(|y| {
+            (0..TEXELS).map(move |x| clouds_at(Vec2::new(x as f32, y as f32) / TEXELS as f32))
+        })
+        .collect();
+    clouds.cover = COVER;
+    clouds.mask = images.add(mask_image(&clouds.field, COVER));
+}
+
+/// Weaves the mask again when the rain has moved the threshold far enough to
+/// show. The rain read is the drawn one, eased — see [`SeaConditions::rain`]
+/// — so a squall's arrival is the shade swelling rather than stepping.
+fn thicken(
+    conditions: Res<SeaConditions>,
+    mut clouds: ResMut<Clouds>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let cover = COVER + (OVERCAST - COVER) * conditions.rain();
+    if (cover - clouds.cover).abs() < RE_WEAVE || clouds.field.is_empty() {
+        return;
+    }
+    clouds.cover = cover;
+    if let Some(mut image) = images.get_mut(&clouds.mask) {
+        image.data = Some(shade(&clouds.field, cover));
+    }
 }
 
 /// Carries the clouds along on the wind.
@@ -296,17 +342,7 @@ fn clouds_by_day(
 /// [`TILE`] / [`TEXELS`] metres of ground, which is wider than a screen pixel
 /// out to well past the haze — so there is nothing here for a filter to
 /// shimmer on.
-fn mask_image() -> Image {
-    let shade: Vec<u8> = (0..TEXELS)
-        .flat_map(|y| {
-            (0..TEXELS).map(move |x| {
-                let at = Vec2::new(x as f32, y as f32) / TEXELS as f32;
-                let cloud = smoothstep(COVER, COVER + EDGE, clouds_at(at));
-                (255.0 * (1.0 - cloud * (1.0 - SHADE))).round() as u8
-            })
-        })
-        .collect();
-
+fn mask_image(field: &[f32], cover: f32) -> Image {
     let mut image = Image::new(
         Extent3d {
             width: TEXELS as u32,
@@ -314,9 +350,11 @@ fn mask_image() -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        shade,
+        shade(field, cover),
         TextureFormat::R8Unorm,
-        RenderAssetUsages::RENDER_WORLD,
+        // Kept in the main world too, which an image the GPU alone reads
+        // would not be: [`thicken`] writes into it again.
+        RenderAssetUsages::default(),
     );
     // Repeating and bilinear, and both are load-bearing. Bevy samples a light
     // mask with whatever sampler its own image carries, and a mask that
@@ -330,6 +368,17 @@ fn mask_image() -> Image {
         ..default()
     });
     image
+}
+
+/// The mask's texels: the field, thresholded at `cover`.
+fn shade(field: &[f32], cover: f32) -> Vec<u8> {
+    field
+        .iter()
+        .map(|&cloud| {
+            let cloud = smoothstep(cover, cover + EDGE, cloud);
+            (255.0 * (1.0 - cloud * (1.0 - SHADE))).round() as u8
+        })
+        .collect()
 }
 
 /// How much cloud stands over a point of the tile, as a number about a half —
@@ -448,7 +497,8 @@ mod tests {
         // whatever sampler the image itself carries, and one clamping at the
         // edge would smear a single row of texels over every metre of world
         // beyond the first tile.
-        let ImageSampler::Descriptor(sampler) = mask_image().sampler else {
+        let ImageSampler::Descriptor(sampler) = mask_image(&[0.5; TEXELS * TEXELS], COVER).sampler
+        else {
             panic!("the mask goes to the GPU with a sampler of its own");
         };
         assert_eq!(sampler.address_mode_u, ImageAddressMode::Repeat);
@@ -465,11 +515,7 @@ mod tests {
         // one carrying the weather upwind.
         let drift = Vec2::new(37.0, -64.0);
         let still = Clouds::default().stand_the_light(SUN);
-        let blown = Clouds {
-            mask: Handle::default(),
-            drift,
-        }
-        .stand_the_light(SUN);
+        let blown = Clouds { drift, ..default() }.stand_the_light(SUN);
 
         // The mask's coordinates, which are two: the third axis of this
         // transform is [`NO_DEPTH`] and so is not a length in metres at all.
@@ -496,10 +542,7 @@ mod tests {
         // `scale.x` across the sun's bearing whatever the hour; along the
         // bearing, `scale.y` of it is spread over the `up` of the ground the
         // sun can see — so their ratio is the shape a cloud casts.
-        let clouds = Clouds {
-            mask: Handle::default(),
-            drift: Vec2::ZERO,
-        };
+        let clouds = Clouds::default();
         let stretch = |up: f32| {
             let from = Vec3::new(0.0, up, (1.0 - up * up).sqrt());
             let stand = clouds.stand_the_light(from);
@@ -541,6 +584,33 @@ mod tests {
         // Downwind, and only downwind: a pattern sliding across the wind would
         // be weather nothing in the world agrees with.
         assert_eq!(breeze.y, 0.0);
+    }
+
+    #[test]
+    fn rain_closes_the_sky() {
+        // A squall is the shade joining up: the mask the app is drawing with
+        // has to be woven again, nearly all shade, once the rain is down —
+        // and before that a clear sky is mostly sun.
+        let shaded = |app: &App| {
+            let clouds = app.world().resource::<Clouds>();
+            let mask = app.world().resource::<Assets<Image>>().get(&clouds.mask);
+            let texels = mask
+                .and_then(|mask| mask.data.clone())
+                .expect("a woven mask");
+            texels.iter().filter(|&&texel| texel < 200).count() as f32 / texels.len() as f32
+        };
+        let mut app = cloudy_app(0.5);
+        let clear = shaded(&app);
+        assert!(clear < 0.5, "a dry sky is {:.0}% shade", clear * 100.0);
+
+        app.insert_resource(SeaConditions::default().raining(1.0));
+        app.update();
+        let squall = shaded(&app);
+        assert!(
+            squall > 0.85,
+            "a squall's sky is {:.0}% shade",
+            squall * 100.0
+        );
     }
 
     #[test]

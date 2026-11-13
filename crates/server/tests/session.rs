@@ -480,7 +480,10 @@ impl Client {
     /// can say the spot. Ordered before the hull is ever free, since it only
     /// stops drift that has yet to happen.
     fn orders_a_calm(&self) {
-        assert_eq!(self.order("world weather calm"), "the wind is ordered calm");
+        assert_eq!(
+            self.order("world weather calm"),
+            "the weather is ordered calm"
+        );
     }
 
     /// The boat on a ship's painter, as the world tells it: reads on until
@@ -1043,8 +1046,9 @@ fn a_newcomer_is_told_the_sky_before_anything_else_happens() {
         other => panic!("expected a welcome, heard {other:?}"),
     }
     match client.hear_by(Instant::now() + PATIENCE, "the weather") {
-        ToClient::Weather { wind } => {
+        ToClient::Weather { wind, rain } => {
             assert!(wind.is_finite(), "the wind blows {wind}");
+            assert!((0.0..=1.0).contains(&rain), "it rains {rain}");
             // The same answer the pure function gives for this seed at the
             // server's age — no exact pin, the server's clock not being the
             // test's to read, but a session seconds old is in its first
