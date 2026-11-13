@@ -10,12 +10,3 @@
 # parent, so the path holds wherever the repository is checked out.
 [env]
 BEVY_ASSET_ROOT = { value = ".", relative = true }
-
-# Every checkout of this repository — the main one and each worktree — compiles
-# into one build directory, so Bevy is stored once rather than at ~2.7G a
-# worktree. Only intermediates live there: final binaries still land in each
-# checkout's own `target/`, so one worktree's `mapgen` never draws another's
-# world. Builds in two checkouts take turns on its lock instead of running side
-# by side, and `cargo clean` anywhere clears it for all of them.
-[build]
-build-dir = "{cargo-cache-home}/build/genovesa"

@@ -49,10 +49,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # `.cargo/config.toml` shares one build directory between a machine's
-  # checkouts; a runner has one checkout, and the cache steps below expect the
-  # intermediates under `target/`.
-  CARGO_BUILD_BUILD_DIR: "{workspace-root}/target"
 
 jobs:
   # Formatting, linting and the tests in one job, which is one restore of a
