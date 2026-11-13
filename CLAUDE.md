@@ -83,10 +83,9 @@ half no command catches.
 
 ## The build
 
-A `target/` is ~2.7G per worktree.
+Checkouts share one build directory (`.cargo/config.toml` says where and
+why), so builds in two worktrees take turns.
 
 - The dev profile is tuned for size (`Cargo.toml` says why) — keep it.
 - Never share a `CARGO_TARGET_DIR` between worktrees: they collide on the
-  binary, and one worktree's `mapgen` silently draws another's world. Share
-  `build.build-dir` instead: it keeps final binaries per worktree.
-- Retire branches; removing a worktree takes its `target/` with it.
+  binary, and one worktree's `mapgen` silently draws another's world.
